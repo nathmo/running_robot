@@ -1,0 +1,52 @@
+<mujoco model="simple_biped">
+  <compiler angle="radian" />
+  <option timestep="0.001" />
+
+  <worldbody>
+    <geom name="ground" size="100 100 1" type="plane" />
+
+    <body name="base" pos="0 0 0.5">
+      <!-- Allow base to move freely in XY and rotate around Z -->
+      <freejoint name="base_free" />
+
+      <geom name="torso" mass="3" pos="0 0 0" size="0.15 0.25 0.1" type="box" rgba="0.2 0.2 0.2 0.8" />
+
+      <!-- LEFT LEG -->
+      <body name="left_thigh" pos="0.1 0.15 -0.15">
+        <joint name="left_thigh_joint" axis="0 1 0" type="hinge" range="-1.57 1.57" />
+        <geom name="left_thigh" mass="0.5" pos="0 0 -0.1" size="0.06 0.1" type="capsule" rgba="0.4 0.4 0.4 0.8" />
+
+        <body name="left_calf" pos="0 0 -0.2">
+          <joint name="left_calf_joint" axis="0 1 0" type="hinge" range="-1.57 1.57" />
+          <geom name="left_calf" mass="0.3" pos="0 0 -0.1" size="0.05 0.1" type="capsule" rgba="0.5 0.5 0.5 0.8" />
+
+          <body name="left_foot" pos="0 0 -0.2">
+            <geom name="left_foot" mass="0.2" pos="0 0 0" friction="1.0" size="0.08 0.04 0.06" type="box" rgba="0.6 0.2 0.2 0.8" />
+          </body>
+        </body>
+      </body>
+
+      <!-- RIGHT LEG -->
+      <body name="right_thigh" pos="0.1 -0.15 -0.15">
+        <joint name="right_thigh_joint" axis="0 1 0" type="hinge" range="-1.57 1.57" />
+        <geom name="right_thigh" mass="0.5" pos="0 0 -0.1" size="0.06 0.1" type="capsule" rgba="0.4 0.4 0.4 0.8" />
+
+        <body name="right_calf" pos="0 0 -0.2">
+          <joint name="right_calf_joint" axis="0 1 0" type="hinge" range="-1.57 1.57" />
+          <geom name="right_calf" mass="0.3" pos="0 0 -0.1" size="0.05 0.1" type="capsule" rgba="0.5 0.5 0.5 0.8" />
+
+          <body name="right_foot" pos="0 0 -0.2">
+            <geom name="right_foot" mass="0.2" pos="0 0 0" friction="1.0" size="0.08 0.04 0.06" type="box" rgba="0.6 0.2 0.2 0.8" />
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="left_thigh" joint="left_thigh_joint" ctrlrange="-1 1" />
+    <motor name="left_calf" joint="left_calf_joint" ctrlrange="-1 1" />
+    <motor name="right_thigh" joint="right_thigh_joint" ctrlrange="-1 1" />
+    <motor name="right_calf" joint="right_calf_joint" ctrlrange="-1 1" />
+  </actuator>
+</mujoco>
