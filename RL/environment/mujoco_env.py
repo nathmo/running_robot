@@ -118,10 +118,15 @@ class LeggedRobotEnv(gym.Env):
             low=-1.0, high=1.0, shape=(self.action_dim,), dtype=np.float32
         )
 
-        # Observation space: qpos+qvel + base_quat + base_vel + base_ang_vel + prev_action
-        # = 4 + 4 + 4 + 3 + 3 + 4 = 22
+        # Observation space: compute from actual model structure
+        # qpos includes all joint positions (freejoint is 7D: 3 pos + 4 quat)
+        # qvel includes all joint velocities (freejoint is 6D: 3 vel + 3 angular vel)
+        qpos_dim = self.model.nq  # Total qpos dimension from MuJoCo
+        qvel_dim = self.model.nv  # Total qvel dimension from MuJoCo
+
         obs_dim = (
-            self.num_dofs * 2  # qpos + qvel
+            qpos_dim
+            + qvel_dim
             + 4  # base quaternion
             + 3  # base linear velocity
             + 3  # base angular velocity
@@ -131,6 +136,8 @@ class LeggedRobotEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-float("inf"), high=float("inf"), shape=(obs_dim,), dtype=np.float32
         )
+
+        print(f"Observation space: {obs_dim} dims (qpos={qpos_dim}, qvel={qvel_dim}, action={self.action_dim})")
 
     def _generate_terrain(self):
         """Generate heightfield terrain"""
