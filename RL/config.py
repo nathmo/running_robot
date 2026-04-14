@@ -94,11 +94,11 @@ RL = {
     "action_space": "continuous",  # All motors
 
     # Checkpointing
-    "checkpoint_interval": 50,  # Save checkpoint every N epochs
-    "keep_last_n_checkpoints": 5,
+    "checkpoint_interval": 10,  # Save checkpoint every N epochs
+    "keep_last_n_checkpoints": 20,
 
     # Logging
-    "log_interval": 10,  # Print stats every N steps
+    "log_interval": 1,  # Print stats every N steps
 }
 
 # ==============================================================================
