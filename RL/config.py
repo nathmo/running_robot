@@ -129,7 +129,7 @@ REWARD = {
 # ENVIRONMENT CONFIGURATION
 # ==============================================================================
 ENVIRONMENT = {
-    "render": True,
+    "render": False,
     "render_mode": "human",  # "human" or "rgb_array"
     "camera_distance": 3.0,
     "camera_lookat": [0, 0, 0],
