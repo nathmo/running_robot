@@ -7,3 +7,4 @@ gymnasium>=0.28.0
 perlin-noise
 pyyaml
 tensorboard
+tqdm
