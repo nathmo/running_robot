@@ -8,3 +8,4 @@ perlin-noise
 pyyaml
 tensorboard
 tqdm
+stable-baselines3[extra]
