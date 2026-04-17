@@ -288,6 +288,11 @@ def main():
         type=int,
         help="Override total number of epochs",
     )
+    parser.add_argument(
+        "--n-steps",
+        type=int,
+        help="Override rollout size per env (n_steps in PPO)",
+    )
 
     args = parser.parse_args()
 
@@ -299,6 +304,8 @@ def main():
         custom_config["RL"] = {"n_envs": args.n_envs}
     if args.n_epochs:
         custom_config["RL"] = {**custom_config.get("RL", {}), "n_epochs": args.n_epochs}
+    if args.n_steps:
+        custom_config["RL"] = {**custom_config.get("RL", {}), "n_steps": args.n_steps}
 
     train(
         variant_name=args.variant,
