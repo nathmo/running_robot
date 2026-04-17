@@ -13,11 +13,11 @@
 
       <!-- LEFT LEG -->
       <body name="left_thigh" pos="0.1 0.15 -0.15">
-        <joint name="left_thigh_joint" axis="0 1 0" type="hinge" range="-1.57 1.57" />
+        <joint name="left_thigh_joint" axis="0 1 0" type="hinge" range="-1.2 1.2" damping="0.3" armature="0.01" />
         <geom name="left_thigh" mass="0.5" pos="0 0 -0.1" size="0.06 0.1" type="capsule" rgba="0.4 0.4 0.4 0.8" />
 
         <body name="left_calf" pos="0 0 -0.2">
-          <joint name="left_calf_joint" axis="0 1 0" type="hinge" range="-1.57 1.57" />
+          <joint name="left_calf_joint" axis="0 1 0" type="hinge" range="-1.2 1.2" damping="0.3" armature="0.01" />
           <geom name="left_calf" mass="0.3" pos="0 0 -0.1" size="0.05 0.1" type="capsule" rgba="0.5 0.5 0.5 0.8" />
 
           <body name="left_foot" pos="0 0 -0.2">
@@ -28,11 +28,11 @@
 
       <!-- RIGHT LEG -->
       <body name="right_thigh" pos="0.1 -0.15 -0.15">
-        <joint name="right_thigh_joint" axis="0 1 0" type="hinge" range="-1.57 1.57" />
+        <joint name="right_thigh_joint" axis="0 1 0" type="hinge" range="-1.2 1.2" damping="0.3" armature="0.01" />
         <geom name="right_thigh" mass="0.5" pos="0 0 -0.1" size="0.06 0.1" type="capsule" rgba="0.4 0.4 0.4 0.8" />
 
         <body name="right_calf" pos="0 0 -0.2">
-          <joint name="right_calf_joint" axis="0 1 0" type="hinge" range="-1.57 1.57" />
+          <joint name="right_calf_joint" axis="0 1 0" type="hinge" range="-1.2 1.2" damping="0.3" armature="0.01" />
           <geom name="right_calf" mass="0.3" pos="0 0 -0.1" size="0.05 0.1" type="capsule" rgba="0.5 0.5 0.5 0.8" />
 
           <body name="right_foot" pos="0 0 -0.2">
@@ -43,10 +43,11 @@
     </body>
   </worldbody>
 
+  <!-- gear=100 maps ctrl in [-1,1] directly to torque in [-100, 100] Nm -->
   <actuator>
-    <motor name="left_thigh" joint="left_thigh_joint" ctrlrange="-1 1" />
-    <motor name="left_calf" joint="left_calf_joint" ctrlrange="-1 1" />
-    <motor name="right_thigh" joint="right_thigh_joint" ctrlrange="-1 1" />
-    <motor name="right_calf" joint="right_calf_joint" ctrlrange="-1 1" />
+    <motor name="left_thigh" joint="left_thigh_joint" ctrlrange="-1 1" gear="100" />
+    <motor name="left_calf" joint="left_calf_joint" ctrlrange="-1 1" gear="100" />
+    <motor name="right_thigh" joint="right_thigh_joint" ctrlrange="-1 1" gear="100" />
+    <motor name="right_calf" joint="right_calf_joint" ctrlrange="-1 1" gear="100" />
   </actuator>
 </mujoco>

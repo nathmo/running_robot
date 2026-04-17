@@ -6,6 +6,7 @@ from .mujoco_env import LeggedRobotEnv, create_env
 from .terrain import TerrainGenerator
 from .paths import (
     Path,
+    StraightPath,
     CircularPath,
     SineWavePath,
     SpiralPath,
@@ -18,6 +19,7 @@ __all__ = [
     "create_env",
     "TerrainGenerator",
     "Path",
+    "StraightPath",
     "CircularPath",
     "SineWavePath",
     "SpiralPath",

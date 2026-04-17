@@ -10,7 +10,7 @@ from pathlib import Path as PathLib
 import os
 
 from .terrain import TerrainGenerator
-from .paths import PathTracker, create_random_path, CircularPath
+from .paths import PathTracker, create_random_path, CircularPath, StraightPath
 
 
 class LeggedRobotEnv(gym.Env):
@@ -66,6 +66,13 @@ class LeggedRobotEnv(gym.Env):
         self.prev_base_pos = np.array([0.0, 0.0, 0.0])
         self.prev_action = np.zeros(self.action_dim)
 
+        # Feet-air-time tracking (one entry per foot geom).
+        # `foot_airtime[i]` is seconds since foot i last made contact.
+        # `foot_prev_contact[i]` is whether foot i was in contact at the previous control step.
+        n_feet = len(self.foot_geom_ids)
+        self.foot_airtime = np.zeros(n_feet, dtype=np.float32)
+        self.foot_prev_contact = np.zeros(n_feet, dtype=bool)
+
         # Rendering
         self.viewer = None
 
@@ -109,7 +116,28 @@ class LeggedRobotEnv(gym.Env):
             # Fallback: use last few bodies as feet
             self.foot_body_ids = list(range(max(0, self.model.nbody - 4), self.model.nbody))
 
-        print(f"Base body ID: {self.base_body_id}, Foot body IDs: {self.foot_body_ids}")
+        # Foot *geom* ids (needed for contact detection; geoms and bodies share names here).
+        self.foot_geom_ids = []
+        for geom_name in ["left_foot", "right_foot"]:
+            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
+            if gid >= 0:
+                self.foot_geom_ids.append(gid)
+
+        print(
+            f"Base body ID: {self.base_body_id}, "
+            f"Foot body IDs: {self.foot_body_ids}, "
+            f"Foot geom IDs: {self.foot_geom_ids}"
+        )
+
+        # Pre-compute the qvel index for each actuator's joint. Used by the motor
+        # saturation model in step() to enforce the velocity limit per-joint.
+        self.actuator_dof_indices = []
+        for act_id in range(self.model.nu):
+            joint_id = int(self.model.actuator_trnid[act_id, 0])
+            if joint_id >= 0:
+                self.actuator_dof_indices.append(int(self.model.jnt_dofadr[joint_id]))
+            else:
+                self.actuator_dof_indices.append(-1)
 
     def _setup_spaces(self):
         """Define observation and action spaces"""
@@ -160,14 +188,20 @@ class LeggedRobotEnv(gym.Env):
             raise ValueError(f"Unknown terrain type: {terrain_config['type']}")
 
     def _reset_path(self):
-        """Reset to a new random path"""
+        """Reset to a new path.
+
+        When `PATHS.straight_line` is true, the path is always an infinite straight
+        line along +x (straight-running task). Otherwise falls back to circles of
+        varying radii.
+        """
         path_config = self.config["PATHS"]
 
-        if self.randomize_path:
+        if path_config.get("straight_line", False):
+            self.current_path = StraightPath(direction=(1.0, 0.0))
+        elif self.randomize_path:
             radius = np.random.choice(path_config["radii"])
             self.current_path = CircularPath(radius=radius)
         else:
-            # Use default path
             self.current_path = CircularPath(radius=path_config["radii"][0])
 
         self.path_tracker = PathTracker(self.current_path)
@@ -198,78 +232,137 @@ class LeggedRobotEnv(gym.Env):
 
         return obs
 
+    def _get_foot_contacts(self):
+        """Return a boolean array: True if foot i is currently in contact with anything.
+
+        We scan active contacts at the end of the control step. A foot-geom appearing
+        as either side of a contact pair counts as "in contact".
+        """
+        n_feet = len(self.foot_geom_ids)
+        if n_feet == 0:
+            return np.zeros(0, dtype=bool)
+
+        contacts = np.zeros(n_feet, dtype=bool)
+        foot_set = set(self.foot_geom_ids)
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if g1 in foot_set:
+                contacts[self.foot_geom_ids.index(g1)] = True
+            if g2 in foot_set:
+                contacts[self.foot_geom_ids.index(g2)] = True
+        return contacts
+
+    def _update_feet_air_time(self, v_along):
+        """Update per-foot airtime counters and return the ANYmal/Rudin airtime reward.
+
+        At the moment a foot transitions air -> contact, credit
+            (airtime_at_landing - threshold) * weight
+        Gated off at very low forward speeds so the policy can't farm the term by
+        marching in place without travelling.
+        """
+        r = self.config["REWARD"]
+        n_feet = len(self.foot_geom_ids)
+        if n_feet == 0:
+            return 0.0
+
+        contacts_now = self._get_foot_contacts()
+        # Landing event = was airborne last step, is in contact now.
+        first_contact = contacts_now & (~self.foot_prev_contact)
+
+        # Compute reward from each landing. We use the airtime accumulated up to this
+        # step (before we zero it out below).
+        threshold = r["feet_air_time_threshold"]
+        gate = 1.0 if v_along > r["feet_air_time_min_speed"] else 0.0
+        landing_reward = float(
+            np.sum((self.foot_airtime[first_contact] - threshold))
+            * r["feet_air_time_weight"]
+            * gate
+        )
+
+        # Advance the bookkeeping.
+        control_dt = self.config["ROBOT"]["control_dt"]
+        self.foot_airtime[~contacts_now] += control_dt
+        self.foot_airtime[contacts_now] = 0.0
+        self.foot_prev_contact = contacts_now
+
+        return landing_reward
+
     def _get_reward(self):
-        """Compute reward for this step"""
-        reward_config = self.config["REWARD"]
+        """Compute reward for this step.
+
+        Terms (all from REWARD config):
+          +forward    min(v_along_path, target_speed) * forward_speed_weight  [m/s-scaled]
+          -upright    (1 - body_z . world_z) * upright_weight                 [0 upright, 2 flipped]
+          -smoothness ||a_t - a_{t-1}|| * action_smoothness_weight
+          -deviation  distance_from_path * track_deviation_weight             [m]
+          +alive      alive_bonus
+        `fall_penalty` is applied once by step() when termination is caused by a fall.
+        """
+        r = self.config["REWARD"]
 
         base_pos = self.data.body(self.base_body_id).xpos.copy()
 
-        # Forward speed along path
-        speed_along_path = self.path_tracker.get_speed_along_path(
-            self.prev_base_pos[:2], base_pos[:2]
+        # Forward speed in m/s, measured along the path tangent at the prev position.
+        # For StraightPath this is just dx/dt along the path direction.
+        dt = self.config["ROBOT"]["control_dt"]
+        step_vec = base_pos[:2] - self.prev_base_pos[:2]
+        _, _, t_prev = self.current_path.get_closest_point(
+            float(self.prev_base_pos[0]), float(self.prev_base_pos[1])
         )
-        speed_reward = (
-            speed_along_path
-            * reward_config["forward_speed_weight"]
-            * reward_config["forward_speed_scale"]
-        )
+        heading = self.current_path.get_heading(t_prev)
+        tangent = np.array([np.cos(heading), np.sin(heading)])
+        v_along = float(np.dot(step_vec, tangent)) / max(dt, 1e-9)  # m/s
 
-        # Stability (penalize base rotation)
-        base_quat = self.data.body(self.base_body_id).xquat.copy()
-        # Quaternion to Euler angles (just use spin rate)
-        base_ang_vel = self.data.body(self.base_body_id).cvel[3:]
-        stability_penalty = (
-            np.linalg.norm(base_ang_vel)
-            * reward_config["stability_weight"]
-        )
+        forward_reward = min(v_along, r["forward_target_speed"]) * r["forward_speed_weight"]
+
+        # Upright penalty via body-z projection onto world-z.
+        # xmat is row-major 3x3; last column = body z-axis in world frame.
+        xmat = self.data.body(self.base_body_id).xmat.reshape(3, 3)
+        body_z_world_z = float(xmat[2, 2])
+        upright_penalty = (1.0 - body_z_world_z) * r["upright_weight"]
 
         # Action smoothness
-        action_diff = np.linalg.norm(self._last_action - self.prev_action)
-        smoothness_penalty = action_diff * reward_config["action_smoothness_weight"]
+        action_diff = float(np.linalg.norm(self._last_action - self.prev_action))
+        smoothness_penalty = action_diff * r["action_smoothness_weight"]
 
-        # Energy efficiency
-        energy_cost = (
-            np.sum(np.abs(self.data.ctrl))
-            * reward_config["energy_weight"]
-        )
+        # Path deviation (m). For StraightPath this is perpendicular distance to the line.
+        deviation = float(self.path_tracker.get_deviation(base_pos[0], base_pos[1]))
+        deviation_penalty = deviation * r["track_deviation_weight"]
 
-        # Track deviation
-        deviation = self.path_tracker.get_deviation(base_pos[0], base_pos[1])
-        deviation_penalty = deviation * reward_config["track_deviation_weight"]
+        # Feet-air-time reward (ANYmal/Rudin). Fires only on landing events; zero most steps.
+        air_time_reward = self._update_feet_air_time(v_along)
 
-        # Alive bonus
-        alive_bonus = reward_config["alive_bonus"]
-
-        total_reward = (
-            speed_reward
-            - stability_penalty
+        total = (
+            forward_reward
+            - upright_penalty
             - smoothness_penalty
-            - energy_cost
             - deviation_penalty
-            + alive_bonus
+            + air_time_reward
+            + r["alive_bonus"]
         )
+        return float(total)
 
-        return float(total_reward)
+    def _check_termination(self):
+        """Return (terminated, reason) where reason is 'fall', 'off_path', 'timeout' or None."""
+        base_pos = self.data.body(self.base_body_id).xpos
 
-    def _is_done(self):
-        """Check if episode is done"""
-        # Episode ends if base falls too low or goes too far off path
-        base_pos = self.data.body(self.base_body_id).xpos.copy()
-
-        # Fallen
         if base_pos[2] < 0.1:
-            return True
+            return True, "fall"
 
-        # Too far from path
         deviation = self.path_tracker.get_deviation(base_pos[0], base_pos[1])
         if deviation > 5.0:
-            return True
+            return True, "off_path"
 
-        # Max steps exceeded
         if self.step_count >= self.config["RL"]["max_episode_steps"]:
-            return True
+            return True, "timeout"
 
-        return False
+        return False, None
+
+    def _is_done(self):
+        """Legacy: kept for any external callers. Prefer _check_termination()."""
+        terminated, _ = self._check_termination()
+        return terminated
 
     def reset(self, seed=None, options=None):
         """Reset environment"""
@@ -294,42 +387,70 @@ class LeggedRobotEnv(gym.Env):
         self.prev_base_pos = self.data.body(self.base_body_id).xpos.copy()
         self.prev_action = np.zeros(self.action_dim)
 
+        # Reset feet-air-time state. Initialize `prev_contact` from the settled pose
+        # so the very first control step doesn't fire a spurious "landing" event.
+        self.foot_airtime[:] = 0.0
+        self.foot_prev_contact = self._get_foot_contacts()
+
         obs = self._get_observation()
         info = {}
 
         return obs, info
 
     def step(self, action):
-        """Execute one step of environment"""
+        """Execute one control step.
+
+        - Torque limit (±100 Nm) is enforced physically by the actuator's gear=100
+          combined with ctrlrange=[-1,1] clamp, so we write the action directly to
+          data.ctrl without further scaling.
+        - Velocity limit (±joint_velocity_limit) is enforced as motor saturation:
+          at each sim substep, if a joint is already at its speed limit and the
+          commanded torque would push it further, that torque is zeroed. Models a
+          real motor's back-EMF: you can't spin faster than the motor's no-load speed.
+        """
         action = np.array(action, dtype=np.float32)
+        # Safety clip against policies that occasionally output slightly > 1.
+        action = np.clip(action, -1.0, 1.0)
         self._last_action = action.copy()
 
-        # Repeat action for multiple sim steps
         action_repeat = self.config["ROBOT"]["action_repeat"]
+        vel_limit = self.config["ROBOT"]["joint_velocity_limit"]
 
         for _ in range(action_repeat):
-            # Scale action from [-1,1] to joint torques
-            ctrl = action * self.config["ROBOT"]["torque_limit"]
+            ctrl = action.copy()
+            # Motor saturation: zero torque that would push an already-maxed-out joint.
+            for act_i, dof_i in enumerate(self.actuator_dof_indices):
+                if dof_i < 0:
+                    continue
+                qv = self.data.qvel[dof_i]
+                if qv > vel_limit and ctrl[act_i] > 0.0:
+                    ctrl[act_i] = 0.0
+                elif qv < -vel_limit and ctrl[act_i] < 0.0:
+                    ctrl[act_i] = 0.0
             np.copyto(self.data.ctrl, ctrl)
-
-            # Step simulation
             mujoco.mj_step(self.model, self.data)
 
-        # Compute observations and rewards
         obs = self._get_observation()
         reward = self._get_reward()
-        terminated = self._is_done()
+
+        terminated, reason = self._check_termination()
         truncated = False
+
+        # Terminal fall penalty. Applied at the terminating step so the Bellman
+        # backup carries the signal back through the trajectory.
+        if terminated and reason == "fall":
+            reward -= self.config["REWARD"]["fall_penalty"]
+
         info = {
             "episode_reward": self.episode_reward,
             "step": self.step_count,
+            "termination_reason": reason,
             "path_deviation": self.path_tracker.get_deviation(
                 self.data.body(self.base_body_id).xpos[0],
                 self.data.body(self.base_body_id).xpos[1],
             ),
         }
 
-        # Update state
         self.episode_reward += reward
         self.step_count += 1
         self.prev_action = action.copy()

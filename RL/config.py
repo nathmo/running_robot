@@ -33,14 +33,18 @@ TERRAIN = {
 # PATH/TRACK CONFIGURATION
 # ==============================================================================
 PATHS = {
+    # When True, the environment uses a StraightPath (infinite radius) instead
+    # of sampling from `radii`. Simpler task: learn to run in a straight line.
+    "straight_line": True,
+
     "track_types": ["circle", "sine_wave", "spiral"],
-    "radii": [2.0, 3.0, 5.0, 10.0],  # Different radii for variety
-    "sine_amplitudes": [0.5, 1.0, 1.5],  # For sine wave track
-    "spawn_distribution": "uniform",  # "uniform" or "clustered"
+    "radii": [2.0, 3.0, 5.0, 10.0],  # Ignored when straight_line=True
+    "sine_amplitudes": [0.5, 1.0, 1.5],
+    "spawn_distribution": "uniform",
 
     # Start position randomization
-    "start_position_noise": 0.3,  # std dev for x,y perturbation (m)
-    "heading_randomization": True,  # Random initial orientation
+    "start_position_noise": 0.3,
+    "heading_randomization": True,
 }
 
 # ==============================================================================
@@ -60,8 +64,13 @@ ROBOT = {
     # PD gains (if control_mode == "pd")
     "motor_kp": 55.0,
     "motor_kd": 0.8,
-    "torque_limit": 33.5,
-    "velocity_limit": 21.0,
+
+    # Physical motor spec (hard-enforced by the sim, not just reward-shaped):
+    #   Torque: ±100 Nm, enforced by actuator gear=100 + ctrlrange [-1,1] in the XML.
+    #   Speed:  ±100 rpm = ±10.47 rad/s, enforced in env.step as motor saturation
+    #           (torque is zeroed when the joint is at limit and being pushed further).
+    "torque_limit_nm": 100.0,
+    "joint_velocity_limit": 10.47,
 }
 
 # ==============================================================================
@@ -105,24 +114,37 @@ RL = {
 # REWARD CONFIGURATION
 # ==============================================================================
 REWARD = {
+    # Forward progress along the path. Reward is min(v_along_path, target_speed)*weight,
+    # so going faster than target_speed stops earning extra — prevents reward runaway
+    # and gives the policy a clear "good enough" signal.
     "forward_speed_weight": 1.0,
-    "forward_speed_scale": 1.0,  # Normalize speed (~2 m/s reference)
+    "forward_target_speed": 20,  # m/s
 
-    # Stability and smoothness
-    "stability_weight": 0.1,  # Penalize base rotation
-    "action_smoothness_weight": 0.01,  # Penalize abrupt changes
+    # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
+    # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
+    "upright_weight": 0.5,
 
-    # Energy efficiency
-    "energy_weight": 0.01,  # Penalize motor power
+    # Discourage abrupt changes between consecutive actions.
+    "action_smoothness_weight": 0.01,
 
-    # Track deviation
-    "track_deviation_weight": 0.05,
+    # Distance from the path (m). For StraightPath this is |y|.
+    "track_deviation_weight": 0.2,
 
-    # Ground contact
-    "foot_contact_weight": 0.0,  # Encourage contact (if needed)
+    # Survival incentive. Bumped from 0.01 because penalties previously swamped it,
+    # making "stand still and collapse" a better strategy than attempting to walk.
+    "alive_bonus": 0.1,
 
-    # Alive bonus per step
-    "alive_bonus": 0.01,
+    # One-shot penalty applied at the step that terminates an episode via a fall
+    # (base below ground_clearance). Strong signal against falling.
+    "fall_penalty": 10.0,
+
+    # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
+    # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait
+    # at a target cadence; negative contribution if the step was shorter than
+    # threshold. Gated off below min_speed so it can't be farmed by marching in place.
+    "feet_air_time_weight": 1.0,
+    "feet_air_time_threshold": 0.25,  # seconds per foot per swing phase
+    "feet_air_time_min_speed": 0.1,   # m/s along-path gate
 }
 
 # ==============================================================================

@@ -26,6 +26,36 @@ class Path:
         raise NotImplementedError
 
 
+class StraightPath(Path):
+    """Infinite straight line along a fixed direction. Use for straight running."""
+
+    def __init__(self, start=(0.0, 0.0), direction=(1.0, 0.0), length=1000.0):
+        dx, dy = direction
+        norm = np.hypot(dx, dy)
+        if norm < 1e-9:
+            raise ValueError("StraightPath direction must be non-zero")
+        self.start_x, self.start_y = start
+        self.dir_x, self.dir_y = dx / norm, dy / norm
+        self.length = length
+
+    def get_position(self, t: float) -> Tuple[float, float]:
+        x = self.start_x + self.dir_x * t * self.length
+        y = self.start_y + self.dir_y * t * self.length
+        return x, y
+
+    def get_heading(self, t: float) -> float:
+        return float(np.arctan2(self.dir_y, self.dir_x))
+
+    def get_closest_point(self, x: float, y: float) -> Tuple[float, float, float]:
+        dx = x - self.start_x
+        dy = y - self.start_y
+        s = dx * self.dir_x + dy * self.dir_y  # signed distance along direction (m)
+        t = np.clip(s / self.length, 0.0, 1.0)
+        cx = self.start_x + self.dir_x * t * self.length
+        cy = self.start_y + self.dir_y * t * self.length
+        return cx, cy, float(t)
+
+
 class CircularPath(Path):
     """Circular path with specified radius"""
 
