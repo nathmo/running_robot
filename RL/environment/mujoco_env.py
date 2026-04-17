@@ -313,6 +313,8 @@ class LeggedRobotEnv(gym.Env):
         heading = self.current_path.get_heading(t_prev)
         tangent = np.array([np.cos(heading), np.sin(heading)])
         v_along = float(np.dot(step_vec, tangent)) / max(dt, 1e-9)  # m/s
+        # Cache so step() can surface the true speed in info (used by eval metrics).
+        self._last_v_along = v_along
 
         forward_reward = min(v_along, r["forward_target_speed"]) * r["forward_speed_weight"]
 
@@ -445,6 +447,7 @@ class LeggedRobotEnv(gym.Env):
             "episode_reward": self.episode_reward,
             "step": self.step_count,
             "termination_reason": reason,
+            "forward_speed_mps": float(getattr(self, "_last_v_along", 0.0)),
             "path_deviation": self.path_tracker.get_deviation(
                 self.data.body(self.base_body_id).xpos[0],
                 self.data.body(self.base_body_id).xpos[1],

@@ -6,7 +6,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv, sync_envs_normalization
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from tqdm import tqdm
 import time
@@ -85,6 +85,15 @@ def train(
     # Normalize observations/actions
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
+    # Dedicated evaluation env: single-env, path not randomized, no reward normalization.
+    # Obs-normalization stats are synced from `env` before each eval call so the policy
+    # sees the same observation distribution it was trained on.
+    eval_env = DummyVecEnv([
+        lambda: LeggedRobotEnv(config, randomize_path=False)
+    ])
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0,
+                            training=False)
+
     # Create or load model
     print("Creating model...")
     model_kwargs = {
@@ -151,8 +160,12 @@ def train(
             epoch_pbar.write(f"\n[Epoch {epoch+1}/{n_epochs}] Evaluating...")
             eval_start_time = time.time()
 
+            # Copy running obs mean/std from train env to eval env so the policy
+            # gets consistent inputs. Reward stats are not used (norm_reward=False).
+            sync_envs_normalization(env, eval_env)
+
             eval_metrics = evaluate_policy(
-                model, env, config, num_episodes=5
+                model, eval_env, config, num_episodes=5
             )
 
             eval_time = time.time() - eval_start_time
@@ -200,16 +213,19 @@ def train(
         )
 
     env.close()
+    eval_env.close()
 
     return checkpoint_manager, metrics_logger
 
 
 def evaluate_policy(model, env, config, num_episodes=5):
-    """
-    Evaluate policy on test environment
+    """Evaluate policy on a (preferably single-env, non-randomized) VecEnv.
 
-    Returns:
-        Dict of evaluation metrics
+    Metrics:
+        eval_mean_reward:   mean total reward per episode
+        eval_mean_length:   mean step count per episode
+        eval_mean_speed:    mean forward speed along the path (m/s),
+                            averaged over steps of each episode from info["forward_speed_mps"].
     """
     episode_rewards = []
     episode_lengths = []
@@ -217,42 +233,47 @@ def evaluate_policy(model, env, config, num_episodes=5):
 
     for _ in range(num_episodes):
         obs = env.reset()
-        # Handle both single and vectorized environments
         if isinstance(obs, tuple):
             obs = obs[0]
+
         episode_reward = 0.0
         episode_length = 0
-        episode_speed = 0.0
+        speed_samples = []
 
-        for step in range(config["RL"]["max_episode_steps"]):
+        for _ in range(config["RL"]["max_episode_steps"]):
             action, _ = model.predict(obs, deterministic=True)
             result = env.step(action)
-            if len(result) == 5:  # Gymnasium API
+            if len(result) == 5:  # Gymnasium single-env
                 obs, reward, terminated, truncated, info = result
-                done = terminated or truncated
-            else:  # Old API
+                done = terminated
+            else:  # SB3 VecEnv: (obs, reward, done, info) — done merges terminated|truncated
                 obs, reward, done, info = result
-                truncated = done
+                truncated = False
 
-            episode_reward += np.mean(reward) if isinstance(reward, np.ndarray) else reward
+            episode_reward += float(np.mean(reward))
             episode_length += 1
-            episode_speed += np.mean(reward) if isinstance(reward, np.ndarray) else reward
 
-            if done or truncated:
+            # Extract per-step forward speed from info. VecEnv infos is a list of dicts.
+            if isinstance(info, (list, tuple)):
+                for sub in info:
+                    if "forward_speed_mps" in sub:
+                        speed_samples.append(float(sub["forward_speed_mps"]))
+            elif isinstance(info, dict) and "forward_speed_mps" in info:
+                speed_samples.append(float(info["forward_speed_mps"]))
+
+            if np.any(done) or np.any(truncated):
                 break
 
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
-        episode_speeds.append(episode_speed / max(episode_length, 1))
+        episode_speeds.append(float(np.mean(speed_samples)) if speed_samples else 0.0)
 
-    metrics = {
+    return {
         "eval_mean_reward": float(np.mean(episode_rewards)),
         "eval_std_reward": float(np.std(episode_rewards)),
         "eval_mean_length": float(np.mean(episode_lengths)),
         "eval_mean_speed": float(np.mean(episode_speeds)),
     }
-
-    return metrics
 
 
 def main():
