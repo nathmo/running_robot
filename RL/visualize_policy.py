@@ -325,11 +325,18 @@ def visualize_policy(
     variant_dir: Path,
     epoch: int,
     episodes: int = 3,
-    max_steps: int = 1000,
+    max_steps: int = 10000,
     speed: float = 1.0,
     render: bool = True,
 ):
-    """Load a trained policy from variant_dir/checkpoints and roll it out."""
+    """Load a trained policy from variant_dir/checkpoints and roll it out.
+
+    In the viewer:
+        R      reset the current episode (useful if the robot falls and can't recover)
+        N      end current episode, move to the next one
+        SPACE  pause / unpause physics
+        Q      quit (also closes the window)
+    """
     checkpoints_dir = variant_dir / "checkpoints"
     checkpoint_path = checkpoints_dir / f"model_epoch_{epoch:06d}.zip"
     if not checkpoint_path.exists():
@@ -356,59 +363,119 @@ def visualize_policy(
     mj_model = env.model
     mj_data = env.data
 
+    # Wall-clock delay per control step (env.step advances action_repeat * sim_dt of sim time).
+    control_dt = env.config["ROBOT"]["control_dt"]
+
     print(f"\n{'='*60}")
-    print(f"Episodes: {episodes}, Max steps: {max_steps}, Speed: {speed}x")
+    print(f"Episodes: {episodes}, Max steps: {max_steps} (~{max_steps * control_dt:.0f}s sim)")
+    print(f"Speed: {speed}x real-time")
+    print(f"Controls: R=reset, N=next ep, SPACE=pause, Q=quit")
     print(f"{'='*60}\n")
 
     episode_rewards = []
     episode_lengths = []
     episode_distances = []
 
-    def run_episode(ep_idx, viewer=None):
+    def reset_episode():
         obs = env.reset()
         if isinstance(obs, tuple):
             obs = obs[0]
-
-        ep_reward = 0.0
-        ep_length = 0
-        ep_distance = 0.0
         last_x = env.data.body(env.base_body_id).xpos[0]
+        return obs, 0.0, 0, 0.0, last_x, False
 
-        for _ in range(max_steps):
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, _ = env.step(action)
+    # ---------- headless (no viewer) ----------
+    if not render:
+        for ep in range(episodes):
+            obs, ep_reward, ep_length, ep_distance, last_x, _ = reset_episode()
+            for _ in range(max_steps):
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, _ = env.step(action)
+                ep_reward += reward
+                ep_length += 1
+                cur_x = env.data.body(env.base_body_id).xpos[0]
+                ep_distance += abs(cur_x - last_x)
+                last_x = cur_x
+                if terminated or truncated:
+                    break
+            print(f"[Ep {ep+1}/{episodes}] reward={ep_reward:8.3f}  "
+                  f"length={ep_length:4d}  distance={ep_distance:6.2f} m")
+            episode_rewards.append(ep_reward)
+            episode_lengths.append(ep_length)
+            episode_distances.append(ep_distance)
 
-            ep_reward += reward
-            ep_length += 1
-            cur_x = env.data.body(env.base_body_id).xpos[0]
-            ep_distance += abs(cur_x - last_x)
-            last_x = cur_x
+    # ---------- interactive viewer ----------
+    else:
+        # Shared state with the key callback. Dict so the nested fn can mutate freely.
+        ctrl_state = {"reset": False, "next": False, "quit": False, "pause": False}
 
-            if viewer is not None:
-                viewer.sync()
-                time.sleep(mj_model.opt.timestep / speed)
+        def key_callback(keycode):
+            # GLFW key codes align with ASCII for uppercase letters and space.
+            if keycode == ord("R"):
+                ctrl_state["reset"] = True
+            elif keycode == ord("N"):
+                ctrl_state["next"] = True
+            elif keycode == ord("Q"):
+                ctrl_state["quit"] = True
+            elif keycode == 32:  # SPACE
+                ctrl_state["pause"] = not ctrl_state["pause"]
 
-            if terminated or truncated:
-                break
-
-        print(
-            f"[Ep {ep_idx + 1}/{episodes}] "
-            f"reward={ep_reward:8.3f}  length={ep_length:4d}  "
-            f"distance={ep_distance:6.2f} m"
-        )
-        episode_rewards.append(ep_reward)
-        episode_lengths.append(ep_length)
-        episode_distances.append(ep_distance)
-
-    if render:
-        with mujoco.viewer.launch_passive(mj_model, mj_data) as viewer:
+        with mujoco.viewer.launch_passive(
+            mj_model, mj_data, key_callback=key_callback
+        ) as viewer:
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = True
+
             for ep in range(episodes):
-                run_episode(ep, viewer=viewer)
-    else:
-        for ep in range(episodes):
-            run_episode(ep)
+                if ctrl_state["quit"] or not viewer.is_running():
+                    break
+
+                obs, ep_reward, ep_length, ep_distance, last_x, terminated_flag = reset_episode()
+                print(f"[Ep {ep+1}/{episodes}] running... (R to reset, N for next)")
+
+                step = 0
+                while viewer.is_running() and step < max_steps:
+                    if ctrl_state["quit"]:
+                        break
+                    if ctrl_state["next"]:
+                        ctrl_state["next"] = False
+                        break
+                    if ctrl_state["reset"]:
+                        ctrl_state["reset"] = False
+                        obs, ep_reward, ep_length, ep_distance, last_x, terminated_flag = reset_episode()
+                        step = 0
+                        continue
+
+                    if ctrl_state["pause"]:
+                        viewer.sync()
+                        time.sleep(1.0 / 60.0)
+                        continue
+
+                    if not terminated_flag:
+                        action, _ = model.predict(obs, deterministic=True)
+                        obs, reward, terminated, truncated, _ = env.step(action)
+                        ep_reward += reward
+                        ep_length += 1
+                        cur_x = env.data.body(env.base_body_id).xpos[0]
+                        ep_distance += abs(cur_x - last_x)
+                        last_x = cur_x
+                        terminated_flag = bool(terminated or truncated)
+                        step += 1
+                        if terminated_flag:
+                            print(f"  [terminated at step {step}] press R to reset, "
+                                  f"N to skip to next episode")
+                    # else: robot is done — keep rendering the fallen pose until user acts.
+
+                    viewer.sync()
+                    time.sleep(control_dt / max(speed, 1e-6))
+
+                print(f"  reward={ep_reward:8.3f}  length={ep_length:4d}  "
+                      f"distance={ep_distance:6.2f} m")
+                episode_rewards.append(ep_reward)
+                episode_lengths.append(ep_length)
+                episode_distances.append(ep_distance)
+
+                if ctrl_state["quit"]:
+                    break
 
     print(f"\n{'='*60}")
     print(f"SUMMARY  ({variant_dir.name}, epoch {epoch})")
@@ -458,8 +525,8 @@ def main():
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=1000,
-        help="Max steps per episode.",
+        default=10000,
+        help="Max steps per episode (10000 = 100 s of sim at 100 Hz control).",
     )
     parser.add_argument(
         "--speed",
