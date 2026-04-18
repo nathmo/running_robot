@@ -26,6 +26,9 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*/.venv/
+*/venv/
+*/__pycache__/
 
 # IDE
 .vscode/
