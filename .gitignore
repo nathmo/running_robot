@@ -26,8 +26,11 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-*/.venv/
-*/venv/
+# virtualenvs — match at any depth
+.venv/
+venv/
+**/.venv/
+**/venv/
 */__pycache__/
 
 # IDE
