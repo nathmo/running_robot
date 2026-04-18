@@ -57,12 +57,15 @@ def train(
     print(f"Config preset: {config_preset}")
     print(f"{'='*60}\n")
 
-    # Create experiment folders using project root
+    # Create experiment folders using project root.
+    # When resuming, reuse the existing (already-timestamped) variant folder
+    # instead of forking a new one — otherwise the checkpoint can't be found.
     project_root = get_project_root(__file__)
     models_dir, logs_dir, variant_full_name = create_experiment_folder(
         project_root,
         variant_name,
         include_timestamp=config["LOGGING"]["append_timestamp"],
+        reuse=resume_from_epoch is not None,
     )
 
     # Save config
@@ -110,14 +113,18 @@ def train(
 
     if resume_from_epoch is not None:
         print(f"Resuming from epoch {resume_from_epoch}...")
-        try:
-            model = checkpoint_manager.load_checkpoint(PPO, resume_from_epoch)
-            start_epoch = resume_from_epoch
-        except FileNotFoundError as e:
-            print(f"Error loading checkpoint: {e}")
-            print("Starting from scratch...")
-            model = PPO("MlpPolicy", env, verbose=1, **model_kwargs)
-            start_epoch = 0
+        # Restore VecNormalize running stats first so the loaded policy sees
+        # the same observation distribution it was trained against. Without
+        # this, fresh obs_rms would corrupt the value function on resume.
+        if not checkpoint_manager.load_vecnormalize_into(env, resume_from_epoch):
+            print(
+                "  [warn] No VecNormalize stats found for this epoch — "
+                "continuing with fresh obs-normalization stats."
+            )
+        model = checkpoint_manager.load_checkpoint(
+            PPO, resume_from_epoch, env=env
+        )
+        start_epoch = resume_from_epoch
     else:
         model = PPO("MlpPolicy", env, verbose=1, **model_kwargs)
         start_epoch = 0
@@ -177,8 +184,9 @@ def train(
             }
             metrics_logger.log_epoch(epoch + 1, log_metrics)
 
-            # Save checkpoint
+            # Save checkpoint + normalization stats so resume is lossless
             checkpoint_manager.save_checkpoint(model, epoch + 1, log_metrics)
+            checkpoint_manager.save_vecnormalize(env, epoch + 1)
 
             # Print results nicely
             epoch_pbar.write(

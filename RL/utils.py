@@ -97,13 +97,15 @@ class CheckpointManager:
 
         if len(checkpoints) > self.keep_last_n:
             for old_checkpoint in checkpoints[: -self.keep_last_n]:
+                epoch_str = old_checkpoint.stem.split("_")[-1]
                 old_checkpoint.unlink()
-                # Also remove metrics file
-                metrics_file = old_checkpoint.parent / (
-                    old_checkpoint.stem + ".json"
-                )
-                if metrics_file.exists():
-                    metrics_file.unlink()
+                # Also remove the sibling metrics JSON and VecNormalize pkl
+                for sibling in (
+                    old_checkpoint.parent / f"metrics_epoch_{epoch_str}.json",
+                    old_checkpoint.parent / f"vecnormalize_epoch_{epoch_str}.pkl",
+                ):
+                    if sibling.exists():
+                        sibling.unlink()
 
     def load_latest_checkpoint(self, model_class):
         """Load latest checkpoint"""
@@ -120,14 +122,54 @@ class CheckpointManager:
 
         return model, epoch
 
-    def load_checkpoint(self, model_class, epoch):
-        """Load specific epoch checkpoint"""
+    def load_checkpoint(self, model_class, epoch, env=None):
+        """Load specific epoch checkpoint.
+
+        If `env` is passed, it is attached to the loaded model so `learn()`
+        can continue without re-creating a rollout buffer against a detached env.
+        """
         checkpoint_file = self.checkpoints_dir / f"model_epoch_{epoch:06d}.zip"
 
         if not checkpoint_file.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_file}")
 
+        if env is not None:
+            return model_class.load(str(checkpoint_file), env=env)
         return model_class.load(str(checkpoint_file))
+
+    def vecnormalize_path(self, epoch):
+        """Path to VecNormalize stats file for a given epoch."""
+        return self.checkpoints_dir / f"vecnormalize_epoch_{epoch:06d}.pkl"
+
+    def save_vecnormalize(self, vec_env, epoch):
+        """Persist VecNormalize running stats alongside the checkpoint."""
+        path = self.vecnormalize_path(epoch)
+        vec_env.save(str(path))
+        print(f"VecNormalize stats saved: {path}")
+
+    def load_vecnormalize_into(self, vec_env, epoch):
+        """Load VecNormalize stats (in-place) from a previous checkpoint.
+
+        Returns True if stats were loaded, False if no pkl was found.
+        """
+        from stable_baselines3.common.vec_env import VecNormalize
+
+        path = self.vecnormalize_path(epoch)
+        if not path.exists():
+            return False
+
+        # VecNormalize.load rewraps; we instead copy running stats onto the
+        # already-constructed env so the caller keeps its env reference.
+        loaded = VecNormalize.load(str(path), vec_env.venv)
+        vec_env.obs_rms = loaded.obs_rms
+        vec_env.ret_rms = loaded.ret_rms
+        vec_env.clip_obs = loaded.clip_obs
+        vec_env.clip_reward = loaded.clip_reward
+        vec_env.gamma = loaded.gamma
+        vec_env.epsilon = loaded.epsilon
+        vec_env.returns = loaded.returns
+        print(f"VecNormalize stats loaded: {path}")
+        return True
 
     def save_metadata(self, metadata):
         """Save experiment metadata"""
@@ -254,24 +296,38 @@ class MetricsLogger:
         plt.close()
 
 
-def create_experiment_folder(base_dir, variant_name, include_timestamp=True):
+def create_experiment_folder(base_dir, variant_name, include_timestamp=True, reuse=False):
     """
     Create experiment folder structure
 
+    Args:
+        base_dir: Project root
+        variant_name: Variant name. When reuse=True, treated as the already-
+            timestamped folder name (e.g. "gpu_mjx_20260417_172700").
+        include_timestamp: Append a fresh timestamp to variant_name
+        reuse: If True, skip timestamp and require the variant folder to
+            already exist (used when resuming a previous run).
+
     Returns:
-        (models_dir, logs_dir, variant_name_with_timestamp)
+        (models_dir, logs_dir, variant_full_name)
     """
-    if include_timestamp:
+    models_dir = Path(base_dir) / "models"
+    logs_dir = Path(base_dir) / "logs"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    if reuse:
+        variant_full_name = variant_name
+        if not (models_dir / variant_full_name).exists():
+            raise FileNotFoundError(
+                f"Cannot resume: {models_dir / variant_full_name} does not exist. "
+                f"Pass --variant <existing_folder_name> when using --resume."
+            )
+    elif include_timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         variant_full_name = f"{variant_name}_{timestamp}"
     else:
         variant_full_name = variant_name
-
-    models_dir = Path(base_dir) / "models"
-    logs_dir = Path(base_dir) / "logs"
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir.mkdir(parents=True, exist_ok=True)
 
     return models_dir, logs_dir, variant_full_name
 
