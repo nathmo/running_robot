@@ -149,8 +149,8 @@ REWARD = {
     # at a target cadence; negative contribution if the step was shorter than
     # threshold. Gated off below min_speed so it can't be farmed by marching in place.
     "feet_air_time_weight": 0.1,
-    "feet_air_time_threshold": 0.15,  # seconds per foot per swing phase
-    "feet_air_time_min_speed": 0.01,   # m/s along-path gate
+    "feet_air_time_threshold": 0.5,  # seconds per foot per swing phase
+    "feet_air_time_min_speed": 0.2,   # m/s along-path gate
 }
 
 # ==============================================================================
