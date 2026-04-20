@@ -123,7 +123,7 @@ REWARD = {
     # Forward progress along the path. Reward is min(v_along_path, target_speed)*weight,
     # so going faster than target_speed stops earning extra — prevents reward runaway
     # and gives the policy a clear "good enough" signal.
-    "forward_speed_weight": 1.0,
+    "forward_speed_weight": 10.0,
     "forward_target_speed": 2,  # m/s
 
     # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
@@ -138,11 +138,11 @@ REWARD = {
 
     # Survival incentive. Bumped from 0.01 because penalties previously swamped it,
     # making "stand still and collapse" a better strategy than attempting to walk.
-    "alive_bonus": 0.01,
+    "alive_bonus": 0.0001,
 
     # One-shot penalty applied at the step that terminates an episode via a fall
     # (base below ground_clearance). Strong signal against falling.
-    "fall_penalty": 10.0,
+    "fall_penalty": 2.0,
 
     # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
     # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait
