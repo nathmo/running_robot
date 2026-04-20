@@ -99,7 +99,7 @@ RL = {
 
     # Environment
     "n_envs": 8,  # Windows: use 1, Linux: can use 4+ for speed
-    "max_episode_steps": 500,  # Max steps per episode
+    "max_episode_steps": 2500,  # Max steps per episode
 
     # Observation/Action
     "observation_space": {
@@ -124,7 +124,7 @@ REWARD = {
     # so going faster than target_speed stops earning extra — prevents reward runaway
     # and gives the policy a clear "good enough" signal.
     "forward_speed_weight": 10.0,
-    "forward_target_speed": 2,  # m/s
+    "forward_target_speed": 20,  # m/s
 
     # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
     # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
@@ -142,7 +142,7 @@ REWARD = {
 
     # One-shot penalty applied at the step that terminates an episode via a fall
     # (base below ground_clearance). Strong signal against falling.
-    "fall_penalty": 5.0,
+    "fall_penalty": 10.0,
 
     # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
     # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait
