@@ -123,7 +123,7 @@ REWARD = {
     # Forward progress along the path. Reward is min(v_along_path, target_speed)*weight,
     # so going faster than target_speed stops earning extra — prevents reward runaway
     # and gives the policy a clear "good enough" signal.
-    "forward_speed_weight": 50.0,
+    "forward_speed_weight": 20.0,
     "forward_target_speed": 20,  # m/s
 
     # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
@@ -138,7 +138,7 @@ REWARD = {
 
     # Survival incentive. Bumped from 0.01 because penalties previously swamped it,
     # making "stand still and collapse" a better strategy than attempting to walk.
-    "alive_bonus": 1,
+    "alive_bonus": 10,
 
     # One-shot penalty applied at the step that terminates an episode via a fall
     # (base below ground_clearance). Strong signal against falling.
@@ -150,7 +150,7 @@ REWARD = {
     # threshold. Gated off below min_speed so it can't be farmed by marching in place.
     "feet_air_time_weight": 0.1,
     "feet_air_time_threshold": 0.5,  # seconds per foot per swing phase
-    "feet_air_time_min_speed": 0.2,   # m/s along-path gate
+    "feet_air_time_min_speed": 0.5,   # m/s along-path gate
 }
 
 # ==============================================================================
