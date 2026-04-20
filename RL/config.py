@@ -88,17 +88,17 @@ RL = {
 
     # Training parameters
     "n_steps": 2048,  # Steps per epoch (per environment)
-    "n_epochs": 500,  # Total epochs to train
+    "n_epochs": 2500,  # Total epochs to train
     "batch_size": 64,
     "learning_rate": 3e-4,
     "gamma": 0.99,  # Discount factor
     "gae_lambda": 0.95,  # GAE lambda
     "clip_range": 0.2,  # PPO clip range
-    "ent_coef": 0.0,  # Entropy coefficient
+    "ent_coef": 0.01,  # Entropy coefficient
     "vf_coef": 0.5,  # Value function coefficient
 
     # Environment
-    "n_envs": 1,  # Windows: use 1, Linux: can use 4+ for speed
+    "n_envs": 8,  # Windows: use 1, Linux: can use 4+ for speed
     "max_episode_steps": 500,  # Max steps per episode
 
     # Observation/Action
@@ -124,7 +124,7 @@ REWARD = {
     # so going faster than target_speed stops earning extra — prevents reward runaway
     # and gives the policy a clear "good enough" signal.
     "forward_speed_weight": 1.0,
-    "forward_target_speed": 20,  # m/s
+    "forward_target_speed": 2,  # m/s
 
     # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
     # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
@@ -138,7 +138,7 @@ REWARD = {
 
     # Survival incentive. Bumped from 0.01 because penalties previously swamped it,
     # making "stand still and collapse" a better strategy than attempting to walk.
-    "alive_bonus": 0.1,
+    "alive_bonus": 0.01,
 
     # One-shot penalty applied at the step that terminates an episode via a fall
     # (base below ground_clearance). Strong signal against falling.
@@ -150,7 +150,7 @@ REWARD = {
     # threshold. Gated off below min_speed so it can't be farmed by marching in place.
     "feet_air_time_weight": 1.0,
     "feet_air_time_threshold": 0.25,  # seconds per foot per swing phase
-    "feet_air_time_min_speed": 0.1,   # m/s along-path gate
+    "feet_air_time_min_speed": 0.01,   # m/s along-path gate
 }
 
 # ==============================================================================
