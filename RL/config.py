@@ -142,7 +142,7 @@ REWARD = {
 
     # One-shot penalty applied at the step that terminates an episode via a fall
     # (base below ground_clearance). Strong signal against falling.
-    "fall_penalty": 10.0,
+    "fall_penalty": 300.0,
 
     # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
     # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait

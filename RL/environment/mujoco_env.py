@@ -123,10 +123,18 @@ class LeggedRobotEnv(gym.Env):
             if gid >= 0:
                 self.foot_geom_ids.append(gid)
 
+        # Ground geom id — used by fall detection to check whether any non-foot
+        # robot part is touching the floor (torso/thigh/calf contact = fall on
+        # the real robot → damage).
+        self.ground_geom_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, "ground"
+        )
+
         print(
             f"Base body ID: {self.base_body_id}, "
             f"Foot body IDs: {self.foot_body_ids}, "
-            f"Foot geom IDs: {self.foot_geom_ids}"
+            f"Foot geom IDs: {self.foot_geom_ids}, "
+            f"Ground geom ID: {self.ground_geom_id}"
         )
 
         # Pre-compute the qvel index for each actuator's joint. Used by the motor
@@ -345,9 +353,36 @@ class LeggedRobotEnv(gym.Env):
         )
         return float(total)
 
+    def _non_foot_ground_contact(self):
+        """Return True if any non-foot robot geom is touching the ground.
+
+        The real robot is damaged if the torso, thighs, or calves hit the floor
+        — only the feet are supposed to make ground contact. We catch this
+        directly via the MuJoCo contact list so the policy cannot exploit a
+        "flop on back and wiggle" gait that previously stayed within the
+        base_z > 0.1 termination threshold.
+        """
+        if self.ground_geom_id < 0:
+            return False
+        foot_set = set(self.foot_geom_ids)
+        ground = self.ground_geom_id
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if g1 == ground and g2 not in foot_set:
+                return True
+            if g2 == ground and g1 not in foot_set:
+                return True
+        return False
+
     def _check_termination(self):
         """Return (terminated, reason) where reason is 'fall', 'off_path', 'timeout' or None."""
         base_pos = self.data.body(self.base_body_id).xpos
+
+        # Any non-foot robot geom contacting the ground = fall (torso scrape,
+        # knee-down, etc.). Strong termination signal against self-damaging gaits.
+        if self._non_foot_ground_contact():
+            return True, "fall"
 
         if base_pos[2] < 0.1:
             return True, "fall"
