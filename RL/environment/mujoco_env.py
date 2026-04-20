@@ -367,7 +367,15 @@ class LeggedRobotEnv(gym.Env):
         return terminated
 
     def reset(self, seed=None, options=None):
-        """Reset environment"""
+        """Reset environment.
+
+        Spawn the robot upright with feet just clearing the ground, then settle for
+        a few sim steps so contact transients die out before the policy sees its
+        first obs. The model's default base z (0.5 for simple_biped) leaves the
+        feet penetrating the ground by ~0.11m; constraint forces would then launch
+        the robot into a near-random orientation, making early learning much
+        harder than necessary.
+        """
         super().reset(seed=seed)
 
         # Reset path occasionally
@@ -378,11 +386,26 @@ class LeggedRobotEnv(gym.Env):
         self.data.qpos = self.model.qpos0.copy()
         self.data.qvel = np.zeros(self.num_dofs)
 
-        # Add small random perturbation
-        self.data.qpos[:self.num_dofs] += np.random.normal(0, 0.02, self.num_dofs)
+        # Place base upright at a height where the feet just clear the ground.
+        # qpos layout for the freejoint: [x, y, z, qw, qx, qy, qz], then joint angles.
+        spawn_height = self.config["ROBOT"].get("spawn_height", 0.62)
+        self.data.qpos[:3] = [0.0, 0.0, spawn_height]
+        self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
 
-        # Simulate a few steps to settle
-        mujoco.mj_step(self.model, self.data)
+        # Small noise on joint angles only — never on base pos or quaternion,
+        # which used to produce non-unit quats and tumbling spawns.
+        n_joints = self.model.nq - 7
+        if n_joints > 0:
+            self.data.qpos[7:7 + n_joints] += np.random.normal(0, 0.01, n_joints)
+
+        # Settle physics so ground contact converges before the first obs.
+        # 50 sim steps at sim_dt=0.001 ≈ 50 ms of settling.
+        for _ in range(50):
+            mujoco.mj_step(self.model, self.data)
+
+        # Start the episode from rest so settling transients don't bleed into
+        # the policy's first step.
+        self.data.qvel[:] = 0.0
 
         self.step_count = 0
         self.episode_reward = 0.0

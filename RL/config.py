@@ -71,6 +71,12 @@ ROBOT = {
     #           (torque is zeroed when the joint is at limit and being pushed further).
     "torque_limit_nm": 100.0,
     "joint_velocity_limit": 10.47,
+
+    # Spawn height of the base link at reset. Chosen so the feet just clear the
+    # ground for the simple_biped model (foot bottom = base_z - 0.61 with zero
+    # joint angles). Change this when switching to a robot with different leg
+    # geometry.
+    "spawn_height": 0.62,
 }
 
 # ==============================================================================
