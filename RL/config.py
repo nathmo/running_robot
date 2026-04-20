@@ -142,14 +142,14 @@ REWARD = {
 
     # One-shot penalty applied at the step that terminates an episode via a fall
     # (base below ground_clearance). Strong signal against falling.
-    "fall_penalty": 2.0,
+    "fall_penalty": 5.0,
 
     # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
     # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait
     # at a target cadence; negative contribution if the step was shorter than
     # threshold. Gated off below min_speed so it can't be farmed by marching in place.
-    "feet_air_time_weight": 1.0,
-    "feet_air_time_threshold": 0.25,  # seconds per foot per swing phase
+    "feet_air_time_weight": 0.1,
+    "feet_air_time_threshold": 0.15,  # seconds per foot per swing phase
     "feet_air_time_min_speed": 0.01,   # m/s along-path gate
 }
 
