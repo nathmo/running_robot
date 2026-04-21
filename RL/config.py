@@ -1,82 +1,32 @@
 """
-Configuration for RL training framework
-Organized by section for easy modification
+Configuration for inverted pendulum RL training
+Task: Balance a 200g mass on a 0.5m rod with a 1 Nm motor
 """
-
-# ==============================================================================
-# TERRAIN CONFIGURATION
-# ==============================================================================
-TERRAIN = {
-    "type": "perlin",  # "flat", "perlin", or "stairs"
-    "seed": 42,  # Fixed seed for reproducibility
-
-    # Perlin noise parameters
-    "perlin_scale": 1.0,  # Scale of the noise (0.5 = smaller features, 2.0 = larger)
-    "perlin_octaves": 4,  # Number of octaves for detail
-    "perlin_persistence": 0.5,  # How much each octave contributes
-    "perlin_lacunarity": 2.0,  # Frequency multiplier for octaves
-
-    # Height parameters
-    "height_scale": 0.2,  # Max height variation (meters)
-    "height_offset": 0.0,  # Base height
-
-    # Grid size (resolution)
-    "grid_size": 256,  # NxN grid for heightfield
-    "grid_spacing": 0.1,  # Physical spacing between grid points (m)
-
-    # Friction randomization during training
-    "friction_range": [0.6, 1.2],  # Random friction per episode
-    "friction_base": 0.8,
-}
-
-# ==============================================================================
-# PATH/TRACK CONFIGURATION
-# ==============================================================================
-PATHS = {
-    # When True, the environment uses a StraightPath (infinite radius) instead
-    # of sampling from `radii`. Simpler task: learn to run in a straight line.
-    "straight_line": True,
-
-    "track_types": ["circle", "sine_wave", "spiral"],
-    "radii": [2.0, 3.0, 5.0, 10.0],  # Ignored when straight_line=True
-    "sine_amplitudes": [0.5, 1.0, 1.5],
-    "spawn_distribution": "uniform",
-
-    # Start position randomization
-    "start_position_noise": 0.3,
-    "heading_randomization": True,
-}
 
 # ==============================================================================
 # ROBOT CONFIGURATION
 # ==============================================================================
 ROBOT = {
-    "urdf_path": "assets/simple_biped.xml",  # Can be overridden per run
-    "base_mass": 7.0,  # Optional: override URDF mass for quick experiments
-    "use_base_mass_override": False,
+    "urdf_path": "assets/inverted_pendulum.xml",
 
     # Control parameters
-    "control_mode": "pd",  # "pd" or "torque"
-    "action_repeat": 10,  # Repeat action for N simulation steps
+    "control_mode": "torque",  # Direct torque control
+    "action_repeat": 2,  # Repeat action for N simulation steps (faster control)
     "sim_dt": 0.001,  # Simulation timestep (seconds)
-    "control_dt": 0.01,  # Control timestep after action_repeat
+    "control_dt": 0.002,  # Control timestep after action_repeat
 
-    # PD gains (if control_mode == "pd")
-    "motor_kp": 55.0,
-    "motor_kd": 0.8,
+    # Motor spec: 1 Nm capable motor
+    # Action space is [-1, 1] which maps to [-1, 1] Nm (linear)
+    "torque_limit_nm": 1.0,
+}
 
-    # Physical motor spec (hard-enforced by the sim, not just reward-shaped):
-    #   Torque: ±100 Nm, enforced by actuator gear=100 + ctrlrange [-1,1] in the XML.
-    #   Speed:  ±100 rpm = ±10.47 rad/s, enforced in env.step as motor saturation
-    #           (torque is zeroed when the joint is at limit and being pushed further).
-    "torque_limit_nm": 100.0,
-    "joint_velocity_limit": 10.47,
-
-    # Spawn height of the base link at reset. Chosen so the feet just clear the
-    # ground for the simple_biped model (foot bottom = base_z - 0.61 with zero
-    # joint angles). Change this when switching to a robot with different leg
-    # geometry.
-    "spawn_height": 0.62,
+# ==============================================================================
+# START CONFIGURATION (Pendulum-specific)
+# ==============================================================================
+START = {
+    "default_start_angle": 270.0,  # Start hanging down (degrees)
+    "randomize_start_angle": False,
+    "start_angle_range": [260.0, 280.0],  # ±10° from hanging down
 }
 
 # ==============================================================================
@@ -84,89 +34,54 @@ ROBOT = {
 # ==============================================================================
 RL = {
     # Algorithm
-    "algorithm": "PPO",  # "PPO", "TD3", "SAC"
+    "algorithm": "PPO",
 
     # Training parameters
     "n_steps": 2048,  # Steps per epoch (per environment)
-    "n_epochs": 2500,  # Total epochs to train
+    "n_epochs": 1000,  # Total epochs to train (pendulum converges faster than biped)
     "batch_size": 64,
-    "learning_rate": 3e-4,  # Used as the starting LR; train.py decays linearly to 0
-                            # over `n_epochs` to stabilize late-stage PPO updates.
-    "gamma": 0.995,  # Discount factor. 0.99 only values ~1s into the future at
-                     # control_dt=0.01, which encourages burst-and-fall gaits.
-                     # 0.995 ≈ 2s horizon, which rewards sustained locomotion.
+    "learning_rate": 3e-2,  # Lower from 1e-3 for stability
+    "gamma": 0.995,  # Higher discount — rewards staying upright longer
     "gae_lambda": 0.95,  # GAE lambda
-    "clip_range": 0.2,  # PPO clip range
-    "ent_coef": 0.05,  # Entropy coefficient. Bumped from 0.01 after a policy-
-                       # collapse incident (deterministic fall-backward at epoch 200);
-                       # more entropy pressure keeps exploration alive early on.
+    "clip_range": 0.5,  # PPO clip range
+    "ent_coef": 0.01,  # Entropy coefficient
     "vf_coef": 0.5,  # Value function coefficient
 
     # Environment
-    "n_envs": 8,  # Windows: use 1, Linux: can use 4+ for speed
-    "max_episode_steps": 2500,  # Max steps per episode
+    "n_envs": 4,  # Windows: use 1, Linux: can use 4+ for speed
+    "max_episode_steps": 500,  # Max steps per episode (5 seconds at 0.01s control_dt)
 
     # Observation/Action
     "observation_space": {
-        "include": ["joint_pos", "joint_vel", "base_orient", "base_vel", "prev_action"],
+        "include": ["angle", "angular_velocity"],
         "normalize": True,
     },
-    "action_space": "continuous",  # All motors
+    "action_space": "continuous",  # Single motor
 
     # Checkpointing
-    "checkpoint_interval": 10,  # Save checkpoint every N epochs
-    "keep_last_n_checkpoints": 20,
+    "checkpoint_interval": 5,  # Save checkpoint every N epochs
+    "keep_last_n_checkpoints": 50,
 
     # Logging
-    "log_interval": 10,  # Print stats every N steps
+    "log_interval": 5,  # Print stats every N epochs
 }
 
 # ==============================================================================
 # REWARD CONFIGURATION
 # ==============================================================================
 REWARD = {
-    # Forward progress along the path. Reward is min(v_along_path, target_speed)*weight,
-    # so going faster than target_speed stops earning extra — prevents reward runaway
-    # and gives the policy a clear "good enough" signal.
-    "forward_speed_weight": 20.0,
-    "forward_target_speed": 20,  # m/s
+    # Penalty for deviation from upright (90°). Normalized to [0, 1] where
+    # 0° error = 0 penalty, 180° error = 1 penalty
+    "angle_weight": 2.0,  # Increased from 1.0 — more penalty for falling
 
-    # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
-    # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
-    "upright_weight": 0.5,
+    # Penalty for angular velocity. Encourages gentle, controlled motion.
+    "velocity_weight": 0.2,  # Increased from 0.1 — penalize jerky motion more
 
-    # Discourage abrupt changes between consecutive actions.
-    "action_smoothness_weight": 0.01,
+    # Penalty for control effort. Penalizes large motor commands.
+    "effort_weight": 0.005,  # Decreased from 0.01 — less penalizing control
 
-    # Distance from the path (m). For StraightPath this is |y|.
-    "track_deviation_weight": 0.2,
-
-    # Survival incentive. Bumped from 0.01 because penalties previously swamped it,
-    # making "stand still and collapse" a better strategy than attempting to walk.
-    "alive_bonus": 10,
-
-    # One-shot penalty applied at the step that terminates an episode via a fall
-    # (base below ground_clearance). Strong signal against falling.
-    "fall_penalty": 500.0,
-
-    # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
-    # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait
-    # at a target cadence; negative contribution if the step was shorter than
-    # threshold. Gated off below min_speed so it can't be farmed by marching in place.
-    "feet_air_time_weight": 0.1,
-    "feet_air_time_threshold": 0.5,  # seconds per foot per swing phase
-    "feet_air_time_min_speed": 0.0,   # m/s along-path gate. Was 0.5, but that
-                                      # created a chicken-and-egg: the robot
-                                      # needs to step to reach 0.5 m/s, but the
-                                      # stepping reward is gated off until then.
-                                      # Re-raise after walking emerges, to prevent
-                                      # march-in-place farming.
-
-    # Explicit alternating-step reward. Fires whenever one foot makes/breaks contact
-    # while the other does the opposite (out-of-phase stepping). Encourages anti-phase
-    # gait without requiring forward speed. Gated to low speeds after walking emerges.
-    "step_alternation_weight": 0.5,
-    "step_alternation_min_speed": 0.0,
+    # Bonus reward for being upright (within ±10° of 90°)
+    "upright_bonus": 0.5,  # Decreased from 10 — more gradual reward signal
 }
 
 # ==============================================================================
@@ -174,18 +89,8 @@ REWARD = {
 # ==============================================================================
 ENVIRONMENT = {
     "render": False,
-    "render_mode": "human",  # "human" or "rgb_array"
-    "camera_distance": 3.0,
-    "camera_lookat": [0, 0, 0],
-
-    # Domain randomization
-    "randomize_friction": True,
-    "randomize_mass": True,  # Can enable for robustness
-    "mass_range": [0.9, 1.1],  # Multiplier on URDF mass
-
-    # Physics
+    "render_mode": "human",
     "gravity": [0, 0, -9.81],
-    "wind": [0, 0, 0],  # Can be randomized
 }
 
 # ==============================================================================
@@ -224,30 +129,23 @@ def get_config(config_name: str = "default"):
     """Load a named configuration preset"""
     presets = {
         "default": {},
-        "easy_terrain": {
-            "TERRAIN": {**TERRAIN, "height_scale": 0.05, "perlin_scale": 2.0},
-        },
-        "hard_terrain": {
-            "TERRAIN": {**TERRAIN, "height_scale": 0.4, "perlin_scale": 0.5},
-        },
-        "fast_training": {
-            "RL": {**RL, "n_steps": 8192, "n_epochs": 100},
+        "quick": {
+            "RL": {**RL, "n_steps": 1024, "n_epochs": 100},
         },
         "long_training": {
-            "RL": {**RL, "n_steps": 64000, "n_epochs": 2000},
+            "RL": {**RL, "n_steps": 4096, "n_epochs": 2000},
         },
     }
 
     preset = presets.get(config_name, {})
 
     config = {
-        "TERRAIN": {**TERRAIN, **preset.get("TERRAIN", {})},
         "ROBOT": {**ROBOT, **preset.get("ROBOT", {})},
+        "START": {**START, **preset.get("START", {})},
         "RL": {**RL, **preset.get("RL", {})},
         "REWARD": {**REWARD, **preset.get("REWARD", {})},
         "ENVIRONMENT": {**ENVIRONMENT, **preset.get("ENVIRONMENT", {})},
         "LOGGING": {**LOGGING, **preset.get("LOGGING", {})},
-        "PATHS": {**PATHS, **preset.get("PATHS", {})},
     }
 
     return config

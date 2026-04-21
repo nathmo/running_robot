@@ -2,27 +2,9 @@
 RL environment package
 """
 
-from .mujoco_env import LeggedRobotEnv, create_env
-from .terrain import TerrainGenerator
-from .paths import (
-    Path,
-    StraightPath,
-    CircularPath,
-    SineWavePath,
-    SpiralPath,
-    PathTracker,
-    create_random_path,
-)
+from .pendulum_env import InvertedPendulumEnv, create_env
 
 __all__ = [
-    "LeggedRobotEnv",
+    "InvertedPendulumEnv",
     "create_env",
-    "TerrainGenerator",
-    "Path",
-    "StraightPath",
-    "CircularPath",
-    "SineWavePath",
-    "SpiralPath",
-    "PathTracker",
-    "create_random_path",
 ]

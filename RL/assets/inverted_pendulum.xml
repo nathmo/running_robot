@@ -1,0 +1,35 @@
+<mujoco model="inverted_pendulum">
+  <compiler angle="degree" />
+  <option timestep="0.001" />
+
+  <worldbody>
+    <!-- Fixed ground reference -->
+    <geom name="ground" size="2 2 0.1" type="plane" pos="0 0 -0.2" />
+
+    <!-- Fixed pivot point at origin -->
+    <body name="pivot" pos="0 0 0">
+      <!-- Motor axis - fixed in space -->
+      <!-- The pendulum rod rotates around the X-axis (front-back)
+           Angle convention: 0° = horizontal, 90° = upright, 270° = hanging down -->
+
+      <!-- Rod body (massless inertia, mass on tip) -->
+      <body name="rod" pos="0 0 0">
+        <joint name="pendulum_joint" axis="1 0 0" type="hinge" range="-180 180" />
+
+        <!-- Rod geometry (visual only) -->
+        <geom name="rod" size="0.02 0.25" type="capsule" pos="0 0 0.25" rgba="0.5 0.5 0.5 0.8" />
+
+        <!-- Point mass at tip (0.2 kg at 0.5m from motor) -->
+        <body name="mass" pos="0 0 0.5">
+          <geom name="mass" size="0.05" type="sphere" mass="0.2" rgba="0.8 0.2 0.2 0.8" />
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- Motor: 1 Nm max torque -->
+  <actuator>
+    <motor name="pendulum_motor" joint="pendulum_joint" ctrlrange="-1 1" gear="1" />
+  </actuator>
+
+</mujoco>

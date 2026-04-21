@@ -1,5 +1,5 @@
 """
-Main training script for legged robot RL
+Main training script for inverted pendulum RL
 """
 
 import argparse
@@ -13,7 +13,7 @@ from tqdm import tqdm
 import time
 
 import config as cfg
-from environment import LeggedRobotEnv, create_env
+from environment import InvertedPendulumEnv, create_env
 from utils import (
     CheckpointManager,
     MetricsLogger,
@@ -30,11 +30,11 @@ def train(
     custom_config=None,
 ):
     """
-    Train RL policy for legged robot
+    Train RL policy for inverted pendulum
 
     Args:
         variant_name: Name for this experiment
-        config_preset: Config preset ("default", "easy_terrain", "hard_terrain", etc.)
+        config_preset: Config preset ("default", "quick", "long_training", etc.)
         resume_from_epoch: Resume from specific epoch (None = start fresh)
         custom_config: Override specific config values
     """
@@ -86,14 +86,14 @@ def train(
         render_mode="human" if config["ENVIRONMENT"]["render"] else None,
     )
 
-    # Normalize observations/actions
-    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    # Normalize observations/actions (disable reward normalization — too unstable for pendulum)
+    env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
-    # Dedicated evaluation env: single-env, path not randomized, no reward normalization.
+    # Dedicated evaluation env: single-env, no reward normalization.
     # Obs-normalization stats are synced from `env` before each eval call so the policy
     # sees the same observation distribution it was trained on.
     eval_env = DummyVecEnv([
-        lambda: LeggedRobotEnv(config, randomize_path=False)
+        lambda: InvertedPendulumEnv(config)
     ])
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0,
                             training=False)
@@ -205,7 +205,7 @@ def train(
             epoch_pbar.write(
                 f"  [OK] Reward: {eval_metrics['eval_mean_reward']:7.3f} ± {eval_metrics['eval_std_reward']:.3f} | "
                 f"Len: {eval_metrics['eval_mean_length']:5.0f} | "
-                f"Speed: {eval_metrics['eval_mean_speed']:6.3f} | "
+                f"Upright: {eval_metrics['eval_mean_upright_time']:6.3f}s | "
                 f"Time: {epoch_time:.1f}s"
             )
 
@@ -240,17 +240,16 @@ def train(
 
 
 def evaluate_policy(model, env, config, num_episodes=5):
-    """Evaluate policy on a (preferably single-env, non-randomized) VecEnv.
+    """Evaluate policy on a (preferably single-env) VecEnv.
 
     Metrics:
         eval_mean_reward:   mean total reward per episode
         eval_mean_length:   mean step count per episode
-        eval_mean_speed:    mean forward speed along the path (m/s),
-                            averaged over steps of each episode from info["forward_speed_mps"].
+        eval_mean_upright_time: mean time spent upright (within ±10° of 90°)
     """
     episode_rewards = []
     episode_lengths = []
-    episode_speeds = []
+    episode_upright_times = []
 
     for _ in range(num_episodes):
         obs = env.reset()
@@ -259,7 +258,7 @@ def evaluate_policy(model, env, config, num_episodes=5):
 
         episode_reward = 0.0
         episode_length = 0
-        speed_samples = []
+        max_upright_time = 0.0
 
         for _ in range(config["RL"]["max_episode_steps"]):
             action, _ = model.predict(obs, deterministic=True)
@@ -274,32 +273,32 @@ def evaluate_policy(model, env, config, num_episodes=5):
             episode_reward += float(np.mean(reward))
             episode_length += 1
 
-            # Extract per-step forward speed from info. VecEnv infos is a list of dicts.
+            # Extract upright time from info
             if isinstance(info, (list, tuple)):
                 for sub in info:
-                    if "forward_speed_mps" in sub:
-                        speed_samples.append(float(sub["forward_speed_mps"]))
-            elif isinstance(info, dict) and "forward_speed_mps" in info:
-                speed_samples.append(float(info["forward_speed_mps"]))
+                    if "upright_time" in sub:
+                        max_upright_time = max(max_upright_time, float(sub["upright_time"]))
+            elif isinstance(info, dict) and "upright_time" in info:
+                max_upright_time = max(max_upright_time, float(info["upright_time"]))
 
             if np.any(done) or np.any(truncated):
                 break
 
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
-        episode_speeds.append(float(np.mean(speed_samples)) if speed_samples else 0.0)
+        episode_upright_times.append(max_upright_time)
 
     return {
         "eval_mean_reward": float(np.mean(episode_rewards)),
         "eval_std_reward": float(np.std(episode_rewards)),
         "eval_mean_length": float(np.mean(episode_lengths)),
-        "eval_mean_speed": float(np.mean(episode_speeds)),
+        "eval_mean_upright_time": float(np.mean(episode_upright_times)),
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train RL policy for legged robot"
+        description="Train RL policy for inverted pendulum"
     )
     parser.add_argument(
         "--variant", type=str, default="default", help="Experiment variant name"
@@ -308,17 +307,11 @@ def main():
         "--preset",
         type=str,
         default="default",
-        choices=["default", "easy_terrain", "hard_terrain", "fast_training", "long_training"],
+        choices=["default", "quick", "long_training"],
         help="Configuration preset",
     )
     parser.add_argument(
         "--resume", type=int, default=None, help="Resume from epoch N"
-    )
-    parser.add_argument(
-        "--terrain-type",
-        type=str,
-        choices=["flat", "perlin", "stairs"],
-        help="Override terrain type",
     )
     parser.add_argument(
         "--n-envs",
@@ -340,8 +333,6 @@ def main():
 
     # Build custom config from args
     custom_config = {}
-    if args.terrain_type:
-        custom_config["TERRAIN"] = {"type": args.terrain_type}
     if args.n_envs:
         custom_config["RL"] = {"n_envs": args.n_envs}
     if args.n_epochs:
