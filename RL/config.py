@@ -97,7 +97,9 @@ RL = {
                      # 0.995 ≈ 2s horizon, which rewards sustained locomotion.
     "gae_lambda": 0.95,  # GAE lambda
     "clip_range": 0.2,  # PPO clip range
-    "ent_coef": 0.01,  # Entropy coefficient
+    "ent_coef": 0.02,  # Entropy coefficient. Bumped from 0.01 after a policy-
+                       # collapse incident (deterministic fall-backward at epoch 200);
+                       # more entropy pressure keeps exploration alive early on.
     "vf_coef": 0.5,  # Value function coefficient
 
     # Environment
@@ -133,10 +135,11 @@ REWARD = {
     # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
     "upright_weight": 0.5,
 
-    # Discourage abrupt changes between consecutive actions. Bumped 0.01 → 0.05
-    # as sim2real prep: the moteus controller tolerates far less command jitter
-    # than MuJoCo does, so we pre-train the policy to emit smoother torques.
-    "action_smoothness_weight": 0.05,
+    # Discourage abrupt changes between consecutive actions. 0.05 was too
+    # aggressive early in training (policy collapsed to "don't move / fall
+    # fast"). 0.02 is still 2× the original 0.01 — enough smoothness pressure
+    # for sim2real prep without suffocating exploration.
+    "action_smoothness_weight": 0.02,
 
     # Distance from the path (m). For StraightPath this is |y|.
     "track_deviation_weight": 0.2,
