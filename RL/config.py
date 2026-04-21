@@ -7,7 +7,7 @@ Organized by section for easy modification
 # TERRAIN CONFIGURATION
 # ==============================================================================
 TERRAIN = {
-    "type": "perlin",  # "flat", "perlin", or "stairs"
+    "type": "flat",  # "flat", "perlin", or "stairs"
     "seed": 42,  # Fixed seed for reproducibility
 
     # Perlin noise parameters
@@ -104,7 +104,8 @@ RL = {
 
     # Environment
     "n_envs": 8,  # Windows: use 1, Linux: can use 4+ for speed
-    "max_episode_steps": 2500,  # Max steps per episode
+    "max_episode_steps": 5000,  # Max steps per episode. Increased from 2500 to
+                                 # give no-ankle biped more time to discover balance.
 
     # Observation/Action
     "observation_space": {
@@ -127,15 +128,16 @@ RL = {
 REWARD = {
     # Forward progress along the path. Reward is min(v_along_path, target_speed)*weight,
     # so going faster than target_speed stops earning extra — prevents reward runaway
-    # and gives the policy a clear "good enough" signal.
-    "forward_speed_weight": 1.0,
+    # and gives the policy a clear "good enough" signal. Increased from 1.0 to 5.0
+    # to make forward motion the dominant signal once balance is discovered.
+    "forward_speed_weight": 5.0,
     "forward_target_speed": 2.0,  # m/s — realistic biped running speed. Was 20,
                                   # which made the reward effectively uncapped and
                                   # amplified early-training gradient noise.
 
     # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
-    # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
-    "upright_weight": 0.5,
+    # Increased from 0.5 to 1.0 since balance is the primary bottleneck for this no-ankle biped.
+    "upright_weight": 1.0,
 
     # Discourage abrupt changes between consecutive actions. 0.05 was too
     # aggressive early in training (policy collapsed to "don't move / fall
@@ -171,6 +173,12 @@ REWARD = {
                                       # stepping reward is gated off until then.
                                       # Re-raise after walking emerges, to prevent
                                       # march-in-place farming.
+
+    # Explicit alternating-step reward. Fires whenever one foot makes/breaks contact
+    # while the other does the opposite (out-of-phase stepping). Encourages anti-phase
+    # gait without requiring forward speed. Gated to low speeds after walking emerges.
+    "step_alternation_weight": 0.5,
+    "step_alternation_min_speed": 0.0,
 }
 
 # ==============================================================================

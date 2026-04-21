@@ -349,12 +349,25 @@ class LeggedRobotEnv(gym.Env):
         # Feet-air-time reward (ANYmal/Rudin). Fires only on landing events; zero most steps.
         air_time_reward = self._update_feet_air_time(v_along)
 
+        # Step alternation reward: encourage out-of-phase foot contacts.
+        # Fires when one foot lands while the other lifts (or vice versa).
+        step_alt_reward = 0.0
+        contacts_now = self._get_foot_contacts()
+        if len(contacts_now) == 2:
+            # Anti-phase event: contacts differ from previous step
+            if contacts_now[0] != self.foot_prev_contact[0] and contacts_now[1] != self.foot_prev_contact[1]:
+                # Check for true alternation (not both making or both breaking contact)
+                if contacts_now[0] != contacts_now[1]:
+                    gate = 1.0 if v_along > r.get("step_alternation_min_speed", 0.0) else 1.0
+                    step_alt_reward = r.get("step_alternation_weight", 0.0) * gate
+
         total = (
             forward_reward
             - upright_penalty
             - smoothness_penalty
             - deviation_penalty
             + air_time_reward
+            + step_alt_reward
             + r["alive_bonus"]
         )
         return float(total)
