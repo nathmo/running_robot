@@ -97,7 +97,7 @@ RL = {
                      # 0.995 ≈ 2s horizon, which rewards sustained locomotion.
     "gae_lambda": 0.95,  # GAE lambda
     "clip_range": 0.2,  # PPO clip range
-    "ent_coef": 0.02,  # Entropy coefficient. Bumped from 0.01 after a policy-
+    "ent_coef": 0.05,  # Entropy coefficient. Bumped from 0.01 after a policy-
                        # collapse incident (deterministic fall-backward at epoch 200);
                        # more entropy pressure keeps exploration alive early on.
     "vf_coef": 0.5,  # Value function coefficient
@@ -128,8 +128,10 @@ REWARD = {
     # Forward progress along the path. Reward is min(v_along_path, target_speed)*weight,
     # so going faster than target_speed stops earning extra — prevents reward runaway
     # and gives the policy a clear "good enough" signal.
-    "forward_speed_weight": 20.0,
-    "forward_target_speed": 20,  # m/s
+    "forward_speed_weight": 1.0,
+    "forward_target_speed": 2.0,  # m/s — realistic biped running speed. Was 20,
+                                  # which made the reward effectively uncapped and
+                                  # amplified early-training gradient noise.
 
     # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
     # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
@@ -144,13 +146,17 @@ REWARD = {
     # Distance from the path (m). For StraightPath this is |y|.
     "track_deviation_weight": 0.2,
 
-    # Survival incentive. Bumped from 0.01 because penalties previously swamped it,
-    # making "stand still and collapse" a better strategy than attempting to walk.
-    "alive_bonus": 10,
+    # Survival incentive. 10/step was way too high — a 500-step episode was
+    # worth +5000 alive bonus alone, swamping every other signal and making
+    # "survive at all costs" the attractor. With no ankle, the robot can't
+    # passively survive, so this created a paralysis trap.
+    "alive_bonus": 0.5,
 
-    # One-shot penalty applied at the step that terminates an episode via a fall
-    # (base below ground_clearance). Strong signal against falling.
-    "fall_penalty": 500.0,
+    # One-shot penalty applied at the step that terminates an episode via a fall.
+    # 500 was catastrophic — created gradient fear of *any* policy update that
+    # might trigger a fall, locking the policy into the current (bad) behavior.
+    # 20 is a clear signal without being traumatic.
+    "fall_penalty": 20.0,
 
     # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
     # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait
