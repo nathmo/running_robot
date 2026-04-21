@@ -153,10 +153,11 @@ REWARD = {
     "alive_bonus": 0.5,
 
     # One-shot penalty applied at the step that terminates an episode via a fall.
-    # 500 was catastrophic — created gradient fear of *any* policy update that
-    # might trigger a fall, locking the policy into the current (bad) behavior.
-    # 20 is a clear signal without being traumatic.
-    "fall_penalty": 20.0,
+    # Disabled (0) while 100% of episodes end in a fall: early termination already
+    # truncates future reward, so an extra terminal penalty just floods the gradient
+    # with "every action leads to -20" and can't distinguish better/worse falls.
+    # Re-enable (try 2-5) once the policy sometimes survives past the settling window.
+    "fall_penalty": 0.0,
 
     # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
     # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait
@@ -164,7 +165,12 @@ REWARD = {
     # threshold. Gated off below min_speed so it can't be farmed by marching in place.
     "feet_air_time_weight": 0.1,
     "feet_air_time_threshold": 0.5,  # seconds per foot per swing phase
-    "feet_air_time_min_speed": 0.5,   # m/s along-path gate
+    "feet_air_time_min_speed": 0.0,   # m/s along-path gate. Was 0.5, but that
+                                      # created a chicken-and-egg: the robot
+                                      # needs to step to reach 0.5 m/s, but the
+                                      # stepping reward is gated off until then.
+                                      # Re-raise after walking emerges, to prevent
+                                      # march-in-place farming.
 }
 
 # ==============================================================================
