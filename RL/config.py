@@ -7,7 +7,7 @@ Organized by section for easy modification
 # TERRAIN CONFIGURATION
 # ==============================================================================
 TERRAIN = {
-    "type": "flat",  # "flat", "perlin", or "stairs"
+    "type": "perlin",  # "flat", "perlin", or "stairs"
     "seed": 42,  # Fixed seed for reproducibility
 
     # Perlin noise parameters
@@ -104,8 +104,7 @@ RL = {
 
     # Environment
     "n_envs": 8,  # Windows: use 1, Linux: can use 4+ for speed
-    "max_episode_steps": 5000,  # Max steps per episode. Increased from 2500 to
-                                 # give no-ankle biped more time to discover balance.
+    "max_episode_steps": 2500,  # Max steps per episode
 
     # Observation/Action
     "observation_space": {
@@ -128,38 +127,27 @@ RL = {
 REWARD = {
     # Forward progress along the path. Reward is min(v_along_path, target_speed)*weight,
     # so going faster than target_speed stops earning extra — prevents reward runaway
-    # and gives the policy a clear "good enough" signal. Increased from 1.0 to 5.0
-    # to make forward motion the dominant signal once balance is discovered.
-    "forward_speed_weight": 5.0,
-    "forward_target_speed": 2.0,  # m/s — realistic biped running speed. Was 20,
-                                  # which made the reward effectively uncapped and
-                                  # amplified early-training gradient noise.
+    # and gives the policy a clear "good enough" signal.
+    "forward_speed_weight": 20.0,
+    "forward_target_speed": 20,  # m/s
 
     # Upright penalty: 1 - (body_z . world_z). 0 when perfectly upright, up to 2 upside-down.
-    # Increased from 0.5 to 1.0 since balance is the primary bottleneck for this no-ankle biped.
-    "upright_weight": 1.0,
+    # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
+    "upright_weight": 0.5,
 
-    # Discourage abrupt changes between consecutive actions. 0.05 was too
-    # aggressive early in training (policy collapsed to "don't move / fall
-    # fast"). 0.02 is still 2× the original 0.01 — enough smoothness pressure
-    # for sim2real prep without suffocating exploration.
-    "action_smoothness_weight": 0.02,
+    # Discourage abrupt changes between consecutive actions.
+    "action_smoothness_weight": 0.01,
 
     # Distance from the path (m). For StraightPath this is |y|.
     "track_deviation_weight": 0.2,
 
-    # Survival incentive. 10/step was way too high — a 500-step episode was
-    # worth +5000 alive bonus alone, swamping every other signal and making
-    # "survive at all costs" the attractor. With no ankle, the robot can't
-    # passively survive, so this created a paralysis trap.
-    "alive_bonus": 0.5,
+    # Survival incentive. Bumped from 0.01 because penalties previously swamped it,
+    # making "stand still and collapse" a better strategy than attempting to walk.
+    "alive_bonus": 10,
 
-    # One-shot penalty applied at the step that terminates an episode via a fall.
-    # Disabled (0) while 100% of episodes end in a fall: early termination already
-    # truncates future reward, so an extra terminal penalty just floods the gradient
-    # with "every action leads to -20" and can't distinguish better/worse falls.
-    # Re-enable (try 2-5) once the policy sometimes survives past the settling window.
-    "fall_penalty": 0.0,
+    # One-shot penalty applied at the step that terminates an episode via a fall
+    # (base below ground_clearance). Strong signal against falling.
+    "fall_penalty": 500.0,
 
     # Feet-air-time reward (ANYmal / Rudin 2022). At each foot-landing event,
     # add (airtime_at_landing - threshold) * weight. Encourages a stepping gait
