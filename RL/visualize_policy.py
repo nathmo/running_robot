@@ -10,6 +10,7 @@ import json
 import numpy as np
 from pathlib import Path
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import mujoco
 import mujoco.viewer
 import time
@@ -347,14 +348,39 @@ def visualize_policy(
     if not Path(config["ROBOT"]["urdf_path"]).is_absolute():
         config["ROBOT"]["urdf_path"] = str(script_dir / config["ROBOT"]["urdf_path"])
 
-    env = LeggedRobotEnv(config)
+    # Keep a handle to the raw LeggedRobotEnv so we can still read mj_data / base_body_id
+    # after wrapping it in DummyVecEnv + VecNormalize.
+    raw_env_ref = {"env": None}
+
+    def _make_env():
+        e = LeggedRobotEnv(config)
+        raw_env_ref["env"] = e
+        return e
+
+    vec_env = DummyVecEnv([_make_env])
+    raw_env = raw_env_ref["env"]
+
+    # Restore the VecNormalize running stats that the policy was trained against.
+    # Without this the policy sees an obs distribution nothing like training and
+    # performs dramatically worse than the eval metrics suggest.
+    vecnorm_path = checkpoints_dir / f"vecnormalize_epoch_{epoch:06d}.pkl"
+    if vecnorm_path.exists():
+        vec_env = VecNormalize.load(str(vecnorm_path), vec_env)
+        vec_env.training = False
+        vec_env.norm_reward = False
+        print(f"VecNormalize stats loaded: {vecnorm_path.name}")
+    else:
+        print(
+            f"[WARN] No VecNormalize stats at {vecnorm_path.name} — "
+            f"policy will see unnormalized obs and likely misbehave."
+        )
 
     print(f"\nLoading policy...")
     model = PPO.load(str(checkpoint_path))
     print(f"Policy loaded: {type(model.policy).__name__}")
 
-    mj_model = env.model
-    mj_data = env.data
+    mj_model = raw_env.model
+    mj_data = raw_env.data
 
     print(f"\n{'='*60}")
     print(f"Episodes: {episodes}, Max steps: {max_steps}, Speed: {speed}x")
@@ -363,24 +389,24 @@ def visualize_policy(
     episode_rewards = []
     episode_lengths = []
     episode_distances = []
+    episode_reasons = []
 
     def run_episode(ep_idx, viewer=None):
-        obs = env.reset()
-        if isinstance(obs, tuple):
-            obs = obs[0]
+        obs = vec_env.reset()  # shape (1, obs_dim), normalized
 
         ep_reward = 0.0
         ep_length = 0
         ep_distance = 0.0
-        last_x = env.data.body(env.base_body_id).xpos[0]
+        last_x = mj_data.body(raw_env.base_body_id).xpos[0]
+        term_reason = None
 
         for _ in range(max_steps):
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, _ = env.step(action)
+            obs, reward, done, info = vec_env.step(action)
 
-            ep_reward += reward
+            ep_reward += float(reward[0])
             ep_length += 1
-            cur_x = env.data.body(env.base_body_id).xpos[0]
+            cur_x = mj_data.body(raw_env.base_body_id).xpos[0]
             ep_distance += abs(cur_x - last_x)
             last_x = cur_x
 
@@ -388,17 +414,21 @@ def visualize_policy(
                 viewer.sync()
                 time.sleep(mj_model.opt.timestep / speed)
 
-            if terminated or truncated:
+            if done[0]:
+                term_reason = info[0].get("termination_reason", "done")
                 break
+        else:
+            term_reason = "max_steps"
 
         print(
             f"[Ep {ep_idx + 1}/{episodes}] "
             f"reward={ep_reward:8.3f}  length={ep_length:4d}  "
-            f"distance={ep_distance:6.2f} m"
+            f"distance={ep_distance:6.2f} m  reason={term_reason}"
         )
         episode_rewards.append(ep_reward)
         episode_lengths.append(ep_length)
         episode_distances.append(ep_distance)
+        episode_reasons.append(term_reason)
 
     if render:
         with mujoco.viewer.launch_passive(mj_model, mj_data) as viewer:
@@ -419,8 +449,13 @@ def visualize_policy(
     )
     print(f"Mean Length:   {np.mean(episode_lengths):.1f} steps")
     print(f"Mean Distance: {np.mean(episode_distances):.2f} m")
+    # Termination breakdown: fall / timeout / off_path / max_steps
+    from collections import Counter
+    counts = Counter(episode_reasons)
+    reasons_str = ", ".join(f"{k}: {v}" for k, v in counts.most_common())
+    print(f"Terminations:  {reasons_str}")
 
-    env.close()
+    vec_env.close()
 
 
 # ---------------------------------------------------------------------------

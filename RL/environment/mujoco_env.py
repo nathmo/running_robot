@@ -154,11 +154,13 @@ class LeggedRobotEnv(gym.Env):
             low=-1.0, high=1.0, shape=(self.action_dim,), dtype=np.float32
         )
 
-        # Observation space: compute from actual model structure
-        # qpos includes all joint positions (freejoint is 7D: 3 pos + 4 quat)
-        # qvel includes all joint velocities (freejoint is 6D: 3 vel + 3 angular vel)
-        qpos_dim = self.model.nq  # Total qpos dimension from MuJoCo
-        qvel_dim = self.model.nv  # Total qvel dimension from MuJoCo
+        # Observation space: compute from actual model structure.
+        # qpos includes all joint positions (freejoint is 7D: 3 pos + 4 quat);
+        # we drop the absolute (x, y) world position because running forward is
+        # translationally invariant — those two dims are pure noise the policy
+        # has to learn to ignore. Height (z) is kept because it matters.
+        qpos_dim = self.model.nq - 2  # drop x, y
+        qvel_dim = self.model.nv      # keep all velocities
 
         obs_dim = (
             qpos_dim
@@ -215,13 +217,17 @@ class LeggedRobotEnv(gym.Env):
         self.path_tracker = PathTracker(self.current_path)
 
     def _get_observation(self):
-        """Construct observation vector"""
-        # Joint positions and velocities
-        qpos = self.data.qpos.copy()
+        """Construct observation vector.
+
+        We drop qpos[0:2] (absolute world x, y) — see _setup_spaces for the
+        rationale. Everything else stays: z, quat, joint angles, all velocities,
+        base kinematics, and previous action.
+        """
+        # Joint positions and velocities. Slice off absolute x,y.
+        qpos = self.data.qpos[2:].copy()
         qvel = self.data.qvel.copy()
 
         # Base pose and velocity
-        base_pos = self.data.body(self.base_body_id).xpos.copy()
         base_quat = self.data.body(self.base_body_id).xquat.copy()
         base_vel = self.data.body(self.base_body_id).cvel[:3].copy()
         base_ang_vel = self.data.body(self.base_body_id).cvel[3:].copy()

@@ -8,6 +8,7 @@ from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv, sync_envs_normalization
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.utils import LinearSchedule
 from tqdm import tqdm
 import time
 
@@ -99,8 +100,16 @@ def train(
 
     # Create or load model
     print("Creating model...")
+    # Linear LR decay from config lr → 0 over the full training horizon.
+    # `LinearSchedule(initial, final, end_fraction)` is the non-deprecated
+    # SB3 API; PPO calls it each update with `progress_remaining` in [1, 0].
+    # Decays stabilize late-stage updates — constant lr tends to destabilize
+    # after a few thousand epochs and blow up the reward variance.
+    lr_schedule = LinearSchedule(
+        config["RL"]["learning_rate"], 0.0, 1.0
+    )
     model_kwargs = {
-        "learning_rate": config["RL"]["learning_rate"],
+        "learning_rate": lr_schedule,
         "n_steps": config["RL"]["n_steps"],
         "batch_size": config["RL"]["batch_size"],
         "gamma": config["RL"]["gamma"],
@@ -124,6 +133,10 @@ def train(
         model = checkpoint_manager.load_checkpoint(
             PPO, resume_from_epoch, env=env
         )
+        # Re-install the LR schedule after load; PPO.load otherwise uses whatever
+        # schedule was baked into the checkpoint (which may already be exhausted).
+        model.learning_rate = lr_schedule
+        model._setup_lr_schedule()
         start_epoch = resume_from_epoch
     else:
         model = PPO("MlpPolicy", env, verbose=1, **model_kwargs)

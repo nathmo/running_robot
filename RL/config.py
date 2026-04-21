@@ -90,8 +90,11 @@ RL = {
     "n_steps": 2048,  # Steps per epoch (per environment)
     "n_epochs": 2500,  # Total epochs to train
     "batch_size": 64,
-    "learning_rate": 3e-4,
-    "gamma": 0.99,  # Discount factor
+    "learning_rate": 3e-4,  # Used as the starting LR; train.py decays linearly to 0
+                            # over `n_epochs` to stabilize late-stage PPO updates.
+    "gamma": 0.995,  # Discount factor. 0.99 only values ~1s into the future at
+                     # control_dt=0.01, which encourages burst-and-fall gaits.
+                     # 0.995 ≈ 2s horizon, which rewards sustained locomotion.
     "gae_lambda": 0.95,  # GAE lambda
     "clip_range": 0.2,  # PPO clip range
     "ent_coef": 0.01,  # Entropy coefficient
@@ -130,8 +133,10 @@ REWARD = {
     # Replaces the old ||angvel|| penalty, which punished the swing motion we actually want.
     "upright_weight": 0.5,
 
-    # Discourage abrupt changes between consecutive actions.
-    "action_smoothness_weight": 0.01,
+    # Discourage abrupt changes between consecutive actions. Bumped 0.01 → 0.05
+    # as sim2real prep: the moteus controller tolerates far less command jitter
+    # than MuJoCo does, so we pre-train the policy to emit smoother torques.
+    "action_smoothness_weight": 0.05,
 
     # Distance from the path (m). For StraightPath this is |y|.
     "track_deviation_weight": 0.2,
