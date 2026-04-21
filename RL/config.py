@@ -72,16 +72,16 @@ RL = {
 REWARD = {
     # Penalty for deviation from upright (90°). Normalized to [0, 1] where
     # 0° error = 0 penalty, 180° error = 1 penalty
-    "angle_weight": 2.0,  # Increased from 1.0 — more penalty for falling
+    "angle_weight": 0.5,  # Reduced — focus on upright bonus instead
 
     # Penalty for angular velocity. Encourages gentle, controlled motion.
-    "velocity_weight": 0.2,  # Increased from 0.1 — penalize jerky motion more
+    "velocity_weight": 0.01,  # Cut dramatically — allow swinging
 
     # Penalty for control effort. Penalizes large motor commands.
-    "effort_weight": 0.005,  # Decreased from 0.01 — less penalizing control
+    "effort_weight": 0.0,  # Disabled — let it use motor freely
 
     # Bonus reward for being upright (within ±10° of 90°)
-    "upright_bonus": 0.5,  # Decreased from 10 — more gradual reward signal
+    "upright_bonus": 3.0,  # Increased 6x — strong learning signal
 }
 
 # ==============================================================================
