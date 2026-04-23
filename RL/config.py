@@ -25,8 +25,9 @@ ROBOT = {
 # ==============================================================================
 START = {
     "default_start_angle": 270.0,  # Start hanging down (degrees)
-    "randomize_start_angle": False,
-    "start_angle_range": [260.0, 280.0],  # ±10° from hanging down
+    # Randomized starts reduce overfitting to a single low-torque local mode.
+    "randomize_start_angle": True,
+    "start_angle_range": [240.0, 300.0],
 }
 
 # ==============================================================================
@@ -37,19 +38,32 @@ RL = {
     "algorithm": "PPO",
 
     # Training parameters
-    "n_steps": 2048,  # Steps per epoch (per environment)
+    "n_steps": 1024,  # Steps per epoch (per environment)
     "n_epochs": 1000,  # Total epochs to train (pendulum converges faster than biped)
     "batch_size": 64,
-    "learning_rate": 3e-2,  # Lower from 1e-3 for stability
+    # 3e-1 caused policy collapse; PPO is much stabler here around 3e-4.
+    "learning_rate": 3e-4,
     "gamma": 0.995,  # Higher discount — rewards staying upright longer
     "gae_lambda": 0.95,  # GAE lambda
-    "clip_range": 0.5,  # PPO clip range
-    "ent_coef": 0.01,  # Entropy coefficient
+    "clip_range": 0.2,  # PPO default range, less policy thrash
+    "ent_coef": 0.20,  # Much stronger exploration pressure early in training
     "vf_coef": 0.5,  # Value function coefficient
+    "target_kl": 0.03,  # Keep PPO updates bounded while entropy is high
+    "max_grad_norm": 0.7,  # Mildly tighter gradients for stability under larger action std
+
+    # Policy exploration settings (continuous Gaussian policy)
+    "policy": {
+        # Larger initial std so sampled training actions can explore wider torque values.
+        # (exp(0.5) ~= 1.65 before squashing/clipping to [-1, 1]).
+        "log_std_init": 0.5,
+        # Orthogonal init can produce overly confident early means in this task.
+        "ortho_init": False,
+    },
 
     # Environment
     "n_envs": 4,  # Windows: use 1, Linux: can use 4+ for speed
-    "max_episode_steps": 500,  # Max steps per episode (5 seconds at 0.01s control_dt)
+    "max_episode_steps": 5000,  # 10x longer horizon: more time to recover and settle
+    "max_upright_episode_steps": 50000,  # Allow long balancing runs once upright
 
     # Observation/Action
     "observation_space": {
@@ -70,18 +84,22 @@ RL = {
 # REWARD CONFIGURATION
 # ==============================================================================
 REWARD = {
-    # Penalty for deviation from upright (90°). Normalized to [0, 1] where
-    # 0° error = 0 penalty, 180° error = 1 penalty
-    "angle_weight": 0.5,  # Reduced — focus on upright bonus instead
+    # Proximity-based reward: 0 at 270° (start), increases quadratically to upright (90°)
+    # At 270°: reward = 0
+    # At 180°: reward = (90/180)^2 * scale = 0.25 * scale
+    # At 90°:  reward = (180/180)^2 * scale = 1.0 * scale
+    "proximity_scale": 1.0,  # Base reward scale for distance to upright
 
-    # Penalty for angular velocity. Encourages gentle, controlled motion.
-    "velocity_weight": 0.01,  # Cut dramatically — allow swinging
+    # Baseline subtraction to eliminate sideways local optimum.
+    # With scale=1.0 and baseline=0.30:
+    #   270° -> -0.30, 180°/0° -> -0.05, 90° -> +0.70
+    "proximity_baseline": 0.30,
 
-    # Penalty for control effort. Penalizes large motor commands.
-    "effort_weight": 0.0,  # Disabled — let it use motor freely
+    # Bonus reward for being within ±10° of upright (STRONG incentive to reach & stay upright)
+    "upright_bonus": 100.0,  # Much stronger — goal is to reach & balance upright
 
-    # Bonus reward for being upright (within ±10° of 90°)
-    "upright_bonus": 3.0,  # Increased 6x — strong learning signal
+    # Penalty for control effort (motor torque magnitude)
+    "effort_weight": 0.0,  # Disabled — let agent use motor freely
 }
 
 # ==============================================================================
@@ -118,7 +136,7 @@ LOGGING = {
 VISUALIZATION = {
     "render_every_n_episodes": 10,
     "video_length": 200,  # Steps per video
-    "save_videos": False,
+    "save_videos": True,
 }
 
 # ==============================================================================

@@ -117,6 +117,9 @@ def train(
         "clip_range": config["RL"]["clip_range"],
         "ent_coef": config["RL"]["ent_coef"],
         "vf_coef": config["RL"]["vf_coef"],
+        "target_kl": config["RL"].get("target_kl", None),
+        "max_grad_norm": config["RL"].get("max_grad_norm", 0.5),
+        "policy_kwargs": config["RL"].get("policy", {}),
         "tensorboard_log": logs_dir / variant_full_name,
     }
 
@@ -206,6 +209,8 @@ def train(
                 f"  [OK] Reward: {eval_metrics['eval_mean_reward']:7.3f} ± {eval_metrics['eval_std_reward']:.3f} | "
                 f"Len: {eval_metrics['eval_mean_length']:5.0f} | "
                 f"Upright: {eval_metrics['eval_mean_upright_time']:6.3f}s | "
+                f"Breakdown: prox={eval_metrics['eval_mean_proximity']:6.2f} + bonus={eval_metrics['eval_mean_upright_bonus']:6.2f} - effort={eval_metrics['eval_mean_effort_penalty']:5.2f} | "
+                f"|a|={eval_metrics['eval_mean_abs_action']:.4f} | "
                 f"Time: {epoch_time:.1f}s"
             )
 
@@ -246,10 +251,17 @@ def evaluate_policy(model, env, config, num_episodes=5):
         eval_mean_reward:   mean total reward per episode
         eval_mean_length:   mean step count per episode
         eval_mean_upright_time: mean time spent upright (within ±10° of 90°)
+        eval_reward_breakdown: dict with mean proximity, upright_bonus, effort_penalty
     """
     episode_rewards = []
     episode_lengths = []
     episode_upright_times = []
+
+    # Track reward components
+    proximity_rewards = []
+    upright_bonuses = []
+    effort_penalties = []
+    mean_abs_actions = []
 
     for _ in range(num_episodes):
         obs = env.reset()
@@ -260,8 +272,14 @@ def evaluate_policy(model, env, config, num_episodes=5):
         episode_length = 0
         max_upright_time = 0.0
 
+        episode_proximity = 0.0
+        episode_upright_bonus = 0.0
+        episode_effort_penalty = 0.0
+        episode_abs_action_sum = 0.0
+
         for _ in range(config["RL"]["max_episode_steps"]):
             action, _ = model.predict(obs, deterministic=True)
+            episode_abs_action_sum += float(np.mean(np.abs(action)))
             result = env.step(action)
             if len(result) == 5:  # Gymnasium single-env
                 obs, reward, terminated, truncated, info = result
@@ -278,8 +296,19 @@ def evaluate_policy(model, env, config, num_episodes=5):
                 for sub in info:
                     if "upright_time" in sub:
                         max_upright_time = max(max_upright_time, float(sub["upright_time"]))
-            elif isinstance(info, dict) and "upright_time" in info:
-                max_upright_time = max(max_upright_time, float(info["upright_time"]))
+                    if "reward_breakdown" in sub:
+                        bd = sub["reward_breakdown"]
+                        episode_proximity += float(bd.get("proximity", 0.0))
+                        episode_upright_bonus += float(bd.get("upright_bonus", 0.0))
+                        episode_effort_penalty += float(bd.get("effort_penalty", 0.0))
+            elif isinstance(info, dict):
+                if "upright_time" in info:
+                    max_upright_time = max(max_upright_time, float(info["upright_time"]))
+                if "reward_breakdown" in info:
+                    bd = info["reward_breakdown"]
+                    episode_proximity += float(bd.get("proximity", 0.0))
+                    episode_upright_bonus += float(bd.get("upright_bonus", 0.0))
+                    episode_effort_penalty += float(bd.get("effort_penalty", 0.0))
 
             if np.any(done) or np.any(truncated):
                 break
@@ -287,12 +316,20 @@ def evaluate_policy(model, env, config, num_episodes=5):
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
         episode_upright_times.append(max_upright_time)
+        proximity_rewards.append(episode_proximity)
+        upright_bonuses.append(episode_upright_bonus)
+        effort_penalties.append(episode_effort_penalty)
+        mean_abs_actions.append(episode_abs_action_sum / max(episode_length, 1))
 
     return {
         "eval_mean_reward": float(np.mean(episode_rewards)),
         "eval_std_reward": float(np.std(episode_rewards)),
         "eval_mean_length": float(np.mean(episode_lengths)),
         "eval_mean_upright_time": float(np.mean(episode_upright_times)),
+        "eval_mean_proximity": float(np.mean(proximity_rewards)),
+        "eval_mean_upright_bonus": float(np.mean(upright_bonuses)),
+        "eval_mean_effort_penalty": float(np.mean(effort_penalties)),
+        "eval_mean_abs_action": float(np.mean(mean_abs_actions)),
     }
 
 

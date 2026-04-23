@@ -155,11 +155,9 @@ class LeggedRobotEnv(gym.Env):
         )
 
         # Observation space: compute from actual model structure.
-        # qpos includes all joint positions (freejoint is 7D: 3 pos + 4 quat);
-        # we drop the absolute (x, y) world position because running forward is
-        # translationally invariant — those two dims are pure noise the policy
-        # has to learn to ignore. Height (z) is kept because it matters.
-        qpos_dim = self.model.nq - 2  # drop x, y
+        # Keep the full qpos vector so the policy sees the exact observation
+        # layout it was trained with.
+        qpos_dim = self.model.nq
         qvel_dim = self.model.nv      # keep all velocities
 
         obs_dim = (
@@ -223,8 +221,8 @@ class LeggedRobotEnv(gym.Env):
         rationale. Everything else stays: z, quat, joint angles, all velocities,
         base kinematics, and previous action.
         """
-        # Joint positions and velocities. Slice off absolute x,y.
-        qpos = self.data.qpos[2:].copy()
+        # Joint positions and velocities.
+        qpos = self.data.qpos.copy()
         qvel = self.data.qvel.copy()
 
         # Base pose and velocity

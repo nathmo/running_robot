@@ -50,6 +50,14 @@ class InvertedPendulumEnv(gym.Env):
         # Time tracking for upright stability check
         self.upright_time = 0.0  # seconds spent within upright band
 
+        # Reward breakdown tracking
+        self._reward_breakdown = {
+            "proximity": 0.0,
+            "upright_bonus": 0.0,
+            "effort_penalty": 0.0,
+            "angle": 0.0,
+        }
+
         # Rendering
         self.viewer = None
 
@@ -102,21 +110,27 @@ class InvertedPendulumEnv(gym.Env):
     def _normalize_angle(self, angle_deg):
         """Normalize angle (degrees) to [-1, 1].
 
-        Convention: 0° = horizontal, 90° = upright, 270° = hanging down.
-        We normalize to [-1, 1] such that 90° (upright) → 0.0.
+        Convention: 0° = horizontal (0.0), 90° = upright (0.5), 
+                   180° = other side (1.0), 270° = hanging down (-0.5), 
+                   -180° = opposite (−1.0).
+        
+        Maps angle → [-1, 1] such that:
+          - 0° → 0.0
+          - ±180° → ±1.0
+          - 90° → 0.5 (upright)
+          - 270° ≡ -90° → −0.5 (hanging down)
         """
-        # Wrap angle to [0, 360)
-        angle_wrapped = angle_deg % 360.0
-
-        # Map [0, 360) to [-1, 1] with 90° at 0.0
-        # 0° → -1, 90° → 0, 180° → 1, 270° → 0 (wraps around)
-        # Actually, simpler: offset by 90, then map [-90, 270] to [-1, 1]
-        angle_offset = angle_wrapped - 90.0  # -90 to 270
-        if angle_offset > 180.0:
-            angle_offset -= 360.0  # Wrap to [-180, 180]
-
-        # Normalize [-180, 180] to [-1, 1]
-        angle_norm = np.clip(angle_offset / 180.0, -1.0, 1.0)
+        # Normalize angle to [-180, 180] range
+        angle_normalized = angle_deg
+        while angle_normalized > 180.0:
+            angle_normalized -= 360.0
+        while angle_normalized < -180.0:
+            angle_normalized += 360.0
+        
+        # Map [-180, 180] directly to [-1, 1]
+        angle_norm = angle_normalized / 180.0
+        # Clip just in case (should be unnecessary)
+        angle_norm = np.clip(angle_norm, -1.0, 1.0)
         return float(angle_norm)
 
     def _normalize_angular_velocity(self, ang_vel_deg_per_s):
@@ -127,6 +141,20 @@ class InvertedPendulumEnv(gym.Env):
         max_ang_vel = 360.0  # deg/s
         ang_vel_norm = np.clip(ang_vel_deg_per_s / max_ang_vel, -1.0, 1.0)
         return float(ang_vel_norm)
+
+    def _wrap_angle_deg(self, angle_deg):
+        """Wrap an angle in degrees to [-180, 180]."""
+        wrapped = float(angle_deg)
+        while wrapped > 180.0:
+            wrapped -= 360.0
+        while wrapped < -180.0:
+            wrapped += 360.0
+        return wrapped
+
+    def _shortest_distance_to_upright(self, angle_deg):
+        """Return the shortest angular distance in degrees to the 90° upright target."""
+        angle_diff = self._wrap_angle_deg(float(angle_deg) - 90.0)
+        return abs(angle_diff)
 
     def _get_observation(self):
         """Get normalized angle and angular velocity"""
@@ -143,61 +171,98 @@ class InvertedPendulumEnv(gym.Env):
         return obs
 
     def _get_reward(self):
-        """Compute reward for this step.
+        """Compute reward for this step, tracking components for debugging.
 
-        Terms:
-          -angle_penalty: distance from upright (90°), scaled to [0, 1]
-          -velocity_penalty: magnitude of angular velocity
-          -effort_penalty: magnitude of control torque
+        Reward structure:
+          - Proximity bonus: reward based on distance to upright (90°)
+            Ranges from 0 at furthest (270°) to proximity_scale at upright (90°)
+          - Upright bonus: extra reward for being within ±10° of upright
+          - Effort penalty: penalize large motor commands
+
+        Returns: (total_reward, reward_breakdown_dict)
         """
         r = self.config["REWARD"]
 
         joint_idx = self.model.jnt_dofadr[self.joint_id]
         angle_deg = float(self.data.qpos[joint_idx])
-        ang_vel_deg_s = float(self.data.qvel[joint_idx])
         control_effort = float(np.abs(self.data.ctrl[0]))
 
-        # Angle penalty: distance from 90° (upright)
-        angle_error = abs(angle_deg - 90.0)
-        # Normalize to [0, 1]: 0° error → 0, 180° error → 1
-        angle_penalty = min(angle_error / 180.0, 1.0) * r.get("angle_weight", 1.0)
+        # Compute shortest angular distance to upright (90°), accounting for circular wrapping
+        shortest_distance = self._shortest_distance_to_upright(angle_deg)
 
-        # Velocity penalty: penalize high angular velocity
-        vel_penalty = abs(ang_vel_deg_s) / 360.0 * r.get("velocity_weight", 0.1)
+        # Proximity reward: square the term to heavily reward near-upright angles,
+        # then subtract a baseline so sideways states (near 0° / 180°) are not
+        # locally attractive fixed points.
+        #
+        # Raw proximity term:
+        #   - At 270°: 0.00
+        #   - At 180°: 0.25
+        #   - At  90°: 1.00
+        #
+        # With baseline (default 0.30):
+        #   - At 270°: -0.30
+        #   - At 180°: -0.05
+        #   - At  90°: +0.70
+        proximity_scale = r.get("proximity_scale", 1.0)
+        proximity_baseline = r.get("proximity_baseline", 0.30)
+        raw_proximity = ((180.0 - shortest_distance) / 180.0) ** 2 * proximity_scale
+        proximity_reward = raw_proximity - proximity_baseline
 
-        # Control effort penalty: penalize large torques
-        effort_penalty = control_effort * r.get("effort_weight", 0.01)
-
-        # Bonus for being upright (within ±10°)
+        # Extra bonus for being within ±10° of upright
         upright_bonus = 0.0
-        if abs(angle_deg - 90.0) <= 10.0:
-            upright_bonus = r.get("upright_bonus", 0.1)
+        if shortest_distance <= 10.0:
+            upright_bonus = r.get("upright_bonus", 0.5)
 
-        total = upright_bonus - angle_penalty - vel_penalty - effort_penalty
+        # Control effort penalty: penalize large motor commands
+        effort_penalty = control_effort * r.get("effort_weight", 0.0)
+
+        total = proximity_reward + upright_bonus - effort_penalty
+
+        # Store breakdown for evaluation
+        self._reward_breakdown = {
+            "raw_proximity": float(raw_proximity),
+            "proximity": float(proximity_reward),
+            "upright_bonus": float(upright_bonus),
+            "effort_penalty": float(effort_penalty),
+            "shortest_distance": float(shortest_distance),
+            "angle": float(angle_deg),
+        }
+
         return float(total)
 
     def _check_termination(self):
         """Check if episode should terminate.
 
-        Terminate if:
-          1. Angle leaves [80°, 100°] band (not within ±10° of upright)
-          2. Step count exceeds max
+                Timeout-based termination with configurable horizons:
+                    - Base horizon from RL.max_episode_steps
+                    - Upright-zone horizon from RL.max_upright_episode_steps (defaults to 10x base)
         """
         joint_idx = self.model.jnt_dofadr[self.joint_id]
         angle_deg = float(self.data.qpos[joint_idx])
+        shortest_distance = self._shortest_distance_to_upright(angle_deg)
 
-        # Check upright band
-        if 80.0 <= angle_deg <= 100.0:
+        # Check upright band (for tracking upright time)
+        if shortest_distance <= 10.0:
             self.upright_time += self.config["ROBOT"]["control_dt"]
         else:
             self.upright_time = 0.0
 
-        # Terminate if fell out of band
-        if angle_deg < 80.0 or angle_deg > 100.0:
-            return True, "fell"
+        # Determine if in upright zone (±20° from 90°)
+        in_upright_zone = shortest_distance <= 20.0
 
-        # Terminate if max steps reached
-        if self.step_count >= self.config["RL"]["max_episode_steps"]:
+        rl_cfg = self.config.get("RL", {})
+        base_max_steps = int(rl_cfg.get("max_episode_steps", 2000))
+        upright_max_steps = int(
+            rl_cfg.get("max_upright_episode_steps", base_max_steps * 10)
+        )
+
+        # Timeout-based termination
+        if in_upright_zone:
+            max_steps = upright_max_steps
+        else:
+            max_steps = base_max_steps
+
+        if self.step_count >= max_steps:
             return True, "timeout"
 
         return False, None
@@ -266,6 +331,7 @@ class InvertedPendulumEnv(gym.Env):
             "step": self.step_count,
             "termination_reason": reason,
             "upright_time": self.upright_time,
+            "reward_breakdown": self._reward_breakdown.copy(),
         }
 
         self.episode_reward += reward
