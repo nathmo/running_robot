@@ -13,9 +13,11 @@ class InvertedPendulumEnv(gym.Env):
     """
     Gymnasium environment for training RL policies on an inverted pendulum.
 
-    Task: Keep a 200g mass balanced upright (90°) on a 0.5m massless rod
-    with a 1 Nm motor. Observations are angle and angular velocity, both
-    normalized to [-1, 1].
+    Task: Keep the pendulum upright while minimizing motor effort.
+
+    Observation matches the hardware telemetry used on the Raspberry Pi:
+        [position_turns, velocity_turns_per_s, torque_nm]
+    The policy outputs a torque command in Nm, clipped to [-1, 1].
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
@@ -52,11 +54,20 @@ class InvertedPendulumEnv(gym.Env):
 
         # Reward breakdown tracking
         self._reward_breakdown = {
-            "proximity": 0.0,
-            "upright_bonus": 0.0,
+            "angle_penalty": 0.0,
+            "velocity_penalty": 0.0,
             "effort_penalty": 0.0,
-            "angle": 0.0,
+            "alive_bonus": 0.0,
+            "stable_bonus": 0.0,
+            "success_bonus": 0.0,
         }
+
+        self.episode_count = 0
+        self.curriculum_progress = 0.0
+        self.success_achieved = False
+        self.first_stable_step = None
+        self.left_stable_after_entry = False
+        self.stable_time = 0.0
 
         # Rendering
         self.viewer = None
@@ -96,15 +107,16 @@ class InvertedPendulumEnv(gym.Env):
 
     def _setup_spaces(self):
         """Define observation and action spaces"""
-        # Action space: motor control [-1, 1] → [-1, 1] Nm (linear mapping)
+        # Action space: direct torque command in Nm, clipped by the env.
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(1,), dtype=np.float32
         )
 
-        # Observation space: [angle_normalized, angular_velocity_normalized]
-        # Both normalized to [-1, 1]
+        # Observation space: [position_turns, velocity_turns_per_s, last_torque_nm]
         self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(2,), dtype=np.float32
+            low=np.array([-100.0, -100.0, -1.0], dtype=np.float32),
+            high=np.array([100.0, 100.0, 1.0], dtype=np.float32),
+            dtype=np.float32,
         )
 
     def _normalize_angle(self, angle_deg):
@@ -157,73 +169,83 @@ class InvertedPendulumEnv(gym.Env):
         return abs(angle_diff)
 
     def _get_observation(self):
-        """Get normalized angle and angular velocity"""
+        """Get raw hardware-style observation values."""
         # Get joint angle (degrees) and velocity
         joint_idx = self.model.jnt_dofadr[self.joint_id]
 
         angle_deg = float(self.data.qpos[joint_idx])  # degrees (compiler angle="degree")
         ang_vel_deg_s = float(self.data.qvel[joint_idx])  # degrees/s
 
-        angle_norm = self._normalize_angle(angle_deg)
-        ang_vel_norm = self._normalize_angular_velocity(ang_vel_deg_s)
-
-        obs = np.array([angle_norm, ang_vel_norm], dtype=np.float32)
+        angle_turns = angle_deg / 360.0
+        ang_vel_turns_s = ang_vel_deg_s / 360.0
+        obs = np.array([angle_turns, ang_vel_turns_s, float(self.prev_action)], dtype=np.float32)
         return obs
 
+    def set_curriculum_progress(self, progress):
+        self.curriculum_progress = float(np.clip(progress, 0.0, 1.0))
+
+    def _sample_start_angle_deg(self):
+        start_cfg = self.config.get("START", {})
+        if not start_cfg.get("randomize_start_angle", False):
+            return float(start_cfg.get("default_start_angle", 90.0))
+
+        progress = float(np.clip(self.curriculum_progress, 0.0, 1.0))
+        curriculum_episodes = max(1, int(self.config.get("RL", {}).get("curriculum_episodes", 400)))
+        episode_progress = min(1.0, self.episode_count / curriculum_episodes)
+        progress = max(progress, episode_progress)
+
+        initial_span = float(start_cfg.get("curriculum_initial_span_deg", 10.0))
+        final_span = float(start_cfg.get("curriculum_final_span_deg", 180.0))
+        span = initial_span + (final_span - initial_span) * progress
+
+        # Near-upright starts first; then occasionally sample the full circle.
+        if np.random.rand() < progress:
+            return float(np.random.uniform(0.0, 360.0))
+        return float((90.0 + np.random.uniform(-span, span)) % 360.0)
+
+    def _is_within_success_band(self):
+        joint_idx = self.model.jnt_dofadr[self.joint_id]
+        angle_deg = float(self.data.qpos[joint_idx])
+        ang_vel_deg_s = float(self.data.qvel[joint_idx])
+
+        angle_error_turns = abs(self._shortest_distance_to_upright(angle_deg) / 360.0)
+        velocity_turns_s = abs(ang_vel_deg_s / 360.0)
+
+        r_cfg = self.config.get("RL", {})
+        return (
+            angle_error_turns <= float(r_cfg.get("success_angle_threshold_turns", 0.1))
+            and velocity_turns_s <= float(r_cfg.get("success_velocity_threshold_turns_s", 0.1))
+        )
+
     def _get_reward(self):
-        """Compute reward for this step, tracking components for debugging.
-
-        Reward structure:
-          - Proximity bonus: reward based on distance to upright (90°)
-            Ranges from 0 at furthest (270°) to proximity_scale at upright (90°)
-          - Upright bonus: extra reward for being within ±10° of upright
-          - Effort penalty: penalize large motor commands
-
-        Returns: (total_reward, reward_breakdown_dict)
-        """
+        """Compute dense shaping reward around the hardware success criteria."""
         r = self.config["REWARD"]
 
         joint_idx = self.model.jnt_dofadr[self.joint_id]
         angle_deg = float(self.data.qpos[joint_idx])
-        control_effort = float(np.abs(self.data.ctrl[0]))
+        ang_vel_deg_s = float(self.data.qvel[joint_idx])
+        torque_nm = float(self.data.ctrl[0])
 
-        # Compute shortest angular distance to upright (90°), accounting for circular wrapping
         shortest_distance = self._shortest_distance_to_upright(angle_deg)
+        angle_error_turns = shortest_distance / 360.0
+        ang_vel_turns_s = ang_vel_deg_s / 360.0
 
-        # Proximity reward: square the term to heavily reward near-upright angles,
-        # then subtract a baseline so sideways states (near 0° / 180°) are not
-        # locally attractive fixed points.
-        #
-        # Raw proximity term:
-        #   - At 270°: 0.00
-        #   - At 180°: 0.25
-        #   - At  90°: 1.00
-        #
-        # With baseline (default 0.30):
-        #   - At 270°: -0.30
-        #   - At 180°: -0.05
-        #   - At  90°: +0.70
-        proximity_scale = r.get("proximity_scale", 1.0)
-        proximity_baseline = r.get("proximity_baseline", 0.30)
-        raw_proximity = ((180.0 - shortest_distance) / 180.0) ** 2 * proximity_scale
-        proximity_reward = raw_proximity - proximity_baseline
+        angle_penalty = r.get("angle_weight", 10.0) * (angle_error_turns ** 2)
+        velocity_penalty = r.get("velocity_weight", 0.5) * (ang_vel_turns_s ** 2)
+        effort_penalty = r.get("effort_weight", 0.02) * (torque_nm ** 2)
 
-        # Extra bonus for being within ±10° of upright
-        upright_bonus = 0.0
-        if shortest_distance <= 10.0:
-            upright_bonus = r.get("upright_bonus", 0.5)
+        alive_bonus = r.get("alive_bonus", 0.02)
+        stable_bonus = r.get("stable_bonus", 0.0) if self._is_within_success_band() else 0.0
 
-        # Control effort penalty: penalize large motor commands
-        effort_penalty = control_effort * r.get("effort_weight", 0.0)
-
-        total = proximity_reward + upright_bonus - effort_penalty
+        total = alive_bonus + stable_bonus - angle_penalty - velocity_penalty - effort_penalty
 
         # Store breakdown for evaluation
         self._reward_breakdown = {
-            "raw_proximity": float(raw_proximity),
-            "proximity": float(proximity_reward),
-            "upright_bonus": float(upright_bonus),
+            "angle_penalty": float(angle_penalty),
+            "velocity_penalty": float(velocity_penalty),
             "effort_penalty": float(effort_penalty),
+            "alive_bonus": float(alive_bonus),
+            "stable_bonus": float(stable_bonus),
             "shortest_distance": float(shortest_distance),
             "angle": float(angle_deg),
         }
@@ -233,36 +255,32 @@ class InvertedPendulumEnv(gym.Env):
     def _check_termination(self):
         """Check if episode should terminate.
 
-                Timeout-based termination with configurable horizons:
-                    - Base horizon from RL.max_episode_steps
-                    - Upright-zone horizon from RL.max_upright_episode_steps (defaults to 10x base)
+        The episode runs for the full 20 seconds. Success is measured by reaching
+        the upright band within 5 seconds and then never leaving it.
         """
-        joint_idx = self.model.jnt_dofadr[self.joint_id]
-        angle_deg = float(self.data.qpos[joint_idx])
-        shortest_distance = self._shortest_distance_to_upright(angle_deg)
-
-        # Check upright band (for tracking upright time)
-        if shortest_distance <= 10.0:
-            self.upright_time += self.config["ROBOT"]["control_dt"]
-        else:
-            self.upright_time = 0.0
-
-        # Determine if in upright zone (±20° from 90°)
-        in_upright_zone = shortest_distance <= 20.0
-
         rl_cfg = self.config.get("RL", {})
-        base_max_steps = int(rl_cfg.get("max_episode_steps", 2000))
-        upright_max_steps = int(
-            rl_cfg.get("max_upright_episode_steps", base_max_steps * 10)
-        )
+        max_steps = int(rl_cfg.get("max_episode_steps", 1000))
+        control_dt = float(self.config["ROBOT"]["control_dt"])
+        success_deadline_steps = int(float(rl_cfg.get("success_deadline_seconds", 5.0)) / control_dt)
 
-        # Timeout-based termination
-        if in_upright_zone:
-            max_steps = upright_max_steps
+        within = self._is_within_success_band()
+
+        if within:
+            self.stable_time += control_dt
+            if self.first_stable_step is None:
+                self.first_stable_step = self.step_count
         else:
-            max_steps = base_max_steps
+            if self.first_stable_step is not None:
+                self.left_stable_after_entry = True
+            self.stable_time = 0.0
 
         if self.step_count >= max_steps:
+            self.success_achieved = (
+                self.first_stable_step is not None
+                and self.first_stable_step <= success_deadline_steps
+                and within
+                and not self.left_stable_after_entry
+            )
             return True, "timeout"
 
         return False, None
@@ -270,21 +288,22 @@ class InvertedPendulumEnv(gym.Env):
     def reset(self, seed=None, options=None):
         """Reset environment.
 
-        Start angle is either fixed (270°, hanging down) or randomized
-        based on config.
+        Start angle follows the curriculum: initially close to upright, then
+        gradually expands to full-swing random starts.
         """
         super().reset(seed=seed)
+
+        self.episode_count += 1
+        start_cfg = self.config.get("START", {})
+        if start_cfg.get("curriculum_enabled", False):
+            curriculum_episodes = max(1, int(self.config.get("RL", {}).get("curriculum_episodes", 400)))
+            self.curriculum_progress = min(1.0, self.episode_count / curriculum_episodes)
 
         self.data.qpos[:] = self.model.qpos0.copy()
         self.data.qvel[:] = np.zeros(self.num_dofs)
 
         # Set start angle
-        start_config = self.config["START"]
-        if start_config.get("randomize_start_angle", False):
-            angle_range = start_config.get("start_angle_range", [270, 270])
-            start_angle = np.random.uniform(angle_range[0], angle_range[1])
-        else:
-            start_angle = start_config.get("default_start_angle", 270.0)
+        start_angle = self._sample_start_angle_deg()
 
         joint_idx = self.model.jnt_dofadr[self.joint_id]
         self.data.qpos[joint_idx] = start_angle
@@ -298,10 +317,15 @@ class InvertedPendulumEnv(gym.Env):
         self.step_count = 0
         self.episode_reward = 0.0
         self.prev_action = 0.0
-        self.upright_time = 0.0
+        self.stable_time = 0.0
+        self.success_achieved = False
+        self.first_stable_step = None
+        self.left_stable_after_entry = False
 
         obs = self._get_observation()
-        info = {}
+        info = {
+            "curriculum_progress": self.curriculum_progress,
+        }
 
         return obs, info
 
@@ -311,8 +335,7 @@ class InvertedPendulumEnv(gym.Env):
         action = np.clip(action[0], -1.0, 1.0)
         self.prev_action = action
 
-        # Apply control: [-1, 1] maps directly to [-1, 1] Nm torque
-        # (gear=1 in XML means ctrl directly becomes torque)
+        # Apply control in Nm. The XML gear=1 means ctrl maps directly to torque.
         self.data.ctrl[0] = action
 
         # Simulate one control step (action_repeat × sim substeps)
@@ -330,12 +353,20 @@ class InvertedPendulumEnv(gym.Env):
             "episode_reward": self.episode_reward,
             "step": self.step_count,
             "termination_reason": reason,
-            "upright_time": self.upright_time,
+            "stable_time": self.stable_time,
+            "success_achieved": self.success_achieved,
+            "first_stable_step": self.first_stable_step,
             "reward_breakdown": self._reward_breakdown.copy(),
         }
 
         self.episode_reward += reward
         self.step_count += 1
+
+        if terminated and reason == "timeout" and self.success_achieved:
+            success_bonus = self.config.get("REWARD", {}).get("success_bonus", 200.0)
+            reward += success_bonus
+            self.episode_reward += success_bonus
+            info["reward_breakdown"]["success_bonus"] = float(success_bonus)
 
         return obs, float(reward), terminated, truncated, info
 

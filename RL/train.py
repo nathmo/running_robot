@@ -208,8 +208,8 @@ def train(
             epoch_pbar.write(
                 f"  [OK] Reward: {eval_metrics['eval_mean_reward']:7.3f} ± {eval_metrics['eval_std_reward']:.3f} | "
                 f"Len: {eval_metrics['eval_mean_length']:5.0f} | "
-                f"Upright: {eval_metrics['eval_mean_upright_time']:6.3f}s | "
-                f"Breakdown: prox={eval_metrics['eval_mean_proximity']:6.2f} + bonus={eval_metrics['eval_mean_upright_bonus']:6.2f} - effort={eval_metrics['eval_mean_effort_penalty']:5.2f} | "
+                f"Success: {100.0 * eval_metrics['eval_success_rate']:5.1f}% | "
+                f"Stable: {eval_metrics['eval_mean_stable_time']:6.3f}s | "
                 f"|a|={eval_metrics['eval_mean_abs_action']:.4f} | "
                 f"Time: {epoch_time:.1f}s"
             )
@@ -248,19 +248,23 @@ def evaluate_policy(model, env, config, num_episodes=5):
     """Evaluate policy on a (preferably single-env) VecEnv.
 
     Metrics:
-        eval_mean_reward:   mean total reward per episode
-        eval_mean_length:   mean step count per episode
-        eval_mean_upright_time: mean time spent upright (within ±10° of 90°)
-        eval_reward_breakdown: dict with mean proximity, upright_bonus, effort_penalty
+        eval_mean_reward: mean total reward per episode
+        eval_mean_length: mean step count per episode
+        eval_success_rate: fraction of episodes that held success criteria to the end
+        eval_mean_stable_time: mean time spent within the success band
     """
     episode_rewards = []
     episode_lengths = []
-    episode_upright_times = []
+    episode_stable_times = []
+    episode_successes = []
+    episode_first_stable_steps = []
 
     # Track reward components
-    proximity_rewards = []
-    upright_bonuses = []
+    angle_penalties = []
+    velocity_penalties = []
     effort_penalties = []
+    alive_bonuses = []
+    stable_bonuses = []
     mean_abs_actions = []
 
     for _ in range(num_episodes):
@@ -270,11 +274,15 @@ def evaluate_policy(model, env, config, num_episodes=5):
 
         episode_reward = 0.0
         episode_length = 0
-        max_upright_time = 0.0
+        stable_time = 0.0
+        success = False
+        first_stable_step = None
 
-        episode_proximity = 0.0
-        episode_upright_bonus = 0.0
+        episode_angle_penalty = 0.0
+        episode_velocity_penalty = 0.0
         episode_effort_penalty = 0.0
+        episode_alive_bonus = 0.0
+        episode_stable_bonus = 0.0
         episode_abs_action_sum = 0.0
 
         for _ in range(config["RL"]["max_episode_steps"]):
@@ -294,41 +302,61 @@ def evaluate_policy(model, env, config, num_episodes=5):
             # Extract upright time from info
             if isinstance(info, (list, tuple)):
                 for sub in info:
-                    if "upright_time" in sub:
-                        max_upright_time = max(max_upright_time, float(sub["upright_time"]))
+                    if "stable_time" in sub:
+                        stable_time = max(stable_time, float(sub["stable_time"]))
+                    if "success_achieved" in sub:
+                        success = bool(sub["success_achieved"])
+                    if "first_stable_step" in sub and sub["first_stable_step"] is not None:
+                        first_stable_step = int(sub["first_stable_step"])
                     if "reward_breakdown" in sub:
                         bd = sub["reward_breakdown"]
-                        episode_proximity += float(bd.get("proximity", 0.0))
-                        episode_upright_bonus += float(bd.get("upright_bonus", 0.0))
+                        episode_angle_penalty += float(bd.get("angle_penalty", 0.0))
+                        episode_velocity_penalty += float(bd.get("velocity_penalty", 0.0))
                         episode_effort_penalty += float(bd.get("effort_penalty", 0.0))
+                        episode_alive_bonus += float(bd.get("alive_bonus", 0.0))
+                        episode_stable_bonus += float(bd.get("stable_bonus", 0.0))
             elif isinstance(info, dict):
-                if "upright_time" in info:
-                    max_upright_time = max(max_upright_time, float(info["upright_time"]))
+                if "stable_time" in info:
+                    stable_time = max(stable_time, float(info["stable_time"]))
+                if "success_achieved" in info:
+                    success = bool(info["success_achieved"])
+                if "first_stable_step" in info and info["first_stable_step"] is not None:
+                    first_stable_step = int(info["first_stable_step"])
                 if "reward_breakdown" in info:
                     bd = info["reward_breakdown"]
-                    episode_proximity += float(bd.get("proximity", 0.0))
-                    episode_upright_bonus += float(bd.get("upright_bonus", 0.0))
+                    episode_angle_penalty += float(bd.get("angle_penalty", 0.0))
+                    episode_velocity_penalty += float(bd.get("velocity_penalty", 0.0))
                     episode_effort_penalty += float(bd.get("effort_penalty", 0.0))
+                    episode_alive_bonus += float(bd.get("alive_bonus", 0.0))
+                    episode_stable_bonus += float(bd.get("stable_bonus", 0.0))
 
             if np.any(done) or np.any(truncated):
                 break
 
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
-        episode_upright_times.append(max_upright_time)
-        proximity_rewards.append(episode_proximity)
-        upright_bonuses.append(episode_upright_bonus)
+        episode_stable_times.append(stable_time)
+        episode_successes.append(1.0 if success else 0.0)
+        episode_first_stable_steps.append(first_stable_step if first_stable_step is not None else -1)
+        angle_penalties.append(episode_angle_penalty)
+        velocity_penalties.append(episode_velocity_penalty)
         effort_penalties.append(episode_effort_penalty)
+        alive_bonuses.append(episode_alive_bonus)
+        stable_bonuses.append(episode_stable_bonus)
         mean_abs_actions.append(episode_abs_action_sum / max(episode_length, 1))
 
     return {
         "eval_mean_reward": float(np.mean(episode_rewards)),
         "eval_std_reward": float(np.std(episode_rewards)),
         "eval_mean_length": float(np.mean(episode_lengths)),
-        "eval_mean_upright_time": float(np.mean(episode_upright_times)),
-        "eval_mean_proximity": float(np.mean(proximity_rewards)),
-        "eval_mean_upright_bonus": float(np.mean(upright_bonuses)),
+        "eval_success_rate": float(np.mean(episode_successes)),
+        "eval_mean_stable_time": float(np.mean(episode_stable_times)),
+        "eval_mean_first_stable_step": float(np.mean([x for x in episode_first_stable_steps if x >= 0])) if any(x >= 0 for x in episode_first_stable_steps) else -1.0,
+        "eval_mean_angle_penalty": float(np.mean(angle_penalties)),
+        "eval_mean_velocity_penalty": float(np.mean(velocity_penalties)),
         "eval_mean_effort_penalty": float(np.mean(effort_penalties)),
+        "eval_mean_alive_bonus": float(np.mean(alive_bonuses)),
+        "eval_mean_stable_bonus": float(np.mean(stable_bonuses)),
         "eval_mean_abs_action": float(np.mean(mean_abs_actions)),
     }
 

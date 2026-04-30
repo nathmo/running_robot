@@ -1,7 +1,13 @@
 """
-Configuration for inverted pendulum RL training
-Task: Balance a 200g mass on a 0.5m rod with a 1 Nm motor
+Configuration for inverted pendulum RL training.
+
+The task is to stabilize the pendulum upright while minimizing control effort,
+using the same observation tuple that will be available on hardware:
+position (revolutions), velocity (revolutions/s), and torque (Nm).
 """
+
+import os
+import platform
 
 # ==============================================================================
 # ROBOT CONFIGURATION
@@ -11,9 +17,9 @@ ROBOT = {
 
     # Control parameters
     "control_mode": "torque",  # Direct torque control
-    "action_repeat": 2,  # Repeat action for N simulation steps (faster control)
+    "action_repeat": 20,  # 20 x 1ms sim steps = 50 Hz control loop
     "sim_dt": 0.001,  # Simulation timestep (seconds)
-    "control_dt": 0.002,  # Control timestep after action_repeat
+    "control_dt": 0.02,  # 50 Hz control timestep
 
     # Motor spec: 1 Nm capable motor
     # Action space is [-1, 1] which maps to [-1, 1] Nm (linear)
@@ -24,10 +30,14 @@ ROBOT = {
 # START CONFIGURATION (Pendulum-specific)
 # ==============================================================================
 START = {
-    "default_start_angle": 270.0,  # Start hanging down (degrees)
-    # Randomized starts reduce overfitting to a single low-torque local mode.
+    "default_start_angle": 90.0,  # Upright (degrees)
+    # Randomized starts reduce overfitting. Curriculum starts near upright and
+    # gradually expands to full-swing randomization.
     "randomize_start_angle": True,
-    "start_angle_range": [240.0, 300.0],
+    "curriculum_enabled": True,
+    "curriculum_episodes": 400,
+    "curriculum_initial_span_deg": 10.0,
+    "curriculum_final_span_deg": 180.0,
 }
 
 # ==============================================================================
@@ -39,7 +49,7 @@ RL = {
 
     # Training parameters
     "n_steps": 1024,  # Steps per epoch (per environment)
-    "n_epochs": 1000,  # Total epochs to train (pendulum converges faster than biped)
+    "n_epochs": 1000,  # Total epochs to train
     "batch_size": 64,
     # 3e-1 caused policy collapse; PPO is much stabler here around 3e-4.
     "learning_rate": 3e-4,
@@ -61,16 +71,20 @@ RL = {
     },
 
     # Environment
-    "n_envs": 4,  # Windows: use 1, Linux: can use 4+ for speed
-    "max_episode_steps": 5000,  # 10x longer horizon: more time to recover and settle
-    "max_upright_episode_steps": 50000,  # Allow long balancing runs once upright
+    "n_envs": 4,  # Windows: use 1, Linux: use all cores
+    "max_episode_steps": 1000,  # 20 seconds at 50 Hz
+    "max_upright_episode_steps": 1000,  # Hold success until the end of the episode
+    "success_hold_seconds": 5.0,
+    "success_deadline_seconds": 5.0,
+    "success_angle_threshold_turns": 0.1,
+    "success_velocity_threshold_turns_s": 0.1,
 
     # Observation/Action
     "observation_space": {
-        "include": ["angle", "angular_velocity"],
-        "normalize": True,
+        "include": ["position", "velocity", "torque"],
+        "normalize": False,
     },
-    "action_space": "continuous",  # Single motor
+    "action_space": "continuous",  # Single motor torque command in Nm
 
     # Checkpointing
     "checkpoint_interval": 5,  # Save checkpoint every N epochs
@@ -84,22 +98,19 @@ RL = {
 # REWARD CONFIGURATION
 # ==============================================================================
 REWARD = {
-    # Proximity-based reward: 0 at 270° (start), increases quadratically to upright (90°)
-    # At 270°: reward = 0
-    # At 180°: reward = (90/180)^2 * scale = 0.25 * scale
-    # At 90°:  reward = (180/180)^2 * scale = 1.0 * scale
-    "proximity_scale": 1.0,  # Base reward scale for distance to upright
+    # Dense shaping reward: higher is better.
+    "angle_weight": 10.0,
+    "velocity_weight": 0.5,
+    "effort_weight": 0.02,
 
-    # Baseline subtraction to eliminate sideways local optimum.
-    # With scale=1.0 and baseline=0.30:
-    #   270° -> -0.30, 180°/0° -> -0.05, 90° -> +0.70
-    "proximity_baseline": 0.30,
+    # Small alive bonus to encourage surviving the full 20 s episode.
+    "alive_bonus": 0.02,
 
-    # Bonus reward for being within ±10° of upright (STRONG incentive to reach & stay upright)
-    "upright_bonus": 100.0,  # Much stronger — goal is to reach & balance upright
+    # Bonus for being inside the success region; helps the policy settle.
+    "stable_bonus": 0.25,
 
-    # Penalty for control effort (motor torque magnitude)
-    "effort_weight": 0.0,  # Disabled — let agent use motor freely
+    # Final bonus paid only if the episode ends successfully.
+    "success_bonus": 200.0,
 }
 
 # ==============================================================================
@@ -165,5 +176,10 @@ def get_config(config_name: str = "default"):
         "ENVIRONMENT": {**ENVIRONMENT, **preset.get("ENVIRONMENT", {})},
         "LOGGING": {**LOGGING, **preset.get("LOGGING", {})},
     }
+
+    # On Linux servers, default to using all available CPU cores unless the
+    # preset explicitly overrides it.
+    if platform.system() != "Windows" and config["RL"].get("n_envs", None) == RL["n_envs"]:
+        config["RL"]["n_envs"] = max(1, os.cpu_count() or 1)
 
     return config
