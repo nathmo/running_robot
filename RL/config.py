@@ -35,9 +35,9 @@ START = {
     # gradually expands to full-swing randomization.
     "randomize_start_angle": True,
     "curriculum_enabled": True,
-    "curriculum_episodes": 400,
+    "curriculum_episodes": 800,  # Expand MUCH more slowly over 800 episodes instead of 400
     "curriculum_initial_span_deg": 10.0,
-    "curriculum_final_span_deg": 180.0,
+    "curriculum_final_span_deg": 90.0,  # Only go to ±45° instead of ±90° (full swing)
 }
 
 # ==============================================================================
