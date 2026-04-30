@@ -33,17 +33,17 @@ class OnnxPolicy:
 
 async def run(model_path: Path, device: str, rate_hz: float, max_torque: float, watchdog_timeout: float, debug: bool):
     policy = OnnxPolicy(model_path)
-    # Try to initialize the fdcanusb transport if a device path is provided,
-    # but fall back to the default Controller() if that fails. Some
-    # installations / platforms raise C++ assertions when the transport
-    # is constructed with certain args — catch that and continue.
+    # Use the default Controller() which auto-selects available transports.
+    # Creating a transport (Fdcanusb) and passing it in has triggered
+    # C++ assertion failures on some systems; the default constructor
+    # has proven more robust in practice (see quick tests earlier).
     try:
-        transport = moteus.Fdcanusb(path=device) if device else None
-        controller = moteus.Controller(id=1, transport=transport) if transport is not None else moteus.Controller(id=1)
-    except Exception as e:
+        controller = moteus.Controller()
         if debug:
-            print(f"Warning: Fdcanusb init failed ({e}), falling back to default Controller()")
-        controller = moteus.Controller(id=1)
+            print(f"Controller initialized: {controller}")
+    except Exception as e:
+        print(f"Failed to initialize moteus.Controller(): {e}")
+        raise
 
     period_s = 1.0 / rate_hz
 
