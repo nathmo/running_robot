@@ -4,6 +4,8 @@
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
   name="000_Assy_Full.SLDASM">
+  <!-- ================================================================================= -->
+  <!-- LINK Main Body -->
   <link
     name="Main Body">
     <inertial>
@@ -31,7 +33,7 @@
       <material
         name="">
         <color
-          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+          rgba="0.5 0 0 1" />
       </material>
     </visual>
     <collision>
@@ -44,6 +46,8 @@
       </geometry>
     </collision>
   </link>
+  <!-- ================================================================================= -->
+  <!-- LINK Hip Right -->
   <link
     name="Hip Right">
     <inertial>
@@ -71,7 +75,7 @@
       <material
         name="">
         <color
-          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+          rgba="0 0.5 0 1" />
       </material>
     </visual>
     <collision>
@@ -84,34 +88,23 @@
       </geometry>
     </collision>
   </link>
-  <joint
-    name="Hip Joint Right Adduction"
-    type="fixed">
-    <origin
-      xyz="0.12179 -0.10812 -0.16534"
-      rpy="-2.8244 0 3.1416" />
-    <parent
-      link="Main Body" />
-    <child
-      link="Hip Right" />
-    <axis
-      xyz="0 0 0" />
-  </joint>
+  <!-- ================================================================================= -->
+  <!-- LINK Hip Left -->
   <link
-    name="Four Bar Beam Right">
+    name="Hip Left">
     <inertial>
       <origin
-        xyz="-0.011019175519832 -1.24659178299402E-07 0.00347757297699097"
+        xyz="0.127254632212811 -0.000149488360941571 -0.0202957404054771"
         rpy="0 0 0" />
       <mass
-        value="0.142630655141381" />
+        value="1.35740771588615" />
       <inertia
-        ixx="2.65319868645238E-05"
-        ixy="-8.01849796892294E-11"
-        ixz="1.55377606261961E-17"
-        iyy="7.85996063730645E-05"
-        iyz="-1.68085218053143E-17"
-        izz="9.98768507971965E-05" />
+        ixx="0.00110468050069669"
+        ixy="-1.20679753946943E-12"
+        ixz="3.52851108379561E-05"
+        iyy="0.00268829932797972"
+        iyz="-1.70863288253241E-12"
+        izz="0.0035848192464673" />
     </inertial>
     <visual>
       <origin
@@ -119,12 +112,12 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://000_Assy_Full.SLDASM/meshes/Four Bar Beam Right.STL" />
+          filename="package://000_Assy_Full.SLDASM/meshes/Hip Left.STL" />
       </geometry>
       <material
         name="">
         <color
-          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+          rgba="0 0.5 0 1" />
       </material>
     </visual>
     <collision>
@@ -133,76 +126,12 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://000_Assy_Full.SLDASM/meshes/Four Bar Beam Right.STL" />
+          filename="package://000_Assy_Full.SLDASM/meshes/Hip Left.STL" />
       </geometry>
     </collision>
   </link>
-  <joint
-    name="Four Bar Hip Joint"
-    type="fixed">
-    <origin
-      xyz="0 0 0.0125999999782441"
-      rpy="-3.14159265358979 0 -2.86931947413175" />
-    <parent
-      link="Hip Right" />
-    <child
-      link="Four Bar Beam Right" />
-    <axis
-      xyz="0 0 0" />
-  </joint>
-  <link
-    name="Four Bar Link Right">
-    <inertial>
-      <origin
-        xyz="0.00168951988732721 0.164499999692325 -0.00166112315882333"
-        rpy="0 0 0" />
-      <mass
-        value="0.109514776037964" />
-      <inertia
-        ixx="0.000224121622750797"
-        ixy="5.05229856696951E-07"
-        ixz="2.9424952703396E-07"
-        iyy="5.85117780931328E-06"
-        iyz="5.13872320557526E-07"
-        izz="0.000224131598510378" />
-    </inertial>
-    <visual>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://000_Assy_Full.SLDASM/meshes/Four Bar Link Right.STL" />
-      </geometry>
-      <material
-        name="">
-        <color
-          rgba="0.498039215686275 0.498039215686275 0.498039215686275 1" />
-      </material>
-    </visual>
-    <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://000_Assy_Full.SLDASM/meshes/Four Bar Link Right.STL" />
-      </geometry>
-    </collision>
-  </link>
-  <joint
-    name="Four Bar Pivot Right"
-    type="fixed">
-    <origin
-      xyz="-0.127050006683462 -0.0291598597804043 -0.00250000000597414"
-      rpy="-3.14159265358752 0.776923357705932 -0.23721878662446" />
-    <parent
-      link="Four Bar Beam Right" />
-    <child
-      link="Four Bar Link Right" />
-    <axis
-      xyz="0 0 0" />
-  </joint>
+  <!-- ================================================================================= -->
+  <!-- LINK Femur Right -->
   <link
     name="Femur Right">
     <inertial>
@@ -243,6 +172,108 @@
       </geometry>
     </collision>
   </link>
+  <!-- ================================================================================= -->
+  <!-- LINK Femur Left -->
+  <link
+    name="Femur Left">
+    <inertial>
+      <origin
+        xyz="-0.057068986739219 -0.0989281192242479 0.0243581895610647"
+        rpy="0 0 0" />
+      <mass
+        value="0.845028163769262" />
+      <inertia
+        ixx="0.0039686644146834"
+        ixy="-0.00213805171958798"
+        ixz="7.55475461919689E-16"
+        iyy="0.00162228105548006"
+        iyz="-4.4930964331058E-15"
+        izz="0.00550146037446654" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://000_Assy_Full.SLDASM/meshes/Femur Left.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://000_Assy_Full.SLDASM/meshes/Femur Left.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Joint Main body to hip right abduction -->
+  <joint
+    name="Hip Joint Right Adduction"
+    type="fixed">
+    <origin
+      xyz="0.12179 -0.10812 -0.16534"
+      rpy="-2.8244 0 3.1416" />
+    <parent
+      link="Main Body" />
+    <child
+      link="Hip Right" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+
+  <!-- Joint Main body to hip left abduction -->
+  <joint
+    name="Hip Joint Left Adduction"
+    type="fixed">
+    <origin
+      xyz="0.121794924630579 -0.0938366694238008 0.167247868377338"
+      rpy="0.051513058093229 0 3.14159265358979" />
+    <parent
+      link="Main Body" />
+    <child
+      link="Hip Left" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+
+  <joint
+    name="Four Bar Hip Joint"
+    type="fixed">
+    <origin
+      xyz="0 0 0.0125999999782441"
+      rpy="-3.14159265358979 0 -2.86931947413175" />
+    <parent
+      link="Hip Right" />
+    <child
+      link="Four Bar Beam Right" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+
+  <joint
+    name="Four Bar Pivot Right"
+    type="fixed">
+    <origin
+      xyz="-0.127050006683462 -0.0291598597804043 -0.00250000000597414"
+      rpy="-3.14159265358752 0.776923357705932 -0.23721878662446" />
+    <parent
+      link="Four Bar Beam Right" />
+    <child
+      link="Four Bar Link Right" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+
+
   <joint
     name="Hip Joint Right"
     type="fixed">
@@ -309,6 +340,7 @@
     <axis
       xyz="0 0 0" />
   </joint>
+
   <link
     name="Foot Right">
     <inertial>
@@ -349,6 +381,7 @@
       </geometry>
     </collision>
   </link>
+
   <joint
     name="Ankle Right"
     type="fixed">
@@ -415,59 +448,8 @@
     <axis
       xyz="0 0 0" />
   </joint>
-  <link
-    name="Hip Left">
-    <inertial>
-      <origin
-        xyz="0.127254632121599 -0.000149488047743077 -0.0202957403988102"
-        rpy="0 0 0" />
-      <mass
-        value="1.35740771588615" />
-      <inertia
-        ixx="0.00110468050069669"
-        ixy="-1.20679753946943E-12"
-        ixz="3.52851108379561E-05"
-        iyy="0.00268829932797972"
-        iyz="-1.70863288253241E-12"
-        izz="0.0035848192464673" />
-    </inertial>
-    <visual>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://000_Assy_Full.SLDASM/meshes/Hip Left.STL" />
-      </geometry>
-      <material
-        name="">
-        <color
-          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
-      </material>
-    </visual>
-    <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://000_Assy_Full.SLDASM/meshes/Hip Left.STL" />
-      </geometry>
-    </collision>
-  </link>
-  <joint
-    name="Hip Joint Left Adduction"
-    type="fixed">
-    <origin
-      xyz="0.121794924630579 -0.0938366694238008 0.167247868377338"
-      rpy="0.051513058093229 0 3.14159265358979" />
-    <parent
-      link="Main Body" />
-    <child
-      link="Hip Left" />
-    <axis
-      xyz="0 0 0" />
-  </joint>
+
+
   <link
     name="Four Bar Beam Left">
     <inertial>
@@ -574,46 +556,7 @@
     <axis
       xyz="0 0 0" />
   </joint>
-  <link
-    name="Femur Left">
-    <inertial>
-      <origin
-        xyz="-0.0563852408337139 -0.0975281538755867 0.0243581895610647"
-        rpy="0 0 0" />
-      <mass
-        value="0.845028163769262" />
-      <inertia
-        ixx="0.0039686644146834"
-        ixy="-0.00213805171958798"
-        ixz="7.55475461919689E-16"
-        iyy="0.00162228105548006"
-        iyz="-4.4930964331058E-15"
-        izz="0.00550146037446654" />
-    </inertial>
-    <visual>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://000_Assy_Full.SLDASM/meshes/Femur Left.STL" />
-      </geometry>
-      <material
-        name="">
-        <color
-          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
-      </material>
-    </visual>
-    <collision>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <mesh
-          filename="package://000_Assy_Full.SLDASM/meshes/Femur Left.STL" />
-      </geometry>
-    </collision>
-  </link>
+
   <joint
     name="Hip Joint Left"
     type="fixed">
