@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="running_robot_debug">
+  <compiler angle="radian" coordinate="local" autolimits="true" inertiafromgeom="false" fusestatic="false" meshdir="../robotURDF/meshes"/>
+  <option gravity="0 0 0" integrator="Euler" solver="Newton" iterations="50" tolerance="1e-10"/>
+  <statistic meansize="0.25" extent="1.25" center="0 0 0"/>
+  <visual>
+    <global azimuth="135" elevation="-25" fovy="45" offwidth="1600" offheight="1200"/>
+    <quality shadowsize="2048" offsamples="4"/>
+    <headlight ambient="0.25 0.25 0.25" diffuse="0.6 0.6 0.6" specular="0.2 0.2 0.2"/>
+    <rgba joint="0.2 0.6 0.9 1" com="0.9 0.9 0.9 1" inertia="0.8 0.2 0.2 0.45" constraint="0.9 0 0 1"/>
+  </visual>
+  <default>
+    <geom rgba="0.7 0.7 0.7 1" contype="0" conaffinity="0"/>
+  </default>
+  <asset>
+    <mesh name="main_body_mesh" file="Main Body.STL"/>
+    <mesh name="hip_right_mesh" file="Hip Right.STL"/>
+    <mesh name="four_bar_beam_right_mesh" file="Four Bar Beam Right.STL"/>
+    <mesh name="four_bar_link_right_mesh" file="Four Bar Link Right.STL"/>
+    <mesh name="femur_right_mesh" file="Femur Right.STL"/>
+    <mesh name="shin_right_mesh" file="Shin Right.STL"/>
+    <mesh name="foot_right_mesh" file="Foot Right.STL"/>
+    <mesh name="achilles_tendon_right_mesh" file="Achilles Tendon Right.STL"/>
+    <mesh name="hip_left_mesh" file="Hip Left.STL"/>
+    <mesh name="femur_left_mesh" file="Femur Left.STL"/>
+    <mesh name="shin_left_mesh" file="Shin Left.STL"/>
+    <mesh name="foot_left_mesh" file="Foot Left.STL"/>
+    <mesh name="achilles_tendon_left_mesh" file="Achilles Tendon Left.STL"/>
+  </asset>
+  <equality>
+    <connect name="hip_right_hip_joint_right_adduction_placeholder" active="false" site1="hip_right_parent_anchor" site2="hip_right_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="four_bar_beam_right_four_bar_hip_joint_placeholder" active="false" site1="four_bar_beam_right_parent_anchor" site2="four_bar_beam_right_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="four_bar_link_right_four_bar_pivot_right_placeholder" active="false" site1="four_bar_link_right_parent_anchor" site2="four_bar_link_right_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="femur_right_hip_joint_right_placeholder" active="false" site1="femur_right_parent_anchor" site2="femur_right_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="shin_right_knee_right_placeholder" active="false" site1="shin_right_parent_anchor" site2="shin_right_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="foot_right_ankle_right_placeholder" active="false" site1="foot_right_parent_anchor" site2="foot_right_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="achilles_tendon_right_achilles_pivot_right_placeholder" active="false" site1="achilles_tendon_right_parent_anchor" site2="achilles_tendon_right_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="hip_left_hip_joint_left_adduction_placeholder" active="false" site1="hip_left_parent_anchor" site2="hip_left_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="femur_left_hip_joint_left_placeholder" active="false" site1="femur_left_parent_anchor" site2="femur_left_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="shin_left_knee_left_placeholder" active="false" site1="shin_left_parent_anchor" site2="shin_left_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="foot_left_ankle_right_placeholder" active="false" site1="foot_left_parent_anchor" site2="foot_left_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <connect name="achilles_tendon_left_achilles_pivot_left_placeholder" active="false" site1="achilles_tendon_left_parent_anchor" site2="achilles_tendon_left_pivot_child" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+  </equality>
+  <actuator>
+    <motor name="femur_right_hip" joint="femur_right_hip_joint_right" gear="1" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="femur_left_hip" joint="femur_left_hip_joint_left" gear="1" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="hip_right_adduction" joint="hip_right_hip_joint_right_adduction" gear="1" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="hip_left_adduction" joint="hip_left_hip_joint_left_adduction" gear="1" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor name="right_hip_abduction" joint="four_bar_beam_right_four_bar_hip_joint" gear="1" ctrllimited="true" ctrlrange="-1 1"/>
+  </actuator>
+  <worldbody>
+    <body name="main_body">
+      <freejoint name="main_body_root_freejoint"/>
+      <site name="main_body_frame" pos="0 0 0" size="0.007" rgba="0.95 0.75 0.1 1"/>
+      <inertial pos="-0.00103355831047746 -5.85934555886878e-07 0.095898315980789" mass="3.83790046512082" fullinertia="0.00293557255778769 0.00321803531509905 0.00348676153224273 -1.41459085135855e-07 6.29875730526683e-08 -3.4241970232236e-08"/>
+      <geom name="main_body_geom" type="mesh" mesh="main_body_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" contype="0" conaffinity="0" group="1"/>
+      <site name="hip_right_parent_anchor" pos="0.12179 -0.10812 -0.16534" quat="-5.80117751031107e-07 3.62710616417412e-06 -0.987449941427197 0.157932305631031" size="0.006" rgba="0.95 0.45 0.1 1"/>
+      <site name="hip_left_parent_anchor" pos="0.121794924630579 -0.0938366694238008 0.167247868377338" quat="1.6150087289001e-15 4.16062201487312e-17 0.0257536813327136 0.999668318942745" size="0.006" rgba="0.95 0.45 0.1 1"/>
+      <body name="hip_right" pos="0.12179 -0.10812 -0.16534" quat="-5.80117751031107e-07 3.62710616417412e-06 -0.987449941427197 0.157932305631031">
+        <joint name="hip_right_hip_joint_right_adduction" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+        <site name="hip_right_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+        <inertial pos="0.127254632212811 0.000149488360941571 -0.0202957404054771" mass="1.35740771972829" fullinertia="0.0011046805012951 0.0026882993281322 0.00358481924686636 -1.17567400584849e-12 3.52851108220559e-05 -1.78555184960488e-12"/>
+        <geom name="hip_right_geom" type="mesh" mesh="hip_right_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" contype="0" conaffinity="0" group="1"/>
+        <site name="four_bar_beam_right_parent_anchor" pos="0 0 0.0125999999782441" quat="2.19256010172096e-16 -0.135716472106072 0.990747717231325 -1.60059709920454e-15" size="0.006" rgba="0.95 0.45 0.1 1"/>
+        <site name="femur_right_parent_anchor" pos="0.249999999630666 0 -0.00480000000676006" quat="0.0861369522217297 0 0 0.996283305823174" size="0.006" rgba="0.95 0.45 0.1 1"/>
+        <body name="four_bar_beam_right" pos="0 0 0.0125999999782441" quat="2.19256010172096e-16 -0.135716472106072 0.990747717231325 -1.60059709920454e-15">
+          <joint name="four_bar_beam_right_four_bar_hip_joint" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+          <site name="four_bar_beam_right_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+          <inertial pos="-0.011019175519832 -1.24659178299402e-07 0.00347757297699097" mass="0.142630655141381" fullinertia="2.65319868645238e-05 7.85996063730645e-05 9.98768507971965e-05 -8.01849796892294e-11 1.55377606261961e-17 -1.68085218053143e-17"/>
+          <geom name="four_bar_beam_right_geom" type="mesh" mesh="four_bar_beam_right_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" contype="0" conaffinity="0" group="1"/>
+          <site name="four_bar_link_right_parent_anchor" pos="-0.127050006683462 -0.0291598597804043 -0.00250000000597414" quat="0.0448198439417132 -0.918990442000438 0.109514940016624 0.376104010898629" size="0.006" rgba="0.95 0.45 0.1 1"/>
+          <body name="four_bar_link_right" pos="-0.127050006683462 -0.0291598597804043 -0.00250000000597414" quat="0.0448198439417132 -0.918990442000438 0.109514940016624 0.376104010898629">
+            <joint name="four_bar_link_right_four_bar_pivot_right" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+            <site name="four_bar_link_right_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+            <inertial pos="0.00168951988732721 0.164499999692325 -0.00166112315882333" mass="0.109514776037964" fullinertia="0.000224121622750797 5.85117780931328e-06 0.000224131598510378 5.05229856696951e-07 2.9424952703396e-07 5.13872320557526e-07"/>
+            <geom name="four_bar_link_right_geom" type="mesh" mesh="four_bar_link_right_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.498039215686275 0.498039215686275 0.498039215686275 1" contype="0" conaffinity="0" group="1"/>
+          </body>
+        </body>
+        <body name="femur_right" pos="0.249999999630666 0 -0.00480000000676006" quat="0.0861369522217297 0 0 0.996283305823174">
+          <joint name="femur_right_hip_joint_right" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+          <site name="femur_right_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+          <inertial pos="-0.057068986739219 0.0989281192242479 0.0245054709378571" mass="0.841171867100181" fullinertia="0.00396847721845167 0.0016220940522616 0.00550143980148414 0.00213805178398913 1.55175080684272e-14 -2.74324291581196e-14"/>
+          <geom name="femur_right_geom" type="mesh" mesh="femur_right_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" contype="0" conaffinity="0" group="1"/>
+          <site name="shin_right_parent_anchor" pos="-0.175000008569798 0.303108885530675 0.026599999994807" quat="0.581168121538015 0.581168121539145 -0.402794754816437 -0.402794754815654" size="0.006" rgba="0.95 0.45 0.1 1"/>
+          <site name="achilles_tendon_right_parent_anchor" pos="-0.123782385542232 0.26339736004743 0.0431000000127672" quat="1.08234134131436e-11 -0.863690175558132 -0.504023095348183 6.31621209214334e-12" size="0.006" rgba="0.95 0.45 0.1 1"/>
+          <body name="shin_right" pos="-0.175000008569798 0.303108885530675 0.026599999994807" quat="0.581168121538015 0.581168121539145 -0.402794754816437 -0.402794754815654">
+            <joint name="shin_right_knee_right" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+            <site name="shin_right_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+            <inertial pos="0.000351968301704697 0.00023703952367618 -0.240166762432412" mass="0.45989184587505" fullinertia="0.00658385058161262 0.0066261606946727 5.30349027361131e-05 -1.46731746406004e-08 8.89465068409669e-07 1.29242241620587e-14"/>
+            <geom name="shin_right_geom" type="mesh" mesh="shin_right_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" contype="0" conaffinity="0" group="1"/>
+            <site name="foot_right_parent_anchor" pos="0.0519713537290222 -0.0174999999937875 -0.532050286670248" quat="0.487388986189015 6.89536760183362e-12 0.873184961014357 -2.30896002034623e-12" size="0.006" rgba="0.95 0.45 0.1 1"/>
+            <body name="foot_right" pos="0.0519713537290222 -0.0174999999937875 -0.532050286670248" quat="0.487388986189015 6.89536760183362e-12 0.873184961014357 -2.30896002034623e-12">
+              <joint name="foot_right_ankle_right" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+              <site name="foot_right_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+              <inertial pos="0.0433927710286527 0.017424286170362 -0.154652304991723" mass="0.498036623860506" fullinertia="0.000883686538349972 0.000946003759259067 0.000138874280195633 -6.56904543781811e-16 0.000248107457960729 2.206752914625e-15"/>
+              <geom name="foot_right_geom" type="mesh" mesh="foot_right_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" contype="0" conaffinity="0" group="1"/>
+            </body>
+          </body>
+          <body name="achilles_tendon_right" pos="-0.123782385542232 0.26339736004743 0.0431000000127672" quat="1.08234134131436e-11 -0.863690175558132 -0.504023095348183 6.31621209214334e-12">
+            <joint name="achilles_tendon_right_achilles_pivot_right" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+            <site name="achilles_tendon_right_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+            <inertial pos="0.0915646152614171 0.0767829642441324 -0.0050734462019475" mass="0.30962539233588" fullinertia="0.000213362737482866 0.000290715107261993 0.000475045385310673 -0.000218506864286905 -9.27977790478318e-08 -8.12973199923377e-08"/>
+            <geom name="achilles_tendon_right_geom" type="mesh" mesh="achilles_tendon_right_mesh" pos="0 0 0" quat="1 0 0 0" rgba="1 1 1 1" contype="0" conaffinity="0" group="1"/>
+          </body>
+        </body>
+      </body>
+      <body name="hip_left" pos="0.121794924630579 -0.0938366694238008 0.167247868377338" quat="1.6150087289001e-15 4.16062201487312e-17 0.0257536813327136 0.999668318942745">
+        <joint name="hip_left_hip_joint_left_adduction" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+        <site name="hip_left_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+        <inertial pos="0.127254632121599 -0.000149488047743077 -0.0202957403988102" mass="1.35740771588615" fullinertia="0.00110468050069669 0.00268829932797972 0.0035848192464673 -1.20679753946943e-12 3.52851108379561e-05 -1.70863288253241e-12"/>
+        <geom name="hip_left_geom" type="mesh" mesh="hip_left_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" contype="0" conaffinity="0" group="1"/>
+        <site name="femur_left_parent_anchor" pos="0.249999999987394 0 -0.00480000002734837" quat="0.0832920165095542 0 0 0.996525182815654" size="0.006" rgba="0.95 0.45 0.1 1"/>
+        <body name="femur_left" pos="0.249999999987394 0 -0.00480000002734837" quat="0.0832920165095542 0 0 0.996525182815654">
+          <joint name="femur_left_hip_joint_left" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+          <site name="femur_left_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+          <inertial pos="-0.0563852408337139 -0.0975281538755867 0.0243581895610647" mass="0.845028163769262" fullinertia="0.0039686644146834 0.00162228105548006 0.00550146037446654 -0.00213805171958798 7.55475461919689e-16 -4.4930964331058e-15"/>
+          <geom name="femur_left_geom" type="mesh" mesh="femur_left_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" contype="0" conaffinity="0" group="1"/>
+          <site name="shin_left_parent_anchor" pos="0.0156501396439831 -0.464826312132183 0.0229000000135512" quat="0.938775947368906 0 0 -0.344528258117694" size="0.006" rgba="0.95 0.45 0.1 1"/>
+          <site name="achilles_tendon_left_parent_anchor" pos="-0.123782377809959 -0.263397366937607 0.0480999998954914" quat="2.31555651385382e-10 -0.998163841787472 0.060571816450176 -1.40515472776489e-11" size="0.006" rgba="0.95 0.45 0.1 1"/>
+          <body name="shin_left" pos="0.0156501396439831 -0.464826312132183 0.0229000000135512" quat="0.938775947368906 0 0 -0.344528258117694">
+            <joint name="shin_left_knee_left" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+            <site name="shin_left_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+            <inertial pos="-0.0101137404936142 0.000349082459925154 0.00344014936558201" mass="0.459402062312658" fullinertia="5.3022580039485e-05 0.00658383839579555 0.00662613644880214 -8.89734559501902e-07 6.28886878596368e-13 -1.46731789344475e-08"/>
+            <geom name="shin_left_geom" type="mesh" mesh="shin_left_mesh" pos="0 0 0" quat="1 0 0 0" rgba="1 1 1 1" contype="0" conaffinity="0" group="1"/>
+            <site name="foot_left_parent_anchor" pos="0.262596767416777 0.059745827745814 0.0211999998653724" quat="0.703293681021569 -0.703293680978403 0.0733348366409871 -0.0733348366454881" size="0.006" rgba="0.95 0.45 0.1 1"/>
+            <body name="foot_left" pos="0.262596767416777 0.059745827745814 0.0211999998653724" quat="0.703293681021569 -0.703293680978403 0.0733348366409871 -0.0733348366454881">
+              <joint name="foot_left_ankle_right" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+              <site name="foot_left_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+              <inertial pos="0.0433981157265454 0.017372685298235 -0.154674688414417" mass="0.497957719619419" fullinertia="0.000883684161198164 0.000946005628113021 0.000138873873072778 -1.72664143651408e-09 0.000248106653071407 -7.05041956111119e-10"/>
+              <geom name="foot_left_geom" type="mesh" mesh="foot_left_mesh" pos="0 0 0" quat="1 0 0 0" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" contype="0" conaffinity="0" group="1"/>
+            </body>
+          </body>
+          <body name="achilles_tendon_left" pos="-0.123782377809959 -0.263397366937607 0.0480999998954914" quat="2.31555651385382e-10 -0.998163841787472 0.060571816450176 -1.40515472776489e-11">
+            <joint name="achilles_tendon_left_achilles_pivot_left" type="hinge" axis="0 0 1" limited="true" range="-1.5707963267949 1.5707963267949"/>
+            <site name="achilles_tendon_left_pivot_child" pos="0 0 0" size="0.006" rgba="0.15 0.65 0.95 1"/>
+            <inertial pos="0.0998053974114031 0.0657157595764849 -7.58478739828483e-05" mass="0.309625411601379" fullinertia="0.000164340798125385 0.000339741032206026 0.000475041413986389 -0.000203839727739998 -1.23839633505047e-07 -8.02597230903611e-08"/>
+            <geom name="achilles_tendon_left_geom" type="mesh" mesh="achilles_tendon_left_mesh" pos="0 0 0" quat="1 0 0 0" rgba="1 1 1 1" contype="0" conaffinity="0" group="1"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

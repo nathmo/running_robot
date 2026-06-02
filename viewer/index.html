@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>URDF Joint Viewer</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">URDF viewer</p>
+          <h1>Joint range explorer</h1>
+          <p class="description">
+            Load the robot from the exported URDF, inspect the 3D model, and move any movable
+            joint with a slider.
+          </p>
+        </div>
+
+        <section class="card stats-card">
+          <div class="stat-row">
+            <span>Root</span>
+            <strong id="root-name">Loading...</strong>
+          </div>
+          <div class="stat-row">
+            <span>Links</span>
+            <strong id="link-count">0</strong>
+          </div>
+          <div class="stat-row">
+            <span>Joints</span>
+            <strong id="joint-count">0</strong>
+          </div>
+          <div class="stat-row">
+            <span>Movable</span>
+            <strong id="movable-count">0</strong>
+          </div>
+          <div class="notice" id="status-message">Loading URDF...</div>
+        </section>
+
+        <section class="card">
+          <div class="section-header">
+            <h2>Joint sliders</h2>
+            <button id="reset-view-button" type="button">Reset view</button>
+          </div>
+          <div id="slider-panel" class="slider-panel"></div>
+        </section>
+
+        <section class="card help-card">
+          <h2>Notes</h2>
+          <p>
+            This viewer reads the URDF directly. If the model contains only fixed joints, no
+            sliders will appear and the status panel will tell you that the assembly is not
+            articulated in the export.
+          </p>
+        </section>
+      </aside>
+
+      <main class="viewport">
+        <div id="canvas-container" class="canvas-container"></div>
+        <div class="hint">Orbit: drag mouse. Zoom: wheel. Pan: right mouse or shift-drag.</div>
+      </main>
+    </div>
+
+    <script type="module" src="./viewer.js?v=2"></script>
+  </body>
+</html>
