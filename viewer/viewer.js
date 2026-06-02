@@ -2,7 +2,7 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.m
 import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/controls/OrbitControls.js';
 import { STLLoader } from 'https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/loaders/STLLoader.js';
 
-const URDF_URL = '../robotURDF/urdf/000_Assy_Full.SLDASM.urdf';
+const URDF_URL = '../robotURDF/urdf/Assy_Full_Aligned_URDF.urdf';
 const MESH_PREFIX = '../robotURDF/';
 
 const ui = {
@@ -395,8 +395,8 @@ function resolveMeshPath(filename) {
     return null;
   }
 
-  if (filename.startsWith('package://000_Assy_Full.SLDASM/')) {
-    return filename.replace('package://000_Assy_Full.SLDASM/', MESH_PREFIX);
+  if (filename.startsWith('package://Assy_Full_Aligned_URDF/')) {
+    return filename.replace('package://Assy_Full_Aligned_URDF/', MESH_PREFIX);
   }
 
   return filename;
