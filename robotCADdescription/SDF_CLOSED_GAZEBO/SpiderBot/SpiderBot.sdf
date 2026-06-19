@@ -1,0 +1,568 @@
+<?xml version='1.0' encoding='utf-8'?>
+<sdf version="1.7">
+    <model name="SpiderBot">
+        <link name="bodyNCS-v1">
+            <pose>0.0 0.0 0.0 0.0 -0.0 0.0</pose>
+            <inertial>
+                <mass>1.8141006934908845</mass>
+                <pose>0.0016690918854414011 4.297697354650468e-07 9.498539066587414e-06 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.012823544204434234</ixx>
+                    <iyy>0.004661054292120578</iyy>
+                    <izz>0.015210658991172597</izz>
+                    <ixy>8.889789342507086e-08</ixy>
+                    <iyz>5.980362454802101e-07</iyz>
+                    <ixz>1.4632265547397721e-06</ixz>
+                </inertia>
+            </inertial>
+            <visual name="bodyNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/bodyNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="bodyNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/bodyNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="HipLeftNCS-v1">
+            <pose>0.027294924660796353 0.12800000000861275 2.943479741862386e-11 0.0 2.15060487902769e-16 0.0</pose>
+            <inertial>
+                <mass>1.0501006524075551</mass>
+                <pose>-0.023170080111601033 0.016018447983417783 0.00019232179773001127 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.001026188966625481</ixx>
+                    <iyy>0.015466200097397577</iyy>
+                    <izz>0.01506012726703141</izz>
+                    <ixy>0.0003279313134294341</ixy>
+                    <iyz>5.665805698538075e-06</iyz>
+                    <ixz>3.2969505953294785e-07</ixz>
+                </inertia>
+            </inertial>
+            <visual name="HipLeftNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/HipLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="HipLeftNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/HipLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="HipRightNCS-v1">
+            <pose>0.027294924660796194 -0.128000000008613 -2.9434570614155416e-11 -0.02113283630637985 -9.70357630190621e-16 2.68568113149284e-16</pose>
+            <inertial>
+                <mass>1.0500114425905998</mass>
+                <pose>-0.023158859460218346 -0.01601691326758222 0.00019341398621135946 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.001026038107613838</ixx>
+                    <iyy>0.015464526431425258</iyy>
+                    <izz>0.015058544614084898</izz>
+                    <ixy>-0.0003277184725226478</ixy>
+                    <iyz>-5.645088300915981e-06</iyz>
+                    <ixz>4.716969465181976e-07</ixz>
+                </inertia>
+            </inertial>
+            <visual name="HipRightNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/HipRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="HipRightNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/HipRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="CamLeftNCS-v1">
+            <pose>-0.12170507533920256 0.17990000000861336 2.943480541515651e-11 0.0 2.15060487902769e-16 0.0</pose>
+            <inertial>
+                <mass>0.013438060017115797</mass>
+                <pose>0.04624089887284015 0.0010000000000000143 2.6437697658976432e-17 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>2.451235110088564e-06</ixx>
+                    <iyy>3.092731646986336e-05</iyy>
+                    <izz>2.8485040066453054e-05</izz>
+                    <ixy>2.710505431213761e-20</ixy>
+                    <iyz>6.217248947447439e-22</iyz>
+                    <ixz>4.4849776825713306e-20</ixz>
+                </inertia>
+            </inertial>
+            <visual name="CamLeftNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/CamLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="CamLeftNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/CamLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="CamRightNCS-v1">
+            <pose>-0.12170507533920379 -0.17988841125372734 0.001096712539231162 -0.021132836306382432 -4.201497311039978e-07 8.880276935365495e-09</pose>
+            <inertial>
+                <mass>0.01343806001711578</mass>
+                <pose>0.04624089887284262 -0.0010000000000000013 6.052084289449866e-16 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>2.4512351100883777e-06</ixx>
+                    <iyy>3.092731646986228e-05</iyy>
+                    <izz>2.848504006645265e-05</izz>
+                    <ixy>-2.776319597029625e-20</ixy>
+                    <iyz>-6.352747104407253e-22</iyz>
+                    <ixz>6.302282644887821e-19</ixz>
+                </inertia>
+            </inertial>
+            <visual name="CamRightNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/CamRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="CamRightNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/CamRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="ThighLeftNCS-v1">
+            <pose>0.1282949246607957 0.17410000000861306 2.94288604292394e-11 0.0 2.15060487902769e-16 0.0</pose>
+            <inertial>
+                <mass>0.3669710179821286</mass>
+                <pose>0.0009733420828806365 0.01498294336196043 -0.1411118417746592 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.005373722207071371</ixx>
+                    <iyy>0.005523505431308952</iyy>
+                    <izz>0.00022576002275628495</izz>
+                    <ixy>6.739471820164919e-07</ixy>
+                    <iyz>6.501506690880995e-06</iyz>
+                    <ixz>7.138676799726725e-05</ixz>
+                </inertia>
+            </inertial>
+            <visual name="ThighLeftNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/ThighLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="ThighLeftNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/ThighLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="ThighRightNCS-v1">
+            <pose>0.1282949246607962 -0.17408970633615706 0.0009741512117101876 -0.02113283630641867 1.9220937708591568e-06 -4.0625341626805275e-08</pose>
+            <inertial>
+                <mass>0.36647662097327144</mass>
+                <pose>0.0009430110630468821 -0.015029284942483455 -0.14160752239628085 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.005370520434600565</ixx>
+                    <iyy>0.005519928795292498</iyy>
+                    <izz>0.00022527180210302983</izz>
+                    <ixy>-5.42670350252397e-07</ixy>
+                    <iyz>-7.1433033168138e-06</iyz>
+                    <ixz>6.953833720503799e-05</ixz>
+                </inertia>
+            </inertial>
+            <visual name="ThighRightNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/ThighRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="ThighRightNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/ThighRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="LegLeftNCS-v1">
+            <pose>0.12829492466079553 0.1891000000086132 -0.34999999997056724 3.864806246618555e-15 -1.000389939944308 -2.7278053475660688e-15</pose>
+            <inertial>
+                <mass>0.2221171739386004</mass>
+                <pose>-0.24518356685145476 -0.00017709874116033454 0.000420485236984125 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>3.5224948679710906e-05</ixx>
+                    <iyy>0.005697040272495027</iyy>
+                    <izz>0.005668173858214381</izz>
+                    <ixy>4.749850768709827e-06</ixy>
+                    <iyz>5.438438794895656e-07</iyz>
+                    <ixz>-1.7380190126245866e-05</ixz>
+                </inertia>
+            </inertial>
+            <visual name="LegLeftNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/LegLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="LegLeftNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/LegLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="LegRightNCS-v1">
+            <pose>0.12829425177773254 -0.196482299162917 -0.34863072831092806 -0.03912267763766111 -1.0000430752499434 0.03292641104146202</pose>
+            <inertial>
+                <mass>0.2216332406500461</mass>
+                <pose>-0.24462818745306347 4.3409556023459375e-05 0.00042237404783052046 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>3.5202909877916364e-05</ixx>
+                    <iyy>0.00566561648956584</iyy>
+                    <izz>0.005636749613156255</izz>
+                    <ixy>-4.799610366287226e-06</ixy>
+                    <iyz>-5.553292536571728e-07</iyz>
+                    <ixz>-1.7283100362687677e-05</ixz>
+                </inertia>
+            </inertial>
+            <visual name="LegRightNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/LegRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="LegRightNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/LegRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="FootLeftNCS-v1">
+            <pose>-0.14169214616429598 0.18750000000861625 -0.7708408031102916 1.633777360643353e-15 -1.000389939944308 -2.7278053475660696e-15</pose>
+            <inertial>
+                <mass>0.2593184686605107</mass>
+                <pose>-0.004826310056437695 0.000377045846251916 -0.10466467671885393 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.002977353834372901</ixx>
+                    <iyy>0.0029710075575362926</iyy>
+                    <izz>6.48202275597754e-05</izz>
+                    <ixy>1.8008833281898528e-06</ixy>
+                    <iyz>-1.5300654913384665e-05</iyz>
+                    <ixz>0.00016835822851597433</ixz>
+                </inertia>
+            </inertial>
+            <visual name="FootLeftNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/FootLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="FootLeftNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/FootLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="FootRightNCS-v1">
+            <pose>-0.1416923586829161 -0.20537520324994382 -0.7693778571529981 -0.038981853156665275 -0.9977231451708959 0.0327589358214441</pose>
+            <inertial>
+                <mass>0.2595337393532014</mass>
+                <pose>-0.00495501786349592 -0.0002889852253573598 -0.10446233298751854 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.0029818113070248725</ixx>
+                    <iyy>0.0029754461909895025</iyy>
+                    <izz>6.489538219984233e-05</izz>
+                    <ixy>-1.780827480301131e-06</ixy>
+                    <iyz>1.4448304899687008e-05</iyz>
+                    <ixz>0.0001697255481799458</ixz>
+                </inertia>
+            </inertial>
+            <visual name="FootRightNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/FootRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="FootRightNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/FootRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="PushrodLeftNCS-v1">
+            <pose>-0.0017050753392025648 0.1819000000086134 2.943483392688461e-11 -2.6821994695620555e-16 -0.18047963198315062 2.17403264369702e-18</pose>
+            <inertial>
+                <mass>0.045198290927437025</mass>
+                <pose>-0.001446515823232096 0.0009770750294905441 -0.19135709372461382 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.0009971743464509463</ixx>
+                    <iyy>0.0009977072590840932</iyy>
+                    <izz>2.7437611486152885e-06</izz>
+                    <ixy>-5.985238375484134e-08</ixy>
+                    <iyz>2.190188856696195e-08</iyz>
+                    <ixz>-2.0612523046672094e-07</ixz>
+                </inertia>
+            </inertial>
+            <visual name="PushrodLeftNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/PushrodLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="PushrodLeftNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/PushrodLeftNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <link name="PushrodRightNCS-v1">
+            <pose>-0.0017050753392139249 -0.18188796360794426 0.0011390254839297577 -0.021481636093831857 -0.18043722496279563 0.003855662334689309</pose>
+            <inertial>
+                <mass>0.04519829092743693</mass>
+                <pose>-0.001447016071191555 -0.0005227074404326086 -0.19135653035872305 0.0 0.0 0.0</pose>
+                <inertia>
+                    <ixx>0.0009971748677209198</ixx>
+                    <iyy>0.00099769749323578</iyy>
+                    <izz>2.754001731674306e-06</izz>
+                    <ixy>1.5073202818499859e-09</ixy>
+                    <iyz>3.3900598639128785e-06</iyz>
+                    <ixz>-2.1066318878923082e-07</ixz>
+                </inertia>
+            </inertial>
+            <visual name="PushrodRightNCS-v1_visual">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/PushrodRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </visual>
+            <collision name="PushrodRightNCS-v1_collision">
+                <geometry>
+                    <mesh>
+                        <uri>model://SpiderBot/meshes/PushrodRightNCS-v1.stl</uri>
+                        <scale>0.001 0.001 0.001</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+        </link>
+        <joint name="bodyNCS-v1_Révolution-1" type="revolute">
+            <pose>7.533920364649563e-08 -8.612749402558961e-12 -2.943479741860745e-11 0.0 0.0 0.0</pose>
+            <parent>bodyNCS-v1</parent>
+            <child>HipLeftNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">1.0 -0.0 0.0</xyz>
+                <limit>
+                    <lower>-0.785398</lower>
+                    <upper>0.785398</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="bodyNCS-v1_Révolution-2" type="revolute">
+            <pose>7.533920380609072e-08 7.98908634178733e-12 2.961000172112301e-11 0.0 0.0 0.0</pose>
+            <parent>bodyNCS-v1</parent>
+            <child>HipRightNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">1.0 0.0 0.0</xyz>
+                <limit>
+                    <lower>-0.785398</lower>
+                    <upper>0.785398</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="HipLeftNCS-v1_Révolution-3" type="revolute">
+            <pose>7.53392025709676e-08 -8.613360025222505e-12 -2.943480541514031e-11 0.0 0.0 0.0</pose>
+            <parent>HipLeftNCS-v1</parent>
+            <child>CamLeftNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">-0.0 1.0 0.0</xyz>
+                <limit>
+                    <lower>0.0</lower>
+                    <upper>3.141593</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="HipRightNCS-v1_Révolution-4" type="revolute">
+            <pose>7.533932822081831e-08 4.05087489261258e-07 2.960868608632889e-07 0.0 0.0 0.0</pose>
+            <parent>HipRightNCS-v1</parent>
+            <child>CamRightNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">-0.0 -0.999777 0.021131</xyz>
+                <limit>
+                    <lower>3.141593</lower>
+                    <upper>6.283185</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="HipLeftNCS-v1_Révolution-5" type="revolute">
+            <pose>7.533920429181329e-08 -8.613054713890733e-12 -2.9428860429223196e-11 0.0 0.0 0.0</pose>
+            <parent>HipLeftNCS-v1</parent>
+            <child>ThighLeftNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">-0.0 1.0 0.0</xyz>
+                <limit>
+                    <lower>-1.047198</lower>
+                    <upper>1.047198</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="HipRightNCS-v1_Révolution-6" type="revolute">
+            <pose>7.533950636535386e-08 -2.9040297624397937e-07 -1.573832892778356e-07 0.0 0.0 0.0</pose>
+            <parent>HipRightNCS-v1</parent>
+            <child>ThighRightNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">-0.0 -0.999777 0.021131</xyz>
+                <limit>
+                    <lower>-1.047198</lower>
+                    <upper>1.047198</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="ThighLeftNCS-v1_Révolution-7" type="revolute">
+            <pose>4.0656449283877955e-08 -0.010000000008613202 -6.342751552395111e-08 0.0 0.0 0.0</pose>
+            <parent>ThighLeftNCS-v1</parent>
+            <child>LegLeftNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">0.0 -1.0 -0.0</xyz>
+                <limit>
+                    <lower>0.0</lower>
+                    <upper>1.570796</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="ThighRightNCS-v1_Révolution-8" type="revolute">
+            <pose>-1.098212281233277e-07 0.009999531302941199 2.2868157479868716e-07 0.0 0.0 0.0</pose>
+            <parent>ThighRightNCS-v1</parent>
+            <child>LegRightNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">0.0 0.999777 -0.021131</xyz>
+                <limit>
+                    <lower>-1.570796</lower>
+                    <upper>0.0</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="LegLeftNCS-v1_Révolution-9" type="revolute">
+            <pose>-8.679350578343133e-08 -0.004700000008616256 -2.293391507246932e-07 0.0 0.0 0.0</pose>
+            <parent>LegLeftNCS-v1</parent>
+            <child>FootLeftNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">-0.0 -1.0 -0.0</xyz>
+                <limit>
+                    <lower>-1.047198</lower>
+                    <upper>0.785398</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="LegRightNCS-v1_Révolution-10" type="revolute">
+            <pose>3.4514539044840315e-07 0.004700248978108805 -2.0422932496191323e-07 0.0 0.0 0.0</pose>
+            <parent>LegRightNCS-v1</parent>
+            <child>FootRightNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">0.0 0.999777 -0.021131</xyz>
+                <limit>
+                    <lower>-0.785398</lower>
+                    <upper>1.047198</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="CamLeftNCS-v1_Révolution-11" type="revolute">
+            <pose>7.411023789274043e-08 -8.613387780794649e-12 -1.3552451771001049e-08 0.0 0.0 0.0</pose>
+            <parent>CamLeftNCS-v1</parent>
+            <child>PushrodLeftNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">0.0 -1.0 -0.0</xyz>
+                <limit>
+                    <lower>0.0</lower>
+                    <upper>3.141593</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="CamRightNCS-v1_Révolution-12" type="revolute">
+            <pose>6.9404179188002e-08 -3.58454221138817e-08 -3.934431567199589e-08 0.0 0.0 0.0</pose>
+            <parent>CamRightNCS-v1</parent>
+            <child>PushrodRightNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">-0.0 -0.999777 0.021131</xyz>
+                <limit>
+                    <lower>0.0</lower>
+                    <upper>3.141593</upper>
+                </limit>
+            </axis>
+        </joint>
+        <joint name="LegLeftNCS-v1_Révolution-14" type="revolute">
+            <pose>-2.8362248674640433e-08 0.0024999999913867185 -0.38900024928501464 0.0 0.0 0.0</pose>
+            <parent>LegLeftNCS-v1</parent>
+            <child>PushrodLeftNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">-0.0 1.0 0.0</xyz>
+            </axis>
+        </joint>
+        <joint name="LegRightNCS-v1_Révolution-15" type="revolute">
+            <pose>-4.189456291048277e-07 -0.0025000340838234793 -0.3890003683487654 0.0 0.0 0.0</pose>
+            <parent>LegRightNCS-v1</parent>
+            <child>PushrodRightNCS-v1</child>
+            <axis>
+                <xyz expressed_in="__model__">0.0 -0.999777 0.021131</xyz>
+            </axis>
+        </joint>
+    </model>
+</sdf>

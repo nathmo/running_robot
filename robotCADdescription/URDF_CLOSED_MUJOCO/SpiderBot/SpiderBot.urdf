@@ -1,0 +1,346 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="SpiderBot">
+    <link name="bodyNCS-v1">
+        <inertial>
+            <origin xyz="0.0016690918854414011 4.297697354650468e-07 9.498539066587414e-06" rpy="0.0 0.0 0.0" />
+            <mass value="1.8141006934908845" />
+            <inertia ixx="0.012823544204434234" iyy="0.004661054292120578" izz="0.015210658991172597" ixy="8.889789342507086e-08" iyz="5.980362454802101e-07" ixz="1.4632265547397721e-06" />
+        </inertial>
+        <visual name="bodyNCS-v1_visual">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/bodyNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="bodyNCS-v1_collision">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+            <geometry>
+                <mesh filename="meshes/bodyNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="HipLeftNCS-v1">
+        <inertial>
+            <origin xyz="0.00019232182716481504 -0.016018447992030522 -0.023170075450804843" rpy="0.0 -0.0 0.0" />
+            <mass value="1.0501006524075551" />
+            <inertia ixx="0.015060127267031626" iyy="0.015466200097397577" izz="0.0010261889666254957" ixy="-5.665805698538046e-06" iyz="-0.00032793131342943643" ixz="3.2969505953597065e-07" />
+        </inertial>
+        <visual name="HipLeftNCS-v1_visual">
+            <origin xyz="2.943479741862386e-11 -8.61273719010569e-12 4.6607963533062954e-09" rpy="-3.141592653589793 -1.5707963267948963 0" />
+            <geometry>
+                <mesh filename="meshes/HipLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="HipLeftNCS-v1_collision">
+            <origin xyz="2.943479741862386e-11 -8.61273719010569e-12 4.6607963533062954e-09" rpy="-3.141592653589793 -1.5707963267948963 0" />
+            <geometry>
+                <mesh filename="meshes/HipLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="HipRightNCS-v1">
+        <inertial>
+            <origin xyz="0.0005318283819118207 0.016009249776550244 -0.02315885479942215" rpy="0.0 -0.0 0.0" />
+            <mass value="1.0500114425905998" />
+            <inertia ixx="0.015058964419687737" iyy="0.015464106625822418" izz="0.001026038107613838" ixy="1.421704001369581e-05" iyz="0.0003276353286879579" ixz="7.396696973850546e-06" />
+        </inertial>
+        <visual name="HipRightNCS-v1_visual">
+            <origin xyz="-2.9434570614155416e-11 8.613003643631601e-12 4.66079619343418e-09" rpy="3.1204598172834133 -1.5707963267948957 0" />
+            <geometry>
+                <mesh filename="meshes/HipRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="HipRightNCS-v1_collision">
+            <origin xyz="-2.9434570614155416e-11 8.613003643631601e-12 4.66079619343418e-09" rpy="3.1204598172834133 -1.5707963267948957 0" />
+            <geometry>
+                <mesh filename="meshes/HipRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="CamLeftNCS-v1">
+        <inertial>
+            <origin xyz="0.046240903533637585 -2.94348219082639e-11 0.0010000000086133908" rpy="0.0 -0.0 0.0" />
+            <mass value="0.013438060017115797" />
+            <inertia ixx="2.451235110088564e-06" iyy="2.8485040066453054e-05" izz="3.092731646986336e-05" ixy="-5.044861962159458e-20" iyz="-6.217248947447381e-22" ixz="2.710505431213761e-20" />
+        </inertial>
+        <visual name="CamLeftNCS-v1_visual">
+            <origin xyz="4.660797436883968e-09 -2.943480541515651e-11 8.613376678567875e-12" rpy="1.5707963267948966 -0.0 2.15060487902769e-16" />
+            <geometry>
+                <mesh filename="meshes/CamLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="CamLeftNCS-v1_collision">
+            <origin xyz="4.660797436883968e-09 -2.943480541515651e-11 8.613376678567875e-12" rpy="1.5707963267948966 -0.0 2.15060487902769e-16" />
+            <geometry>
+                <mesh filename="meshes/CamLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="CamRightNCS-v1">
+        <inertial>
+            <origin xyz="0.04624090353363456 2.115323069844355e-05 0.0009997775530203867" rpy="0.0 -0.0 0.0" />
+            <mass value="0.01343806001711578" />
+            <inertia ixx="2.451235110092955e-06" iyy="2.848613061684187e-05" izz="3.092622591946797e-05" ixy="-1.0938095520407714e-11" iyz="5.159686225137091e-08" ixz="2.3118741079505845e-13" />
+        </inertial>
+        <visual name="CamRightNCS-v1_visual">
+            <origin xyz="4.660796211197749e-09 2.5392311620020537e-09 1.253727326400167e-09" rpy="-1.5919291631012753 8.880276935364712e-09 4.201497311039978e-07" />
+            <geometry>
+                <mesh filename="meshes/CamRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="CamRightNCS-v1_collision">
+            <origin xyz="4.660796211197749e-09 2.5392311620020537e-09 1.253727326400167e-09" rpy="-1.5919291631012753 8.880276935364712e-09 4.201497311039978e-07" />
+            <geometry>
+                <mesh filename="meshes/CamRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="ThighLeftNCS-v1">
+        <inertial>
+            <origin xyz="0.0009733467436763021 0.14111184174523034 0.014982943370573487" rpy="0.0 -0.0 0.0" />
+            <mass value="0.3669710179821286" />
+            <inertia ixx="0.005373722207071371" iyy="0.0002257600227562849" izz="0.005523505431308952" ixy="-7.138676799726615e-05" iyz="-6.501506690880995e-06" ixz="6.739471820164933e-07" />
+        </inertial>
+        <visual name="ThighLeftNCS-v1_visual">
+            <origin xyz="4.6607956960542655e-09 -2.94288604292394e-11 8.613056934336783e-12" rpy="1.5707963267948966 -0.0 2.15060487902769e-16" />
+            <geometry>
+                <mesh filename="meshes/ThighLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="ThighLeftNCS-v1_collision">
+            <origin xyz="4.6607956960542655e-09 -2.94288604292394e-11 8.613056934336783e-12" rpy="1.5707963267948966 -0.0 2.15060487902769e-16" />
+            <geometry>
+                <mesh filename="meshes/ThighLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="ThighRightNCS-v1">
+        <inertial>
+            <origin xyz="0.0009427434801152935 -0.14125831566426333 0.01801827127706584" rpy="0.0 -0.0 0.0" />
+            <mass value="0.36647662097327144" />
+            <inertia ixx="0.005370520701959661" iyy="0.000227937586186798" izz="0.005517262743849635" ixy="6.952438793394328e-05" iyz="0.0001189947375560222" ixz="-9.266609825361177e-07" />
+        </inertial>
+        <visual name="ThighRightNCS-v1_visual">
+            <origin xyz="4.66079619343418e-09 1.2117101876041315e-09 -3.6638429534718852e-09" rpy="-1.591929163101237 -4.0625341626730233e-08 -1.922093770859158e-06" />
+            <geometry>
+                <mesh filename="meshes/ThighRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="ThighRightNCS-v1_collision">
+            <origin xyz="4.66079619343418e-09 1.2117101876041315e-09 -3.6638429534718852e-09" rpy="-1.591929163101237 -4.0625341626730233e-08 -1.922093770859158e-06" />
+            <geometry>
+                <mesh filename="meshes/ThighRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="LegLeftNCS-v1">
+        <inertial>
+            <origin xyz="-0.1327466960862264 -0.20613944719650895 -0.0098229012674528" rpy="0.0 -0.0 0.0" />
+            <mass value="0.2221171739386004" />
+            <inertia ixx="0.004041561380600273" iyy="0.0016618374262938086" izz="0.005697040272495027" ixy="-0.0025528530903071475" iyz="-4.291523656614513e-06" ixz="-2.107053201742465e-06" />
+        </inertial>
+        <visual name="LegLeftNCS-v1_visual">
+            <origin xyz="4.660795518418581e-09 2.9432740689117054e-11 -0.010000000008613199" rpy="-1.5707963267948963 3.696517908824006e-16 1.000389939944308" />
+            <geometry>
+                <mesh filename="meshes/LegLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="LegLeftNCS-v1_collision">
+            <origin xyz="4.660795518418581e-09 2.9432740689117054e-11 -0.010000000008613199" rpy="-1.5707963267948963 3.696517908824006e-16 1.000389939944308" />
+            <geometry>
+                <mesh filename="meshes/LegLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="LegRightNCS-v1">
+        <inertial>
+            <origin xyz="-0.13244817324599453 0.20541480086998753 -0.014300459894324291" rpy="1.232595164407831e-32 -0.0 0.0" />
+            <mass value="0.2216332406500461" />
+            <inertia ixx="0.004019210444073537" iyy="0.0016547173108520728" izz="0.005663641257674365" ixy="0.0025380073648668977" iyz="8.911390565996057e-05" ixz="-5.576800481477239e-05" />
+        </inertial>
+        <visual name="LegRightNCS-v1_visual">
+            <origin xyz="1.7777325034273873e-09 -0.00021131168907189137 -0.00999776916291701" rpy="1.559383957556971 -0.017786746019757698 -1.0002895356256354" />
+            <geometry>
+                <mesh filename="meshes/LegRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="LegRightNCS-v1_collision">
+            <origin xyz="1.7777325034273873e-09 -0.00021131168907189137 -0.00999776916291701" rpy="1.559383957556971 -0.017786746019757698 -1.0002895356256354" />
+            <geometry>
+                <mesh filename="meshes/LegRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="FootLeftNCS-v1">
+        <inertial>
+            <origin xyz="0.08548825442708644 -0.06057843848335196 -0.005077045854868167" rpy="0.0 -0.0 0.0" />
+            <mass value="0.2593184686605107" />
+            <inertia ixx="0.0007610006731961769" iyy="0.0022811733887364936" izz="0.0029710075575362926" ixy="0.0012535255181067085" iyz="6.746187631139475e-06" ixz="-1.385071023398182e-05" />
+        </inertial>
+        <visual name="FootLeftNCS-v1_visual">
+            <origin xyz="3.835704003307683e-09 -3.1102915443170786e-09 -0.004700000008616243" rpy="-1.5707963267948966 -2.6288793848626597e-15 1.000389939944308" />
+            <geometry>
+                <mesh filename="meshes/FootLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="FootLeftNCS-v1_collision">
+            <origin xyz="3.835704003307683e-09 -3.1102915443170786e-09 -0.004700000008616243" rpy="-1.5707963267948966 -2.6288793848626597e-15 1.000389939944308" />
+            <geometry>
+                <mesh filename="meshes/FootLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="FootRightNCS-v1">
+        <inertial>
+            <origin xyz="0.08510763806651021 0.06065618080788553 -0.006272130087393393" rpy="0.0 -0.0 0.0" />
+            <mass value="0.2595337393532014" />
+            <inertia ixx="0.0007669433990444843" iyy="0.0022798063340165233" izz="0.002975403147153194" ixy="-0.0012584674278961468" iyz="8.369775667885695e-06" ixz="1.3488206859792218e-05" />
+        </inertial>
+        <visual name="FootRightNCS-v1_visual">
+            <origin xyz="1.3170838997211832e-09 -9.931284700186894e-05 -0.004698953249943827" rpy="1.5593426912104742 -0.017760202581713284 -0.9979676203946951" />
+            <geometry>
+                <mesh filename="meshes/FootRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="FootRightNCS-v1_collision">
+            <origin xyz="1.3170838997211832e-09 -9.931284700186894e-05 -0.004698953249943827" rpy="1.5593426912104742 -0.017760202581713284 -0.9979676203946951" />
+            <geometry>
+                <mesh filename="meshes/FootRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="PushrodLeftNCS-v1">
+        <inertial>
+            <origin xyz="0.03292585662327888 -0.1885086682044219 -0.0009770750381038694" rpy="0.0 -0.0 0.0" />
+            <mass value="0.045198290927437025" />
+            <inertia ixx="0.0009652058294587081" iyy="3.4712278140853776e-05" izz="0.0009977072590840932" ixy="0.00017540959914658842" iyz="-1.0802562954836253e-08" ixz="6.281166450215715e-08" />
+        </inertial>
+        <visual name="PushrodLeftNCS-v1_visual">
+            <origin xyz="4.6607974352186335e-09 2.943483392688461e-11 -8.613376678567875e-12" rpy="-1.5707963267948968 2.138721377891839e-18 0.18047963198315062" />
+            <geometry>
+                <mesh filename="meshes/PushrodLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="PushrodLeftNCS-v1_collision">
+            <origin xyz="4.6607974352186335e-09 2.943483392688461e-11 -8.613376678567875e-12" rpy="-1.5707963267948968 2.138721377891839e-18 0.18047963198315062" />
+            <geometry>
+                <mesh filename="meshes/PushrodLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <link name="PushrodRightNCS-v1">
+        <inertial>
+            <origin xyz="0.03292494952566659 -0.188455125655265 0.00450601199268327" rpy="0.0 -0.0 0.0" />
+            <mass value="0.04519829092743693" />
+            <inertia ixx="0.0009652088506325442" iyy="3.500909200669838e-05" izz="0.0009974084200491205" ixy="0.00017537574995764402" iyz="1.7012096400221053e-05" ixz="-3.0995710418601944e-06" />
+        </inertial>
+        <visual name="PushrodRightNCS-v1_visual">
+            <origin xyz="4.66078607513909e-09 -4.516070242349679e-09 3.607944272232544e-09" rpy="-1.5915860234976607 0.0037930665976698827 0.1804385372505173" />
+            <geometry>
+                <mesh filename="meshes/PushrodRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </visual>
+        <collision name="PushrodRightNCS-v1_collision">
+            <origin xyz="4.66078607513909e-09 -4.516070242349679e-09 3.607944272232544e-09" rpy="-1.5915860234976607 0.0037930665976698827 0.1804385372505173" />
+            <geometry>
+                <mesh filename="meshes/PushrodRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+            </geometry>
+        </collision>
+    </link>
+    <joint name="bodyNCS-v1_Révolution-1" type="revolute">
+        <origin xyz="0.02729492 0.128 0.0" rpy="-3.141592653589793 -1.5707963267948966 0" />
+        <parent link="bodyNCS-v1" />
+        <child link="HipLeftNCS-v1" />
+        <axis xyz="0.0 0.0 1.0" />
+        <limit lower="-0.785398" upper="0.785398" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="bodyNCS-v1_Révolution-2" type="revolute">
+        <origin xyz="0.02729492 -0.128 0.0" rpy="-3.141592653589793 -1.5707963267948966 0" />
+        <parent link="bodyNCS-v1" />
+        <child link="HipRightNCS-v1" />
+        <axis xyz="0.0 0.0 1.0" />
+        <limit lower="-0.785398" upper="0.785398" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="HipLeftNCS-v1_Révolution-3" type="revolute">
+        <origin xyz="0.0 -0.05189999999999998 -0.149" rpy="1.5707963267948966 -1.5707963267948966 0" />
+        <parent link="HipLeftNCS-v1" />
+        <child link="CamLeftNCS-v1" />
+        <axis xyz="0.0 0.0 1.0" />
+        <limit lower="0.0" upper="3.141593" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="HipRightNCS-v1_Révolution-4" type="revolute">
+        <origin xyz="0.00109671 0.05188841 -0.149" rpy="-1.5707963267948966 -1.5707963267948966 0" />
+        <parent link="HipRightNCS-v1" />
+        <child link="CamRightNCS-v1" />
+        <axis xyz="-1.848480443529252e-32 0.021131 0.999777" />
+        <limit lower="3.141593" upper="6.283185" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="HipLeftNCS-v1_Révolution-5" type="revolute">
+        <origin xyz="0.0 -0.046099999999999995 0.10099999999999999" rpy="1.5707963267948966 -1.5707963267948966 0" />
+        <parent link="HipLeftNCS-v1" />
+        <child link="ThighLeftNCS-v1" />
+        <axis xyz="0.0 0.0 1.0" />
+        <limit lower="-1.047198" upper="1.047198" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="HipRightNCS-v1_Révolution-6" type="revolute">
+        <origin xyz="0.00097415 0.046089710000000006 0.10099999999999999" rpy="-1.5707963267948966 -1.5707963267948966 0" />
+        <parent link="HipRightNCS-v1" />
+        <child link="ThighRightNCS-v1" />
+        <axis xyz="-1.848480443529252e-32 0.021131 0.999777" />
+        <limit lower="-1.047198" upper="1.047198" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="ThighLeftNCS-v1_Révolution-7" type="revolute">
+        <origin xyz="0.0 0.35000000000000003 0.005" rpy="-3.141592653589791 -0.0 0.0" />
+        <parent link="ThighLeftNCS-v1" />
+        <child link="LegLeftNCS-v1" />
+        <axis xyz="0.0 2.18918428093977e-15 1.0" />
+        <limit lower="0.0" upper="1.570796" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="ThighRightNCS-v1_Révolution-8" type="revolute">
+        <origin xyz="-6.699999999959516e-07 -0.34981618999999997 0.012394819999999989" rpy="3.141592653589793 -1.8488927466117464e-32 0.0" />
+        <parent link="ThighRightNCS-v1" />
+        <child link="LegRightNCS-v1" />
+        <axis xyz="0.0 0.021130999999999907 0.999777" />
+        <limit lower="-1.570796" upper="0.0" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="LegLeftNCS-v1_Révolution-9" type="revolute">
+        <origin xyz="-0.26998707 -0.4208408 -0.003699999999999122" rpy="-3.56254806256213e-15 7.569108661291297e-32 -5.551115123125783e-17" />
+        <parent link="LegLeftNCS-v1" />
+        <child link="FootLeftNCS-v1" />
+        <axis xyz="-1.9721522630525295e-31 -1.3733637816223603e-15 1.0" />
+        <limit lower="-1.047198" upper="0.785398" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="LegRightNCS-v1_Révolution-10" type="revolute">
+        <origin xyz="-0.26998661000000007 0.4206351300000001 -0.014191719999999962" rpy="2.842721163061277e-16 1.0048821091648032e-32 -1.1102230246251568e-16" />
+        <parent link="LegRightNCS-v1" />
+        <child link="FootRightNCS-v1" />
+        <axis xyz="-2.3460122733354183e-18 0.021131000000000195 0.999777" />
+        <limit lower="-0.785398" upper="1.047198" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="CamLeftNCS-v1_Révolution-11" type="revolute">
+        <origin xyz="0.12 0.0 0.0020000000000000287" rpy="-3.141592653589793 -0.0 0.0" />
+        <parent link="CamLeftNCS-v1" />
+        <child link="PushrodLeftNCS-v1" />
+        <axis xyz="0.0 3.08148791103188e-33 1.0" />
+        <limit lower="0.0" upper="3.141593" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="CamRightNCS-v1_Révolution-12" type="revolute">
+        <origin xyz="0.12 4.2319999999999995e-05 0.0019995499999999923" rpy="3.469446951953615e-18 -1.8488927466117464e-32 -5.293955920339378e-23" />
+        <parent link="CamRightNCS-v1" />
+        <child link="PushrodRightNCS-v1" />
+        <axis xyz="-1.1186658255269138e-24 0.021131 0.9997769999999998" />
+        <limit lower="0.0" upper="3.141593" effort="1000000" velocity="1000000" />
+    </joint>
+    <joint name="LegLeftNCS-v1_Révolution-14" type="continuous">
+        <origin xyz="-0.060173939999999995 -0.032681749999999996 -0.00529999999999994" rpy="3.141592653589791 7.569108661291297e-32 -5.551115123125783e-17" />
+        <parent link="LegLeftNCS-v1" />
+        <child link="PushrodLeftNCS-v1" />
+        <axis xyz="1.9721522630525295e-31 -6.123233995736799e-17 1.0" />
+    </joint>
+    <joint name="LegRightNCS-v1_Révolution-15" type="continuous">
+        <origin xyz="-0.06017390000000004 0.03256252000000003 -0.005989429999999985" rpy="-3.141592653589792 1.0048821091648032e-32 -1.1102230246251568e-16" />
+        <parent link="LegRightNCS-v1" />
+        <child link="PushrodRightNCS-v1" />
+        <axis xyz="2.3460122733354183e-18 0.021131000000001423 0.999777" />
+    </joint>
+</robot>
