@@ -1,0 +1,40 @@
+Mass properties of Foot (left + right)
+
+Configuration: Défaut
+Coordinate system: -- default --
+
+Mass = 498.67 grams
+
+Volume = 254725.43 cubic millimeters
+
+Surface area = 97641.83 square millimeters
+
+Center of mass (millimeters):
+
+X = 0.04
+Y = 4.79
+Z = -102.92
+
+Principal axes of inertia and principal moments of inertia (grams·square millimeters)
+Taken at the center of mass.
+
+Axis	Direction Vector	Principal Moment
+Ix	(0.00, 0.06, 1.00)	Px = 108868.97
+Iy	(1.00, 0.00, 0.00)	Py = 5402543.51
+Iz	(0.00, 1.00, -0.06)	Pz = 5439714.92
+
+Moments of inertia (grams·square millimeters)
+Taken at the center of mass and aligned with the output coordinate system (using positive tensor notation).
+
+	X	Y	Z
+X	5402543.02	-105.48	-1620.13
+Y	-105.48	5419796.37	325247.55
+Z	-1620.13	325247.55	128788.02
+
+Moments of inertia (grams·square millimeters)
+Taken at the output coordinate system (using positive tensor notation).
+
+	X	Y	Z
+X	10696248.19	-0.31	-3882.00
+Y	-0.31	10702082.44	79637.97
+Z	-3882.00	79637.97	140209.06

@@ -52,3 +52,6 @@ Thumbs.db
 # Temporary
 *.tmp
 *.log
+
+# scratch validation renders
+mujoco/spiderbot/_*.png
