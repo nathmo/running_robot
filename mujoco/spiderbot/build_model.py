@@ -13,15 +13,17 @@ with measured values later) and layers on everything needed to actually simulate
 All tunable numbers live in MOTORS / JOINTS below so the eventual real values are a one-edit swap.
 Re-run after CAD regen:  .venv/Scripts/python.exe mujoco/spiderbot/build_model.py
 """
-import itertools
 import xml.etree.ElementTree as ET
 import numpy as np
 import mujoco
-from geometry import loop_anchors, foot_boxes
+from geometry import loop_anchors, foot_tips
 
 # slight thigh-forward crouch used as the standing init pose (feet under the CoM)
 INIT_CTRL = np.array([0.0, 0.0, 0.12, 0.0, 0.0, -0.12])
-_CORNERS = np.array(list(itertools.product([-1, 1], repeat=3)))
+# Only a small sphere at each foot tip touches the floor (a point/ball foot). Everything else
+# is non-colliding, so the policy cannot rest other parts on the ground (which would damage the
+# real robot). The robot must therefore actively balance / step in place.
+FOOT_SPHERE_R = 0.025
 
 
 def compute_standing_keyframe(model, init_ctrl):
@@ -42,8 +44,7 @@ def compute_standing_keyframe(model, init_ctrl):
     mujoco.mj_forward(model, data)
     model.opt.gravity[:] = g
     foot_g = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col") for s in "LR"]
-    zmin = min((data.geom_xpos[gg] + (_CORNERS * model.geom_size[gg]) @ data.geom_xmat[gg].reshape(3, 3).T)[:, 2].min()
-               for gg in foot_g)
+    zmin = min(data.geom_xpos[gg][2] - model.geom_rbound[gg] for gg in foot_g)  # sphere bottom
     qpos = data.qpos.copy()
     qpos[:3] = [0, 0, 1.5 - zmin + 0.002]   # drop torso so feet just touch z=0
     qpos[3:7] = [1, 0, 0, 0]
@@ -79,7 +80,9 @@ J = {
 # NOTE: MuJoCo's linear spring can't represent the 2.27 Nm preload "breakaway"; that's a TODO
 # (one-sided joint limit + spring). Stiffness is the real value; preload is currently approximated.
 ANKLE_STIFFNESS = 28.65
-ANKLE_SPRINGREF = {"LegLeftNCS-v1_Révolution-9": 0.44, "LegRightNCS-v1_Révolution-10": -0.44}
+# Toe-DOWN neutral so the long foot rests on its toe ball with the heel/rest-of-foot clear of the
+# floor (~8.5 cm), tuned via tune_foot_posture.py. Required because only the toe sphere may touch.
+ANKLE_SPRINGREF = {"LegLeftNCS-v1_Révolution-9": -0.7, "LegRightNCS-v1_Révolution-10": 0.7}
 
 # Actuator order (also the ctrl / observation order).
 ACTUATORS = [
@@ -97,7 +100,7 @@ def f3(v):
 
 
 def build():
-    anchors, boxes = loop_anchors(), foot_boxes()
+    anchors, tips = loop_anchors(), foot_tips()
     tree = ET.parse(OPEN_B)
     root = tree.getroot()
     root.set("model", "spiderbot")
@@ -180,8 +183,8 @@ def build():
         bodies[leg].append(ET.fromstring(
             f'<site name="leg_anchor_{s}" pos="{f3(anchors[s]["leg_site"])}"/>'))
         bodies[foot].append(ET.fromstring(
-            f'<geom name="foot_{s}_col" class="collision" type="box" '
-            f'pos="{f3(boxes[s]["pos"])}" size="{f3(boxes[s]["size"])}"/>'))
+            f'<geom name="foot_{s}_col" class="collision" type="sphere" '
+            f'size="{FOOT_SPHERE_R}" pos="{f3(tips[s])}"/>'))
 
     # equality: close both loops
     eq = ET.SubElement(root, "equality")

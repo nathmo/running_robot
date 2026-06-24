@@ -43,6 +43,25 @@ class SpiderBotEnv(gym.Env):
         self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")
         self._gyro_adr = self._sensor_adr("imu_gyro")
 
+        # foot-tip spheres + floor, for the air-time stepping reward (sim contact, reward-only)
+        self.floor_gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        self.foot_gids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col")
+                          for s in "LR"]
+        self._air_time = np.zeros(2, np.float32)
+
+        # Parts that must NOT dip below the floor (only the toe spheres may touch). Precompute a
+        # subsampled set of each mesh's vertices so we can cheaply test true floor penetration.
+        self._nofloor = []
+        for nm in ("FootLeftNCS-v1_geom", "FootRightNCS-v1_geom",
+                   "LegLeftNCS-v1_geom", "LegRightNCS-v1_geom"):
+            g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, nm)
+            mid = self.model.geom_dataid[g]
+            a, k = self.model.mesh_vertadr[mid], self.model.mesh_vertnum[mid]
+            v = self.model.mesh_vert[a:a + k].reshape(-1, 3)
+            if len(v) > 256:
+                v = v[np.linspace(0, len(v) - 1, 256).astype(int)]
+            self._nofloor.append((g, v.copy()))
+
         # nominal standing pose / targets from the keyframe
         self.key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, self.cfg.keyframe)
         self.default_qpos = self.model.key_qpos[self.key_id].copy()
@@ -74,6 +93,40 @@ class SpiderBotEnv(gym.Env):
 
     def _ang_vel_body(self):
         return self.data.sensordata[self._gyro_adr:self._gyro_adr + 3].copy()
+
+    def _foot_contacts(self):
+        """Which foot-tip spheres touch the floor (sim contact; used only for the reward)."""
+        c = np.zeros(2, bool)
+        for i in range(self.data.ncon):
+            con = self.data.contact[i]
+            pair = (con.geom1, con.geom2)
+            if self.floor_gid in pair:
+                for fi, fg in enumerate(self.foot_gids):
+                    if fg in pair:
+                        c[fi] = True
+        return c
+
+    def _floor_violation(self):
+        """Only the LOWER half of each toe sphere may touch the floor (resting on top of it).
+        Forbidden (kill the episode) if either:
+          (a) a toe-sphere contact lands on its UPPER hemisphere -> the sphere sank below the floor;
+          (b) any other foot/shin point dips below the floor -> the 'rest of the foot' is traversing.
+        Both would damage the real robot, so they must never be a usable strategy."""
+        # (a) toe sphere contacted from above its center => sunk
+        for i in range(self.data.ncon):
+            con = self.data.contact[i]
+            pair = (con.geom1, con.geom2)
+            if self.floor_gid in pair:
+                for fg in self.foot_gids:
+                    if fg in pair and con.pos[2] > self.data.geom_xpos[fg][2] + 1e-3:
+                        return True
+        # (b) any foot/shin mesh vertex below the floor
+        tol = self.cfg.floor_penetration_tol
+        for g, v in self._nofloor:
+            R = self.data.geom_xmat[g].reshape(3, 3)
+            if (v @ R.T + self.data.geom_xpos[g])[:, 2].min() < -tol:
+                return True
+        return False
 
     def _proprio(self):
         s = self.cfg.obs_scales
@@ -111,6 +164,7 @@ class SpiderBotEnv(gym.Env):
         mujoco.mj_forward(self.model, self.data)
         self._prev_action[:] = 0.0
         self._filt_target[:] = self.nominal_ctrl
+        self._air_time[:] = 0.0
         self._step = 0
         self._sample_command()
         frame = self._proprio()
@@ -133,6 +187,15 @@ class SpiderBotEnv(gym.Env):
 
         self._push_frame(self._proprio())
         reward, terms = self._reward(action)
+        # stepping reward (air-time): credit each foot at touchdown by (air_time - min); strides
+        # shorter than the minimum score negative, punishing tiny chattering steps.
+        contact = self._foot_contacts()
+        first_contact = contact & (self._air_time > 0)
+        self._air_time += self.control_dt
+        air = c.w_air_time * float(np.sum((self._air_time - c.foot_air_time_min) * first_contact))
+        self._air_time[contact] = 0.0
+        terms["air_time"] = air
+        reward += air
         terminated = self._fallen()
         if terminated:
             reward -= c.fall_penalty
@@ -169,5 +232,7 @@ class SpiderBotEnv(gym.Env):
         if self.data.qpos[2] < self.cfg.term_height:
             return True
         if self._gravity_body()[2] > self.cfg.term_gravity_z:   # tipped past ~60 deg
+            return True
+        if self._floor_violation():                             # foot sank through the floor
             return True
         return False

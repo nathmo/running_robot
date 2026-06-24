@@ -73,10 +73,21 @@ def foot_boxes():
     return out
 
 
+def foot_tips():
+    """The contact 'ball' at the END of each foot: the mesh vertex farthest from the ankle
+    (foot body origin), in foot-body-local frame. Only a small sphere here touches the ground."""
+    m, d = _load()
+    out = {}
+    for s, names in _SIDES.items():
+        verts_local = _to_body_local(m, d, _mesh_world(m, d, names["foot"] + "_geom"), names["foot"])
+        out[s] = verts_local[np.argmax(np.linalg.norm(verts_local, axis=1))]
+    return out
+
+
 if __name__ == "__main__":
     np.set_printoptions(precision=5, suppress=True)
-    la, fb = loop_anchors(), foot_boxes()
+    la, ft = loop_anchors(), foot_tips()
     for s in "LR":
         print(f"[{s}] loop pushrod_site = {la[s]['pushrod_site']}   leg_site = {la[s]['leg_site']}")
     for s in "LR":
-        print(f"[{s}] foot box pos = {fb[s]['pos']}   half-size = {fb[s]['size']}")
+        print(f"[{s}] foot tip (toe sphere center) = {ft[s]}")

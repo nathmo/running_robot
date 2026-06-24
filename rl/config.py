@@ -42,6 +42,11 @@ class Config:
     w_action_rate: float = 0.01
     w_torque: float = 1.0e-4
     w_alive: float = 0.5
+    # feet air-time (anti-vibration stepping): reward each foot at touchdown by (air_time - min);
+    # steps shorter than the minimum get NEGATIVE reward, so tiny chattering is punished while
+    # deliberate strides are rewarded. Uses sim contact (reward-only, never in the observation).
+    w_air_time: float = 2.0
+    foot_air_time_min: float = 0.3      # seconds; the minimum useful step (swing) duration
     fall_penalty: float = 200.0
     track_sigma_vx: float = 0.25        # width of the exp tracking kernel (m/s)
     track_sigma_yaw: float = 0.25       # (rad/s)
@@ -51,6 +56,8 @@ class Config:
     episode_s: float = 20.0
     term_height: float = 0.45           # torso below this -> fall
     term_gravity_z: float = -0.5        # body-frame gravity z above this (less negative) -> tipped > 60 deg
+    floor_penetration_tol: float = 0.02 # only the toe spheres may touch; if any foot/shin point sinks
+    #                                     deeper than this below the floor -> forbidden -> terminate
     reset_joint_noise: float = 0.03     # rad of random noise added to the standing pose on reset
 
     # ----- domain randomization (enabled at M4; ranges are multiplicative unless noted) -----

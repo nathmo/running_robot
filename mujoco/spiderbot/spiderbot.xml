@@ -59,10 +59,10 @@
             <geom name="LegLeftNCS-v1_geom" type="mesh" mesh="LegLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
             <inertial mass="0.2221171739386004" pos="-0.24518356685145476 -0.00017709874116033454 0.000420485236984125" fullinertia="3.5224948679710906e-05 0.005697040272495027 0.005668173858214381 4.749850768709827e-06 -1.7380190126245866e-05 5.438438794895656e-07" />
             <body name="FootLeftNCS-v1" pos="-0.5000000000000007 -0.0015999999999976567 9.201528428093297e-15" euler="-2.231028885975213e-15 5.551115123125783e-17 -3.8456969129524326e-30">
-              <joint name="LegLeftNCS-v1_Révolution-9" type="hinge" axis="1.4729443511407235e-15 -1.0 -6.650599895248049e-16" pos="-8.679350578343133e-08 -0.004700000008616256 -2.293391507246932e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="0.44" />
+              <joint name="LegLeftNCS-v1_Révolution-9" type="hinge" axis="1.4729443511407235e-15 -1.0 -6.650599895248049e-16" pos="-8.679350578343133e-08 -0.004700000008616256 -2.293391507246932e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="-0.7" />
               <geom name="FootLeftNCS-v1_geom" type="mesh" mesh="FootLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
               <inertial mass="0.2593184686605107" pos="-0.004826310056437695 0.000377045846251916 -0.10466467671885393" fullinertia="0.002977353834372901 0.0029710075575362926 6.48202275597754e-05 1.8008833281898528e-06 0.00016835822851597433 -1.5300654913384665e-05" />
-              <geom name="foot_L_col" class="collision" type="box" pos="-0.0108814 -1.53708e-11 -0.118251" size="0.0286144 0.0277 0.193249" />
+              <geom name="foot_L_col" class="collision" type="sphere" size="0.025" pos="-3.74889e-10 1.77817e-11 -0.3115" />
             </body>
             <site name="leg_anchor_L" pos="-0.0660502 -0.0002 0.026337" />
           </body>
@@ -92,10 +92,10 @@
             <geom name="LegRightNCS-v1_geom" type="mesh" mesh="LegRightNCS-v1" pos="0 0 0" euler="0 0 0" />
             <inertial mass="0.2216332406500461" pos="-0.24462818745306347 4.3409556023459375e-05 0.00042237404783052046" fullinertia="3.5202909877916364e-05 0.00566561648956584 0.005636749613156255 -4.799610366287226e-06 -1.7283100362687677e-05 -5.553292536571728e-07" />
             <body name="FootRightNCS-v1" pos="-0.4999999999999763 3.161915174132446e-15 -7.862155371185508e-14" euler="-8.292000563311185e-16 0.0023217002353604597 -1.6375833748463927e-15">
-              <joint name="LegRightNCS-v1_Révolution-10" type="hinge" axis="2.2644132062488165e-07 1.0000002844449258 1.4601449516496445e-07" pos="3.4514539044840315e-07 0.004700248978108805 -2.0422932496191323e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="-0.44" />
+              <joint name="LegRightNCS-v1_Révolution-10" type="hinge" axis="2.2644132062488165e-07 1.0000002844449258 1.4601449516496445e-07" pos="3.4514539044840315e-07 0.004700248978108805 -2.0422932496191323e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="0.7" />
               <geom name="FootRightNCS-v1_geom" type="mesh" mesh="FootRightNCS-v1" pos="0 0 0" euler="0 0 0" />
               <inertial mass="0.2595337393532014" pos="-0.00495501786349592 -0.0002889852253573598 -0.10446233298751854" fullinertia="0.0029818113070248725 0.0029754461909895025 6.489538219984233e-05 -1.780827480301131e-06 0.0001697255481799458 1.4448304899687008e-05" />
-              <geom name="foot_R_col" class="collision" type="box" pos="-0.0108748 -4.99992e-05 -0.11825" size="0.0286248 0.02775 0.19325" />
+              <geom name="foot_R_col" class="collision" type="sphere" size="0.025" pos="1.99588e-10 1.05647e-11 -0.3115" />
             </body>
             <site name="leg_anchor_R" pos="-0.0670644 0.0002 0.0274238" />
           </body>
@@ -139,6 +139,6 @@
     <actuatorfrc name="thigh_R_frc" actuator="thigh_R" />
   </sensor>
   <keyframe>
-    <key name="stand" qpos="0 0 0.842889 1 0 0 0 -1.15316e-09 2.20273e-11 -0.0907561 0.12 0.25576 0.44 1.14993e-09 -5.20201e-12 -0.0913062 -0.12 -0.249943 -0.44" ctrl="0 0 0.12 0 0 -0.12" />
+    <key name="stand" qpos="0 0 1.11033 1 0 0 0 -2.09908e-08 -2.10772e-09 -0.0907561 0.12 0.25576 -0.7 2.06858e-08 -2.5577e-09 -0.0913062 -0.12 -0.249943 0.7" ctrl="0 0 0.12 0 0 -0.12" />
   </keyframe>
 </mujoco>
