@@ -1,78 +1,134 @@
-# SpiderBot RL
+# SpiderBot RL — train standing + walking from scratch
 
-Teach the SpiderBot biped to walk under joystick control, in simulation, then transfer to the
-real robot. Built from scratch around **MuJoCo** (physics) + **Stable-Baselines3 PPO** (learning).
-Start simple — low-speed walking and a solid sim-to-real bridge first; chase top speed later.
+Teach the SpiderBot biped to balance and walk under joystick control, in MuJoCo, with
+**Stable-Baselines3 PPO**. CPU-only — **no GPU required** (just a multi-core machine).
 
-## The pipeline
+> **The one command to train walking** (run from the repo root, venv active):
+> ```
+> python -m rl.train --preset m2_walk --steps 8000000 --n-envs 6 --subproc --no-progress
+> ```
+> `m2_walk` learns to **balance and walk forward from scratch** (it also trains standing). Set
+> `--n-envs` to about (CPU cores − 2). On a headless server keep `--no-progress` and use tmux.
+> Full setup + all milestones below.
 
-```
- CAD export ──build_model.py──► mujoco/spiderbot/spiderbot.xml ──► rl/env.py ──train.py──► policy
-   (OPEN_B)     (adds motors,        (the simulated robot)        (what the      (PPO)        │
-                loop, sensors…)                                    agent sees)                 │
-                                                                                  evaluate.py ◄┘
-                                                                                  (watch / measure)
-                                                                                       │
-                                                                                  export → Pi (later)
-```
+---
 
-## How reinforcement learning is used here
+## 0. Requirements
+- Python **3.10+** (tested 3.11/3.12), Git, a multi-core CPU. No GPU needed.
+- The repo includes the robot CAD meshes (`robotCADdescription/`), so a normal clone is enough.
 
-Every 1/50 s the **policy** (a small neural net) reads an **observation** (what the robot can
-sense), outputs an **action** (6 motor angle targets), the **simulator** advances, and a
-**reward** scores how well it did. PPO adjusts the network to maximize long-term reward. The
-agent only ever sees signals the *real* robot can measure, so the learned policy can transfer.
+## 1. Get the code + create the environment
 
-- **Observation** (`rl/env.py`): per motor — position, velocity, torque (6 each); plus the
-  IMU-derived gravity direction (3) and angular velocity (3); plus the previous action (6) and
-  the joystick command (2). 32 numbers, stacked over the last 5 steps → 160. No foot-contact
-  sensor (the real robot has none); the true base velocity is *not* shown (not measurable) — the
-  policy infers motion from the stacked history.
-- **Action**: 6 PD position targets (hip-roll, cam, thigh × 2 legs). The knee follows the
-  parallel linkage; the ankle follows its spring. `target = standing_pose + 0.5·action`.
-- **Reward**: track the commanded body-frame forward speed and yaw rate (exp kernels), stay
-  upright and at standing height, move smoothly, stay alive; big penalty for falling.
-- **Command** = joystick `[forward, yaw]` in `[-1,1]`, mapped to ±1.5 m/s and ±2 rad/s.
-  `(0,0)` = stand still.
-
-## The robot model (`mujoco/spiderbot/`)
-
-`build_model.py` turns the CAD export into a simulatable model: free-floating base, world
-options, ground, **6 motors** (cam+thigh = CubeMars AKE90-8, hip-roll = AK60-39 — real specs,
-incl. reflected `armature`), the **closed parallel knee loop** (`<equality><connect>` from the
-pushrod tip to the shin), a **passive preloaded ankle spring**, an IMU + per-motor sensors, box
-foot collision, and a flat-footed standing keyframe. `geometry.py` derives the loop/foot numbers
-from the mesh; `validate_model.py` is the sanity gate; `find_stance.py`/`tune_ankle.py` are
-design tools. Masses/inertias are **placeholders** until the real values are measured (all motor
-and inertia numbers live in one table in `build_model.py`).
-
-```
-.venv/Scripts/python.exe mujoco/spiderbot/build_model.py      # (re)generate the model
-.venv/Scripts/python.exe mujoco/spiderbot/validate_model.py   # gate: loop holds, cam drives knee, no blow-up
+**Linux / macOS (typical training server):**
+```bash
+git clone <REPO_URL> running_robot && cd running_robot
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU build of torch
+pip install -r rl/requirements.txt
 ```
 
-## Train & evaluate
+**Windows (PowerShell):**
+```powershell
+git clone <REPO_URL> running_robot; cd running_robot
+python -m venv .venv; .venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r rl/requirements.txt
+```
 
+**All commands below assume: the venv is active and your working directory is the repo root.**
+(The model and run paths are relative to the repo root.) If you prefer not to activate the venv,
+prefix commands with the interpreter: `.venv/bin/python` (Linux) or `.venv\Scripts\python.exe`
+(Windows).
+
+## 2. Build + sanity-check the robot model
+The simulatable model is generated from the CAD export (it is not committed pre-built):
+```bash
+python mujoco/spiderbot/build_model.py       # -> mujoco/spiderbot/spiderbot.xml
+python mujoco/spiderbot/validate_model.py     # gate: closed loop holds, cam drives the knee, no blow-up
+python -m rl.smoke_test                        # env sanity: obs/action shapes, a few steps, no NaN
 ```
-.venv/Scripts/python.exe -m rl.smoke_test                                   # env sanity
-.venv/Scripts/python.exe -m rl.train --preset m1_stand --n-envs 6 --subproc # train (CPU)
-.venv/Scripts/python.exe -m tensorboard.main --logdir rl/runs               # watch curves
-.venv/Scripts/python.exe -m rl.evaluate --run rl/runs/m1_stand --viewer     # watch the policy (local)
-.venv/Scripts/python.exe -m rl.evaluate --run rl/runs/m1_stand --video rl/runs/m1_stand/rollout.mp4
+
+## 3. Train — standing, then walking (each trains from scratch)
+Pick `N` ≈ (CPU cores − 2). Times below are for an 8-core CPU at ~2.3k env-steps/s.
+
+```bash
+# M1 — stand / balance on the toe points  (sanity milestone; ~45-60 min)
+python -m rl.train --preset m1_stand --steps 8000000 --n-envs 6 --subproc --no-progress
+
+# M2 — stand + walk forward  (THE walking policy; also stands on command (0,0); ~60-90 min)
+python -m rl.train --preset m2_walk  --steps 8000000 --n-envs 6 --subproc --no-progress
+
+# M3 — full joystick: forward + turn  (optional next step; ~90 min)
+python -m rl.train --preset m3_turn  --steps 10000000 --n-envs 6 --subproc --no-progress
 ```
-Key training signals in TensorBoard / logs: `rollout/ep_len_mean` (climbs as it learns not to
-fall) and `rollout/ep_rew_mean`.
+- You do **not** need M1 before M2 — `m2_walk` learns balancing and walking together (20% of
+  commands are "stand still"). M1 is just the simplest checkpoint to confirm the setup learns.
+- Outputs go to `rl/runs/<preset>/`: periodic checkpoints `ppo_<steps>_steps.zip`, the matching
+  `ppo_vecnormalize_<steps>_steps.pkl`, the final `final_model.zip` + `vecnormalize.pkl`, and
+  TensorBoard logs.
+- Drop `--subproc` to run envs serially (one process); drop `--no-progress` for a live progress bar.
+
+**Resume an interrupted / extend a finished run:**
+```bash
+python -m rl.train --preset m2_walk --resume rl/runs/m2_walk/final_model.zip \
+    --steps 4000000 --n-envs 6 --subproc --no-progress
+```
+
+**Headless Linux server (tmux):**
+```bash
+tmux new -s train
+source .venv/bin/activate
+python -m rl.train --preset m2_walk --steps 8000000 --n-envs $(($(nproc)-2)) --subproc --no-progress
+# detach: Ctrl-b then d   |   reattach: tmux attach -t train
+```
+
+## 4. Monitor training
+```bash
+python -m tensorboard.main --logdir rl/runs        # open http://localhost:6006
+```
+Watch **`rollout/ep_len_mean`** (climbs toward the 1000-step cap as it stops falling) and
+**`rollout/ep_rew_mean`**. Expect a long flat early phase, then a sharp take-off.
+
+## 5. Evaluate / watch / record
+```bash
+# metrics over several episodes (ep_len, command-tracking error)
+python -m rl.evaluate --run rl/runs/m2_walk --episodes 5
+
+# drive a fixed joystick command and record an mp4  (vx,yaw are normalized -1..1)
+python -m rl.evaluate --run rl/runs/m2_walk --vx 0.5 --yaw 0.0 --video rl/runs/m2_walk/walk.mp4
+
+# live 3D viewer (run locally, not over headless SSH)
+python -m rl.evaluate --run rl/runs/m2_walk --viewer --vx 0.5
+```
+Evaluation auto-loads the matching VecNormalize stats; pass `--checkpoint rl/runs/.../ppo_XXXX_steps`
+to evaluate a specific checkpoint instead of the final model.
+
+---
+
+## How it works (brief)
+- **Model** (`mujoco/spiderbot/`, generated by `build_model.py`): free-floating base, the **6
+  motors** (cam+thigh = CubeMars AKE90-8, hip-roll = AK60-39, real torque/inertia), the **closed
+  parallel knee loop**, a passive **toe-down** ankle spring, an IMU + per-motor sensors, and a
+  **point-toe contact**: only a small sphere at each foot tip touches the floor. Masses/inertias
+  are placeholders until the real values are measured (all in one table in `build_model.py`).
+- **Observation** (`rl/env.py`, hardware-measurable, history-stacked): per-motor pos/vel/torque,
+  IMU gravity direction + angular velocity, previous action, joystick command. No foot-contact
+  sensor.
+- **Action**: 6 PD position targets (knee follows the linkage; ankle follows its spring).
+- **Reward**: track commanded body-frame forward speed + yaw, stay upright/at height, smoothness,
+  alive; **feet air-time** reward (deliberate strides, punishes tiny vibration steps).
+- **Hard rules (termination)**: fall (low/ tilted), and **floor violation** — only the lower half
+  of a toe sphere may touch; if a toe sphere sinks (upper-hemisphere contact) or any foot/shin
+  point dips below the floor, the episode is killed (the robot can't cheat by clipping the floor).
+- **Config / all knobs**: `rl/config.py` (presets `m1_stand`, `m2_walk`, `m3_turn`).
 
 ## Milestones
-
-| # | preset | goal |
-|---|---|---|
-| M0 | — | model sim-ready & validated ✅ |
-| M1 | `m1_stand` | stand / balance at `(0,0)` |
-| M2 | `m2_walk` | track forward velocity (curriculum raises the command range) |
-| M3 | `m3_turn` | full joystick (forward + yaw) |
-| M4 | — | domain randomization + observation history → robust, then ONNX export |
-| M5 | — | sim-to-real on the Raspberry Pi (moteus/CAN) |
-| M6 | — | push speed; design exploration |
-
-Config and all knobs: `rl/config.py` (presets `m1_stand`, `m2_walk`, `m3_turn`).
+| # | preset | goal | status |
+|---|---|---|---|
+| M0 | — | model sim-ready & validated | ✅ |
+| M1 | `m1_stand` | balance on the toe points | ✅ (953/1000, 0 floor violations) |
+| M2 | `m2_walk` | track forward velocity (+ stand) | in progress |
+| M3 | `m3_turn` | full joystick (forward + yaw) | next |
+| M4 | — | domain randomization → ONNX export → Raspberry Pi (moteus) | later |
