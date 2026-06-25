@@ -70,6 +70,14 @@ class SpiderBotEnv(gym.Env):
         self.ctrl_lo = self.model.actuator_ctrlrange[:, 0].copy()
         self.ctrl_hi = self.model.actuator_ctrlrange[:, 1].copy()
 
+        # height target derived from the keyframe (so it can never go stale relative to the model)
+        self.height_target = float(self.default_qpos[2])
+        # hip-roll (lateral) actuators, for the neutral-pose regularization that prevents crossing
+        self.hip_roll_idx = np.array(
+            [a for a in range(self.nu)
+             if (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) or "")
+             .startswith("hip_roll")], dtype=int)
+
         self.action_space = spaces.Box(-1.0, 1.0, (self.nu,), np.float32)
         obs_dim = FRAME_DIM * self.cfg.history_len
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
@@ -105,6 +113,15 @@ class SpiderBotEnv(gym.Env):
                     if fg in pair:
                         c[fi] = True
         return c
+
+    def _foot_lateral_sep(self):
+        """Body-frame lateral separation of the two toe spheres, sep = y_left - y_right.
+        Nominal stance is ~0.40 m; sep shrinking toward 0 (or going negative) means the legs are
+        coming together / crossing. Used by the anti-crossing stance reward."""
+        R = self._base_rot()
+        base = self.data.qpos[0:3]
+        y = [(R.T @ (self.data.geom_xpos[fg] - base))[1] for fg in self.foot_gids]  # [L, R]
+        return float(y[0] - y[1])
 
     def _floor_violation(self):
         """Only the LOWER half of each toe sphere may touch the floor (resting on top of it).
@@ -219,10 +236,17 @@ class SpiderBotEnv(gym.Env):
         t["track_vx"] = c.w_track_vx * np.exp(-((cmd_vx - vx) ** 2) / c.track_sigma_vx ** 2)
         t["track_yaw"] = c.w_track_yaw * np.exp(-((cmd_yaw - yaw_rate) ** 2) / c.track_sigma_yaw ** 2)
         t["upright"] = -c.w_upright * (grav[0] ** 2 + grav[1] ** 2)
-        t["height"] = -c.w_height * (self.data.qpos[2] - c.height_target) ** 2
+        t["height"] = -c.w_height * (self.data.qpos[2] - self.height_target) ** 2
         t["vz"] = -c.w_vz * self.data.qvel[2] ** 2
         t["action_rate"] = -c.w_action_rate * np.sum((action - self._prev_action) ** 2)
         t["torque"] = -c.w_torque * np.sum(self.data.actuator_force[:self.nu] ** 2)
+        # anti-crossing: penalize the feet getting closer than stance_min_sep (and, hard, crossing);
+        # one-sided so a normal/wide stance is free.
+        sep = self._foot_lateral_sep()
+        t["stance"] = -c.w_no_cross * max(0.0, c.stance_min_sep - sep) ** 2
+        # keep the hip-roll (lateral) joints near neutral so the legs don't roll inward to cross
+        hr = self.data.qpos[self.act_qadr[self.hip_roll_idx]] - self.default_motor_pos[self.hip_roll_idx]
+        t["hip_roll"] = -c.w_hip_roll * float(np.sum(hr ** 2))
         t["alive"] = c.w_alive
         return sum(t.values()), t
 

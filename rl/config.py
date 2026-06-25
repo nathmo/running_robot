@@ -50,7 +50,13 @@ class Config:
     fall_penalty: float = 200.0
     track_sigma_vx: float = 0.25        # width of the exp tracking kernel (m/s)
     track_sigma_yaw: float = 0.25       # (rad/s)
-    height_target: float = 0.843        # standing torso height (from the model keyframe)
+    height_target: float = 1.1103       # standing torso height; the env DERIVES this from the
+    #                                     keyframe at load time (this value is only for reference)
+    # anti-crossing: keep the feet apart laterally so the legs don't cross / scissor.
+    w_no_cross: float = 50.0            # weight on the one-sided stance-width penalty
+    stance_min_sep: float = 0.25        # m; below this body-frame lateral foot separation -> penalty
+    #                                     (nominal stance is ~0.40 m; sep < 0 means feet have crossed)
+    w_hip_roll: float = 3.0             # keep the hip-roll (lateral) joints near their neutral pose
 
     # ----- episode / termination -----
     episode_s: float = 20.0

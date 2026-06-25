@@ -16,12 +16,13 @@ Teach the SpiderBot biped to balance and walk under joystick control, in MuJoCo,
 ## 0. Requirements
 - Python **3.10+** (tested 3.11/3.12), Git, a multi-core CPU. No GPU needed.
 - The repo includes the robot CAD meshes (`robotCADdescription/`), so a normal clone is enough.
+- ssh nemo@100.119.154.43
 
 ## 1. Get the code + create the environment
 
 **Linux / macOS (typical training server):**
 ```bash
-git clone <REPO_URL> running_robot && cd running_robot
+git clone https://github.com/nathmo/running_robot running_robot && cd running_robot
 python3 -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip
 pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU build of torch
@@ -30,7 +31,7 @@ pip install -r rl/requirements.txt
 
 **Windows (PowerShell):**
 ```powershell
-git clone <REPO_URL> running_robot; cd running_robot
+git clone https://github.com/nathmo/running_robot running_robot; cd running_robot
 python -m venv .venv; .venv\Scripts\Activate.ps1
 pip install --upgrade pip
 pip install torch --index-url https://download.pytorch.org/whl/cpu
