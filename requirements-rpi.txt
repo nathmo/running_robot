@@ -1,0 +1,20 @@
+# SpiderBot — Raspberry Pi DEPLOYMENT (run) dependencies only.
+#
+# This is the minimal runtime to execute a trained .onnx policy and drive the
+# motors over CAN. It deliberately excludes the training stack (mujoco, torch,
+# stable-baselines3, tensorboard, matplotlib, imageio, ...) which lives in
+# rl/requirements.txt and is NOT needed on the robot.
+#
+# Install on the Pi:
+#   pip install -r requirements-rpi.txt
+#
+# Notes for Raspberry Pi:
+#   - Use 64-bit Raspberry Pi OS (aarch64). onnxruntime ships prebuilt aarch64
+#     wheels on PyPI; the 32-bit (armv7) build usually needs compiling from source.
+#   - python-can talks to the motor via SocketCAN. Bring the bus up at 1 Mbps first:
+#       sudo ip link set can0 up type can bitrate 1000000
+#     then point the scripts at it:  --interface socketcan --channel can0
+
+onnxruntime>=1.18     # tested 1.25.1 — runs the exported .onnx policy (inference only)
+numpy>=1.26           # tested 2.x    — observation/action array handling
+python-can>=4.0       # tested 4.6.1  — CAN bus access for the AK-series motors
