@@ -10,6 +10,7 @@ stable-baselines3>=2.3 # tested 2.8.0   — PPO
 torch>=2.2             # tested 2.11.0  — install the CPU build (see note above)
 numpy>=1.26            # tested 2.x
 tensorboard>=2.15      # tested 2.20.0  — training curves
+matplotlib>=3.7        # training_plots.png (loss/score/reward-term curves)
 tqdm>=4.66             # progress bar
 rich>=13.0             # progress bar
 imageio>=2.34          # mp4 rollouts (evaluate.py --video)

@@ -86,11 +86,26 @@ python -m rl.train --preset m2_walk --steps 8000000 --n-envs $(($(nproc)-2)) --s
 ```
 
 ## 4. Monitor training
+
+**Plots (no server needed) — written automatically.** Each run writes `progress.csv` and a
+`training_plots.png` to `rl/runs/<name>/`, refreshed every ~500k steps and once more at the end.
+The figure has six panels: episode reward (score), episode length, losses, `approx_kl` &
+`clip_fraction`, policy `std` & `explained_variance`, and the **per-reward-term breakdown**
+(`reward_terms/*`) — the last one shows *which* terms the policy is actually earning, so you can
+spot reward gaming. On a headless server just copy the PNG down (or open it in place):
+```bash
+# regenerate the PNG from a run's progress.csv at any time (e.g. mid-run)
+python -m rl.plot_training --run rl/runs/m2_walk
+```
+
+**TensorBoard (live, interactive).** Same scalars, including `reward_terms/*`:
 ```bash
 python -m tensorboard.main --logdir rl/runs        # open http://localhost:6006
 ```
 Watch **`rollout/ep_len_mean`** (climbs toward the 1000-step cap as it stops falling) and
-**`rollout/ep_rew_mean`**. Expect a long flat early phase, then a sharp take-off.
+**`rollout/ep_rew_mean`**. Expect a long flat early phase, then a sharp take-off. If
+`train/clip_fraction` runs away above ~0.2 while reward stays flat, the policy is stuck — stop and
+adjust the reward rather than training longer.
 
 ## 5. Evaluate / watch / record
 ```bash

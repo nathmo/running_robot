@@ -57,6 +57,15 @@ class Config:
     stance_min_sep: float = 0.25        # m; below this body-frame lateral foot separation -> penalty
     #                                     (nominal stance is ~0.40 m; sep < 0 means feet have crossed)
     w_hip_roll: float = 3.0             # keep the hip-roll (lateral) joints near their neutral pose
+    # integrated command-POSE tracking: anchor where the robot should be (xy + heading), advancing
+    # by the command, so standing still really stays put and forward really goes straight. This
+    # accumulates error, so the policy can't fake it with twitches (unlike instantaneous velocity).
+    w_track_pos: float = 2.0            # reward for the base being at the integrated target xy
+    track_sigma_pos: float = 0.4        # m; width of the position tracking kernel
+    w_track_heading: float = 1.5        # reward for the base heading matching the integrated target
+    track_sigma_heading: float = 0.35   # rad; width of the heading tracking kernel (~20 deg)
+    w_lat_vel: float = 1.0              # penalize body-frame lateral velocity (go straight, no wander)
+    w_angvel_xy: float = 0.05           # penalize roll/pitch angular velocity (steadier, less jerky)
 
     # ----- episode / termination -----
     episode_s: float = 20.0
@@ -87,7 +96,8 @@ class Config:
     gae_lambda: float = 0.95
     learning_rate: float = 3.0e-4
     clip_range: float = 0.2
-    ent_coef: float = 0.0
+    ent_coef: float = 0.005             # small entropy bonus: keep exploring so std doesn't collapse
+    #                                     onto a bad local optimum (a prior run collapsed to std~0.14)
     seed: int = 0
     policy_hidden: List[int] = field(default_factory=lambda: [256, 256])
 

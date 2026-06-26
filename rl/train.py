@@ -16,7 +16,8 @@ from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList, BaseCallback
+from stable_baselines3.common.logger import configure
 
 from .config import get_config
 from .env import SpiderBotEnv
@@ -26,6 +27,53 @@ def make_env(preset):
     def _init():
         return Monitor(SpiderBotEnv(get_config(preset)))
     return _init
+
+
+class RewardTermCallback(BaseCallback):
+    """Average each env's per-step reward-term dict over a rollout and log them as reward_terms/*,
+    so the TensorBoard/CSV/plots show WHICH terms the policy is actually earning (or gaming)."""
+    def __init__(self):
+        super().__init__()
+        self._sums, self._count = {}, 0
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            terms = info.get("reward_terms")
+            if terms:
+                for k, v in terms.items():
+                    self._sums[k] = self._sums.get(k, 0.0) + float(v)
+                self._count += 1
+        return True
+
+    def _on_rollout_end(self) -> None:
+        if self._count:
+            for k, s in self._sums.items():
+                self.logger.record(f"reward_terms/{k}", s / self._count)
+        self._sums, self._count = {}, 0
+
+
+class PlotCallback(BaseCallback):
+    """Periodically (and at the end) render training_plots.png from progress.csv. Never fatal."""
+    def __init__(self, run_dir, every_steps=500_000):
+        super().__init__()
+        self.run_dir, self.every, self._last = str(run_dir), every_steps, 0
+
+    def _plot(self):
+        try:
+            from .plot_training import plot_run
+            plot_run(self.run_dir)
+        except Exception as e:               # plotting must never crash a training run
+            if self.verbose:
+                print(f"[plot] skipped: {e}")
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last >= self.every:
+            self._last = self.num_timesteps
+            self._plot()
+        return True
+
+    def _on_training_end(self) -> None:
+        self._plot()
 
 
 def main():
@@ -62,16 +110,28 @@ def main():
             seed=cfg.seed, verbose=1, tensorboard_log=str(run),
         )
 
-    ckpt = CheckpointCallback(
-        save_freq=max(200_000 // n_envs, 1), save_path=str(run),
-        name_prefix="ppo", save_vecnormalize=True)
+    # log to CSV (for plots) + TensorBoard + stdout, all in the run dir
+    model.set_logger(configure(str(run), ["stdout", "csv", "tensorboard"]))
+
+    callbacks = CallbackList([
+        CheckpointCallback(save_freq=max(200_000 // n_envs, 1), save_path=str(run),
+                           name_prefix="ppo", save_vecnormalize=True),
+        RewardTermCallback(),
+        PlotCallback(run, every_steps=500_000),
+    ])
 
     print(f"[train] preset={args.preset} n_envs={n_envs} ({vec_cls.__name__}) "
           f"total_steps={total} -> {run}")
-    model.learn(total_timesteps=total, callback=ckpt, progress_bar=not args.no_progress)
+    model.learn(total_timesteps=total, callback=callbacks, progress_bar=not args.no_progress)
     model.save(run / "final_model")
     venv.save(str(run / "vecnormalize.pkl"))
-    print(f"[train] done -> {run/'final_model.zip'}")
+    plots = None
+    try:
+        from .plot_training import plot_run
+        plots = plot_run(run)
+    except Exception as e:                # matplotlib missing etc. — models are already saved
+        plots = f"(skipped: {e})"
+    print(f"[train] done -> {run/'final_model.zip'}  plots -> {plots}")
 
 
 if __name__ == "__main__":

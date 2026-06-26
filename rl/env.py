@@ -86,6 +86,10 @@ class SpiderBotEnv(gym.Env):
         self._prev_action = np.zeros(self.nu, np.float32)
         self._filt_target = self.nominal_ctrl.copy()
         self._command = np.zeros(2, np.float32)
+        # integrated command-pose target (world xy + heading); re-anchored to the actual pose on
+        # reset and on every command resample so tracking error stays bounded.
+        self._des_xy = np.zeros(2, np.float64)
+        self._des_yaw = 0.0
         self._step = 0
 
     # ---------- helpers ----------
@@ -95,6 +99,15 @@ class SpiderBotEnv(gym.Env):
 
     def _base_rot(self):
         return self.data.xmat[self.base_id].reshape(3, 3)
+
+    def _base_yaw(self):
+        R = self._base_rot()
+        return float(np.arctan2(R[1, 0], R[0, 0]))
+
+    def _anchor_command_pose(self):
+        """Re-anchor the integrated command-pose target onto the robot's current base pose."""
+        self._des_xy[:] = self.data.qpos[0:2]
+        self._des_yaw = self._base_yaw()
 
     def _gravity_body(self):
         return self._base_rot().T @ np.array([0.0, 0.0, -1.0])
@@ -170,6 +183,14 @@ class SpiderBotEnv(gym.Env):
             self._command[0] = self.np_random.uniform(-c.cmd_vx_frac, c.cmd_vx_frac)
             self._command[1] = self.np_random.uniform(-c.cmd_yaw_frac, c.cmd_yaw_frac)
 
+    def _advance_command_pose(self):
+        """Move the integrated command-pose target by one control step of the current command."""
+        cmd_vx = self._command[0] * self.cfg.vx_max
+        cmd_yaw = self._command[1] * self.cfg.yaw_max
+        self._des_yaw += cmd_yaw * self.control_dt
+        self._des_xy[0] += self.control_dt * cmd_vx * np.cos(self._des_yaw)
+        self._des_xy[1] += self.control_dt * cmd_vx * np.sin(self._des_yaw)
+
     # ---------- gym API ----------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -184,6 +205,7 @@ class SpiderBotEnv(gym.Env):
         self._air_time[:] = 0.0
         self._step = 0
         self._sample_command()
+        self._anchor_command_pose()                   # target starts at the actual standing pose
         frame = self._proprio()
         self._history[:] = frame                      # fill history with the initial frame
         return self._obs(), {}
@@ -201,6 +223,9 @@ class SpiderBotEnv(gym.Env):
         self._step += 1
         if self._step % self._resample_every == 0:
             self._sample_command()
+            self._anchor_command_pose()               # new command -> re-anchor target to here
+        else:
+            self._advance_command_pose()              # else advance target by the command
 
         self._push_frame(self._proprio())
         reward, terms = self._reward(action)
@@ -227,7 +252,8 @@ class SpiderBotEnv(gym.Env):
         R = self._base_rot()
         v_body = R.T @ self.data.qvel[0:3]
         vx = v_body[0]
-        yaw_rate = self._ang_vel_body()[2]
+        angv = self._ang_vel_body()
+        yaw_rate = angv[2]
         cmd_vx = self._command[0] * c.vx_max
         cmd_yaw = self._command[1] * c.yaw_max
         grav = self._gravity_body()
@@ -235,6 +261,15 @@ class SpiderBotEnv(gym.Env):
         t = {}
         t["track_vx"] = c.w_track_vx * np.exp(-((cmd_vx - vx) ** 2) / c.track_sigma_vx ** 2)
         t["track_yaw"] = c.w_track_yaw * np.exp(-((cmd_yaw - yaw_rate) ** 2) / c.track_sigma_yaw ** 2)
+        # integrated command-pose tracking: be where the command says (kills spin, wander, and the
+        # "fake slow shuffle" gaming, because position/heading error accumulates over a few seconds)
+        pos_err2 = float(np.sum((self.data.qpos[0:2] - self._des_xy) ** 2))
+        t["track_pos"] = c.w_track_pos * np.exp(-pos_err2 / c.track_sigma_pos ** 2)
+        yaw_err = np.arctan2(np.sin(self._base_yaw() - self._des_yaw),
+                             np.cos(self._base_yaw() - self._des_yaw))
+        t["track_heading"] = c.w_track_heading * np.exp(-(yaw_err ** 2) / c.track_sigma_heading ** 2)
+        t["lat_vel"] = -c.w_lat_vel * v_body[1] ** 2                    # go straight, don't wander
+        t["ang_xy"] = -c.w_angvel_xy * (angv[0] ** 2 + angv[1] ** 2)    # no rolling/pitching jerks
         t["upright"] = -c.w_upright * (grav[0] ** 2 + grav[1] ** 2)
         t["height"] = -c.w_height * (self.data.qpos[2] - self.height_target) ** 2
         t["vz"] = -c.w_vz * self.data.qvel[2] ** 2
