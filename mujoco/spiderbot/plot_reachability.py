@@ -282,9 +282,13 @@ class Leg:
         return best
 
     def tip_after_ankle(self):
-        """With the loop already closed, set the foot || thigh and return tip (X,Z) rel. hip."""
-        self._set_ankle()
-        return (self.d.geom_xpos[self.g_foot] - self.d.xanchor[self.j_hip])[[0, 2]]
+        """With the loop already closed, set the foot || thigh and return (tip (X,Z) rel. hip,
+        ankle_out_of_range). ank_oob=True means the foot CANNOT be held parallel within the
+        +-60 deg ankle limit, i.e. this configuration is not physically reachable."""
+        a_star = self._set_ankle()
+        tip = (self.d.geom_xpos[self.g_foot] - self.d.xanchor[self.j_hip])[[0, 2]]
+        oob = not (self.ank_range[0] <= a_star <= self.ank_range[1])
+        return tip, oob
 
 
 def sweep(leg, nc, nt):
@@ -405,8 +409,11 @@ def compute_overlays(leg, g, n_cam=361, n_thigh=361):
         leg.d.qpos[3] = 1.0
         leg.d.qpos[leg.q_hip] = 0.0
 
-    # ---- (loop) cam || pushrod : sweep cam, solve (thigh, knee) ----
-    lx, lz, loop_cfg = [], [], []
+    # ---- (loop) cam(l2) || pushrod(l3) : sweep cam, solve (thigh, knee) ----
+    #   Keep only configs the leg can actually reach with the foot parallel within the +-60 deg
+    #   ankle limit. (The thigh||shin "leg extension" singularity is omitted entirely -- it needs
+    #   a 90 deg ankle to hold the foot parallel, so it is physically impossible to reach.)
+    lx, lz, loop_cfg, loop_poses = [], [], [], []
     for c in np.linspace(cam_lo, cam_hi, n_cam):
         for p in leg.pushrod_align_roots(c):
             reset()
@@ -414,54 +421,39 @@ def compute_overlays(leg, g, n_cam=361, n_thigh=361):
             leg.d.qpos[leg.q_push] = p
             (th, kn), ok = leg.close_loop_for(leg.q_thigh, leg.q_knee, seed=(0.0, 0.0))
             if ok and th_lo <= th <= th_hi:
-                x, z = leg.tip_after_ankle()
-                lx.append(x); lz.append(z); loop_cfg.append((c, th))
-
-    # ---- (knee) thigh || shin : fix knee straight, sweep thigh, solve (cam, pushrod) ----
-    reset()
-    k0 = leg.knee_straight_angle()
-    kx, kz, knee_cfg = [], [], []
-    if k0 is not None:
-        for t in np.linspace(th_lo, th_hi, n_thigh):
-            reset()
-            leg.d.qpos[leg.q_thigh] = t
-            leg.d.qpos[leg.q_knee] = k0
-            (cm, ps), ok = leg.close_loop_for(leg.q_cam, leg.q_push, seed=(0.0, 0.0))
-            if ok and cam_lo <= cm <= cam_hi:
-                x, z = leg.tip_after_ankle()
-                kx.append(x); kz.append(z); knee_cfg.append((cm, t))
+                (x, z), oob = leg.tip_after_ankle()
+                if not oob:                          # ankle within +-60 deg -> actually reachable
+                    lx.append(x); lz.append(z); loop_cfg.append((c, th))
+                    # capture the EXACT singular pose now (the aligned pushrod branch); the frame
+                    # must draw THIS, not re-solve via fk() which would pick a different branch.
+                    loop_poses.append(linkage_points(leg))
 
     # drop singular configs whose foot is > 20 cm from the reachable region (far, folded branches)
+    lx, lz = np.array(lx), np.array(lz)
     reach = np.column_stack([X[valid], Z[valid]])
+    if len(lx):
+        d2 = ((reach[:, 0][None, :] - lx[:, None]) ** 2 +
+              (reach[:, 1][None, :] - lz[:, None]) ** 2).min(axis=1)
+        keep = np.flatnonzero(d2 <= 0.20 ** 2)
+    else:
+        keep = np.array([], int)
+    lx, lz = lx[keep], lz[keep]
+    loop_cfg = [loop_cfg[i] for i in keep]
+    loop_poses = [loop_poses[i] for i in keep]
 
-    def near_reach(px, pz, cfg, tol=0.20):
-        keep = [i for i, (x, z) in enumerate(zip(px, pz))
-                if ((reach[:, 0] - x) ** 2 + (reach[:, 1] - z) ** 2).min() <= tol ** 2]
-        return (np.array([px[i] for i in keep]), np.array([pz[i] for i in keep]),
-                [cfg[i] for i in keep])
-
-    lx, lz, loop_cfg = near_reach(lx, lz, loop_cfg)
-    kx, kz, knee_cfg = near_reach(kx, kz, knee_cfg)
-
-    return dict(valid=valid, feas=feas,
-                lx=lx, lz=lz, loop_cfg=loop_cfg,
-                kx=kx, kz=kz, knee_cfg=knee_cfg, k0=k0)
+    return dict(valid=valid, feas=feas, lx=lx, lz=lz,
+                loop_cfg=loop_cfg, loop_poses=loop_poses)
 
 
 def draw_map(ax, g, ov):
-    """Draw the clean, MIRRORED reachability map: reachable region, both singularities, refs."""
+    """Draw the clean, MIRRORED reachability map: reachable region, singularity, refs."""
     vx = VIEW_X
     X, Z, v = g["X"], g["Z"], ov["valid"]
     ax.scatter(vx * X[v], Z[v], s=9, c="#2c9e3f", alpha=0.5, lw=0,
-               label="reachable, foot || thigh", zorder=4)
+               label="reachable, tarsometatarsus || femur", zorder=4)
     ax.scatter(vx * ov["lx"], ov["lz"], s=8, c="darkorange", lw=0, zorder=6,
-               label="singularity: cam || pushrod (shaft/cam aligned)")
-    ax.scatter(vx * ov["kx"], ov["kz"], s=8, c="purple", lw=0, zorder=7,
-               label="singularity: thigh || shin (knee / leg extension)")
+               label="singularity: l2 || l3 (aligned)")
     ax.plot(0, 0, "ks", ms=9, zorder=8, label="hip pivot (origin)")
-    if ov["feas"][g["i0"], g["j0"]]:
-        ax.plot(vx * X[g["i0"], g["j0"]], Z[g["i0"], g["j0"]], "k*", ms=15, zorder=8,
-                label="zero pose (cam=thigh=0)")
     ax.set_xlabel("X  (forward, m)  — mirrored")
     ax.set_ylabel("Z  (up, m)")
     # display-only: flip the sign of the horizontal-axis tick labels to match the user's
@@ -479,11 +471,11 @@ def draw_pose(ax, p):
     ax.plot([x("thigh"), x("knee"), x("ank"), x("ee")],                  # serial leg
             [p["thigh"][1], p["knee"][1], p["ank"][1], p["ee"][1]],
             color="#1f6fb0", lw=2.6, zorder=10, solid_capstyle="round",
-            label="leg (thigh-shin-foot)")
+            label="leg (femur–tibiotarsus–tarsometatarsus)")
     ax.plot([x("cam"), x("push"), x("ptip")],                            # parallel actuation
             [p["cam"][1], p["push"][1], p["ptip"][1]],
             color="#c0392b", lw=2.6, zorder=10, solid_capstyle="round",
-            label="cam + pushrod loop")
+            label="l2 + l3 loop")
     ax.plot([x("cam"), x("thigh")], [p["cam"][1], p["thigh"][1]],        # rigid hip block
             color="#555555", lw=3.2, zorder=9)
     joints = np.array([[vx * p[n][0], p[n][1]]
@@ -535,30 +527,25 @@ def render_pose_frames(g, ov, poses, outdir):
 
 def render_singularity_frames(leg, g, ov, outdir, per_family=40):
     """One image per SINGULAR configuration: the full linkage drawn AT each singularity, so its
-    end effector (black dot) lands on the mirrored singularity curve -- both are mirrored the
-    same way. loop_* = cam-pushrod dead-center, knee_* = leg-extension fold."""
+    end effector (black dot) lands on the mirrored singularity curve. loop_* = l2||l3 (cam-pushrod)
+    dead-center. (The femur||tibiotarsus 'leg extension' family is omitted -- unreachable.)"""
     import os
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     os.makedirs(outdir, exist_ok=True)
-    seed = np.array([0.0, 0.0])
     total = 0
-    for tag, cfg, desc in [
-            ("loop", ov["loop_cfg"], "cam-pushrod dead-center (shaft/cam aligned)"),
-            ("knee", ov["knee_cfg"], "thigh-knee leg-extension (det J = 0)")]:
-        cfg = list(cfg)
-        if len(cfg) > per_family:                        # even subsample across the curve
-            keep = np.linspace(0, len(cfg) - 1, per_family).round().astype(int)
-            cfg = [cfg[k] for k in dict.fromkeys(keep)]
-        for k, (c, t) in enumerate(cfg):
-            res, _ = leg.fk(c, t, seed)
-            if res is None:
-                continue
+    for tag, cfgs, poses, desc in [
+            ("loop", ov["loop_cfg"], ov["loop_poses"], "l2-l3 dead-center (aligned)")]:
+        idx = list(range(len(cfgs)))
+        if len(idx) > per_family:                        # even subsample across the curve
+            idx = list(dict.fromkeys(np.linspace(0, len(idx) - 1, per_family).round().astype(int)))
+        for k, i in enumerate(idx):
+            (c, t), pose = cfgs[i], poses[i]
             fig, ax = _fig()
             draw_map(ax, g, ov)
-            draw_pose(ax, linkage_points(leg))
-            ax.text(0.02, 0.02, f"{desc}\ncam = {c:+.3f}   thigh = {t:+.3f} rad",
+            draw_pose(ax, pose)                          # the EXACT captured singular pose
+            ax.text(0.02, 0.02, f"{desc}\nl2 = {c:+.3f}   femur = {t:+.3f} rad",
                     transform=ax.transAxes, fontsize=8, va="bottom",
                     bbox=dict(boxstyle="round", fc="white", alpha=0.85))
             ax.legend(loc="upper right", fontsize=8, framealpha=0.92)
