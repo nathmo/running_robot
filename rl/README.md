@@ -78,9 +78,14 @@ python -m rl.train --preset m2_walk --resume rl/runs/m2_walk/final_model.zip \
 ```
 
 **Headless Linux server (tmux):**
+
+```
+ssh nemo@100.119.154.43
+```
 ```bash
 tmux new -s train
 source .venv/bin/activate
+git reset --hard HEAD && git clean -fd && git pull
 python -m rl.train --preset m2_walk --steps 8000000 --n-envs $(($(nproc)-2)) --subproc --no-progress
 # detach: Ctrl-b then d   |   reattach: tmux attach -t train
 ```
