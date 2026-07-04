@@ -105,6 +105,10 @@ def main():
     ap.add_argument("--n-envs", type=int, default=None)
     ap.add_argument("--subproc", action="store_true", help="use SubprocVecEnv (true parallelism)")
     ap.add_argument("--resume", default=None, help="path to a .zip checkpoint to continue from")
+    ap.add_argument("--vecnormalize", default=None,
+                    help="VecNormalize .pkl to reload on resume (default: auto-match the checkpoint)")
+    ap.add_argument("--ent-coef", type=float, default=None,
+                    help="override ent_coef (e.g. anneal down when resuming a policy that already walks)")
     ap.add_argument("--no-progress", action="store_true", help="disable the rich progress bar (for logs)")
     args = ap.parse_args()
 
@@ -116,12 +120,29 @@ def main():
     run.mkdir(parents=True, exist_ok=True)
 
     vec_cls = SubprocVecEnv if (args.subproc and n_envs > 1) else DummyVecEnv
-    venv = vec_cls([make_env(args.preset) for _ in range(n_envs)])
-    venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=cfg.gamma)
+    base_venv = vec_cls([make_env(args.preset) for _ in range(n_envs)])
 
     if args.resume:
+        # reload the matching VecNormalize stats so obs/reward normalization CONTINUES (a fresh
+        # wrapper would reset them to mean 0 / var 1 and cause a big transient dip on resume).
+        from .evaluate import pick_vecnormalize
+        ckpt = args.resume[:-4] if args.resume.endswith(".zip") else args.resume
+        vn = Path(args.vecnormalize) if args.vecnormalize else \
+            pick_vecnormalize(Path(ckpt).parent, ckpt)   # stats live next to the checkpoint
+        if vn.exists():
+            venv = VecNormalize.load(str(vn), base_venv)
+            venv.training = True
+            venv.norm_reward = True
+            print(f"[train] resumed VecNormalize stats <- {vn}")
+        else:
+            venv = VecNormalize(base_venv, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=cfg.gamma)
+            print(f"[train] WARNING: no VecNormalize stats at {vn}; starting normalization fresh")
         model = PPO.load(args.resume, env=venv, tensorboard_log=str(run))
+        if args.ent_coef is not None:
+            model.ent_coef = args.ent_coef
+            print(f"[train] ent_coef override -> {args.ent_coef}")
     else:
+        venv = VecNormalize(base_venv, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=cfg.gamma)
         model = PPO(
             "MlpPolicy", venv,
             n_steps=cfg.n_steps, batch_size=cfg.batch_size, n_epochs=cfg.n_epochs,
@@ -140,8 +161,10 @@ def main():
         RewardTermCallback(),
         PlotCallback(run, every_steps=500_000),
     ]
-    # ramp the forward command from cmd_vx_frac_start up to cmd_vx_frac (skip if no ramp requested)
-    if cfg.curriculum_steps > 0 and cfg.cmd_vx_frac > cfg.cmd_vx_frac_start:
+    # ramp the forward command from cmd_vx_frac_start up to cmd_vx_frac (skip if no ramp requested).
+    # On resume the step counter restarts at 0, so skip the ramp and let the envs hold cmd_vx_frac
+    # at the preset target (re-ramping from 0 would throw away the walking the policy already learned).
+    if not args.resume and cfg.curriculum_steps > 0 and cfg.cmd_vx_frac > cfg.cmd_vx_frac_start:
         cb_list.append(CurriculumCallback(cfg.cmd_vx_frac, cfg.curriculum_steps, cfg.cmd_vx_frac_start))
         print(f"[train] curriculum: cmd_vx_frac {cfg.cmd_vx_frac_start} -> {cfg.cmd_vx_frac} "
               f"over {cfg.curriculum_steps} steps")

@@ -86,8 +86,11 @@ ssh nemo@100.119.154.43
 tmux new -s train
 source .venv/bin/activate
 git reset --hard HEAD && git clean -fd && git pull
-python -m rl.train --preset m2_walk --steps 8000000 --n-envs $(($(nproc)-2)) --subproc --no-progress
+python -m rl.train --preset m2_walk --steps 64000000 --n-envs $(($(nproc)-2)) --subproc --no-progress
 # detach: Ctrl-b then d   |   reattach: tmux attach -t train
+
+scp -r nemo@100.119.154.43:running_robot/rl/runs/* "C:\Users\Nathann\Downloads\running_robot\rl\runs\"                                      
+
 ```
 
 ## 4. Monitor training
