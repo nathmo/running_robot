@@ -93,6 +93,11 @@ class SpiderBotEnv(gym.Env):
         self._step = 0
 
     # ---------- helpers ----------
+    def set_cmd_vx_frac(self, frac):
+        """Curriculum hook: set the sampled forward-command fraction (called via VecEnv.env_method so
+        it reaches SubprocVecEnv worker processes too). Takes effect on the next command resample."""
+        self.cfg.cmd_vx_frac = float(frac)
+
     def _sensor_adr(self, name):
         sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, name)
         return self.model.sensor_adr[sid]
@@ -261,6 +266,13 @@ class SpiderBotEnv(gym.Env):
         t = {}
         t["track_vx"] = c.w_track_vx * np.exp(-((cmd_vx - vx) ** 2) / c.track_sigma_vx ** 2)
         t["track_yaw"] = c.w_track_yaw * np.exp(-((cmd_yaw - yaw_rate) ** 2) / c.track_sigma_yaw ** 2)
+        # forward progress along the commanded heading: fraction of the commanded speed actually
+        # achieved (clipped to [0,1] so it can't be gamed by lunging). Zero when no motion is
+        # commanded and zero for a spin-in-place (vx~=0), unlike track_vx which is maxed at vx=0.
+        if abs(cmd_vx) > 1e-6:
+            t["progress"] = c.w_progress * float(np.clip(vx / cmd_vx, 0.0, 1.0))
+        else:
+            t["progress"] = 0.0
         # integrated command-pose tracking: be where the command says (kills spin, wander, and the
         # "fake slow shuffle" gaming, because position/heading error accumulates over a few seconds)
         pos_err2 = float(np.sum((self.data.qpos[0:2] - self._des_xy) ** 2))
@@ -268,6 +280,10 @@ class SpiderBotEnv(gym.Env):
         yaw_err = np.arctan2(np.sin(self._base_yaw() - self._des_yaw),
                              np.cos(self._base_yaw() - self._des_yaw))
         t["track_heading"] = c.w_track_heading * np.exp(-(yaw_err ** 2) / c.track_sigma_heading ** 2)
+        # quadratic companions to the (bounded, saturating) exp tracking rewards: these keep a
+        # restoring gradient far from target, so a large spin/heading drift is actively pushed back.
+        t["yaw_rate"] = -c.w_yaw_rate * (yaw_rate - cmd_yaw) ** 2       # spinning is genuinely costly
+        t["heading_pen"] = -c.w_heading_pen * yaw_err ** 2             # accumulated heading drift
         t["lat_vel"] = -c.w_lat_vel * v_body[1] ** 2                    # go straight, don't wander
         t["ang_xy"] = -c.w_angvel_xy * (angv[0] ** 2 + angv[1] ** 2)    # no rolling/pitching jerks
         t["upright"] = -c.w_upright * (grav[0] ** 2 + grav[1] ** 2)

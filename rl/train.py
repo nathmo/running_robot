@@ -52,6 +52,27 @@ class RewardTermCallback(BaseCallback):
         self._sums, self._count = {}, 0
 
 
+class CurriculumCallback(BaseCallback):
+    """Linearly ramp the sampled forward-command fraction from `start` to `target` over `warmup`
+    timesteps, so the policy first learns to move a little before full speed is demanded. Pushes the
+    value into every worker env via env_method (works for DummyVecEnv and SubprocVecEnv alike)."""
+    def __init__(self, target, warmup, start=0.0):
+        super().__init__()
+        self.target, self.warmup, self.start = float(target), int(warmup), float(start)
+
+    def _apply(self):
+        frac = 1.0 if self.warmup <= 0 else min(1.0, self.num_timesteps / self.warmup)
+        val = self.start + frac * (self.target - self.start)
+        self.training_env.env_method("set_cmd_vx_frac", val)
+        self.logger.record("curriculum/cmd_vx_frac", val)
+
+    def _on_rollout_start(self) -> None:   # once per rollout is plenty; avoids per-step IPC
+        self._apply()
+
+    def _on_step(self) -> bool:
+        return True
+
+
 class PlotCallback(BaseCallback):
     """Periodically (and at the end) render training_plots.png from progress.csv. Never fatal."""
     def __init__(self, run_dir, every_steps=500_000):
@@ -113,12 +134,18 @@ def main():
     # log to CSV (for plots) + TensorBoard + stdout, all in the run dir
     model.set_logger(configure(str(run), ["stdout", "csv", "tensorboard"]))
 
-    callbacks = CallbackList([
+    cb_list = [
         CheckpointCallback(save_freq=max(200_000 // n_envs, 1), save_path=str(run),
                            name_prefix="ppo", save_vecnormalize=True),
         RewardTermCallback(),
         PlotCallback(run, every_steps=500_000),
-    ])
+    ]
+    # ramp the forward command from cmd_vx_frac_start up to cmd_vx_frac (skip if no ramp requested)
+    if cfg.curriculum_steps > 0 and cfg.cmd_vx_frac > cfg.cmd_vx_frac_start:
+        cb_list.append(CurriculumCallback(cfg.cmd_vx_frac, cfg.curriculum_steps, cfg.cmd_vx_frac_start))
+        print(f"[train] curriculum: cmd_vx_frac {cfg.cmd_vx_frac_start} -> {cfg.cmd_vx_frac} "
+              f"over {cfg.curriculum_steps} steps")
+    callbacks = CallbackList(cb_list)
 
     print(f"[train] preset={args.preset} n_envs={n_envs} ({vec_cls.__name__}) "
           f"total_steps={total} -> {run}")

@@ -23,6 +23,10 @@ class Config:
     cmd_yaw_frac: float = 0.0
     p_stand: float = 0.2                # fraction of episodes/commands forced to exactly (0,0)
     cmd_resample_s: float = 4.0         # resample the command every few seconds within an episode
+    # forward-command curriculum: linearly ramp cmd_vx_frac from *_start up to cmd_vx_frac over
+    # curriculum_steps timesteps, so the policy learns to move a little before full speed is demanded.
+    cmd_vx_frac_start: float = 0.0
+    curriculum_steps: int = 8_000_000   # 0 disables the ramp (cmd_vx_frac used from the start)
 
     # ----- observation -----
     history_len: int = 5                # number of past control steps stacked into the observation
@@ -36,6 +40,13 @@ class Config:
     # ----- reward weights -----
     w_track_vx: float = 1.0
     w_track_yaw: float = 0.5
+    # forward progress along the commanded heading: only pays for REAL translation in the commanded
+    # direction, so a spin-in-place (vx~=0) earns nothing (unlike track_vx, which is happy at vx=0).
+    w_progress: float = 1.0
+    # quadratic (unbounded) penalties that keep a restoring gradient even far from target, where the
+    # exp-kernel tracking rewards saturate to ~0 gradient and can't pull the robot back from a spin.
+    w_yaw_rate: float = 2.0             # penalize (yaw_rate - cmd_yaw)^2 -> spinning is genuinely costly
+    w_heading_pen: float = 1.0          # penalize accumulated heading error^2 (companion to track_heading)
     w_upright: float = 5.0
     w_height: float = 10.0
     w_vz: float = 1.0
@@ -49,7 +60,7 @@ class Config:
     foot_air_time_min: float = 0.3      # seconds; the minimum useful step (swing) duration
     fall_penalty: float = 200.0
     track_sigma_vx: float = 0.25        # width of the exp tracking kernel (m/s)
-    track_sigma_yaw: float = 0.25       # (rad/s)
+    track_sigma_yaw: float = 0.5        # (rad/s); widened so the kernel keeps gradient out to the spin
     height_target: float = 1.1103       # standing torso height; the env DERIVES this from the
     #                                     keyframe at load time (this value is only for reference)
     # anti-crossing: keep the feet apart laterally so the legs don't cross / scissor.
@@ -63,7 +74,7 @@ class Config:
     w_track_pos: float = 2.0            # reward for the base being at the integrated target xy
     track_sigma_pos: float = 0.4        # m; width of the position tracking kernel
     w_track_heading: float = 1.5        # reward for the base heading matching the integrated target
-    track_sigma_heading: float = 0.35   # rad; width of the heading tracking kernel (~20 deg)
+    track_sigma_heading: float = 0.6    # rad; widened so the kernel keeps gradient past a large drift
     w_lat_vel: float = 1.0              # penalize body-frame lateral velocity (go straight, no wander)
     w_angvel_xy: float = 0.05           # penalize roll/pitch angular velocity (steadier, less jerky)
 
@@ -96,8 +107,8 @@ class Config:
     gae_lambda: float = 0.95
     learning_rate: float = 3.0e-4
     clip_range: float = 0.2
-    ent_coef: float = 0.005             # small entropy bonus: keep exploring so std doesn't collapse
-    #                                     onto a bad local optimum (a prior run collapsed to std~0.14)
+    ent_coef: float = 0.015             # entropy bonus: keep exploring so std doesn't collapse onto a
+    #                                     bad local optimum (prior runs collapsed to std~0.14 at 0.005)
     seed: int = 0
     policy_hidden: List[int] = field(default_factory=lambda: [256, 256])
 
@@ -112,8 +123,10 @@ def m1_stand() -> Config:
 
 
 def m2_walk() -> Config:
-    """Milestone 2: track forward velocity (curriculum raises cmd_vx_frac toward 1.0)."""
-    return Config(cmd_vx_frac=0.3, cmd_yaw_frac=0.0, p_stand=0.2)
+    """Milestone 2: track forward velocity. The curriculum ramps cmd_vx_frac 0 -> target over
+    curriculum_steps; vx_max is lowered and p_stand cut so a real (achievable) forward speed is
+    demanded almost everywhere, instead of the policy hiding in the vx~=0 / stand regime."""
+    return Config(cmd_vx_frac=0.6, cmd_yaw_frac=0.0, p_stand=0.05, vx_max=1.0)
 
 
 def m3_turn() -> Config:
