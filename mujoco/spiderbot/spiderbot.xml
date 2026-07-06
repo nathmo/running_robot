@@ -63,6 +63,7 @@
               <geom name="FootLeftNCS-v1_geom" type="mesh" mesh="FootLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
               <inertial mass="0.2593184686605107" pos="-0.004826310056437695 0.000377045846251916 -0.10466467671885393" fullinertia="0.002977353834372901 0.0029710075575362926 6.48202275597754e-05 1.8008833281898528e-06 0.00016835822851597433 -1.5300654913384665e-05" />
               <geom name="foot_L_col" class="collision" type="sphere" size="0.025" pos="-3.74889e-10 1.77817e-11 -0.3115" />
+              <geom name="heel_L_col" class="collision" type="sphere" size="0.03" pos="-0.0256445 0 0.0749563" />
             </body>
             <site name="leg_anchor_L" pos="-0.0660502 -0.0002 0.026337" />
           </body>
@@ -102,6 +103,7 @@
               <geom name="FootRightNCS-v1_geom" type="mesh" mesh="FootRightNCS-v1" pos="0 0 0" euler="0 0 0" />
               <inertial mass="0.2595337393532014" pos="-0.00495501786349592 -0.0002889852253573598 -0.10446233298751854" fullinertia="0.0029818113070248725 0.0029754461909895025 6.489538219984233e-05 -1.780827480301131e-06 0.0001697255481799458 1.4448304899687008e-05" />
               <geom name="foot_R_col" class="collision" type="sphere" size="0.025" pos="1.99588e-10 1.05647e-11 -0.3115" />
+              <geom name="heel_R_col" class="collision" type="sphere" size="0.03" pos="-0.0262104 0 0.0749022" />
             </body>
             <site name="leg_anchor_R" pos="-0.0670644 0.0002 0.0274238" />
           </body>

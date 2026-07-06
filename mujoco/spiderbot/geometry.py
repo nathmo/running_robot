@@ -84,6 +84,24 @@ def foot_tips():
     return out
 
 
+def foot_heels():
+    """The far (ankle) end of the foot: the mesh vertex FARTHEST from the toe tip, projected onto
+    the foot's mid-plane (y=0), in foot-body-local frame. A heel collision sphere here is clear of
+    the floor in the nominal toe-down stance (it sits ~28 cm up) but catches the floor if the leg
+    folds and the foot flattens — a physical stop so the long foot can't clip through the ground,
+    which the toe sphere alone can't prevent."""
+    m, d = _load()
+    tips = foot_tips()
+    out = {}
+    for s, names in _SIDES.items():
+        verts_local = _to_body_local(m, d, _mesh_world(m, d, names["foot"] + "_geom"), names["foot"])
+        heel = verts_local[np.argmax(np.linalg.norm(verts_local - tips[s], axis=1))]
+        heel = heel.copy()
+        heel[1] = 0.0                                   # onto the foot mid-plane
+        out[s] = heel
+    return out
+
+
 if __name__ == "__main__":
     np.set_printoptions(precision=5, suppress=True)
     la, ft = loop_anchors(), foot_tips()

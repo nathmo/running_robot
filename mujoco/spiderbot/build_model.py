@@ -16,14 +16,18 @@ Re-run after CAD regen:  .venv/Scripts/python.exe mujoco/spiderbot/build_model.p
 import xml.etree.ElementTree as ET
 import numpy as np
 import mujoco
-from geometry import loop_anchors, foot_tips
+from geometry import loop_anchors, foot_tips, foot_heels
 
 # slight thigh-forward crouch used as the standing init pose (feet under the CoM)
 INIT_CTRL = np.array([0.0, 0.0, 0.12, 0.0, 0.0, -0.12])
-# Only a small sphere at each foot tip touches the floor (a point/ball foot). Everything else
-# is non-colliding, so the policy cannot rest other parts on the ground (which would damage the
-# real robot). The robot must therefore actively balance / step in place.
+# A small sphere at each foot TIP is the walking contact (a point/ball foot): the robot must
+# actively balance / step on its toe points. A second sphere at the far (ankle) end of the foot is
+# a HEEL STOP — it clears the floor in the toe-down stance (~28 cm up) so normal contact stays
+# toe-only, but it catches the floor if the leg folds and the long foot flattens, so the foot can
+# physically never clip through the ground. (Without it the ghost foot mesh traversed the floor,
+# and the old vertex-scan termination that guarded against that fired on every leg-fold.)
 FOOT_SPHERE_R = 0.025
+HEEL_SPHERE_R = 0.03
 
 
 def compute_standing_keyframe(model, init_ctrl):
@@ -140,7 +144,7 @@ def add_motor_masses(root):
 
 
 def build():
-    anchors, tips = loop_anchors(), foot_tips()
+    anchors, tips, heels = loop_anchors(), foot_tips(), foot_heels()
     tree = ET.parse(OPEN_B)
     root = tree.getroot()
     root.set("model", "spiderbot")
@@ -233,6 +237,9 @@ def build():
         bodies[foot].append(ET.fromstring(
             f'<geom name="foot_{s}_col" class="collision" type="sphere" '
             f'size="{FOOT_SPHERE_R}" pos="{f3(tips[s])}"/>'))
+        bodies[foot].append(ET.fromstring(
+            f'<geom name="heel_{s}_col" class="collision" type="sphere" '
+            f'size="{HEEL_SPHERE_R}" pos="{f3(heels[s])}"/>'))
 
     # equality: close both loops
     eq = ET.SubElement(root, "equality")

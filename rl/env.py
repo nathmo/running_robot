@@ -43,30 +43,27 @@ class SpiderBotEnv(gym.Env):
         self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")
         self._gyro_adr = self._sensor_adr("imu_gyro")
 
-        # foot-tip spheres + floor, for the gait-shaping rewards (sim contact, reward-only)
+        # foot spheres + floor, for the gait-shaping rewards (sim contact, reward-only). The TOE
+        # sphere is the walking contact (gait logic keys on it); the HEEL sphere is a passive floor
+        # stop (clears the toe-down stance, catches the floor only if the leg folds / foot flattens
+        # so the foot can never clip through the ground — see build_model.py).
         self.floor_gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
         self.foot_gids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col")
                           for s in "LR"]
         self.foot_gids_arr = np.array(self.foot_gids)
         self._toe_r = float(self.model.geom_size[self.foot_gids[0]][0])
+        # all foot collision spheres (toe + heel), for the deep-penetration safety check
+        self._col_gids = {}
+        for s in "LR":
+            for kind in ("foot", "heel"):
+                g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"{kind}_{s}_col")
+                if g >= 0:
+                    self._col_gids[g] = float(self.model.geom_size[g][0])
         self._air_time = np.zeros(2, np.float32)     # continuous seconds NOT grounded, per foot
         self._contact_time = np.zeros(2, np.float32)  # continuous seconds grounded, per foot
         self._grounded_prev = np.zeros(2, bool)
         self._prev_toe_xy = np.zeros((2, 2))
         self._push_countdown = 0
-
-        # Parts that must NOT dip below the floor (only the toe spheres may touch). Precompute a
-        # subsampled set of each mesh's vertices so we can cheaply test true floor penetration.
-        self._nofloor = []
-        for nm in ("FootLeftNCS-v1_geom", "FootRightNCS-v1_geom",
-                   "LegLeftNCS-v1_geom", "LegRightNCS-v1_geom"):
-            g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, nm)
-            mid = self.model.geom_dataid[g]
-            a, k = self.model.mesh_vertadr[mid], self.model.mesh_vertnum[mid]
-            v = self.model.mesh_vert[a:a + k].reshape(-1, 3)
-            if len(v) > 256:
-                v = v[np.linspace(0, len(v) - 1, 256).astype(int)]
-            self._nofloor.append((g, v.copy()))
 
         # nominal standing pose / targets from the keyframe
         self.key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, self.cfg.keyframe)
@@ -171,26 +168,19 @@ class SpiderBotEnv(gym.Env):
         return float(y[0] - y[1])
 
     def _floor_violation(self):
-        """Only the LOWER half of each toe sphere may touch the floor (resting on top of it).
-        Forbidden (kill the episode) if either:
-          (a) a toe sphere has sunk deep into the floor (penetration beyond half its radius);
-          (b) any other foot/shin point dips below the floor -> the 'rest of the foot' is traversing.
-        Both would damage the real robot, so they must never be a usable strategy."""
-        # (a) deep toe penetration. (The old upper-hemisphere test needed ~2r of penetration to
-        # fire — geometrically impossible before the solver explodes, i.e. it protected nothing.)
+        """Safety check: a foot collision sphere (toe or heel) has sunk deep into the floor
+        (penetration past half its radius) -> the solver is being driven through the ground.
+        The foot can no longer clip through the floor by geometry alone (the toe + heel spheres
+        physically stop it), so the old foot/shin mesh-vertex scan is gone: it fired on every
+        normal leg-fold when the ghost foot mesh dipped a centimetre below the floor, capping
+        episodes at ~1 s and blocking all learning."""
         for i in range(self.data.ncon):
             con = self.data.contact[i]
             pair = (con.geom1, con.geom2)
             if self.floor_gid in pair:
-                for fg in self.foot_gids:
-                    if fg in pair and con.dist < -0.5 * self._toe_r:
+                for g, r in self._col_gids.items():
+                    if g in pair and con.dist < -0.5 * r:
                         return True
-        # (b) any foot/shin mesh vertex below the floor
-        tol = self.cfg.floor_penetration_tol
-        for g, v in self._nofloor:
-            R = self.data.geom_xmat[g].reshape(3, 3)
-            if (v @ R.T + self.data.geom_xpos[g])[:, 2].min() < -tol:
-                return True
         return False
 
     def _proprio(self):

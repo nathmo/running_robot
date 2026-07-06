@@ -128,9 +128,9 @@ class Config:
     episode_s: float = 20.0
     term_height: float = 0.45           # torso below this -> fall
     term_gravity_z: float = -0.5        # body-frame gravity z above this (less negative) -> tipped > 60 deg
-    floor_penetration_tol: float = 0.005  # only the toe spheres may touch; if any foot/shin point
-    #                                     sinks deeper than this below the floor -> terminate (was
-    #                                     2 cm, wide enough to 'kneel-ski' force-free through it)
+    # (no floor-penetration tolerance knob any more: the toe + heel collision spheres physically
+    # stop the foot from clipping through the ground, so only a deep-penetration solver-blowup
+    # check remains in env._floor_violation — nothing to tune.)
     reset_joint_noise: float = 0.03     # rad of random noise added to the standing pose on reset
     # gentle random base pushes: destabilize the both-feet-planted equilibrium (a push during
     # double support forces a step) and train the step-recovery a real floor demands.
