@@ -78,6 +78,29 @@ def parse_status(data):
     return {"pos": pos, "spd": spd, "cur": cur, "temp": temp, "err": err}
 
 
+def count_position_streams(bus, controller_id, seconds=0.6):
+    """Count distinct ~5deg position buckets seen for `controller_id` over a window.
+
+    A single idle motor yields 1; several motors sharing this id yield several
+    (they broadcast different positions on the same arbitration id). Keep motors
+    still while calling -- one moving motor can also span multiple buckets.
+    """
+    buckets = set()
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        msg = bus.recv(timeout=remaining)
+        if msg is None:
+            break
+        if msg.is_extended_id and (msg.arbitration_id & 0xFF) == controller_id:
+            st = parse_status(msg.data)
+            if st:
+                buckets.add(round(st["pos"] / 5.0))
+    return len(buckets)
+
+
 def read_status(bus, controller_id, timeout=1.0):
     """Wait for a status frame from `controller_id` and return the decoded dict."""
     deadline = time.time() + timeout
@@ -108,6 +131,8 @@ def main():
                          "is cut (default: amp + 5 deg margin). Guards a bugged start pos.")
     ap.add_argument("--duration", type=float, default=0.0,
                     help="run time in s (0 = until Ctrl+C)")
+    ap.add_argument("--force", action="store_true",
+                    help="skip the shared-id pre-flight check (dangerous)")
     args = ap.parse_args()
 
     if args.amp > 30:
@@ -118,6 +143,19 @@ def main():
     print(f"Opening {args.interface}:{args.channel} @ {args.bitrate} bps, motor id={args.id}")
     bus = can.Bus(interface=args.interface, channel=args.channel, bitrate=args.bitrate)
     try:
+        # PRE-FLIGHT: if several motors share this CAN id, their status frames interleave
+        # and every command drives all of them -- closed-loop control is impossible and
+        # the feedback is meaningless. Refuse to run unless --force.
+        if not args.force:
+            n = count_position_streams(bus, args.id, seconds=0.6)
+            if n > 1:
+                print(f"ABORT: motor id {args.id} shows {n} distinct position streams -> "
+                      f"multiple motors share this CAN id. Every SET_POS would drive all of "
+                      f"them and the feedback is ambiguous. Give each motor a unique id "
+                      f"(CubeMars GUI, one at a time) before running position control here.\n"
+                      f"(Keep the motors still during this check; use --force to override.)")
+                return
+
         st = read_status(bus, args.id, timeout=1.5)
         if st is None:
             print(f"No status frame from motor {args.id}. Is it powered / in servo mode / "

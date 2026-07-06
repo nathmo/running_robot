@@ -46,8 +46,8 @@ DEFAULT_ID = 104
 KT_OUTPUT = 1.0
 
 # Safety clamps
-MAX_TORQUE_NM = 0.1      # hard ceiling on the torque you asked for
-MAX_CURRENT_A = 0.5      # independent absolute ceiling on commanded current
+MAX_TORQUE_NM = 1      # hard ceiling on the torque you asked for
+MAX_CURRENT_A = 2      # independent absolute ceiling on commanded current
 MAX_SPEED_ERPM = 5000.0  # runaway guard: cut current if the shaft spins faster.
 # NOTE: ERPM is ELECTRICAL rpm = mechanical_rotor_rpm * pole_pairs (~21 on AK80),
 # so 5000 ERPM ~= 240 rotor rpm, less at the output after the gearbox. On a free
