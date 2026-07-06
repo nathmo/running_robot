@@ -84,41 +84,70 @@ def parse_servo_status(data):
 
 
 def passive_listen(bus, seconds):
-    """Listen quietly and report any traffic, decoding servo-mode status frames."""
+    """Listen quietly and report traffic.
+
+    Motors that share a CAN ID appear as ONE arbitration id carrying SEVERAL
+    distinct payload streams. We group frames per id, then per id split them into
+    streams by (rounded) reported position -- so three idle motors on one shared id
+    show up as three streams. Keep motors roughly still while scanning for this to
+    separate cleanly (a moving motor sweeps through many positions).
+    """
     print(f"[1/2] Passive listen for {seconds:.1f}s (catches servo-mode motors)...")
-    seen_std, seen_servo = {}, {}
+    aids = {}   # aid -> {"count", "ext", "streams": {poskey: [st, data, count]}}
+    errors = 0
     deadline = time.time() + seconds
     while time.time() < deadline:
         msg = bus.recv(timeout=0.2)
         if msg is None:
             continue
-        if msg.is_extended_id:
-            ctrl_id = msg.arbitration_id & 0xFF
-            cmd = (msg.arbitration_id >> 8) & 0xFF
-            key = (ctrl_id, cmd)
-            if key not in seen_servo:
-                seen_servo[key] = (msg.arbitration_id, bytes(msg.data))
-                tag = " (STATUS)" if cmd == CAN_PACKET_STATUS else ""
-                print(f"      ext id=0x{msg.arbitration_id:08X}  motor={ctrl_id}  "
-                      f"cmd={cmd}{tag}  data={bytes(msg.data).hex(' ')}")
-                if cmd == CAN_PACKET_STATUS:
-                    st = parse_servo_status(msg.data)
-                    if st:
-                        print(f"          -> pos={st['pos_deg']:.1f}deg "
-                              f"speed={st['speed_erpm']:.0f}erpm "
-                              f"I={st['current_A']:.2f}A "
-                              f"temp={st['temp_C']}C err={st['error']}")
+        # Error frames on SocketCAN surface here -- a wiring/bitrate/collision signal.
+        if getattr(msg, "is_error_frame", False):
+            errors += 1
+            continue
+        aid = msg.arbitration_id
+        data = bytes(msg.data)
+        rec = aids.setdefault(aid, {"count": 0, "ext": msg.is_extended_id, "streams": {}})
+        rec["count"] += 1
+        st = parse_servo_status(data) if (msg.is_extended_id and len(data) >= 8) else None
+        # Group by ~5deg position bucket (stable for an idle motor); else by raw bytes.
+        poskey = round(st["pos_deg"] / 5.0) if st else data.hex()
+        stream = rec["streams"].setdefault(poskey, [st, data, 0])
+        stream[2] += 1
+
+    motors, apparent_devices = set(), 0
+    for aid in sorted(aids):
+        rec = aids[aid]
+        nstreams = len(rec["streams"])
+        apparent_devices += nstreams if rec["ext"] else 1
+        if rec["ext"]:
+            mid, cmd = aid & 0xFF, (aid >> 8) & 0xFF
+            motors.add(mid)
+            shared = ("   <-- SHARED ID: multiple motors on the same id!"
+                      if nstreams > 1 else "")
+            print(f"      ext id=0x{aid:08X}  motor_id={mid}  cmd={cmd}  "
+                  f"frames={rec['count']}  streams={nstreams}{shared}")
+            for st, data, c in rec["streams"].values():
+                if st:
+                    print(f"          - pos={st['pos_deg']:8.1f}deg  I={st['current_A']:5.2f}A  "
+                          f"temp={st['temp_C']}C  err={st['error']}  ({c} frames)")
+                else:
+                    print(f"          - {data.hex(' ')}  ({c} frames)")
         else:
-            if msg.arbitration_id not in seen_std:
-                seen_std[msg.arbitration_id] = bytes(msg.data)
-                print(f"      std id=0x{msg.arbitration_id:03X}  "
-                      f"data={bytes(msg.data).hex(' ')}")
-    servo_motors = sorted({c for c, _ in seen_servo})
-    if servo_motors:
-        print(f"      -> servo-mode motor IDs broadcasting: {servo_motors}")
-    elif not seen_std:
+            print(f"      std id=0x{aid:03X}  frames={rec['count']}")
+
+    if errors:
+        print(f"      !! {errors} CAN ERROR frames during listen -> bitrate/wiring, "
+              f"or shared-id frames starting to overlap.")
+    if motors:
+        print(f"      -> distinct CAN IDs seen: {sorted(motors)}  |  "
+              f"apparent motor count (by payload stream): {apparent_devices}")
+        if apparent_devices > len(motors):
+            print("      -> MORE motors than CAN IDs: some motors share an ID and CANNOT "
+                  "be addressed individually. Assign each a unique ID in the CubeMars GUI "
+                  "(one motor connected at a time).")
+    elif not aids:
         print("      -> no spontaneous traffic (normal if all motors are in MIT mode).")
-    return servo_motors
+    return sorted(motors)
 
 
 def mit_probe(bus, ids):
