@@ -91,6 +91,8 @@ python -m rl.train --preset m2_walk --steps 64000000 --n-envs $(($(nproc)-2)) --
 
 scp -r nemo@100.119.154.43:running_robot/rl/runs/* "C:\Users\Nathann\Downloads\running_robot\rl\runs\"                                      
 
+
+
 ```
 
 ## 4. Monitor training
@@ -109,6 +111,8 @@ python -m rl.plot_training --run rl/runs/m2_walk
 **TensorBoard (live, interactive).** Same scalars, including `reward_terms/*`:
 ```bash
 python -m tensorboard.main --logdir rl/runs        # open http://localhost:6006
+ssh -L 6006:localhost:6006 nemo@128.178.96.208 # on my host not the server
+
 ```
 Watch **`rollout/ep_len_mean`** (climbs toward the 1000-step cap as it stops falling) and
 **`rollout/ep_rew_mean`**. Expect a long flat early phase, then a sharp take-off. If
