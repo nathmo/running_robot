@@ -15,7 +15,8 @@ How it works:
 
 Servo-mode protocol (confirmed against CubeMars firmware / TMotorCANControl):
   extended id = controller_id | (command << 8)
-  CAN_PACKET_SET_POS     = 4 : data = int32(pos_deg   * 1_000_000), big-endian
+  CAN_PACKET_SET_POS     = 4 : data = int32(pos_deg   * 10_000), big-endian
+                               (multi-turn range +/-36000 deg; manual V1.0.14 sec 5.1.5)
   CAN_PACKET_SET_CURRENT = 1 : data = int32(amps      * 1_000),     big-endian
   status frame           : pos = int16BE * 0.1 deg, spd = int16BE * 10 ERPM,
                            cur = int16BE * 0.01 A, temp = int8 degC, err = uint8
@@ -55,8 +56,10 @@ def send_servo(bus, controller_id, command, payload):
 
 
 def set_pos(bus, controller_id, pos_deg):
-    # int32, big-endian, degrees * 1e6. Clamp to int32 range for safety.
-    val = int(round(pos_deg * 1_000_000.0))
+    # int32, big-endian, degrees * 10000 (CubeMars manual V1.0.14 sec 5.1.5:
+    # range -360000000..360000000 == -36000..36000 deg). NOT *1e6 -- that overflows
+    # the +/-36000 deg multi-turn range and drives the motor to a false far target.
+    val = int(round(pos_deg * 10_000.0))
     val = max(-2_147_483_648, min(2_147_483_647, val))
     send_servo(bus, controller_id, CAN_PACKET_SET_POS, struct.pack(">i", val))
 
