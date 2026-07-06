@@ -1,12 +1,12 @@
 <mujoco model="spiderbot">
   <compiler angle="radian" meshdir="../../robotCADdescription/MJCF_OPEN_MUJOCO_B/SpiderBot" autolimits="true" />
-  <option timestep="0.001" integrator="implicitfast" cone="elliptic" solver="Newton" iterations="100" ls_iterations="50" />
+  <option timestep="0.001" integrator="implicitfast" cone="elliptic" impratio="10" solver="Newton" iterations="100" ls_iterations="50" />
   <default>
     <default class="spiderbot">
       <geom contype="0" conaffinity="0" group="2" />
       <site group="4" size="0.012" rgba="0.95 0.45 0.1 1" />
       <default class="collision">
-        <geom contype="1" conaffinity="1" group="3" condim="3" friction="1 0.005 0.0001" rgba="0.2 0.8 0.2 0.4" />
+        <geom contype="1" conaffinity="1" group="3" condim="6" friction="1 0.008 0.001" solref="0.01 1" solimp="0.95 0.99 0.001" rgba="0.2 0.8 0.2 0.4" />
       </default>
     </default>
   </default>
@@ -29,7 +29,7 @@
   </asset>
   <worldbody>
     <light name="top" pos="0 0 3" dir="0 0 -1" directional="true" />
-    <geom name="floor" type="plane" size="0 0 0.05" material="grid" contype="1" conaffinity="1" condim="3" friction="1 0.005 0.0001" />
+    <geom name="floor" type="plane" size="0 0 0.05" material="grid" contype="1" conaffinity="1" condim="6" friction="1 0.008 0.001" solref="0.01 1" solimp="0.95 0.99 0.001" />
     <body name="bodyNCS-v1" pos="0.0 0.0 0.0" euler="-0.0 0.0 -0.0" childclass="spiderbot">
       <freejoint name="root" />
       <site name="imu" pos="0 0 0" size="0.015" rgba="0.1 0.5 0.95 1" />
@@ -67,6 +67,12 @@
             <site name="leg_anchor_L" pos="-0.0660502 -0.0002 0.026337" />
           </body>
         </body>
+        <body name="motor_cam_L" pos="-0.149 0.0519 -2.94348e-11">
+          <inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" />
+        </body>
+        <body name="motor_thigh_L" pos="0.101 0.0461 -2.94348e-11">
+          <inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" />
+        </body>
       </body>
       <body name="HipRightNCS-v1" pos="0.027294924660796194 -0.128000000008613 -2.9434570614155416e-11" euler="-0.02113283630637985 -9.758161424931729e-16 2.4800326191296027e-16">
         <joint name="bodyNCS-v1_Révolution-2" type="hinge" axis="1.0 -2.4800326191296027e-16 -9.758161424931729e-16" pos="7.533920380609072e-08 7.98908634178733e-12 2.961000172112301e-11" damping="0.1" armature="0.046" limited="true" range="-0.785 0.785" />
@@ -100,6 +106,18 @@
             <site name="leg_anchor_R" pos="-0.0670644 0.0002 0.0274238" />
           </body>
         </body>
+        <body name="motor_cam_R" pos="-0.149 -0.0518996 2.96087e-07">
+          <inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" />
+        </body>
+        <body name="motor_thigh_R" pos="0.101 -0.0461003 -1.57383e-07">
+          <inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" />
+        </body>
+      </body>
+      <body name="motor_hip_roll_L" pos="0.027295 0.128 2.06795e-25">
+        <inertial pos="0 0 0" mass="0.75" diaginertia="0.001 0.001 0.001" />
+      </body>
+      <body name="motor_hip_roll_R" pos="0.027295 -0.128 0">
+        <inertial pos="0 0 0" mass="0.75" diaginertia="0.001 0.001 0.001" />
       </body>
     </body>
   </worldbody>
@@ -139,6 +157,6 @@
     <actuatorfrc name="thigh_R_frc" actuator="thigh_R" />
   </sensor>
   <keyframe>
-    <key name="stand" qpos="0 0 1.11033 1 0 0 0 -2.09908e-08 -2.10772e-09 -0.0907561 0.12 0.25576 -0.7 2.06858e-08 -2.5577e-09 -0.0913062 -0.12 -0.249943 0.7" ctrl="0 0 0.12 0 0 -0.12" />
+    <key name="stand" qpos="0 0 1.02348 1 0 0 0 0.000699965 -0.033502 -0.13113 0.117592 0.175174 -0.25218 -0.00126709 0.0338872 -0.131715 -0.117287 -0.169904 0.257397" ctrl="0 0 0.12 0 0 -0.12" />
   </keyframe>
 </mujoco>

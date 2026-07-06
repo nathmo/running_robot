@@ -20,6 +20,23 @@ from .config import get_config
 from .env import SpiderBotEnv
 
 
+def infer_preset(run: Path):
+    """The preset recorded at train time (preset.json), else the longest preset name contained
+    in the run folder name (rl/runs/m2_walk_cont -> m2_walk). Evaluating an m2 policy under the
+    old m1_stand default silently showed a standing robot with near-zero 'tracking error'."""
+    import json
+    from .config import PRESETS
+    rec = run / "preset.json"
+    if rec.exists():
+        p = json.loads(rec.read_text()).get("preset")
+        if p in PRESETS:
+            return p
+    hits = [p for p in PRESETS if p != "default" and p in run.name]
+    if not hits:
+        raise SystemExit(f"cannot infer a preset from run name '{run.name}'; pass --preset")
+    return max(hits, key=len)
+
+
 def pick_model(run: Path, checkpoint):
     if checkpoint:
         return checkpoint
@@ -47,7 +64,10 @@ def pick_vecnormalize(run: Path, model_path: str):
 
 
 def build(run: Path, preset, checkpoint):
-    raw = SpiderBotEnv(get_config(preset))
+    cfg = get_config(preset)
+    cfg.push_interval_s = 0.0   # random shoves are a TRAINING disturbance; evaluation, videos and
+    #                             the gait-probe gates must measure the policy, not push recovery
+    raw = SpiderBotEnv(cfg)
     venv = DummyVecEnv([lambda: raw])
     model_path = pick_model(run, checkpoint)
     vn = pick_vecnormalize(run, model_path)
@@ -69,7 +89,7 @@ def set_command(raw, vx, yaw):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
-    ap.add_argument("--preset", default="m1_stand")
+    ap.add_argument("--preset", default=None, help="default: inferred from the run name")
     ap.add_argument("--checkpoint", default=None, help="model path w/o .zip (default: final / latest)")
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--vx", type=float, default=None, help="fixed forward command in [-1,1]")
@@ -77,10 +97,14 @@ def main():
     ap.add_argument("--video", default=None, help="path to write an mp4 of episode 1")
     ap.add_argument("--seconds", type=float, default=8.0, help="max video length")
     ap.add_argument("--viewer", action="store_true", help="live passive viewer (local only)")
+    ap.add_argument("--stochastic", action="store_true",
+                    help="sample actions like training does (a policy with a large std behaves "
+                         "differently deterministic vs sampled — check the gap before hardware)")
     args = ap.parse_args()
     run = Path(args.run)
+    preset = args.preset or infer_preset(run)
 
-    model, venv, raw = build(run, args.preset, args.checkpoint)
+    model, venv, raw = build(run, preset, args.checkpoint)
     fixed = args.vx is not None or args.yaw is not None
 
     if args.viewer:
@@ -116,12 +140,12 @@ def main():
             set_command(raw, args.vx or 0.0, args.yaw or 0.0)
         done, ep_len, ep_ret = [False], 0, 0.0
         while not done[0]:
-            a, _ = model.predict(obs, deterministic=True)
+            a, _ = model.predict(obs, deterministic=not args.stochastic)
             obs, r, done, info = venv.step(a)
             if fixed:
                 set_command(raw, args.vx or 0.0, args.yaw or 0.0)
             ep_len += 1
-            ep_ret += float(info[0].get("reward_terms") and sum(info[0]["reward_terms"].values()) or r[0])
+            ep_ret += float(r[0])   # raw env reward incl. fall penalty (norm_reward off at eval)
             v_body = raw._base_rot().T @ raw.data.qvel[0:3]
             vx_err.append(abs(raw._command[0] * raw.cfg.vx_max - v_body[0]))
             if ep == 0 and renderer is not None and len(frames) < args.seconds / raw.control_dt:

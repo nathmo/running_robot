@@ -28,7 +28,10 @@ FOOT_SPHERE_R = 0.025
 
 def compute_standing_keyframe(model, init_ctrl):
     """Settle the init pose in the air (gravity off, base frozen) so the closed loop is
-    consistent, then return a keyframe qpos with the torso dropped so the feet touch the ground."""
+    consistent, drop the torso so the toes touch, then RE-SETTLE UNDER GRAVITY (base xy +
+    attitude held, z free) so the recorded keyframe is the true LOADED stance — PD sag, ankle
+    spring compression and contact deflection included. (The old gravity-off keyframe sat
+    ~3 cm above the real loaded height, baking a constant error into the height reward.)"""
     data = mujoco.MjData(model)
     mujoco.mj_resetDataKeyframe(model, data, 0)
     g = model.opt.gravity.copy()
@@ -45,18 +48,31 @@ def compute_standing_keyframe(model, init_ctrl):
     model.opt.gravity[:] = g
     foot_g = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col") for s in "LR"]
     zmin = min(data.geom_xpos[gg][2] - model.geom_rbound[gg] for gg in foot_g)  # sphere bottom
-    qpos = data.qpos.copy()
-    qpos[:3] = [0, 0, 1.5 - zmin + 0.002]   # drop torso so feet just touch z=0
-    qpos[3:7] = [1, 0, 0, 0]
-    return qpos
+    data.qpos[0:3] = [0, 0, 1.5 - zmin + 0.002]   # drop torso so feet just touch z=0
+    data.qpos[3:7] = [1, 0, 0, 0]
+    data.qvel[:] = 0
+    for _ in range(1500):                          # 1.5 s loaded settle, xy + attitude pinned
+        mujoco.mj_step(model, data)
+        data.qpos[0:2] = 0
+        data.qpos[3:7] = [1, 0, 0, 0]
+        data.qvel[0:2] = 0
+        data.qvel[3:6] = 0
+    data.qvel[:] = 0
+    mujoco.mj_forward(model, data)
+    return data.qpos.copy()
 
 OPEN_B = "robotCADdescription/MJCF_OPEN_MUJOCO_B/SpiderBot/SpiderBot.xml"
 OUT = "mujoco/spiderbot/spiderbot.xml"
 MESHDIR = "../../robotCADdescription/MJCF_OPEN_MUJOCO_B/SpiderBot"  # relative to OUT
 
 # --- Motor specs (output/joint side, after gearbox). Edit here when real values are known. ---
-AKE90 = dict(kp=200, kv=5.0, forcerange=170, armature=0.0216)   # cam + thigh (propulsion)
-AK60 = dict(kp=120, kv=4.0, forcerange=72, armature=0.046)      # hip-roll (lateral)
+# mass/inertia: the CAD part inertials OMIT the actuators (~7.1 kg of motors on a ~5.7 kg CAD
+# model), so each motor is welded onto its stator body as a point mass at the joint anchor.
+# inertia is a rough solid-cylinder estimate; replace with measured values with the rest.
+AKE90 = dict(kp=200, kv=5.0, forcerange=170, armature=0.0216,   # cam + thigh (propulsion)
+             mass=1.40, inertia=0.002)
+AK60 = dict(kp=120, kv=4.0, forcerange=72, armature=0.046,      # hip-roll (lateral)
+            mass=0.75, inertia=0.001)
 
 # --- Per-joint setup. range=None => unlimited. act => actuator (motor spec). ---
 #  name : (role, range, damping, armature, motor)
@@ -99,6 +115,30 @@ def f3(v):
     return " ".join(f"{x:.6g}" for x in v)
 
 
+def add_motor_masses(root):
+    """Weld each motor's mass onto its STATOR body (the joint's parent) at the joint anchor.
+    The anchor comes from the compiled model's world-frame xanchor mapped into the parent frame
+    (not hand-composed from body_pos/body_quat), so it stays correct even if a CAD regen inserts
+    intermediate frames. Bodies with an explicit <inertial> ignore geom masses, hence a child
+    body with its own inertial."""
+    model = mujoco.MjModel.from_xml_path(OUT)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)                     # default qpos: frames + xanchor populated
+    bodies = {b.get("name"): b for b in root.iter("body")}
+    for aname, jname in ACTUATORS:
+        spec = J[jname][4]
+        j = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+        pb = model.body_parentid[model.jnt_bodyid[j]]
+        Rp = data.xmat[pb].reshape(3, 3)
+        anchor = Rp.T @ (data.xanchor[j] - data.xpos[pb])
+        parent = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, pb)
+        bodies[parent].append(ET.fromstring(
+            f'<body name="motor_{aname}" pos="{f3(anchor)}">'
+            f'<inertial pos="0 0 0" mass="{spec["mass"]}" '
+            f'diaginertia="{spec["inertia"]} {spec["inertia"]} {spec["inertia"]}"/>'
+            f'</body>'))
+
+
 def build():
     anchors, tips = loop_anchors(), foot_tips()
     tree = ET.parse(OPEN_B)
@@ -113,21 +153,28 @@ def build():
     comp.set("meshdir", MESHDIR)
     comp.set("autolimits", "true")
 
-    # option + statistic (insert near the top)
+    # option + statistic (insert near the top). impratio=10: with the default 1, a loaded foot
+    # creeps several mm/s BELOW the friction cone (measured 2.6-7.9 mm/s at 0.3-0.9 mu*N) — free
+    # translation that real stick friction does not have; 10 cuts it ~10x.
     opt = ET.fromstring(
-        '<option timestep="0.001" integrator="implicitfast" cone="elliptic" '
+        '<option timestep="0.001" integrator="implicitfast" cone="elliptic" impratio="10" '
         'solver="Newton" iterations="100" ls_iterations="50"/>')
     root.insert(list(root).index(comp) + 1, opt)
 
-    # defaults: visual meshes non-colliding; a collision class; site styling
+    # defaults: visual meshes non-colliding; a collision class; site styling.
+    # condim=6: at condim=3 the torsional/rolling friction entries are silently IGNORED, making
+    # the toe spheres frictionless ball casters (free pivot + free rolling = the skating/spin
+    # exploits). Coefficients are realistic for a rubber pad on indoor floor, NOT anti-skate
+    # knobs: torsional ~ (2/3)*mu*patch_radius ~ 0.008 m, rolling ~ Crr*r ~ 0.001 m.
     default = ET.fromstring(
         '<default>'
         '<default class="spiderbot">'
         '<geom contype="0" conaffinity="0" group="2"/>'
         '<site group="4" size="0.012" rgba="0.95 0.45 0.1 1"/>'
         '<default class="collision">'
-        '<geom contype="1" conaffinity="1" group="3" condim="3" '
-        'friction="1 0.005 0.0001" rgba="0.2 0.8 0.2 0.4"/>'
+        '<geom contype="1" conaffinity="1" group="3" condim="6" '
+        'friction="1 0.008 0.001" solref="0.01 1" solimp="0.95 0.99 0.001" '
+        'rgba="0.2 0.8 0.2 0.4"/>'
         '</default></default></default>')
     root.insert(list(root).index(opt) + 1, default)
 
@@ -147,8 +194,9 @@ def build():
     for lt in wb.findall("light"):
         wb.remove(lt)
     wb.insert(0, ET.fromstring('<geom name="floor" type="plane" size="0 0 0.05" '
-                               'material="grid" contype="1" conaffinity="1" condim="3" '
-                               'friction="1 0.005 0.0001"/>'))
+                               'material="grid" contype="1" conaffinity="1" condim="6" '
+                               'friction="1 0.008 0.001" solref="0.01 1" '
+                               'solimp="0.95 0.99 0.001"/>'))
     wb.insert(0, ET.fromstring('<light name="top" pos="0 0 3" dir="0 0 -1" directional="true"/>'))
 
     # base body: childclass + freejoint + imu site
@@ -221,7 +269,12 @@ def build():
     ET.indent(tree, space="  ")
     tree.write(OUT, encoding="unicode", xml_declaration=False)
 
-    # compute a real standing keyframe by settling the slight-crouch init pose, then rewrite
+    # weld the motor masses on (needs the compiled model for the anchor frames), then rewrite
+    add_motor_masses(root)
+    ET.indent(tree, space="  ")
+    tree.write(OUT, encoding="unicode", xml_declaration=False)
+
+    # compute a real standing keyframe by settling the crouched init pose, then rewrite
     model = mujoco.MjModel.from_xml_path(OUT)
     qpos = compute_standing_keyframe(model, INIT_CTRL)
     key.set("qpos", f3(qpos))
@@ -230,9 +283,14 @@ def build():
     tree.write(OUT, encoding="unicode", xml_declaration=False)
     print(f"wrote {OUT}")
 
-    model = mujoco.MjModel.from_xml_path(OUT)
+    # the keyframe edit only changes key_qpos, not masses/sizes — reuse the compiled model for
+    # the summary and just verify the final file parses
+    total_mass = float(model.body_subtreemass[
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")])
+    mujoco.MjModel.from_xml_path(OUT)
     print(f"compiled OK: nq={model.nq} nv={model.nv} nu={model.nu} neq={model.neq} "
-          f"nsensor={model.nsensor} nkey={model.nkey}; stance height={qpos[2]:.3f} m")
+          f"nsensor={model.nsensor} nkey={model.nkey}; stance height={qpos[2]:.3f} m; "
+          f"total mass={total_mass:.2f} kg")
 
 
 if __name__ == "__main__":

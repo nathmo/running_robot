@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 from mujoco import viewer as mjviewer
 
-from .evaluate import build   # reuse the exact model + VecNormalize loading
+from .evaluate import build, infer_preset   # reuse the exact model + VecNormalize loading
 
 # GLFW key codes (mujoco's viewer passes raw GLFW codes as ints; no glfw import needed)
 K_RIGHT, K_LEFT, K_DOWN, K_UP = 262, 263, 264, 265
@@ -38,7 +38,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True, help="run dir, e.g. rl/runs/m2_walk")
-    ap.add_argument("--preset", default="m2_walk", help="config preset the policy was trained with")
+    ap.add_argument("--preset", default=None,
+                    help="config preset the policy was trained with (default: inferred from the run)")
     ap.add_argument("--checkpoint", default=None, help="model path w/o .zip (default: final / latest)")
     ap.add_argument("--accel", type=float, default=0.5,
                     help="command ramp rate in normalized units per second (smaller = gentler)")
@@ -50,7 +51,8 @@ def main():
                     help="run as fast as possible instead of pacing to wall-clock")
     args = ap.parse_args()
 
-    model, venv, raw = build(Path(args.run), args.preset, args.checkpoint)
+    model, venv, raw = build(Path(args.run), args.preset or infer_preset(Path(args.run)),
+                             args.checkpoint)
     raw._resample_every = 10 ** 9            # we own the command now — stop env auto-resampling
     dt = raw.control_dt
     vx_max, yaw_max = raw.cfg.vx_max, raw.cfg.yaw_max
