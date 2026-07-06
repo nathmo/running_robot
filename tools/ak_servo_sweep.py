@@ -120,9 +120,12 @@ def main():
             print(f"No status frame from motor {args.id}. Is it powered / in servo mode / "
                   f"on this channel? Aborting so we don't command a blind position.")
             return
-        center = st["pos"]
-        print(f"Motor {args.id} at {center:.2f} deg, temp {st['temp']}C, err {st['err']}.")
-        print(f"Sweeping {center - args.amp:.2f}..{center + args.amp:.2f} deg "
+        # RELATIVE sweep: the center is wherever the motor sits at launch. The sine
+        # starts at 0, so the first commanded target equals start_pos (no jump).
+        start_pos = st["pos"]
+        print(f"Motor {args.id} start position: {start_pos:.2f} deg "
+              f"(temp {st['temp']}C, err {st['err']}).")
+        print(f"Sweep is RELATIVE to that start: {start_pos - args.amp:.2f}..{start_pos + args.amp:.2f} deg "
               f"({2 * args.amp:.1f} deg peak-to-peak), period {args.period:.1f}s. Ctrl+C to stop.\n")
 
         dt = 1.0 / CMD_RATE_HZ
@@ -136,7 +139,8 @@ def main():
                 break
 
             ramp = min(1.0, elapsed / SOFT_START_S) if SOFT_START_S > 0 else 1.0
-            target = center + args.amp * ramp * math.sin(2.0 * math.pi * elapsed / args.period)
+            offset = args.amp * ramp * math.sin(2.0 * math.pi * elapsed / args.period)
+            target = start_pos + offset   # relative to launch position
             set_pos(bus, args.id, target)
 
             # Non-blocking read of the latest status frame for live feedback.
