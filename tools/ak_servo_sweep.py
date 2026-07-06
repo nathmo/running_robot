@@ -103,6 +103,9 @@ def main():
                     help="deg either side of center (2.5 => 5 deg peak-to-peak)")
     ap.add_argument("--period", type=float, default=PERIOD_S,
                     help="seconds per full cycle (bigger = slower)")
+    ap.add_argument("--max-deviation", type=float, default=None,
+                    help="deg the actual position may stray from start before the motor "
+                         "is cut (default: amp + 5 deg margin). Guards a bugged start pos.")
     ap.add_argument("--duration", type=float, default=0.0,
                     help="run time in s (0 = until Ctrl+C)")
     args = ap.parse_args()
@@ -126,13 +129,23 @@ def main():
         print(f"Motor {args.id} start position: {start_pos:.2f} deg "
               f"(temp {st['temp']}C, err {st['err']}).")
         print(f"Sweep is RELATIVE to that start: {start_pos - args.amp:.2f}..{start_pos + args.amp:.2f} deg "
-              f"({2 * args.amp:.1f} deg peak-to-peak), period {args.period:.1f}s. Ctrl+C to stop.\n")
+              f"({2 * args.amp:.1f} deg peak-to-peak), period {args.period:.1f}s. Ctrl+C to stop.")
+
+        # Safety window: if the ACTUAL position ever strays this far from the start
+        # position, the motion is out of control (most likely a bugged/mis-scaled
+        # start position or an origin mismatch) -> cut the motor and abort. The
+        # window is the sweep amplitude plus a margin for normal tracking overshoot.
+        max_dev = args.max_deviation if args.max_deviation is not None else args.amp + 5.0
+        print(f"Safety: motor is cut if actual position leaves "
+              f"{start_pos - max_dev:.2f}..{start_pos + max_dev:.2f} deg "
+              f"(|dev| > {max_dev:.2f} deg).\n")
 
         dt = 1.0 / CMD_RATE_HZ
         t0 = time.time()
         next_t = t0
         last_print = 0.0
-        while True:
+        aborted = False
+        while not aborted:
             now = time.time()
             elapsed = now - t0
             if args.duration and elapsed >= args.duration:
@@ -143,15 +156,34 @@ def main():
             target = start_pos + offset   # relative to launch position
             set_pos(bus, args.id, target)
 
-            # Non-blocking read of the latest status frame for live feedback.
-            msg = bus.recv(timeout=0.0)
-            if msg is not None and msg.is_extended_id and (msg.arbitration_id & 0xFF) == args.id:
-                fb = parse_status(msg.data)
-                if fb and (now - last_print) > 0.1:
+            # Drain ALL queued status frames so the safety check sees the latest
+            # position promptly (the motor broadcasts faster than this loop runs).
+            fb = None
+            while True:
+                msg = bus.recv(timeout=0.0)
+                if msg is None:
+                    break
+                if msg.is_extended_id and (msg.arbitration_id & 0xFF) == args.id:
+                    parsed = parse_status(msg.data)
+                    if parsed:
+                        fb = parsed
+            if fb is not None:
+                deviation = abs(fb["pos"] - start_pos)
+                if deviation > max_dev:
+                    print(f"\n!! SAFETY STOP: position {fb['pos']:.2f} deg is "
+                          f"{deviation:.2f} deg from start ({start_pos:.2f}) -- exceeds "
+                          f"{max_dev:.2f} deg. Cutting motor (start position likely bad).")
+                    aborted = True
+                    continue
+                if fb["err"]:
+                    print(f"\n!! Motor error code {fb['err']}. Cutting motor.")
+                    aborted = True
+                    continue
+                if (now - last_print) > 0.1:
                     last_print = now
                     print(f"  t={elapsed:5.1f}s  target={target:7.2f}  "
-                          f"actual={fb['pos']:7.2f}deg  I={fb['cur']:5.2f}A  "
-                          f"temp={fb['temp']}C  err={fb['err']}   ", end="\r")
+                          f"actual={fb['pos']:7.2f}deg  dev={fb['pos'] - start_pos:+6.2f}  "
+                          f"I={fb['cur']:5.2f}A  temp={fb['temp']}C  err={fb['err']}   ", end="\r")
 
             next_t += dt
             sleep = next_t - time.time()
