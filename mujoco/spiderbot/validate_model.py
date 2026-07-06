@@ -9,6 +9,8 @@ Also renders a few frames to mujoco/spiderbot/_validate_*.png so we can eyeball 
 
 Run:  .venv/Scripts/python.exe mujoco/spiderbot/validate_model.py
 """
+import os
+import sys
 import numpy as np
 import mujoco
 
@@ -18,6 +20,10 @@ data = mujoco.MjData(model)
 np.set_printoptions(precision=4, suppress=True)
 
 ok = True
+# Rendering is cosmetic; the gate must not depend on a GL context. On a headless box a FAILED
+# GLFW init leaves the GL stack half-initialized and a SECOND Renderer attempt aborts the whole
+# process from C++ (uncatchable) — so after one failure, never try again.
+render_ok = True
 
 
 def sid(n):
@@ -39,6 +45,15 @@ def check(label, cond, detail=""):
 
 
 def render(tag):
+    global render_ok
+    if not render_ok:
+        print(f"  (render skipped: no usable GL context)")
+        return
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") \
+            and os.environ.get("MUJOCO_GL", "") not in ("egl", "osmesa"):
+        render_ok = False
+        print("  (render skipped: headless — set MUJOCO_GL=egl or osmesa to enable PNGs)")
+        return
     try:
         r = mujoco.Renderer(model, 480, 640)
         cam = mujoco.MjvCamera()
@@ -56,6 +71,7 @@ def render(tag):
             mpimg.imsave(f"mujoco/spiderbot/_validate_{tag}.png", px)
         print(f"  rendered _validate_{tag}.png")
     except Exception as e:
+        render_ok = False
         print(f"  (render skipped: {e})")
 
 
