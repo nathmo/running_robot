@@ -165,22 +165,47 @@ the loop (FFT low-pass → exactly periodic), and stores each side's **offset (i
 travel range** separately. Playback then runs the *same* shape on both legs, 180° apart, each
 mapped into its own motor frame and clipped to its recorded range.
 
-### 2. Play it back (compliant, torque-limited, at your speed)
+### 2. Play it back (tunable PID, torque-limited, at your speed)
 
 ```bash
-# torque limit is in AMPS (motor current) — the reliable knob; Kt/Nm isn't known exactly
-python fixed_gait/play_trajectory.py --period 8 --current-limit 1.0     # very slow + gentle
-python fixed_gait/play_trajectory.py --period 4 --current-limit 2.0
-python fixed_gait/play_trajectory.py --period 2 --current-limit 3.0     # faster + stronger
-python fixed_gait/play_trajectory.py --dry-run                          # print targets, 0 A (no motion)
-python fixed_gait/play_trajectory.py --abduction-right 5 --abduction-left -3   # set abduction hold
+python fixed_gait/play_trajectory.py --dry-run                                  # print targets, 0 A
+python fixed_gait/play_trajectory.py --period 8 --current-limit 3 --kp 0.8 --ki 0.4 --log
+python fixed_gait/play_trajectory.py --period 4 --current-limit 6 --kp 1.5 --ki 0.8 --kd 0.03
+python fixed_gait/play_trajectory.py --abduction-right 5 --abduction-left -3    # set abduction hold
 ```
 
-Each motor runs a **compliant software PD loop** whose output current is **hard-clamped to
-`--current-limit`** — torque can never exceed it, so a collision makes the leg yield, not force
-through. `--period` sets seconds per cycle (bigger = slower). `--kp`/`--kd` tune stiffness/damping.
-Both legs run dephased 180°; soft-starts from the current pose; releases on Ctrl+C. Guards: runaway
-speed, over-temp, motor-error → cut. Start with a big period and a low current limit, then work up.
+Each motor runs a software **PID** loop whose output current is **hard-clamped to
+`--current-limit`** (Amps — Kt/Nm isn't known exactly), so torque can never exceed it:
+
+```
+current = kp·err + ki·∫err + kd·(target_vel − actual_vel),   clamped to ±limit
+```
+
+- **`--kp`** — stiffness. *This is the "stricter tracking" knob.* Too low and the leg lags, then
+  friction makes it stick-slip (jagged/twitchy) — which is what you saw (only ~2 A pulled even at a
+  20 A limit). Raise `kp` until tracking is crisp.
+- **`--ki`** — removes the steady lag from gravity/friction (integral, with anti-windup). No gravity
+  feedforward yet; the integral does that job.
+- **`--kd`** — damping; uses `target_vel − actual_vel` so it tracks the *moving* trajectory instead
+  of braking against it. Add a little only if it oscillates.
+- **`--period`** seconds per cycle (bigger = slower). **`--log`** saves a target-vs-actual +
+  current plot (`trajectories/last_run.png/.npz`) — run it, look at the lag, adjust gains, repeat.
+
+**Tuning recipe:** start `--kp 0.4 --ki 0 --kd 0 --period 10 --current-limit 3`; raise `kp` until
+tracking is tight without buzzing; add `ki` to kill the remaining lag; add a touch of `kd` only if
+it oscillates; then shorten `--period` and raise `--current-limit` for speed. Both legs run dephased
+180°, soft-start from the current pose, release on Ctrl+C; guards cut on runaway/over-temp/error.
+
+### Inspect a trajectory (PNG + live animation)
+
+```bash
+python fixed_gait/view_trajectory.py                 # save trajectories/trajectory.png (headless)
+python fixed_gait/view_trajectory.py --live          # animated window (needs a display / X-forwarding)
+python fixed_gait/view_trajectory.py --anim walk.gif # save an animated GIF (works headless)
+```
+
+The PNG shows cam & hip vs phase for both legs plus the cam–hip loop; the animation adds a moving
+phase marker and a schematic stick figure (angles are real, leg geometry is approximate).
 
 ---
 
@@ -194,8 +219,9 @@ speed, over-temp, motor-error → cut. Start with a big period and a low current
 | `validate_gait.py` | sim-based safety check + reachability-map overlay. |
 | `record_trajectory.py` | **teach recorder** — backdrive a leg by hand, SPACE-toggled takes; auto-smooths + exports. |
 | `trajectory.py` | pure-numpy smoothing/fusion (align, mirror, close-loop) + per-side calibration; shared by record & play. |
-| `play_trajectory.py` | **replay** a recorded trajectory, both legs dephased 180°, compliant current-PD with an Amp torque cap + speed. |
-| `trajectories/` | recorded takes + exported `gait_recorded.npz` (+ preview png). |
+| `play_trajectory.py` | **replay** a recorded trajectory, both legs dephased 180°; tunable current-**PID** with an Amp torque cap, `--log` tracking plot. |
+| `view_trajectory.py` | inspect a trajectory: static PNG + live/animated visualization (no hardware). |
+| `trajectories/` | recorded takes + exported `gait_recorded.npz` (+ preview png, tracking logs). |
 | `_gait_reachability.png` | generated: gait foot path over the reachable workspace. |
 
 ## Tuning the gait
