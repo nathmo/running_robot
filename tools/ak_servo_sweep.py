@@ -40,7 +40,7 @@ CAN_PACKET_SET_POS = 4
 
 # ---- Defaults (override on the CLI) ----
 DEFAULT_INTERFACE = "socketcan"
-DEFAULT_CHANNEL = "can1"
+DEFAULT_CHANNEL = "can0"
 DEFAULT_BITRATE = 1_000_000
 DEFAULT_ID = 104
 
