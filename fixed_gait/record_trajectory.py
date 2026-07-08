@@ -12,12 +12,17 @@ Workflow:
 
 Keys (in the terminal):
     SPACE  start / stop a take   (move the leg through ONE full cycle: start pose -> step -> back)
+    c      capture the CURRENT pose as this leg's CENTER (its origin / mid-stance) — do this once,
+           with the leg posed where you want the gait to sit. Sets where the motion is centered and
+           the abduction hold. If you never press it, the recording's mean pose is used instead.
     u      undo the last take
     q      finish and save
 
-The abduction motor (id 104) does not need to move — it is held fixed and calibrated separately in
-playback; only cam (105) and hip (106) trace the gait. Do a few takes; they get averaged +
-smoothed. Being off by a few cm/deg on the return is fine — the loop is closed for you.
+The abduction motor (id 104) does not need to move — it is held fixed at the captured center; only
+cam (105) and hip (106) trace the gait. Do a few takes; they get averaged, smoothed, and re-timed
+so each half-cycle takes a fixed share of the period (the same on both legs). Being off by a few
+cm/deg on the return is fine — the loop is closed for you. Each leg is processed independently, so
+the left leg replays exactly what you taught it (no mirror is assumed).
 """
 import argparse
 import os
@@ -119,8 +124,9 @@ def record(leg, interface):
         return None
 
     print("Motors are LIMP — move the leg by hand.")
-    print("  SPACE=start/stop take   u=undo last   q=finish+save\n")
+    print("  SPACE=start/stop take   c=capture center pose   u=undo last   q=finish+save\n")
     takes = []
+    center = None                                 # captured live center pose [abd, cam, hip]
     dt = 1.0 / SAMPLE_HZ
     recording = False
     buf_t, buf_p = [], []
@@ -153,6 +159,10 @@ def record(leg, interface):
                                   f"{buf_t[-1]:.1f}s                 ")
                         else:
                             print("\n  (take too short, discarded)      ")
+                elif k == "c" and not recording and all(v is not None for v in latest.values()):
+                    center = [latest[i] for i in MOTOR_IDS]
+                    print(f"\n  captured center pose: abd={center[0]:+.1f} cam={center[1]:+.1f} "
+                          f"hip={center[2]:+.1f} deg     ")
                 elif k == "u" and not recording and takes:
                     takes.pop()
                     print(f"\n  undid last take -> {len(takes)} left       ")
@@ -164,7 +174,8 @@ def record(leg, interface):
                     pos = "  ".join(f"{n}={latest[i]:+7.1f}"
                                     for n, i in zip(("abd", "cam", "hip"), MOTOR_IDS))
                     state = "REC " if recording else "idle"
-                    print(f"  [{state}] takes={len(takes)}  {pos} deg   ", end="\r")
+                    ctr = "center SET" if center is not None else "center: press c"
+                    print(f"  [{state}] takes={len(takes)}  {ctr}  {pos} deg   ", end="\r")
 
                 next_t += dt
                 s = next_t - time.time()
@@ -178,14 +189,18 @@ def record(leg, interface):
         for i in MOTOR_IDS:
             set_current(bus, i, 0.0)
         bus.shutdown()
-    print(f"\nFinished {leg}: {len(takes)} take(s).")
-    return takes
+    ctr = "no center captured (will use recorded mean)" if center is None else f"center={center}"
+    print(f"\nFinished {leg}: {len(takes)} take(s), {ctr}.")
+    return takes, center
 
 
-def save_raw(leg, takes, out_dir):
+def save_raw(leg, takes, center, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"raw_{leg}.npz")
-    flat = {"leg": leg, "n": len(takes), "motor_ids": np.array(MOTOR_IDS)}
+    flat = {"leg": leg, "n": len(takes), "motor_ids": np.array(MOTOR_IDS),
+            "has_center": int(center is not None)}
+    if center is not None:
+        flat["center"] = np.asarray(center, float)
     for i, (t, p) in enumerate(takes):
         flat[f"t{i}"] = t
         flat[f"p{i}"] = p
@@ -196,19 +211,22 @@ def save_raw(leg, takes, out_dir):
 
 def load_raw(path):
     z = np.load(path)
-    return [(z[f"t{i}"], z[f"p{i}"]) for i in range(int(z["n"]))]
+    takes = [(z[f"t{i}"], z[f"p{i}"]) for i in range(int(z["n"]))]
+    center = z["center"] if ("has_center" in z.files and int(z["has_center"])) else None
+    return takes, center
 
 
-def process_and_export(out_dir, harmonics):
+def process_and_export(out_dir, harmonics, split, left_phase):
     rp = os.path.join(out_dir, "raw_right.npz")
     lp = os.path.join(out_dir, "raw_left.npz")
-    if not os.path.exists(rp):
-        print("(no raw_right.npz yet — record the right leg to build the trajectory)")
+    if not os.path.exists(rp) and not os.path.exists(lp):
+        print("(no raw_right.npz / raw_left.npz yet — record a leg to build the trajectory)")
         return
-    right = load_raw(rp)
-    left = load_raw(lp) if os.path.exists(lp) else []
+    right, right_center = load_raw(rp) if os.path.exists(rp) else ([], None)
+    left, left_center = load_raw(lp) if os.path.exists(lp) else ([], None)
     print(f"\nSmoothing + exporting: {len(right)} right take(s), {len(left)} left take(s)")
-    data = traj.process(right, left, harmonics=harmonics)
+    data = traj.process(right, left, right_center=right_center, left_center=left_center,
+                        harmonics=harmonics, split=split, left_phase=left_phase)
     out = os.path.join(out_dir, "gait_recorded.npz")
     traj.save(out, data)
     print(f"exported trajectory -> {out}")
@@ -225,16 +243,21 @@ def _plot(data, right, left, path):
         return
     N = data["N"]
     ph = np.linspace(0, 1, N, endpoint=False)
+    raw = {"right": right, "left": left}
+    style = {"right": ("b", "0.8"), "left": ("r", "0.85")}
     fig, ax = plt.subplots(1, 2, figsize=(12, 5))
     for col, name, a in ((traj.COL_CAM, "cam", ax[0]), (traj.COL_HIP, "hip", ax[1])):
-        for t, p in right:
-            u = (t - t[0]) / (t[-1] - t[0])
-            a.plot(u, p[:, col], color="0.8", lw=0.8)
-        R = np.array([traj.reconstruct(data, "right", x)[col] for x in ph])
-        a.plot(ph, R, "b", lw=2, label="right (smoothed)")
-        if data["left"] is not None:
-            L = np.array([traj.reconstruct(data, "left", x)[col] for x in ph])
-            a.plot(ph, L, "r", lw=2, label="left (dephased 180°)")
+        for side in ("right", "left"):
+            if data[side] is None:
+                continue
+            smooth, rawcol = style[side]
+            for t, p in raw[side]:                          # faint raw takes (in the leg's own time)
+                u = (t - t[0]) / (t[-1] - t[0])
+                a.plot(u, p[:, col], color=rawcol, lw=0.8)
+            shift = data[side]["phase_shift"]
+            S = np.array([traj.reconstruct(data, side, x)[col] for x in ph])
+            lbl = side if shift == 0 else f"{side} ({shift*360:.0f}° dephased)"
+            a.plot(ph, S, smooth, lw=2, label=f"{lbl} (smoothed)")
         a.set_title(f"{name} motor"); a.set_xlabel("phase"); a.set_ylabel("deg")
         a.grid(alpha=.3); a.legend()
     fig.tight_layout(); fig.savefig(path, dpi=110)
@@ -248,12 +271,18 @@ def main():
     ap.add_argument("--interface", default="socketcan")
     ap.add_argument("--dir", default=DEFAULT_DIR, help="where raw + exported files go")
     ap.add_argument("--harmonics", type=int, default=8, help="smoothing: Fourier harmonics kept")
+    ap.add_argument("--split", type=float, default=0.5,
+                    help="fraction of the cycle the A->B (hip max->min) arc gets; shared by both "
+                         "legs so swing/return timing matches. 0.5 = symmetric")
+    ap.add_argument("--left-phase", type=float, default=0.5,
+                    help="left-leg dephase (0..1; 0.5 = 180 deg). If the legs move together instead "
+                         "of alternating, try 0.0")
     ap.add_argument("--process-only", action="store_true",
                     help="skip recording; just re-smooth + export from existing raw files")
     args = ap.parse_args()
 
     if args.process_only:
-        process_and_export(args.dir, args.harmonics)
+        process_and_export(args.dir, args.harmonics, args.split, args.left_phase)
         return
     if can is None:
         print("python-can not installed. `pip install python-can` and bring up the CAN bus.")
@@ -262,10 +291,10 @@ def main():
         print("choose --leg right  or  --leg left   (or --process-only)")
         sys.exit(1)
 
-    takes = record(args.leg, args.interface)
+    takes, center = record(args.leg, args.interface)
     if takes:
-        save_raw(args.leg, takes, args.dir)
-        process_and_export(args.dir, args.harmonics)      # auto-export (uses whatever legs exist)
+        save_raw(args.leg, takes, center, args.dir)
+        process_and_export(args.dir, args.harmonics, args.split, args.left_phase)  # uses whatever legs exist
 
 
 if __name__ == "__main__":

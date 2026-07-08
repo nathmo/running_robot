@@ -35,10 +35,8 @@ Examples:
     python fixed_gait/play_trajectory.py --mode position --period 8 --log     # drive runs the loop
 """
 import argparse
-import os
 import sys
 import time
-from collections import deque
 
 import numpy as np
 
@@ -54,7 +52,7 @@ SIDE_CHANNEL = {"right": "can0", "left": "can1"}
 MOTOR_IDS = [104, 105, 106]                 # abduction, cam, hip  == cols 0,1,2
 CAN_PACKET_SET_CURRENT = 1
 CAN_PACKET_SET_POS = 4
-DEFAULT_RATE = 200.0        # control-loop Hz (also the motors' status broadcast rate)
+CMD_HZ = 200.0
 
 # Speed handling: a soft GOVERNOR tapers accelerating current as the motor nears --speed-limit,
 # so speed saturates there smoothly (no crash). The hard --max-speed cut is only a last-resort
@@ -80,82 +78,6 @@ def set_pos(bus, cid, pos_deg):
                          data=val.to_bytes(4, "big", signed=True), is_extended_id=True))
 
 
-class LoopTimer:
-    """Measure the real control-loop period: achieved Hz, jitter (std), min/max, and overruns
-    (loops that couldn't keep up). Streaming stats (Welford) + a short window for the live jitter."""
-    def __init__(self, target_period):
-        self.target = target_period
-        self.n = 0
-        self.mean = 0.0
-        self.M2 = 0.0
-        self.mn = 1e9
-        self.mx = 0.0
-        self.overrun = 0
-        self.recent = deque(maxlen=256)
-
-    def add(self, dt):
-        self.n += 1
-        d = dt - self.mean
-        self.mean += d / self.n
-        self.M2 += d * (dt - self.mean)
-        self.mn = min(self.mn, dt)
-        self.mx = max(self.mx, dt)
-        self.recent.append(dt)
-
-    def hz(self):
-        return 1.0 / self.mean if self.mean > 0 else 0.0
-
-    def jitter_us(self):                 # std of the recent window, microseconds
-        return float(np.std(self.recent)) * 1e6 if len(self.recent) > 1 else 0.0
-
-    def summary(self):
-        std = (self.M2 / self.n) ** 0.5 if self.n > 1 else 0.0
-        return (f"loop timing: {self.hz():6.1f} Hz achieved (target {1/self.target:.0f}) | "
-                f"period {self.mean*1e3:.3f} ms, jitter(std) {std*1e6:.0f} us, "
-                f"min {self.mn*1e3:.3f} / max {self.mx*1e3:.3f} ms | "
-                f"overruns {self.overrun}/{self.n} ({100*self.overrun/max(1,self.n):.1f}%)")
-
-
-def precise_sleep(dur, spin=0.0003):
-    """Sleep most of `dur`, then busy-wait the last ~`spin` s for low jitter (sleep alone jitters
-    hundreds of us on a non-realtime Pi). Busy-wait costs CPU, so keep `spin` small."""
-    if dur <= 0:
-        return
-    end = time.perf_counter() + dur
-    s = dur - spin
-    if s > 0:
-        time.sleep(s)
-    while time.perf_counter() < end:
-        pass
-
-
-def try_realtime(prio, cpu):
-    """Best-effort real-time setup (Linux): SCHED_FIFO priority, CPU pin, locked memory. Needs
-    root / CAP_SYS_NICE — degrades gracefully with a message if not permitted."""
-    msgs = []
-    if prio > 0:
-        try:
-            os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(int(prio)))
-            msgs.append(f"SCHED_FIFO prio {prio}")
-        except Exception as e:
-            msgs.append(f"SCHED_FIFO FAILED ({e}) — run with sudo for real-time priority")
-    if cpu is not None:
-        try:
-            os.sched_setaffinity(0, {int(cpu)})
-            msgs.append(f"pinned to CPU {cpu}")
-        except Exception as e:
-            msgs.append(f"CPU pin failed ({e})")
-    try:
-        import ctypes
-        import ctypes.util
-        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-        if libc.mlockall(0x1 | 0x2) == 0:          # MCL_CURRENT | MCL_FUTURE
-            msgs.append("memory locked")
-    except Exception:
-        pass
-    print("realtime: " + "; ".join(msgs))
-
-
 def parse_status(data):
     if len(data) < 8:
         return None
@@ -174,33 +96,23 @@ class Motor:
         self.cur = 0.0             # drive-reported current (A)
         self.temp = 0
         self.err = 0
-        self.vel = 0.0              # EMA velocity (deg/s), measured on real position changes
+        self.vel = 0.0              # EMA finite-difference velocity (deg/s)
         self._prev_pos = None
-        self._prev_t = None
         self.integ = 0.0           # PID integral state (deg*s)
         self.prev_target = None
         self.tvel = 0.0            # EMA target velocity (deg/s)
         self.last_cmd = 0.0
         self.last_tgt = 0.0
 
-    def update_from(self, st, t):
-        # velocity from the REAL time between distinct position readings (so it doesn't go to zero
-        # when the loop runs faster than the motor's status broadcast); decay if idle.
-        if self._prev_t is None:
-            self._prev_pos, self._prev_t = st["pos"], t
-        elif st["pos"] != self._prev_pos:
-            dtp = t - self._prev_t
-            if dtp > 1e-4:
-                self.vel = 0.4 * (st["pos"] - self._prev_pos) / dtp + 0.6 * self.vel
-            self._prev_pos, self._prev_t = st["pos"], t
-        elif t - self._prev_t > 0.05:          # no movement for 50 ms -> velocity ~ 0
-            self.vel *= 0.6
-            self._prev_t = t
-        self.pos, self.spd, self.temp, self.err, self.cur = (
-            st["pos"], st["spd"], st["temp"], st["err"], st["cur"])
+    def update_from(self, st, dt):
+        if self._prev_pos is not None and dt > 0:
+            self.vel = 0.3 * (st["pos"] - self._prev_pos) / dt + 0.7 * self.vel
+        self._prev_pos = st["pos"]
+        self.pos, self.spd, self.temp, self.err = st["pos"], st["spd"], st["temp"], st["err"]
+        self.cur = st["cur"]
 
 
-def drain(buses, motors_by_bus, t):
+def drain(buses, motors_by_bus, dt):
     for ch, bus in buses.items():
         while True:
             msg = bus.recv(timeout=0.0)
@@ -212,14 +124,14 @@ def drain(buses, motors_by_bus, t):
             if m is not None:
                 st = parse_status(msg.data)
                 if st:
-                    m.update_from(st, t)
+                    m.update_from(st, dt)
 
 
 def preflight(motors, buses, motors_by_bus):
     print("Reading start positions ...")
     t_end = time.time() + 2.0
     while time.time() < t_end and any(m.pos is None for m in motors):
-        drain(buses, motors_by_bus, time.perf_counter())
+        drain(buses, motors_by_bus, 0.0)
         time.sleep(0.005)
     ok = True
     for m in motors:
@@ -279,8 +191,13 @@ def main():
     ap.add_argument("--ramp", type=float, default=3.0, help="soft-start seconds (ease in target+current)")
     ap.add_argument("--duration", type=float, default=0.0, help="run time s (0 = until Ctrl+C)")
     ap.add_argument("--leg", choices=["both", "right", "left"], default="both")
-    ap.add_argument("--abduction-right", type=float, default=None, help="hold angle for right abduction (deg)")
-    ap.add_argument("--abduction-left", type=float, default=None, help="hold angle for left abduction (deg)")
+    ap.add_argument("--left-phase", type=float, default=None,
+                    help="override the left-leg dephase (0..1; 0.5=180 deg). If the legs move "
+                         "together instead of alternating, try 0.0. Default = as recorded.")
+    ap.add_argument("--abduction-right", type=float, default=None,
+                    help="override right abduction hold (deg); default = captured center")
+    ap.add_argument("--abduction-left", type=float, default=None,
+                    help="override left abduction hold (deg); default = captured center")
     ap.add_argument("--max-current", type=float, default=None, help="absolute ceiling (default = limit)")
     ap.add_argument("--speed-limit", type=float, default=DEFAULT_SPEED_LIMIT,
                     help="soft speed governor onset (ERPM); tapers accel current so speed saturates. 0=off")
@@ -289,22 +206,13 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="compute + print, but command 0 A (no motion)")
     ap.add_argument("--log", nargs="?", const="fixed_gait/trajectories/last_run",
                     default=None, help="record target-vs-actual and save a plot (path prefix)")
-    ap.add_argument("--rate", type=float, default=DEFAULT_RATE,
-                    help="control-loop Hz. Feedback is capped by the motors' status broadcast rate "
-                         "(~200 Hz as configured), so >~500 Hz mostly reloads the CAN bus.")
-    ap.add_argument("--rt", action="store_true",
-                    help="request real-time scheduling (SCHED_FIFO) + CPU pin + locked memory. "
-                         "Run with sudo. Big jitter reduction.")
-    ap.add_argument("--rt-prio", type=int, default=80, help="SCHED_FIFO priority for --rt")
-    ap.add_argument("--cpu", type=int, default=None, help="pin the loop to this CPU core (e.g. 3)")
     args = ap.parse_args()
-
-    if args.rt or args.cpu is not None:
-        try_realtime(args.rt_prio if args.rt else 0, args.cpu)
 
     if can is None:
         print("python-can not installed. `pip install python-can`."); sys.exit(1)
     data = traj.load(args.file)
+    if args.left_phase is not None and data["left"] is not None:
+        data["left"]["phase_shift"] = args.left_phase
     sides = ["right", "left"] if args.leg == "both" else [args.leg]
     sides = [s for s in sides if data[s] is not None]
     if not sides:
@@ -330,34 +238,22 @@ def main():
               f"kp={args.kp} ki={args.ki} kd={args.kd} ramp={args.ramp}s "
               f"speed-limit={args.speed_limit:.0f} max-speed={args.max_speed:.0f} ERPM")
 
-    period = 1.0 / args.rate
-    n_per_bus = len(MOTOR_IDS)
-    tx_per_s = args.rate * n_per_bus                     # SET_* frames/s per bus
-    print(f"loop: {args.rate:.0f} Hz  ->  {tx_per_s:.0f} command frames/s per bus "
-          f"(1 Mbit CAN handles ~7000/s incl. status). Feedback capped by the motor's "
-          f"~200 Hz status rate.")
-    if tx_per_s > 4000:
-        print("  ! high CAN load — if you see errors, lower --rate or raise the motor's status rate.")
-    timer = LoopTimer(period)
+    dt = 1.0 / CMD_HZ
     log = {"t": [], "tgt": [], "act": [], "cur": []} if args.log else None
     try:
         if not preflight(motors, buses, motors_by_bus):
             print("Aborting — not all motors reported. Nothing commanded."); return
         start_pos = {id(m): m.pos for m in motors}
 
-        t0 = time.perf_counter()
+        t0 = time.time()
         next_t = t0
         last_print = 0.0
-        prev_loop = None
         while True:
-            now = time.perf_counter()
+            now = time.time()
             elapsed = now - t0
-            if prev_loop is not None:
-                timer.add(now - prev_loop)
-            prev_loop = now
             if args.duration and elapsed >= args.duration:
                 break
-            drain(buses, motors_by_bus, now)
+            drain(buses, motors_by_bus, dt)
 
             ramp = min(1.0, elapsed / args.ramp) if args.ramp > 0 else 1.0
             play_t = max(0.0, elapsed - args.ramp)
@@ -383,11 +279,11 @@ def main():
                 else:
                     # current mode: Python PID -> SET_CURRENT, hard-clamped (torque-limited)
                     if m.prev_target is not None:
-                        m.tvel = 0.3 * (target - m.prev_target) / period + 0.7 * m.tvel
+                        m.tvel = 0.3 * (target - m.prev_target) / dt + 0.7 * m.tvel
                     m.prev_target = target
                     err = target - m.pos
                     if ramp >= 1.0 and args.ki > 0:        # integral, anti-windup after soft-start
-                        m.integ += err * period
+                        m.integ += err * dt
                         m.integ = float(np.clip(m.integ, -lim / args.ki, lim / args.ki))
                     d_term = args.kd * (m.tvel - m.vel)
                     curr = args.kp * err + args.ki * m.integ + d_term
@@ -420,18 +316,16 @@ def main():
                 mt = max(m.temp for m in motors)
                 mc = max(abs(m.last_cmd) for m in motors)
                 me = max(abs(m.last_tgt - m.pos) for m in motors)
-                print(f"  t={elapsed:6.1f}s ph={phase:4.2f} err={me:5.1f}deg "
-                      f"I={mc:4.2f}/{lim:.2f}A loop={timer.hz():5.0f}Hz "
-                      f"jit={timer.jitter_us():4.0f}us ovr={timer.overrun} T={mt}C  ", end="\r")
+                ms = max(abs(m.spd) for m in motors)
+                print(f"  t={elapsed:6.1f}s phase={phase:4.2f} maxErr={me:5.1f}deg "
+                      f"maxI={mc:4.2f}/{lim:.2f}A maxSpd={ms:5.0f}erpm maxT={mt}C   ", end="\r")
 
-            next_t += period
-            slack = next_t - time.perf_counter()
-            if slack > 0:
-                precise_sleep(slack)
-            else:                                      # fell behind: count it, resync if far off
-                timer.overrun += 1
-                if -slack > period:
-                    next_t = time.perf_counter()
+            next_t += dt
+            s = next_t - time.time()
+            if s > 0:
+                time.sleep(s)
+            else:
+                next_t = time.time()
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
@@ -447,8 +341,6 @@ def main():
             except Exception:
                 pass
         print("Motors released (0 A).")
-        if timer.n > 1:
-            print(timer.summary())
         if log is not None and log["t"]:
             save_log(log, motors, args.log)
 

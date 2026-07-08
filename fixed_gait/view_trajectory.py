@@ -24,11 +24,13 @@ def sampled(data, side, ph):
     return np.array([traj.reconstruct(data, side, p) for p in ph])
 
 
-def world_shape(data, ph):
-    """Mean-removed canonical (world) cam,hip over the phase grid — right at ph, left at ph+0.5."""
+def canon(data, side, ph):
+    """This side's mean-removed canonical cam,hip over the phase grid (incl. its phase_shift).
+    Each leg has its OWN shape now — there is no shared world canonical."""
+    cal = data[side]
     N = data["N"]
-    idx = (ph * N).astype(int) % N
-    return data["canonical"][idx]                    # [len(ph), 2] cam,hip
+    idx = (((ph + cal["phase_shift"]) % 1.0) * N).astype(int) % N
+    return cal["canonical"][idx]                      # [len(ph), 2] cam,hip
 
 
 def static_png(data, path):
@@ -77,8 +79,8 @@ def animate(data, period, live, save_path):
     ph = np.linspace(0, 1, Ngrid, endpoint=False)
     R = sampled(data, "right", ph)
     L = sampled(data, "left", ph) if data["left"] is not None else None
-    W = world_shape(data, ph)                          # canonical cam,hip (world), right convention
-    Wl = world_shape(data, (ph + 0.5) % 1.0) if L is not None else None
+    W = canon(data, "right", ph)                        # this leg's own mean-removed cam,hip shape
+    Wl = canon(data, "left", ph) if L is not None else None
 
     fig, (axc, axk, axs) = plt.subplots(1, 3, figsize=(15, 5))
     for a, col, name in ((axc, traj.COL_CAM, "cam"), (axk, traj.COL_HIP, "hip")):

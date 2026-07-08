@@ -149,21 +149,35 @@ are logged. In the terminal:
 
 - **SPACE** — start / stop a take. Move the leg through **one full cycle** (start pose → step →
   back to start). Do a few takes; they're averaged.
+- **c** — capture the **current pose as this leg's center** (its origin / mid-stance, and the
+  abduction hold angle). Pose the leg where you want the gait centered, then press `c` once — do
+  this before or between takes, whenever the leg is sitting where you want "home" to be. If you
+  never press it, the recording's own mean pose is used instead.
 - **u** — undo the last take, **q** — finish.
 
 You don't need to be precise — being off by a few cm/deg on the return is fine, the loop is
-**closed for you**. The **abduction** motor (id 104) doesn't need to move; it's held fixed and set
-separately at playback. Record the **right leg first, then the left**.
+**closed for you**. The **abduction** motor (id 104) doesn't need to move; it's held at the
+captured center. Each leg is recorded and processed **independently** — the two legs' motors have
+different origins and don't move as a clean mirror of each other, so there's no cross-leg
+alignment or sign-guessing; the left leg replays exactly what you taught it, in its own frame.
 
 When both legs are recorded it **auto-smooths and exports**:
 `trajectories/gait_recorded.npz` (+ a `gait_recorded.png` preview). Re-smooth anytime without
-recording: `python fixed_gait/record_trajectory.py --process-only`.
+recording: `python fixed_gait/record_trajectory.py --process-only`. Useful flags:
 
-**What the smoothing does** (`trajectory.py`): resamples each take to one cycle, auto-aligns their
-phase, detects the left↔right **mirror sign**, averages them into **one** canonical shape, closes
-the loop (FFT low-pass → exactly periodic), and stores each side's **offset (its own 0°), sign, and
-travel range** separately. Playback then runs the *same* shape on both legs, 180° apart, each
-mapped into its own motor frame and clipped to its recorded range.
+- `--split 0.5` — the fraction of the cycle given to the "outbound" (hip-max → hip-min) arc,
+  **shared by both legs**, so a step out and the return each take the same portion of the period on
+  both legs, independent of how fast you happened to move your hand while teaching it.
+- `--left-phase 0.5` — the left leg's dephase (0.5 = 180°); pass `0.0` if the legs should move
+  together instead of alternating.
+
+**What the smoothing does now** (`trajectory.py`): resamples each take to one cycle, finds that
+leg's two turning points (hip max/min) and **re-times** the cycle so the outbound and return arcs
+each fill a fixed share of the phase (`--split`) — this removes any timing quirks from your hand
+speed while keeping the taught shape *within* each arc. Multiple takes of the same leg are averaged
+(they land on the same phase grid automatically, anchored on the turning points), then FFT
+low-pass smoothed and loop-closed. Each side keeps its **own** shape, center, and clip range —
+nothing is shared or mirrored between legs except the timing schedule and the phase offset.
 
 ### 2. Play it back — two control modes (`--mode`)
 
@@ -205,28 +219,7 @@ on a normal fast move), the controller now tapers the *accelerating* current as 
 `--speed-limit` (default 9000 ERPM), so speed **saturates** there smoothly — braking current is
 never limited. `--max-speed` (default 16000) is only a last-resort runaway net, well above the
 governor. Raise `--speed-limit` to allow faster moves, lower it to keep things gentle; `--speed-limit 0`
-disables the governor.
-
-**Loop rate & jitter (current mode only — the PID runs in Python on the Pi).**
-
-- **`--rate` Hz** (default 200) sets the control-loop rate. It uses a hybrid sleep (sleep + short
-  busy-wait) for tight timing. *Feedback is capped by the motors' status broadcast rate (~200 Hz as
-  configured)* — running much faster than that mostly reloads the CAN bus with redundant commands
-  and doesn't add feedback. To truly go faster, first raise the motors' status rate in the CubeMars
-  tool, then raise `--rate`.
-- **`--rt`** (run with `sudo`) requests real-time scheduling (`SCHED_FIFO`), locks memory, and
-  optionally pins a core with **`--cpu 3`** — the single biggest jitter reducer on the Pi.
-- The **live readout** shows `loop=…Hz jit=…us ovr=…` (achieved rate, recent jitter, overrun
-  count), and a **summary** prints on exit (mean period, std jitter, min/max, % overruns).
-  `--dry-run` runs the whole loop but commands 0 A, so it's also a safe **benchmark** of what rate
-  the Pi can actually hold.
-
-System tuning outside the script (do these on the Pi for the least jitter):
-```bash
-sudo cpufreq-set -g performance          # or: echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sudo chrt -f 90 taskset -c 3 python fixed_gait/play_trajectory.py --rate 500 --cpu 3 ...   # RT + pinned
-# add `isolcpus=3` to /boot/cmdline.txt to reserve core 3 for the loop (best, needs reboot)
-```
+disables the governor. The live readout shows `maxSpd` so you can see where you're running.
 
 **Tuning recipe:** start `--kp 0.4 --ki 0 --kd 0 --period 10 --current-limit 3`; raise `kp` until
 tracking is tight without buzzing; add `ki` to kill the remaining lag; add a touch of `kd` only if
@@ -255,7 +248,7 @@ phase marker and a schematic stick figure (angles are real, leg geometry is appr
 | `run_hardware.py` | CAN streamer (position/servo mode) for the analytic gait; `CALIB` table + safety. |
 | `validate_gait.py` | sim-based safety check + reachability-map overlay. |
 | `record_trajectory.py` | **teach recorder** — backdrive a leg by hand, SPACE-toggled takes; auto-smooths + exports. |
-| `trajectory.py` | pure-numpy smoothing/fusion (align, mirror, close-loop) + per-side calibration; shared by record & play. |
+| `trajectory.py` | pure-numpy per-leg smoothing + shared-schedule re-timing + close-loop; independent per-side calibration (own shape, captured center, clip range); shared by record & play. |
 | `play_trajectory.py` | **replay** a recorded trajectory, both legs dephased 180°; tunable current-**PID** with an Amp torque cap, `--log` tracking plot. |
 | `view_trajectory.py` | inspect a trajectory: static PNG + live/animated visualization (no hardware). |
 | `trajectories/` | recorded takes + exported `gait_recorded.npz` (+ preview png, tracking logs). |
