@@ -165,12 +165,21 @@ the loop (FFT low-pass → exactly periodic), and stores each side's **offset (i
 travel range** separately. Playback then runs the *same* shape on both legs, 180° apart, each
 mapped into its own motor frame and clipped to its recorded range.
 
-### 2. Play it back (tunable PID, torque-limited, at your speed)
+### 2. Play it back — two control modes (`--mode`)
+
+| `--mode` | who runs the position loop | CAN command | torque cap | when |
+| --- | --- | --- | --- | --- |
+| `current` (default) | **Python PID on the Pi (200 Hz)** | `SET_CURRENT` | **yes** (`--current-limit`, A) | safe first motion, compliant |
+| `position` | the **motor controller** | `SET_POS` | no (drive's preset only) | crisp tracking once you trust it |
 
 ```bash
+# CURRENT mode (torque-limited PID, default):
 python fixed_gait/play_trajectory.py --dry-run                                  # print targets, 0 A
 python fixed_gait/play_trajectory.py --period 8 --current-limit 3 --kp 0.8 --ki 0.4 --log
 python fixed_gait/play_trajectory.py --period 4 --current-limit 6 --kp 1.5 --ki 0.8 --kd 0.03
+
+# POSITION mode (drive runs the loop — no kp/ki/kd/current-limit; a tracking-error guard applies):
+python fixed_gait/play_trajectory.py --mode position --period 8 --log
 python fixed_gait/play_trajectory.py --abduction-right 5 --abduction-left -3    # set abduction hold
 ```
 

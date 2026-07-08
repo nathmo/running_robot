@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Play back a recorded trajectory on both legs, dephased 180 deg, with a hard TORQUE (current)
-limit and adjustable speed. Tunable PID (position -> current) per motor.
+"""Play back a recorded trajectory on both legs, dephased 180 deg, at an adjustable speed.
 
-Control: a software PID loop per motor drives current (servo-mode SET_CURRENT, same command as
+Two control modes (--mode):
+  current  (default) — a software PID on the Pi drives SET_CURRENT, hard-clamped to a torque
+                       (current) limit. Compliant + torque-capped; kp/ki/kd tune it.
+  position           — stream SET_POS position waypoints; the MOTOR's internal loop tracks them
+                       (rock-solid tracking, but NO torque cap from our side). kp/ki/kd and the
+                       current/speed limits are ignored; a position tracking-error guard applies.
+
+Control (current mode): a software PID loop per motor drives current (servo-mode SET_CURRENT, same command as
 tools/ak_servo_torque.py). The commanded current is hard-clamped to --current-limit, so torque can
 never exceed that. Amps (not Nm) because the motor's Nm-per-amp (Kt) is not known exactly.
 
@@ -26,7 +32,7 @@ Tuning recipe:
 Examples:
     python fixed_gait/play_trajectory.py --dry-run
     python fixed_gait/play_trajectory.py --period 8 --current-limit 3 --kp 0.8 --ki 0.4 --log
-    python fixed_gait/play_trajectory.py --period 4 --current-limit 6 --kp 1.5 --ki 0.8 --kd 0.03
+    python fixed_gait/play_trajectory.py --mode position --period 8 --log     # drive runs the loop
 """
 import argparse
 import sys
@@ -45,6 +51,7 @@ BITRATE = 1_000_000
 SIDE_CHANNEL = {"right": "can0", "left": "can1"}
 MOTOR_IDS = [104, 105, 106]                 # abduction, cam, hip  == cols 0,1,2
 CAN_PACKET_SET_CURRENT = 1
+CAN_PACKET_SET_POS = 4
 CMD_HZ = 200.0
 
 # Speed handling: a soft GOVERNOR tapers accelerating current as the motor nears --speed-limit,
@@ -59,6 +66,15 @@ def set_current(bus, cid, amps):
     val = int(round(amps * 1000.0))
     val = max(-2_147_483_648, min(2_147_483_647, val))
     bus.send(can.Message(arbitration_id=cid | (CAN_PACKET_SET_CURRENT << 8),
+                         data=val.to_bytes(4, "big", signed=True), is_extended_id=True))
+
+
+def set_pos(bus, cid, pos_deg):
+    # servo-mode position waypoint: deg * 10000, big-endian int32 (same as tools/ak_servo_sweep.py).
+    # The motor's own internal loop tracks it — no torque cap from our side.
+    val = int(round(pos_deg * 10_000.0))
+    val = max(-2_147_483_648, min(2_147_483_647, val))
+    bus.send(can.Message(arbitration_id=cid | (CAN_PACKET_SET_POS << 8),
                          data=val.to_bytes(4, "big", signed=True), is_extended_id=True))
 
 
@@ -77,6 +93,7 @@ class Motor:
         self.bus, self.cid, self.side, self.col = bus, cid, side, col
         self.pos = None
         self.spd = 0.0
+        self.cur = 0.0             # drive-reported current (A)
         self.temp = 0
         self.err = 0
         self.vel = 0.0              # EMA finite-difference velocity (deg/s)
@@ -92,6 +109,7 @@ class Motor:
             self.vel = 0.3 * (st["pos"] - self._prev_pos) / dt + 0.7 * self.vel
         self._prev_pos = st["pos"]
         self.pos, self.spd, self.temp, self.err = st["pos"], st["spd"], st["temp"], st["err"]
+        self.cur = st["cur"]
 
 
 def drain(buses, motors_by_bus, dt):
@@ -159,6 +177,12 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--file", default="fixed_gait/trajectories/gait_recorded.npz")
     ap.add_argument("--interface", default="socketcan")
+    ap.add_argument("--mode", choices=["current", "position"], default="current",
+                    help="'current' = Python PID -> SET_CURRENT (torque-limited); "
+                         "'position' = stream SET_POS waypoints, the drive runs the loop (no torque cap). "
+                         "kp/ki/kd/current-limit/speed-limit apply to 'current' only.")
+    ap.add_argument("--max-track-err", type=float, default=30.0,
+                    help="position mode: cut if actual strays this many deg from the commanded waypoint")
     ap.add_argument("--period", type=float, default=8.0, help="seconds per cycle (bigger = slower)")
     ap.add_argument("--current-limit", type=float, default=3.0, help="HARD current cap per motor (A)")
     ap.add_argument("--kp", type=float, default=0.8, help="P gain (A per deg of error)")
@@ -197,10 +221,15 @@ def main():
         for col, cid in enumerate(MOTOR_IDS):
             m = Motor(buses[ch], cid, s, col)
             motors.append(m); motors_by_bus[ch][cid] = m
-    print(f"Loaded {args.file}. Playing {sides}, period={args.period}s, "
-          f"current-limit={args.current_limit}A{' (DRY-RUN)' if args.dry_run else ''}")
-    print(f"PID: kp={args.kp} ki={args.ki} kd={args.kd}  ramp={args.ramp}s  "
-          f"speed-limit={args.speed_limit:.0f} max-speed={args.max_speed:.0f} ERPM")
+    dry = " (DRY-RUN)" if args.dry_run else ""
+    print(f"Loaded {args.file}. Playing {sides}, mode={args.mode.upper()}, period={args.period}s{dry}")
+    if args.mode == "position":
+        print(f"POSITION mode: streaming SET_POS waypoints — the DRIVE runs the loop (no torque cap). "
+              f"ramp={args.ramp}s  max-track-err={args.max_track_err:.0f} deg")
+    else:
+        print(f"CURRENT mode: Python PID -> SET_CURRENT, torque cap={args.current_limit}A. "
+              f"kp={args.kp} ki={args.ki} kd={args.kd} ramp={args.ramp}s "
+              f"speed-limit={args.speed_limit:.0f} max-speed={args.max_speed:.0f} ERPM")
 
     dt = 1.0 / CMD_HZ
     log = {"t": [], "tgt": [], "act": [], "cur": []} if args.log else None
@@ -231,32 +260,40 @@ def main():
                                             abduction_override=abd_override[m.side])[m.col]
                 target = (1 - ramp) * start_pos[id(m)] + ramp * tgt_full
 
-                if m.prev_target is not None:
-                    m.tvel = 0.3 * (target - m.prev_target) / dt + 0.7 * m.tvel
-                m.prev_target = target
+                if args.mode == "position":
+                    # stream a position waypoint; the drive's own loop tracks it (no torque cap).
+                    if not args.dry_run:
+                        set_pos(m.bus, m.cid, target)
+                    logged = m.cur                         # drive-reported current
+                    m.last_cmd, m.last_tgt = m.cur, target
+                    if abs(target - m.pos) > args.max_track_err:
+                        aborted = (f"{m.side} id{m.cid} tracking err {target - m.pos:+.0f} deg "
+                                   f"(> --max-track-err {args.max_track_err:.0f}) — hitting a stop?")
+                else:
+                    # current mode: Python PID -> SET_CURRENT, hard-clamped (torque-limited)
+                    if m.prev_target is not None:
+                        m.tvel = 0.3 * (target - m.prev_target) / dt + 0.7 * m.tvel
+                    m.prev_target = target
+                    err = target - m.pos
+                    if ramp >= 1.0 and args.ki > 0:        # integral, anti-windup after soft-start
+                        m.integ += err * dt
+                        m.integ = float(np.clip(m.integ, -lim / args.ki, lim / args.ki))
+                    d_term = args.kd * (m.tvel - m.vel)
+                    curr = args.kp * err + args.ki * m.integ + d_term
+                    curr = float(np.clip(np.clip(curr, -lim, lim), -ceiling, ceiling))
+                    # speed governor: taper only the ACCELERATING current so speed saturates near
+                    # --speed-limit (braking is never limited).
+                    if args.speed_limit > 0 and curr * m.spd > 0 and abs(m.spd) > args.speed_limit:
+                        band = 0.3 * args.speed_limit
+                        curr *= float(np.clip((args.speed_limit + band - abs(m.spd)) / band, 0.0, 1.0))
+                    set_current(m.bus, m.cid, 0.0 if args.dry_run else curr)
+                    logged = curr
+                    m.last_cmd, m.last_tgt = curr, target
+                    if abs(m.spd) > args.max_speed:
+                        aborted = f"{m.side} id{m.cid} runaway {m.spd:.0f} ERPM (> --max-speed {args.max_speed:.0f})"
 
-                err = target - m.pos
-                # integral with anti-windup: accumulate only after soft-start, clamp its contribution
-                if ramp >= 1.0 and args.ki > 0:
-                    m.integ += err * dt
-                    imax = lim / args.ki
-                    m.integ = float(np.clip(m.integ, -imax, imax))
-                d_term = args.kd * (m.tvel - m.vel)
-                curr = args.kp * err + args.ki * m.integ + d_term
-                curr = float(np.clip(np.clip(curr, -lim, lim), -ceiling, ceiling))
-                # speed governor: only the ACCELERATING current is tapered (curr and spd same sign)
-                # as |spd| climbs from speed-limit toward speed-limit+band, so speed saturates
-                # smoothly there. Braking current is never limited. This replaces the old hard cut.
-                if args.speed_limit > 0 and curr * m.spd > 0 and abs(m.spd) > args.speed_limit:
-                    band = 0.3 * args.speed_limit
-                    curr *= float(np.clip((args.speed_limit + band - abs(m.spd)) / band, 0.0, 1.0))
-                set_current(m.bus, m.cid, 0.0 if args.dry_run else curr)
-                m.last_cmd, m.last_tgt = curr, target
-                row_t.append(target); row_a.append(m.pos); row_c.append(curr)
-
-                if abs(m.spd) > args.max_speed:
-                    aborted = f"{m.side} id{m.cid} runaway {m.spd:.0f} ERPM (> --max-speed {args.max_speed:.0f})"
-                elif m.temp >= MAX_TEMP_C:
+                row_t.append(target); row_a.append(m.pos); row_c.append(logged)
+                if m.temp >= MAX_TEMP_C:
                     aborted = f"{m.side} id{m.cid} temp {m.temp}C"
                 elif m.err:
                     aborted = f"{m.side} id{m.cid} error {m.err}"
