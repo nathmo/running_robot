@@ -191,6 +191,13 @@ current = kp·err + ki·∫err + kd·(target_vel − actual_vel),   clamped to �
 - **`--period`** seconds per cycle (bigger = slower). **`--log`** saves a target-vs-actual +
   current plot (`trajectories/last_run.png/.npz`) — run it, look at the lag, adjust gains, repeat.
 
+**Speed governor (no more runaway crashes).** Instead of hard-cutting at 5000 ERPM (which tripped
+on a normal fast move), the controller now tapers the *accelerating* current as a motor nears
+`--speed-limit` (default 9000 ERPM), so speed **saturates** there smoothly — braking current is
+never limited. `--max-speed` (default 16000) is only a last-resort runaway net, well above the
+governor. Raise `--speed-limit` to allow faster moves, lower it to keep things gentle; `--speed-limit 0`
+disables the governor. The live readout shows `maxSpd` so you can see where you're running.
+
 **Tuning recipe:** start `--kp 0.4 --ki 0 --kd 0 --period 10 --current-limit 3`; raise `kp` until
 tracking is tight without buzzing; add `ki` to kill the remaining lag; add a touch of `kd` only if
 it oscillates; then shorten `--period` and raise `--current-limit` for speed. Both legs run dephased

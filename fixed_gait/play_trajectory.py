@@ -47,7 +47,11 @@ MOTOR_IDS = [104, 105, 106]                 # abduction, cam, hip  == cols 0,1,2
 CAN_PACKET_SET_CURRENT = 1
 CMD_HZ = 200.0
 
-MAX_SPEED_ERPM = 5000.0     # runaway guard
+# Speed handling: a soft GOVERNOR tapers accelerating current as the motor nears --speed-limit,
+# so speed saturates there smoothly (no crash). The hard --max-speed cut is only a last-resort
+# runaway net, set well above the governor so normal fast moves never trip it.
+DEFAULT_SPEED_LIMIT = 9000.0    # ERPM: governor onset (0 = governor off)
+DEFAULT_MAX_SPEED = 16000.0     # ERPM: hard emergency cut
 MAX_TEMP_C = 80
 
 
@@ -166,6 +170,10 @@ def main():
     ap.add_argument("--abduction-right", type=float, default=None, help="hold angle for right abduction (deg)")
     ap.add_argument("--abduction-left", type=float, default=None, help="hold angle for left abduction (deg)")
     ap.add_argument("--max-current", type=float, default=None, help="absolute ceiling (default = limit)")
+    ap.add_argument("--speed-limit", type=float, default=DEFAULT_SPEED_LIMIT,
+                    help="soft speed governor onset (ERPM); tapers accel current so speed saturates. 0=off")
+    ap.add_argument("--max-speed", type=float, default=DEFAULT_MAX_SPEED,
+                    help="hard runaway cut (ERPM); a last-resort net above the governor")
     ap.add_argument("--dry-run", action="store_true", help="compute + print, but command 0 A (no motion)")
     ap.add_argument("--log", nargs="?", const="fixed_gait/trajectories/last_run",
                     default=None, help="record target-vs-actual and save a plot (path prefix)")
@@ -191,7 +199,8 @@ def main():
             motors.append(m); motors_by_bus[ch][cid] = m
     print(f"Loaded {args.file}. Playing {sides}, period={args.period}s, "
           f"current-limit={args.current_limit}A{' (DRY-RUN)' if args.dry_run else ''}")
-    print(f"PID: kp={args.kp} ki={args.ki} kd={args.kd}  ramp={args.ramp}s")
+    print(f"PID: kp={args.kp} ki={args.ki} kd={args.kd}  ramp={args.ramp}s  "
+          f"speed-limit={args.speed_limit:.0f} max-speed={args.max_speed:.0f} ERPM")
 
     dt = 1.0 / CMD_HZ
     log = {"t": [], "tgt": [], "act": [], "cur": []} if args.log else None
@@ -235,12 +244,18 @@ def main():
                 d_term = args.kd * (m.tvel - m.vel)
                 curr = args.kp * err + args.ki * m.integ + d_term
                 curr = float(np.clip(np.clip(curr, -lim, lim), -ceiling, ceiling))
+                # speed governor: only the ACCELERATING current is tapered (curr and spd same sign)
+                # as |spd| climbs from speed-limit toward speed-limit+band, so speed saturates
+                # smoothly there. Braking current is never limited. This replaces the old hard cut.
+                if args.speed_limit > 0 and curr * m.spd > 0 and abs(m.spd) > args.speed_limit:
+                    band = 0.3 * args.speed_limit
+                    curr *= float(np.clip((args.speed_limit + band - abs(m.spd)) / band, 0.0, 1.0))
                 set_current(m.bus, m.cid, 0.0 if args.dry_run else curr)
                 m.last_cmd, m.last_tgt = curr, target
                 row_t.append(target); row_a.append(m.pos); row_c.append(curr)
 
-                if abs(m.spd) > MAX_SPEED_ERPM:
-                    aborted = f"{m.side} id{m.cid} runaway {m.spd:.0f} ERPM"
+                if abs(m.spd) > args.max_speed:
+                    aborted = f"{m.side} id{m.cid} runaway {m.spd:.0f} ERPM (> --max-speed {args.max_speed:.0f})"
                 elif m.temp >= MAX_TEMP_C:
                     aborted = f"{m.side} id{m.cid} temp {m.temp}C"
                 elif m.err:
@@ -257,8 +272,9 @@ def main():
                 mt = max(m.temp for m in motors)
                 mc = max(abs(m.last_cmd) for m in motors)
                 me = max(abs(m.last_tgt - m.pos) for m in motors)
-                print(f"  t={elapsed:6.1f}s phase={phase:4.2f} ramp={ramp:3.2f} "
-                      f"maxErr={me:5.1f}deg maxI={mc:4.2f}/{lim:.2f}A maxT={mt}C   ", end="\r")
+                ms = max(abs(m.spd) for m in motors)
+                print(f"  t={elapsed:6.1f}s phase={phase:4.2f} maxErr={me:5.1f}deg "
+                      f"maxI={mc:4.2f}/{lim:.2f}A maxSpd={ms:5.0f}erpm maxT={mt}C   ", end="\r")
 
             next_t += dt
             s = next_t - time.time()
