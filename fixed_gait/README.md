@@ -205,7 +205,28 @@ on a normal fast move), the controller now tapers the *accelerating* current as 
 `--speed-limit` (default 9000 ERPM), so speed **saturates** there smoothly — braking current is
 never limited. `--max-speed` (default 16000) is only a last-resort runaway net, well above the
 governor. Raise `--speed-limit` to allow faster moves, lower it to keep things gentle; `--speed-limit 0`
-disables the governor. The live readout shows `maxSpd` so you can see where you're running.
+disables the governor.
+
+**Loop rate & jitter (current mode only — the PID runs in Python on the Pi).**
+
+- **`--rate` Hz** (default 200) sets the control-loop rate. It uses a hybrid sleep (sleep + short
+  busy-wait) for tight timing. *Feedback is capped by the motors' status broadcast rate (~200 Hz as
+  configured)* — running much faster than that mostly reloads the CAN bus with redundant commands
+  and doesn't add feedback. To truly go faster, first raise the motors' status rate in the CubeMars
+  tool, then raise `--rate`.
+- **`--rt`** (run with `sudo`) requests real-time scheduling (`SCHED_FIFO`), locks memory, and
+  optionally pins a core with **`--cpu 3`** — the single biggest jitter reducer on the Pi.
+- The **live readout** shows `loop=…Hz jit=…us ovr=…` (achieved rate, recent jitter, overrun
+  count), and a **summary** prints on exit (mean period, std jitter, min/max, % overruns).
+  `--dry-run` runs the whole loop but commands 0 A, so it's also a safe **benchmark** of what rate
+  the Pi can actually hold.
+
+System tuning outside the script (do these on the Pi for the least jitter):
+```bash
+sudo cpufreq-set -g performance          # or: echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sudo chrt -f 90 taskset -c 3 python fixed_gait/play_trajectory.py --rate 500 --cpu 3 ...   # RT + pinned
+# add `isolcpus=3` to /boot/cmdline.txt to reserve core 3 for the loop (best, needs reboot)
+```
 
 **Tuning recipe:** start `--kp 0.4 --ki 0 --kd 0 --period 10 --current-limit 3`; raise `kp` until
 tracking is tight without buzzing; add `ki` to kill the remaining lag; add a touch of `kd` only if
