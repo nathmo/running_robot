@@ -46,6 +46,7 @@ except ImportError:
 
 from gait import (GaitParams, GaitGenerator,
                   HIP_ROLL_L, CAM_L, THIGH_L, HIP_ROLL_R, CAM_R, THIGH_R)
+import joint_limits
 
 RAD2DEG = 180.0 / math.pi
 
@@ -137,9 +138,14 @@ class Motor:
             self.last_fb = fb
         return fb
 
+    def target_deg(self, offset_deg):
+        """Absolute raw motor degrees for home + sign*gear*offset, WITHOUT sending anything --
+        lets a target be workspace-checked before it's committed."""
+        return self.home_deg + self.sign * self.gear * offset_deg
+
     def command_offset(self, offset_deg):
         """Command home + sign*gear*offset (joint degrees)."""
-        cmd = self.home_deg + self.sign * self.gear * offset_deg
+        cmd = self.target_deg(offset_deg)
         self.last_cmd_deg = cmd
         set_pos(self.bus, self.cid, cmd)
 
@@ -162,6 +168,32 @@ def build_motors(buses):
         motors.append(m)
         idx_of[name] = (m, gidx)
     return motors, idx_of
+
+
+def leg_groups(motors):
+    """{'left': {'abd':Motor,'cam':Motor,'thigh':Motor}, 'right': {...}} -- for workspace checks."""
+    role_of = {"hip_roll": "abd", "cam": "cam", "thigh": "thigh"}
+    groups = {"left": {}, "right": {}}
+    for m in motors:
+        leg = "left" if m.name.endswith("_L") else "right"
+        role = next(r for prefix, r in role_of.items() if m.name.startswith(prefix))
+        groups[leg][role] = m
+    return groups
+
+
+def check_workspace(groups, abs_pos, limits):
+    """abs_pos: dict Motor -> absolute raw target deg (about to be sent, or already held).
+    Checks every leg that has calibration; None limits (no calibration file yet) always passes."""
+    if limits is None:
+        return True, ""
+    for leg, roles in groups.items():
+        if not limits.has_leg(leg):
+            continue
+        ok, reason = limits.validate(leg, abs_pos[roles["abd"]], abs_pos[roles["cam"]],
+                                     abs_pos[roles["thigh"]])
+        if not ok:
+            return False, reason
+    return True, ""
 
 
 def preflight(motors):
@@ -206,7 +238,7 @@ def release_all(motors):
 
 
 # --------------------------------------------------------------------------- modes
-def run_test_joint(motors, idx_of, gen, name, deg, hold):
+def run_test_joint(motors, idx_of, gen, name, deg, hold, groups, limits):
     """Slowly ramp ONE joint to +deg (home-relative) and back, for sign/direction calibration."""
     if name not in idx_of:
         print(f"unknown joint '{name}'. choices: {[c[0] for c in CALIB]}")
@@ -225,6 +257,11 @@ def run_test_joint(motors, idx_of, gen, name, deg, hold):
                 off = deg * (1 - (k + 1) / n)
             else:
                 off = deg
+            abs_pos = {mm: mm.last_cmd_deg for mm in motors}
+            abs_pos[m] = m.target_deg(off)
+            ok, reason = check_workspace(groups, abs_pos, limits)
+            if not ok:
+                print(f"\n  !! SAFETY STOP: {reason}. Not commanding, cutting."); return
             m.command_offset(off)
             fb = m.drain_latest()
             if fb and fb["err"]:
@@ -236,7 +273,7 @@ def run_test_joint(motors, idx_of, gen, name, deg, hold):
     print("\n done.")
 
 
-def run_gait(motors, idx_of, gen, duration, settle_only):
+def run_gait(motors, idx_of, gen, duration, settle_only, groups, limits):
     dt = 1.0 / CMD_RATE_HZ
     center = gen.center_pose()
     t0 = time.time()
@@ -250,9 +287,18 @@ def run_gait(motors, idx_of, gen, duration, settle_only):
             break
         targets = center if settle_only else gen.targets(t)      # rad, sim convention
         offsets_deg = (targets - center) * RAD2DEG               # home-relative joint offsets
-        # clamp offsets and command
+        # clamp offsets, workspace-check the ABSOLUTE targets, THEN command (reject before sending)
+        pending = {}
+        abs_pos = {m: m.last_cmd_deg for m in motors}
         for m, gidx in (idx_of[n] for n, *_ in CALIB):
             off = float(np.clip(offsets_deg[gidx], -MAX_OFFSET_DEG, MAX_OFFSET_DEG))
+            pending[m] = off
+            abs_pos[m] = m.target_deg(off)
+        ok, reason = check_workspace(groups, abs_pos, limits)
+        if not ok:
+            print(f"\n!! SAFETY STOP: {reason}. Not commanding, releasing motors.")
+            break
+        for m, off in pending.items():
             m.command_offset(off)
         aborted, reason = safety_check(motors)
         if aborted:
@@ -303,6 +349,8 @@ def main():
     print(f"Opening {args.interface} {channels} @ {BITRATE} bps ...")
     buses = open_buses(args.interface, channels)
     motors, idx_of = build_motors(buses)
+    groups = leg_groups(motors)
+    limits = joint_limits.load_or_warn()
     gen = GaitGenerator(make_params(args))
 
     try:
@@ -311,7 +359,7 @@ def main():
             return
         print(f"center pose (rad): {np.round(gen.center_pose(), 3)}")
         if args.test_joint:
-            run_test_joint(motors, idx_of, gen, args.test_joint, args.deg, args.hold)
+            run_test_joint(motors, idx_of, gen, args.test_joint, args.deg, args.hold, groups, limits)
             return
         mode = "SETTLE (hold center)" if args.settle_only else f"WALK amp={args.amp_scale:g}"
         print(f"\nMode: {mode}. Motion in {args.countdown:g}s — Ctrl+C to abort.")
@@ -319,7 +367,7 @@ def main():
             print(f"  {s}...", end=" ", flush=True)
             time.sleep(1.0)
         print()
-        run_gait(motors, idx_of, gen, args.duration, args.settle_only)
+        run_gait(motors, idx_of, gen, args.duration, args.settle_only, groups, limits)
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:

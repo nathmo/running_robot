@@ -1,0 +1,11 @@
+# GPU training extras (rl/mjx_*.py) -- Linux/GPU-only, on top of rl/requirements.txt.
+# The CPU/deployment stack (rl/env.py, rl/train.py, rl/evaluate.py, rl/gait_probe.py,
+# rl/joystick.py) never needs these; a Windows dev machine doesn't need this file at all.
+#
+#   pip install -U 'jax[cuda12]'   # CUDA 13.0 driver is backward-compatible with cuda12 wheels
+#   pip install mujoco-mjx brax
+#   pip install -r rl/requirements-mjx.txt
+
+jax[cuda12]>=0.6            # tested 0.6.2
+mujoco-mjx>=3.10            # tested 3.10.0 -- must match the mujoco version in requirements.txt
+brax>=0.14                  # tested 0.14.1 -- low-level PPO primitives only (see rl/mjx_train.py)

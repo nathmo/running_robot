@@ -55,3 +55,4 @@ Thumbs.db
 
 # scratch validation renders
 mujoco/spiderbot/_*.png
+fixed_gait/calibration/_selftest/

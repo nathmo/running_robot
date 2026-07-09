@@ -46,6 +46,7 @@ except ImportError:
     can = None
 
 import trajectory as traj
+import joint_limits
 
 BITRATE = 1_000_000
 SIDE_CHANNEL = {"right": "can0", "left": "can1"}
@@ -110,6 +111,31 @@ class Motor:
         self._prev_pos = st["pos"]
         self.pos, self.spd, self.temp, self.err = st["pos"], st["spd"], st["temp"], st["err"]
         self.cur = st["cur"]
+
+
+def group_by_side(motors):
+    """{'left': {'abd':Motor,'cam':Motor,'thigh':Motor}, 'right': {...}} -- for workspace checks.
+    col 0=abduction, 1=cam, 2=hip/thigh (MOTOR_IDS order)."""
+    role = ["abd", "cam", "thigh"]
+    groups = {}
+    for m in motors:
+        groups.setdefault(m.side, {})[role[m.col]] = m
+    return groups
+
+
+def check_workspace(groups, targets, limits):
+    """targets: dict Motor -> absolute raw target deg about to be sent. None limits (no
+    calibration file yet) always passes."""
+    if limits is None:
+        return True, ""
+    for side, roles in groups.items():
+        if not limits.has_leg(side):
+            continue
+        ok, reason = limits.validate(side, targets[roles["abd"]], targets[roles["cam"]],
+                                     targets[roles["thigh"]])
+        if not ok:
+            return False, reason
+    return True, ""
 
 
 def drain(buses, motors_by_bus, dt):
@@ -228,6 +254,8 @@ def main():
         for col, cid in enumerate(MOTOR_IDS):
             m = Motor(buses[ch], cid, s, col)
             motors.append(m); motors_by_bus[ch][cid] = m
+    side_groups = group_by_side(motors)
+    limits = joint_limits.load_or_warn()
     dry = " (DRY-RUN)" if args.dry_run else ""
     print(f"Loaded {args.file}. Playing {sides}, mode={args.mode.upper()}, period={args.period}s{dry}")
     if args.mode == "position":
@@ -260,12 +288,22 @@ def main():
             phase = (play_t / args.period) % 1.0
             lim = ramp * args.current_limit
 
-            aborted = None
-            row_t, row_a, row_c = [], [], []
+            # compute every motor's target BEFORE sending anything, so the workspace safety
+            # check can reject the whole tick up front instead of after commanding some motors
+            targets = {}
             for m in motors:
                 tgt_full = traj.reconstruct(data, m.side, phase,
                                             abduction_override=abd_override[m.side])[m.col]
-                target = (1 - ramp) * start_pos[id(m)] + ramp * tgt_full
+                targets[m] = (1 - ramp) * start_pos[id(m)] + ramp * tgt_full
+
+            aborted = None
+            ok, reason = check_workspace(side_groups, targets, limits)
+            if not ok:
+                aborted = reason
+
+            row_t, row_a, row_c = [], [], []
+            for m in (motors if aborted is None else []):
+                target = targets[m]
 
                 if args.mode == "position":
                     # stream a position waypoint; the drive's own loop tracks it (no torque cap).
@@ -305,7 +343,7 @@ def main():
                 elif m.err:
                     aborted = f"{m.side} id{m.cid} error {m.err}"
 
-            if log is not None:
+            if log is not None and row_t:
                 log["t"].append(elapsed); log["tgt"].append(row_t)
                 log["act"].append(row_a); log["cur"].append(row_c)
             if aborted:

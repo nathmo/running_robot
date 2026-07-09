@@ -69,6 +69,44 @@ forward edge of the reachable band — see `_gait_reachability.png`.
 
 ---
 
+## Map the safe workspace (once, before running on real hardware)
+
+The URDF/MJCF joint ranges for `cam` and `thigh` are CAD-derived guesses, not validated hardstops —
+and worse, cam and thigh aren't independent: they drive a closed 4-bar loop through the passive
+pushrod + knee, so only a thin, non-rectangular **band** of (cam, thigh) combinations is
+mechanically assemblable (see the reachability notes above). A per-joint min/max box is provably
+wrong for that pair. `calibrate_workspace.py` backdrives the real leg by hand and derives the safe
+region straight from what you actually swept, instead of trusting the CAD ranges:
+
+```bash
+python fixed_gait/calibrate_workspace.py --leg left     # backdrive LEFT leg (can1), a few segments
+python fixed_gait/calibrate_workspace.py --leg right    # backdrive RIGHT leg (can0)
+```
+
+Same limp-motor technique as the teach recorder below (`SET_CURRENT 0`, so you move the leg by
+hand while positions are logged):
+
+- **SPACE** — start/stop a recording segment. Move whatever you're calibrating through its FULL
+  physical range during a segment — e.g. one segment sweeping abduction stop-to-stop, another
+  sweeping the knee (cam+thigh together, hugging its limits AND wandering the interior). As many
+  segments as you like.
+- **z** — capture the current pose (all 3 raw motor angles) as this leg's zero reference (pose the
+  leg at the same nominal stance you use as "home" elsewhere first). Only used for the origin
+  marker / readable angles in the plot — the stored limits themselves are absolute raw motor
+  degrees.
+- **u** — undo the last segment, **q** — finish: saves raw samples, derives the safe workspace,
+  and writes `fixed_gait/calibration/workspace_summary.png` (abduction range + a knee scatter plot
+  showing the demonstrated (cam, thigh) samples and the derived safe region).
+
+This produces `fixed_gait/calibration/joint_limits.npz`, loaded by `joint_limits.py` — a small
+numpy-only module that `run_hardware.py`, `play_trajectory.py`, and `record_trajectory.py` all use
+to reject/flag out-of-envelope motor angles. Re-tune the safety margin or grid resolution without
+re-recording: `python fixed_gait/calibrate_workspace.py --process-only --margin-deg 4`. Try the
+whole pipeline with fabricated data first (no hardware/CAN needed): `... --selftest`. Until you've
+calibrated a leg, the other scripts run exactly as before (no calibration file = no check).
+
+---
+
 ## Run it on the robot (Raspberry Pi)
 
 Install the runtime and bring up both CAN buses at 1 Mbps:
@@ -123,6 +161,9 @@ Ctrl+C at any time — motors are released (`SET_CURRENT 0`, limp) on exit.
 - **Tracking cut**: if a motor's actual position strays > `MAX_TRACK_ERR_DEG` (25°) from its
   command, it cuts (a motor hitting a mechanical stop trips this).
 - **Error / over-temp cut**: any motor error flag or temp ≥ 80 °C stops and releases.
+- **Workspace check**: if `fixed_gait/calibration/joint_limits.npz` exists (see "Map the safe
+  workspace" above), every target is validated against it *before* being sent — an out-of-envelope
+  abduction angle or (cam, thigh) pair aborts and releases instead of ever reaching the motors.
 
 The CAN protocol (servo-mode `SET_POS`, big-endian int32 × 10000; `SET_CURRENT 0` to release) is
 copied verbatim from the tested `tools/ak_servo_sweep.py`.
@@ -154,6 +195,11 @@ are logged. In the terminal:
   this before or between takes, whenever the leg is sitting where you want "home" to be. If you
   never press it, the recording's own mean pose is used instead.
 - **u** — undo the last take, **q** — finish.
+
+If `fixed_gait/calibration/joint_limits.npz` exists (see "Map the safe workspace" above), the live
+status line flags `⚠ OUTSIDE CALIBRATED WORKSPACE` when the pose you've backdriven to falls outside
+it — informational only (the motors are limp here, nothing to abort), a nudge that you've pushed
+past a previously-mapped stop.
 
 You don't need to be precise — being off by a few cm/deg on the return is fine, the loop is
 **closed for you**. The **abduction** motor (id 104) doesn't need to move; it's held at the
@@ -251,7 +297,10 @@ phase marker and a schematic stick figure (angles are real, leg geometry is appr
 | `trajectory.py` | pure-numpy per-leg smoothing + shared-schedule re-timing + close-loop; independent per-side calibration (own shape, captured center, clip range); shared by record & play. |
 | `play_trajectory.py` | **replay** a recorded trajectory, both legs dephased 180°; tunable current-**PID** with an Amp torque cap, `--log` tracking plot. |
 | `view_trajectory.py` | inspect a trajectory: static PNG + live/animated visualization (no hardware). |
+| `calibrate_workspace.py` | backdrive a leg by hand to map its SAFE workspace (abduction min/max + a (cam,thigh) occupancy grid); exports `joint_limits.npz` + a summary plot. |
+| `joint_limits.py` | pure-numpy safety-check module (loads `joint_limits.npz`); used by `run_hardware.py`, `play_trajectory.py`, `record_trajectory.py`. |
 | `trajectories/` | recorded takes + exported `gait_recorded.npz` (+ preview png, tracking logs). |
+| `calibration/` | workspace calibration: raw backdrive samples, exported `joint_limits.npz`, summary plot. |
 | `_gait_reachability.png` | generated: gait foot path over the reachable workspace. |
 
 ## Tuning the gait

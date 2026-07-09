@@ -54,6 +54,14 @@ python -m rl.smoke_test                        # env sanity: obs/action shapes, 
 ## 3. Train — standing, then walking (each trains from scratch)
 Pick `N` ≈ (CPU cores − 2). Times below are for an 8-core CPU at ~2.3k env-steps/s.
 
+> **Tune `--n-envs` per machine — don't trust the `cores-2` rule blindly.** On a 20-core box
+> (Ultra 7 265K, measured 2026-07), CPU throughput actually PEAKS around `n_envs=64-96`
+> (~4.4-4.7k env-steps/s), not at `cores-2=18` (~2k env-steps/s) — more than 2x left on the table
+> by following the old heuristic. Throughput keeps climbing well past the core count (subprocess/
+> IPC overhead amortizes better with a bigger rollout batch) until it eventually regresses past
+> ~100-128 envs. If retuning for new hardware, sweep a few `--n-envs` values with a short
+> `--steps` run and watch `time_elapsed`/`total_timesteps` rather than assuming.
+
 ```bash
 # M1 — stand / balance on the toe points  (sanity milestone; ~45-60 min)
 python -m rl.train --preset m1_stand --steps 8000000 --n-envs 6 --subproc --no-progress
@@ -191,3 +199,52 @@ way training does — check that gait metrics match the deterministic run before
 > 7.1 kg of motors, reward normalization (÷ return-std ≈ 110) had shrunk the fall penalty to
 > −1.8, and ent_coef=0.015 on a clipped Gaussian farmed std up to 2.1 (bang-bang actions).
 > Trust `rl/gait_probe.py`, not the reward curve.
+
+## GPU training (MJX) — optional, server-only
+
+An alternate training backend runs physics vectorized on GPU via **MuJoCo MJX**, with a
+hand-rolled PPO loop built on Brax's low-level PPO primitives (not
+`brax.training.agents.ppo.train.train()` — see `rl/mjx_train.py`'s docstring for why). It's a
+**separate stack from everything above**: `rl/env.py`/`rl/train.py`/`rl/evaluate.py`/
+`rl/gait_probe.py`/`rl/joystick.py` are all unchanged and remain the CPU/deployment source of
+truth. MJX only replaces how the checkpoint gets *trained*; the exported checkpoint drops into
+the same `rl/runs/<name>/final_model.zip` + `vecnormalize.pkl` shape and every eval/hardware tool
+above works on it unmodified.
+
+**Measured speedup on an RTX 4070 Ti Super (16 GB) / 20-core box: ~1.9x** against a *properly-
+tuned* CPU baseline (9,024 env-steps/s at `n_envs=2048` on GPU vs. ~4,745 env-steps/s for CPU SB3
+at `n_envs=80` on this same box — CPU throughput on this hardware peaks around `n_envs=64-96`, NOT
+at the `cores-2` heuristic below, which under-uses this box badly: only ~1,981 steps/s at
+`n_envs=18`. Sweep before trusting either number if the hardware changes again.) Given the extra
+complexity of the GPU stack (a whole second training pipeline, hand-rolled PPO with documented
+deviations from SB3's exact recipe), a ~1.9x gain is a real but modest case for reaching for it —
+worth it for long runs where the difference compounds over hours, not obviously worth it for quick
+experiments. `n_envs=4096` OOMs at 16 GB with the current `n_steps=1024` rollout length; 2048 is
+near the practical ceiling without further memory tuning. There's also a one-time JIT-compile cost
+(~5 min) paid once per training run start, not per iteration.
+
+```bash
+# one-time setup on the GPU server (separate from the CPU venv above -- same repo, extra packages):
+pip install -U 'jax[cuda12]' mujoco-mjx brax     # CUDA 13.0 driver is backward-compatible w/ cuda12 wheels
+
+# 0. physics parity gate -- confirms MJX handles this model's closed-loop knee + condim=6 contact
+#    correctly on THIS machine before trusting any training run built on it. Read its docstring.
+python mujoco/spiderbot/validate_mjx.py
+
+# (optional) reward-math parity regression test -- rerun after touching rl/env.py or rl/mjx_env.py
+python -m rl.mjx_env_test
+
+# train (same presets/config as the CPU path -- rl/config.py is the single shared source of truth)
+python -m rl.mjx_train --preset m2_walk --n-envs 2048 --steps 20000000
+
+# export to the SB3 checkpoint format evaluate.py / gait_probe.py / joystick.py already expect
+python -m rl.mjx_export --checkpoint rl/runs/m2_walk/final.pkl
+
+# same acceptance gate as any CPU-trained run, completely unmodified:
+python -m rl.gait_probe --run rl/runs/m2_walk
+```
+
+Known simplifications vs. the CPU/SB3 trainer (both deliberate scope cuts, documented in
+`rl/mjx_train.py`'s docstring): minibatches are subsets of parallel envs rather than a flat
+shuffle of (env, time) pairs (Brax's native `compute_ppo_loss` batching, not SB3's precompute-
+advantages-then-SGD recipe), and there's no `target_kl` early-stopping within an epoch.

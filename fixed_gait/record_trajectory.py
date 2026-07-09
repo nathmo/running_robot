@@ -37,6 +37,7 @@ except ImportError:
     can = None
 
 import trajectory as traj
+import joint_limits
 
 BITRATE = 1_000_000
 LEG_CHANNEL = {"right": "can0", "left": "can1"}       # can0 = RIGHT, can1 = LEFT
@@ -123,6 +124,7 @@ def record(leg, interface):
         bus.shutdown()
         return None
 
+    limits = joint_limits.load_or_warn()
     print("Motors are LIMP — move the leg by hand.")
     print("  SPACE=start/stop take   c=capture center pose   u=undo last   q=finish+save\n")
     takes = []
@@ -175,7 +177,12 @@ def record(leg, interface):
                                     for n, i in zip(("abd", "cam", "hip"), MOTOR_IDS))
                     state = "REC " if recording else "idle"
                     ctr = "center SET" if center is not None else "center: press c"
-                    print(f"  [{state}] takes={len(takes)}  {ctr}  {pos} deg   ", end="\r")
+                    warn = ""
+                    if (limits is not None and limits.has_leg(leg)
+                            and all(v is not None for v in latest.values())):
+                        ok, _ = limits.validate(leg, *(latest[i] for i in MOTOR_IDS))
+                        warn = "  ⚠ OUTSIDE CALIBRATED WORKSPACE" if not ok else ""
+                    print(f"  [{state}] takes={len(takes)}  {ctr}  {pos} deg{warn}   ", end="\r")
 
                 next_t += dt
                 s = next_t - time.time()
