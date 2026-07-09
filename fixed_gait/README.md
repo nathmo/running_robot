@@ -272,6 +272,10 @@ tracking is tight without buzzing; add `ki` to kill the remaining lag; add a tou
 it oscillates; then shorten `--period` and raise `--current-limit` for speed. Both legs run dephased
 180°, soft-start from the current pose, release on Ctrl+C; guards cut on runaway/over-temp/error.
 
+Every target is checked against `fixed_gait/calibration/joint_limits.npz` (see "Map the safe
+workspace" above) before it's sent — `--no-workspace-check` disables that guard for a run
+(debugging only; the other cuts above still apply).
+
 ### Inspect a trajectory (PNG + live animation)
 
 ```bash

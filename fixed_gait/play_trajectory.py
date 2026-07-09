@@ -232,6 +232,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="compute + print, but command 0 A (no motion)")
     ap.add_argument("--log", nargs="?", const="fixed_gait/trajectories/last_run",
                     default=None, help="record target-vs-actual and save a plot (path prefix)")
+    ap.add_argument("--no-workspace-check", action="store_true",
+                    help="DANGEROUS: skip the joint_limits.py workspace safety check even if "
+                         "fixed_gait/calibration/joint_limits.npz exists. For debugging only.")
     args = ap.parse_args()
 
     if can is None:
@@ -255,7 +258,11 @@ def main():
             m = Motor(buses[ch], cid, s, col)
             motors.append(m); motors_by_bus[ch][cid] = m
     side_groups = group_by_side(motors)
-    limits = joint_limits.load_or_warn()
+    if args.no_workspace_check:
+        limits = None
+        print("!! --no-workspace-check: workspace safety check DISABLED for this run.")
+    else:
+        limits = joint_limits.load_or_warn()
     dry = " (DRY-RUN)" if args.dry_run else ""
     print(f"Loaded {args.file}. Playing {sides}, mode={args.mode.upper()}, period={args.period}s{dry}")
     if args.mode == "position":
