@@ -148,23 +148,6 @@ class Config:
     dr_motor_pos_noise: float = 0.01    # rad std
     dr_push_interval_s: float = 0.0     # 0 = no random pushes
 
-    # ----- MJX-only analytical foot contact (rl/mjx_env.py) -----
-    # Replaces MuJoCo's/MJX's condim=6 elliptic-cone Newton-solved foot-floor contact (the
-    # dominant cost of the constraint solve) with a closed-form spring-damper + Coulomb-friction
-    # wrench for training-time throughput. CPU (rl/env.py) is untouched and keeps the real
-    # solver -- see rl/mjx_env.py's module docstring for the accepted sim-to-sim gap this implies.
-    # Calibrated against the model's ACTUAL keyframe penetration (measured empirically: 7.0mm /
-    # 4.4mm per foot, asymmetric -- not the initially-assumed ~2mm) so the settled stand pose is
-    # close to a static equilibrium instead of a ~2.7x overload that launches the robot on
-    # contact; damping ~critically-damped for an effective mass of half the body. Still tuned/
-    # validated empirically via the settle test in validate_mjx.py, not purely derived.
-    mjx_contact_stiffness: float = 11000.0    # N/m
-    mjx_contact_damping: float = 500.0        # N*s/m
-    mjx_contact_mu: float = 1.0               # sliding friction coeff -- matches spiderbot.xml
-    mjx_contact_mu_torsional: float = 0.008   # torsional friction coeff -- matches spiderbot.xml
-    mjx_contact_vel_eps: float = 0.01         # m/s; smooths the Coulomb friction near zero slip
-    mjx_heel_condim: int = 3                  # heel only needs to trigger fall detection
-
     # ----- PPO / training -----
     n_envs: int = 8
     total_steps: int = 20_000_000

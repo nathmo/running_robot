@@ -26,6 +26,13 @@ object-oriented/imperative:
 Physics fidelity (closed-loop parallel-knee equality constraint, condim=6 elliptic-cone contact,
 ankle spring) is validated against CPU MuJoCo in mujoco/spiderbot/validate_mjx.py -- read that
 before changing anything physics-related here.
+
+NOTE: an analytical (spring-damper) foot contact model was attempted here to cut Newton-solver
+cost, but was reverted -- it's numerically unstable against this model's closed-loop parallel-
+knee constraint (verified stable in isolation on a single free body, but diverges on the real
+robot even with zero damping / no torque / no extra forward call, i.e. not a tuning problem).
+MJX's real contact solver (condim=6, elliptic cone) is kept for the foot -- see the ~1.9x
+GPU-vs-CPU throughput measured with it in rl/README.md's GPU training section.
 """
 import jax
 import jax.numpy as jnp
@@ -107,58 +114,10 @@ def ang_vel_body(data, gyro_adr):
     return data.sensordata[gyro_adr:gyro_adr + 3]      # gyro_adr is a static python int
 
 
-def foot_contact_wrench(data, cfg, foot_gid, foot_body_id, toe_r):
-    """Analytical sphere-vs-flat-floor contact for ONE foot: linear spring-damper normal force +
-    smoothed-Coulomb tangential/torsional friction. Replaces MuJoCo's/MJX's condim=6 elliptic-cone
-    Newton-solved contact for the foot specifically (see rl/config.py's mjx_contact_* knobs and
-    rl/mjx_env.py's module docstring for why). Rolling friction is dropped -- already negligible
-    in the model's own tuning (coefficient 0.001).
-
-    Requires `data` to have FRESH geom_xpos/cvel/xipos for its current qpos/qvel -- both MJX's
-    mjx.step() and CPU mj_step() leave those derived kinematic fields reflecting the PRE-step
-    state (confirmed empirically: MuJoCo only recomputes them during the next forward/collision
-    pass, not as a step "output" convenience) -- call mjx.forward(model, data) first if `data` is
-    coming straight out of a step() call.
-
-    Returns (force_world(3), torque_about_body_com_world(3), Fn(scalar, >=0 -- also the contact
-    flag: Fn>0 iff penetrating), d(scalar penetration depth, for the deep-penetration safety
-    check in floor_violation() -- the foot geom is excluded from MJX's own contact list, so
-    that check can't read it from data.contact like it does for heel)).
-    """
-    center = data.geom_xpos[foot_gid]
-    d = toe_r - center[2]                                    # penetration depth, >0 = touching
-    contact_point = jnp.array([center[0], center[1], 0.0])
-
-    com = data.xipos[foot_body_id]
-    ang, lin = data.cvel[foot_body_id][0:3], data.cvel[foot_body_id][3:6]
-    v_c = lin + jnp.cross(ang, contact_point - com)           # exact contact-point velocity
-
-    active = d > 0.0
-    Fn = jnp.where(active, jnp.maximum(
-        cfg.mjx_contact_stiffness * d - cfg.mjx_contact_damping * v_c[2], 0.0), 0.0)
-
-    v_t = v_c.at[2].set(0.0)
-    v_t_norm = jnp.linalg.norm(v_t)
-    # smoothed Coulomb: ramps up to full mu*Fn over ~mjx_contact_vel_eps of slip speed, avoiding
-    # the v_t/|v_t| singularity at exactly zero velocity (a planted, non-sliding foot).
-    friction_dir = -v_t / (v_t_norm + 1e-8) * jnp.tanh(v_t_norm / cfg.mjx_contact_vel_eps)
-    F_t = cfg.mjx_contact_mu * Fn * friction_dir
-
-    omega_z = ang[2]
-    T_z = -cfg.mjx_contact_mu_torsional * Fn * jnp.tanh(omega_z / cfg.mjx_contact_vel_eps)
-
-    force = jnp.array([0.0, 0.0, Fn]) + F_t
-    arm = contact_point - com
-    torque = jnp.cross(arm, force) + jnp.array([0.0, 0.0, T_z])
-    return force, torque, Fn, d
-
-
-def foot_contact_flags(data, cfg, foot_gids, foot_body_ids, toe_r):
-    """Fn>0 for both feet, no force applied -- used where only DETECTION is needed (e.g. reset()'s
-    initial grounded_prev), not injection into the sim."""
-    _, _, FnL, _ = foot_contact_wrench(data, cfg, foot_gids[0], foot_body_ids[0], toe_r)
-    _, _, FnR, _ = foot_contact_wrench(data, cfg, foot_gids[1], foot_body_ids[1], toe_r)
-    return jnp.array([FnL > 0, FnR > 0])
+def foot_contacts(data, foot_contact_slot):
+    """Which foot-tip spheres touch the floor, via MJX's static per-model contact-pair slots
+    (see SpiderBotMjxEnv.__init__ for how these slots are discovered)."""
+    return data.contact.dist[foot_contact_slot] < 0.0
 
 
 def toe_heights(data, foot_gids_arr, toe_r):
@@ -178,18 +137,11 @@ def foot_lateral_sep(data, base_id, foot_gids):
     return y[0] - y[1]
 
 
-def floor_violation(data, floor_pairs, foot_penetrations, toe_r):
-    """floor_pairs: static list of (contact_slot, geom_radius) for every (floor, heel) MJX
-    contact-pair slot -- heel stays on MJX's normal (cheapened) solver, so its pair still exists
-    in data.contact. foot_penetrations: (2,) array of the analytical model's `d` (penetration
-    depth, see foot_contact_wrench) for each foot -- the foot geoms no longer appear in
-    data.contact at all (excluded from collision, see SpiderBotMjxEnv.__init__), so their deep-
-    penetration check uses the SAME analytical `d` the contact force itself is computed from.
-    Both halves mirror rl/env.py._floor_violation's deep-penetration safety check (dist < -0.5*r,
-    equivalently d > 0.5*r in this module's sign convention: d = r - z = -dist)."""
-    heel_flags = jnp.array([data.contact.dist[idx] < -0.5 * r for idx, r in floor_pairs])
-    foot_flags = foot_penetrations > 0.5 * toe_r
-    return jnp.any(heel_flags) | jnp.any(foot_flags)
+def floor_violation(data, floor_pairs):
+    """floor_pairs: static list of (contact_slot, geom_radius) for every (floor, foot/heel)
+    MJX contact-pair slot. Mirrors rl/env.py._floor_violation's deep-penetration safety check."""
+    flags = jnp.array([data.contact.dist[idx] < -0.5 * r for idx, r in floor_pairs])
+    return jnp.any(flags)
 
 
 def proprio(data, cfg, act_qadr, act_dadr, default_motor_pos, nu, base_id, gyro_adr,
@@ -279,7 +231,8 @@ def reward_fn(data, cfg, action, prev_action, command, des_xy, des_yaw, base_id,
 
 
 def gait_reward(data, cfg, control_dt, command, air_time, contact_time, grounded_prev,
-                 prev_toe_xy, foot_gids_arr, toe_r, contact_acc, progress_frac, terms):
+                 prev_toe_xy, foot_gids_arr, toe_r, foot_contact_slot, contact_acc, progress_frac,
+                 terms):
     dt = control_dt
     toe_pos = data.geom_xpos[foot_gids_arr]
     heights = toe_pos[:, 2] - toe_r
@@ -320,11 +273,11 @@ def gait_reward(data, cfg, control_dt, command, air_time, contact_time, grounded
     return total, terms, new_air_time, new_contact_time, grounded, toe_pos[:, 0:2]
 
 
-def fallen(data, cfg, base_id, floor_pairs, foot_penetrations, toe_r):
+def fallen(data, cfg, base_id, floor_pairs):
     bad = ~jnp.all(jnp.isfinite(data.qpos))
     bad = bad | (data.qpos[2] < cfg.term_height)
     bad = bad | (gravity_body(data, base_id)[2] > cfg.term_gravity_z)
-    bad = bad | floor_violation(data, floor_pairs, foot_penetrations, toe_r)
+    bad = bad | floor_violation(data, floor_pairs)
     return bad
 
 
@@ -337,21 +290,6 @@ class SpiderBotMjxEnv:
     def __init__(self, cfg: Config = None):
         self.cfg = cfg = cfg or Config()
         mj_model = mujoco.MjModel.from_xml_path(cfg.model_path)
-
-        # MJX-only analytical foot contact (see rl/config.py's mjx_contact_* knobs and this
-        # module's docstring): exclude foot-floor from the built-in collision/constraint solve
-        # entirely (contype/conaffinity=0 -- foot_contact_wrench() replaces it via xfrc_applied),
-        # and cheapen heel-floor (condim 6->3; heel only needs to trigger fall detection, never
-        # precision-critical). This mutates ONLY this locally-loaded mj_model object -- rl/env.py
-        # loads its own independent MjModel from the same file and is completely unaffected.
-        foot_gids_np = np.array([mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col")
-                                 for s in "LR"])
-        heel_gids_np = np.array([mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, f"heel_{s}_col")
-                                 for s in "LR"])
-        mj_model.geom_contype[foot_gids_np] = 0
-        mj_model.geom_conaffinity[foot_gids_np] = 0
-        mj_model.geom_condim[heel_gids_np] = cfg.mjx_heel_condim
-
         mj_data = mujoco.MjData(mj_model)
         self.sim_dt = float(mj_model.opt.timestep)
         self.control_dt = self.sim_dt * cfg.control_decimation
@@ -376,15 +314,12 @@ class SpiderBotMjxEnv:
                           for s in "LR"]
         self.foot_gids_arr = jnp.array(self.foot_gids)
         self.toe_r = float(mj_model.geom_size[self.foot_gids[0]][0])
-        self.foot_body_ids = [mj_model.geom_bodyid[g] for g in self.foot_gids]
-        # heel-only now: foot is excluded from collision entirely (see above), so it never
-        # appears in MJX's own contact list -- its deep-penetration check uses the analytical
-        # model's own `d` directly (see floor_violation()/fallen()), not a contact-pair lookup.
         col_gids = {}
         for s in "LR":
-            g = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, f"heel_{s}_col")
-            if g >= 0:
-                col_gids[g] = float(mj_model.geom_size[g][0])
+            for kind in ("foot", "heel"):
+                g = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, f"{kind}_{s}_col")
+                if g >= 0:
+                    col_gids[g] = float(mj_model.geom_size[g][0])
 
         self.key_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_KEY, cfg.keyframe)
         self.default_qpos = jnp.array(mj_model.key_qpos[self.key_id])
@@ -396,20 +331,6 @@ class SpiderBotMjxEnv:
 
         mujoco.mj_resetDataKeyframe(mj_model, mj_data, self.key_id)
         mj_data.ctrl[:] = mj_model.key_ctrl[self.key_id]
-        mujoco.mj_forward(mj_model, mj_data)
-        # standing-baseline torque must include the floor reaction that used to come from the
-        # built-in contact solver -- otherwise the baseline is missing it entirely and the torque
-        # penalty incorrectly bills ordinary standing as "excessive." Deliberately NOT using
-        # foot_contact_wrench()'s spring formula here: it depends on the keyframe's penetration
-        # depth being positive under whatever mjx_contact_stiffness ends up tuned to, which isn't
-        # guaranteed (the keyframe's geometry was settled under the OLD built-in contact's
-        # compliance, not this one) -- a zero/undersized spring force would silently produce a
-        # wrong baseline with no error. Instead: apply the physically-required static per-foot
-        # support directly (symmetric double support, pure vertical, no friction/torque -- exactly
-        # what a settled symmetric stance needs), decoupling this baseline from contact tuning.
-        half_weight = 0.5 * float(np.sum(mj_model.body_mass)) * 9.81
-        for bid in self.foot_body_ids:
-            mj_data.xfrc_applied[bid, 0:3] = [0.0, 0.0, half_weight]
         mujoco.mj_forward(mj_model, mj_data)
         self.stand_torque = jnp.array(mj_data.actuator_force[:self.nu])
 
@@ -428,10 +349,7 @@ class SpiderBotMjxEnv:
         # one-off (non-jitted) probe of MJX's static contact-pair layout for this model: the
         # candidate geom-pair SET and ORDER are a model-level property (broadphase filtering
         # done once at put_model time), identical for every mjx.Data derived from this model --
-        # see mujoco/spiderbot/validate_mjx.py's introspection for how this was confirmed. Only
-        # (floor, heel) pairs are looked up now -- foot was excluded from collision above, so it
-        # never appears here (find_pair would raise if asked for it, by design: a raised
-        # ValueError here is the loud signal that the contype/conaffinity mutation didn't take).
+        # see mujoco/spiderbot/validate_mjx.py's introspection for how this was confirmed.
         probe = mjx.forward(self.mjx_model, self.data_template)
         pair_geoms = np.asarray(probe.contact.geom)
 
@@ -441,6 +359,7 @@ class SpiderBotMjxEnv:
                     return i
             raise ValueError(f"no MJX contact pair for geoms {g1},{g2} -- model changed?")
 
+        self.foot_contact_slot = jnp.array([find_pair(self.floor_gid, fg) for fg in self.foot_gids])
         self.floor_pairs = [(find_pair(self.floor_gid, g), r) for g, r in col_gids.items()]
 
         self.obs_size = FRAME_DIM * cfg.history_len
@@ -460,7 +379,7 @@ class SpiderBotMjxEnv:
 
         command = sample_command(k_cmd, cfg, jnp.asarray(cmd_vx_frac))
         des_xy, des_yaw = anchor_command_pose(data, self.base_id)
-        contact0 = foot_contact_flags(data, cfg, self.foot_gids, self.foot_body_ids, self.toe_r)
+        contact0 = foot_contacts(data, self.foot_contact_slot)
         heights0 = toe_heights(data, self.foot_gids_arr, self.toe_r)
         grounded0 = grounded_fn(contact0, heights0, cfg.grounded_h)
         prev_action = jnp.zeros(self.nu)
@@ -510,26 +429,13 @@ class SpiderBotMjxEnv:
                                    state.push_countdown - 1)
 
         def substep(carry, _):
-            d, acc, pen = carry
-            # fresh geom_xpos/cvel/xipos for d's CURRENT qpos/qvel before computing the force --
-            # both mjx.step()'s and mj_step()'s OUTPUT leave those stale (reflecting the state
-            # from before that call), confirmed empirically; see foot_contact_wrench()'s docstring.
-            d = mjx.forward(self.mjx_model, d)
-            fL, tL, FnL, dL = foot_contact_wrench(d, cfg, self.foot_gids[0], self.foot_body_ids[0],
-                                                  self.toe_r)
-            fR, tR, FnR, dR = foot_contact_wrench(d, cfg, self.foot_gids[1], self.foot_body_ids[1],
-                                                  self.toe_r)
-            xfrc = d.xfrc_applied.at[self.foot_body_ids[0]].set(jnp.concatenate([fL, tL]))
-            xfrc = xfrc.at[self.foot_body_ids[1]].set(jnp.concatenate([fR, tR]))
-            d = d.replace(xfrc_applied=xfrc)
+            d, acc = carry
             d = mjx.step(self.mjx_model, d)
-            acc = acc | jnp.array([FnL > 0.0, FnR > 0.0])
-            pen = jnp.array([dL, dR])
-            return (d, acc, pen), None
+            acc = acc | foot_contacts(d, self.foot_contact_slot)
+            return (d, acc), None
 
-        (data, contact_acc, foot_penetrations), _ = jax.lax.scan(
-            substep, (data, jnp.zeros(2, dtype=bool), jnp.zeros(2)), None,
-            length=cfg.control_decimation)
+        (data, contact_acc), _ = jax.lax.scan(
+            substep, (data, jnp.zeros(2, dtype=bool)), None, length=cfg.control_decimation)
 
         new_step = state.step + 1
         do_resample = (new_step % self._resample_every) == 0
@@ -554,10 +460,10 @@ class SpiderBotMjxEnv:
         gait_total, terms, air_time, contact_time, grounded, toe_xy = gait_reward(
             data, cfg, self.control_dt, command, air_time_in, contact_time_in,
             state.grounded_prev, state.prev_toe_xy, self.foot_gids_arr, self.toe_r,
-            contact_acc, progress_frac, terms)
+            self.foot_contact_slot, contact_acc, progress_frac, terms)
         reward = reward + gait_total
 
-        terminated = fallen(data, cfg, self.base_id, self.floor_pairs, foot_penetrations, self.toe_r)
+        terminated = fallen(data, cfg, self.base_id, self.floor_pairs)
         reward = reward - jnp.where(terminated, cfg.fall_penalty, 0.0)
         truncated = new_step >= self.max_steps
         done = terminated | truncated
