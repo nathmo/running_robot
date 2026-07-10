@@ -107,6 +107,8 @@ def index():
 def api_state():
     d = _dm()
     fk = STATE["fk"]
+    if not fk.available:
+        fk.try_reload()                 # hot-load a LUT scp'd in after server start
     snap = d.get_snapshot()
     snap["calibration"] = STATE["calib"].snapshot()
     snap["workspace"] = {"legs": sorted(STATE["wstore"].legs.keys()),
@@ -312,6 +314,16 @@ def api_workspace_grid():
 def api_workspace_abduction():
     b = request.get_json(force=True, silent=True) or {}
     ok, why = STATE["wstore"].apply_abduction(b.get("leg"), b.get("safe_min"), b.get("safe_max"))
+    return _ok() if ok else _err(why)
+
+
+@app.post("/api/workspace/mirror")
+def api_workspace_mirror():
+    b = request.get_json(force=True, silent=True) or {}
+    src, dst = b.get("from"), b.get("to")
+    if src not in paths.SIDES or dst not in paths.SIDES:
+        return _err("from/to must be right|left")
+    ok, why = STATE["wstore"].mirror(src, dst, flips=b.get("flips"))
     return _ok() if ok else _err(why)
 
 

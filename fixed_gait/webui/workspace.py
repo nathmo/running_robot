@@ -88,6 +88,45 @@ class WorkspaceStore:
         self._persist_active()
         return True, ""
 
+    def mirror(self, from_leg, to_leg, flips=None):
+        """Copy one leg's workspace onto the other. In the normalized zero-pose frame the two
+        legs' workspaces coincide (per-leg URDF sign conventions mirror the geometry), so a plain
+        copy is the default; per-axis sign flips are available if a convention turns out inverted.
+        flips: {"abd": bool, "cam": bool, "thigh": bool}."""
+        if from_leg not in self.legs:
+            return False, f"no workspace for {from_leg} leg"
+        if from_leg == to_leg:
+            return False, "source and destination leg are the same"
+        f = flips or {}
+        src = self.legs[from_leg]
+        grid = src["knee_grid"].copy()
+        cam_o, thigh_o = src["knee_cam_origin"], src["knee_thigh_origin"]
+        res = src["knee_grid_deg"]
+        if f.get("cam"):
+            grid = grid[::-1, :]
+            cam_o = -(cam_o + grid.shape[0] * res)
+        if f.get("thigh"):
+            grid = grid[:, ::-1]
+            thigh_o = -(thigh_o + grid.shape[1] * res)
+
+        def _interval(iv, flip):
+            return (-iv[1], -iv[0]) if flip else tuple(iv)
+
+        samples = src.get("samples")
+        if samples is not None:
+            samples = samples.copy()
+            for col, key in ((0, "abd"), (1, "cam"), (2, "thigh")):
+                if f.get(key):
+                    samples[:, col] = -samples[:, col]
+        dst = dict(abd_observed=_interval(src["abd_observed"], f.get("abd")),
+                   abd_safe=_interval(src["abd_safe"], f.get("abd")),
+                   knee_grid=np.ascontiguousarray(grid),
+                   knee_cam_origin=float(cam_o), knee_thigh_origin=float(thigh_o),
+                   knee_grid_deg=float(res), samples=samples)
+        self._set_legs({to_leg: dst}, f"{self.source or 'workspace'} (+{from_leg}→{to_leg} mirror)")
+        self._persist_active()
+        return True, ""
+
     def process_segments(self, leg, segments, margin_deg=3.0, grid_deg=1.0, dilate_deg=2.0):
         """Build a leg workspace from normalized backdriven segments — the exact pipeline of
         calibrate_workspace.process_and_export (:227-277), minus file/plot I/O."""
@@ -177,8 +216,11 @@ class WorkspaceStore:
 
 # ===================================================================== npz (de)serialization
 def _safe_name(name):
-    keep = "".join(c for c in name if c.isalnum() or c in "-_ .").strip()
-    return keep.replace(" ", "_") or "workspace"
+    keep = "".join(c for c in (name or "") if c.isalnum() or c in "-_ .").strip()
+    keep = keep.replace(" ", "_")
+    if keep.lower().endswith(".npz"):          # UI file lists carry the extension — don't double it
+        keep = keep[:-4]
+    return keep or "workspace"
 
 
 def _legs_to_npz(legs, source):

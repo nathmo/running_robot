@@ -122,6 +122,14 @@
       <select id="ws-files" class="txt small"></select>
       <button id="btn-ws-load" class="btn small">Load</button>
     </div>
+    <div class="row small">
+      <button id="btn-ws-mirror" class="btn small">⇄ copy right → left</button>
+      <span class="hint">normalized frames coincide between legs; flip an axis only if a direction
+        convention turns out inverted:</span>
+      <label><input type="checkbox" id="mir-abd"> abd</label>
+      <label><input type="checkbox" id="mir-cam"> cam</label>
+      <label><input type="checkbox" id="mir-thigh"> thigh</label>
+    </div>
 
     <details class="rec-block">
       <summary>Record a new workspace sweep (backdrive, motors limp)</summary>

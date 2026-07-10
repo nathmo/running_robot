@@ -15,6 +15,7 @@ it off the band and loses badly. EE displays stay disabled per side until verifi
 import json
 import math
 import os
+import zipfile
 
 import numpy as np
 
@@ -31,6 +32,7 @@ _DEFAULT_MAP = {"left": {"cam": 1, "thigh": 1}, "right": {"cam": 1, "thigh": 1},
 class FkLut:
     def __init__(self, lut_path=paths.FK_LUT_FILE, map_path=paths.MODEL_MAP_FILE):
         self.available = False
+        self.lut_path = lut_path
         self.map_path = map_path
         self.model_map = dict(_DEFAULT_MAP)
         if os.path.exists(map_path):
@@ -42,16 +44,26 @@ class FkLut:
                         self.model_map[k] = m[k]
             except (ValueError, OSError):
                 pass
-        if not os.path.exists(lut_path):
-            print(f"(no FK LUT at {lut_path} — EE animation disabled; "
-                  f"generate it with mujoco/spiderbot/gen_fk_lut.py)")
-            return
-        z = np.load(lut_path)
-        self.cam = z["cam"]
-        self.thigh = z["thigh"]
-        self.nodes = z["nodes"]
-        self.valid = z["valid"].astype(bool)
-        self.feas = z["feas"].astype(bool)
+        if not self.try_reload():
+            print(f"(no FK LUT at {lut_path} — EE animation disabled; generate it with "
+                  f"mujoco/spiderbot/gen_fk_lut.py — it hot-loads once the file appears)")
+
+    def try_reload(self):
+        """Load (or hot-load) fk_lut.npz. Safe to call repeatedly — cheap when absent or already
+        loaded. Lets a LUT scp'd onto the robot AFTER server start be picked up without a restart."""
+        if self.available or not os.path.exists(self.lut_path):
+            return self.available
+        try:
+            z = np.load(self.lut_path)
+            cam, thigh = z["cam"], z["thigh"]
+            nodes = z["nodes"]
+            valid = z["valid"].astype(bool)
+            feas = z["feas"].astype(bool)
+        except (ValueError, OSError, KeyError, EOFError, zipfile.BadZipFile) as e:
+            print(f"(FK LUT at {self.lut_path} unreadable ({e}) — still disabled; "
+                  f"incomplete scp copy?)")
+            return False
+        self.cam, self.thigh, self.nodes, self.valid, self.feas = cam, thigh, nodes, valid, feas
         self._dc = float(self.cam[1] - self.cam[0])
         self._dt = float(self.thigh[1] - self.thigh[0])
         r = max(1, int(round(math.radians(FEAS_MARGIN_DEG) / min(self._dc, self._dt))))
@@ -65,6 +77,8 @@ class FkLut:
         with np.errstate(invalid="ignore"):
             self._smooth = np.isfinite(spread) & (spread < 0.03)  # [nc-1, nt-1] per-cell
         self.available = True
+        print(f"FK LUT loaded: {len(self.cam)}x{len(self.thigh)} grid from {self.lut_path}")
+        return True
 
     def save_map(self):
         with open(self.map_path, "w", encoding="utf-8") as f:

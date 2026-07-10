@@ -720,8 +720,18 @@ $("ws-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
   $("ws-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
   S.wsLeg = b.dataset.leg;
+  $("btn-ws-mirror").textContent =
+    S.wsLeg === "right" ? "⇄ copy right → left" : "⇄ copy left → right";
   loadWsIntoEditor();
 });
+$("btn-ws-mirror").onclick = async () => {
+  const from = S.wsLeg, to = from === "right" ? "left" : "right";
+  if (!confirm(`Overwrite the ${to} leg's workspace with a copy of ${from}?`)) return;
+  await api("/api/workspace/mirror", { json: { from, to, flips: {
+    abd: $("mir-abd").checked, cam: $("mir-cam").checked, thigh: $("mir-thigh").checked } } });
+  setBanner(`workspace copied ${from} → ${to}`, "", 3000);
+  await refreshWorkspace();
+};
 $("btn-ws-save").onclick = () => api("/api/workspace/save", { json: { name: $("ws-name").value } })
   .then(() => { setBanner("workspace saved", "", 2000); refreshWorkspace(); });
 $("btn-ws-export").onclick = () => { window.location = "/api/workspace/export"; };
