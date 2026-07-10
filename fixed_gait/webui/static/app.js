@@ -1092,7 +1092,10 @@ function drawEESide(side) {
   const link = S.linkage[side];
   if (link && link.nodes) for (const p of link.nodes) { xs.push(p[0]); ys.push(p[1]); }
   const xmin = Math.min(...xs), xmax = Math.max(...xs), ymin = Math.min(...ys), ymax = Math.max(...ys);
-  const mirror = side === "right" ? -1 : 1;
+  // display-only x-mirror, persisted per side in model_map.json ("mirror view" checkbox) —
+  // pick whichever matches how you physically look at the robot
+  const mm = (S.state && S.state.fk && S.state.fk.model_map) ? S.state.fk.model_map[side] : null;
+  const mirror = mm && mm.flip_view ? -1 : 1;
   const pad = 0.06 * Math.max(xmax - xmin, ymax - ymin, 0.2);
   const scale = Math.min(cv.width / (xmax - xmin + 2 * pad), cv.height / (ymax - ymin + 2 * pad));
   const P = (x, z) => {
@@ -1164,7 +1167,8 @@ function drawEESide(side) {
     }
   }
   g.fillStyle = "rgba(139,151,168,.8)"; g.font = "10px monospace";
-  g.fillText("X fwd →  Z up ↑ (m, rel. hip)", 8, cv.height - 6);
+  g.fillText((mirror === 1 ? "X fwd →" : "← X fwd (mirrored)") + "  Z up ↑ (m, rel. hip)",
+    8, cv.height - 6);
 }
 
 $("btn-fk-verify").onclick = async () => {
@@ -1189,10 +1193,19 @@ for (const side of ["left", "right"]) {
   $(`btn-fkm-${side}`).onclick = async () => {
     const cam = +$(`fkm-${side}-cam`).value, thigh = +$(`fkm-${side}-thigh`).value;
     if (!confirm(`Force-enable the ${side} EE display with signs cam=${cam}, thigh=${thigh}?\n` +
-                 "Only do this if you know the mapping — a wrong sign draws a mirrored linkage " +
-                 "(display only; the workspace safety check is unaffected).")) return;
-    await api("/api/fk/map", { json: { side, cam, thigh, verified: true } });
+                 "Only do this if you know the mapping — a wrong sign animates the linkage " +
+                 "backwards (display only; the workspace safety check is unaffected).")) return;
+    await api("/api/fk/map", { json: { side, cam, thigh, verified: true,
+                                       flip_view: $(`fkm-${side}-flip`).checked } });
     setBanner(`${side} EE display enabled (cam=${cam}, thigh=${thigh})`, "", 3500);
+    await refreshEEData();
+  };
+  $(`fkm-${side}-flip`).onchange = async () => {
+    // display-only mirror toggle: keep signs + verified state as they are
+    const v = S.state && S.state.fk && S.state.fk.verified ? !!S.state.fk.verified[side] : false;
+    await api("/api/fk/map", { json: {
+      side, cam: +$(`fkm-${side}-cam`).value, thigh: +$(`fkm-${side}-thigh`).value,
+      verified: v, flip_view: $(`fkm-${side}-flip`).checked } });
     await refreshEEData();
   };
 }
@@ -1204,6 +1217,7 @@ function syncFkMapSelects(st) {
     const m = st.fk.model_map[side] || {};
     $(`fkm-${side}-cam`).value = (m.cam >= 0 ? "+1" : "-1");
     $(`fkm-${side}-thigh`).value = (m.thigh >= 0 ? "+1" : "-1");
+    $(`fkm-${side}-flip`).checked = !!m.flip_view;
   }
 }
 

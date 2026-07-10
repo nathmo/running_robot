@@ -565,8 +565,13 @@ def api_fk_map():
         thigh_s = 1 if int(b.get("thigh", 1)) >= 0 else -1
     except (TypeError, ValueError):
         return _err("cam/thigh must be ±1")
-    fk.model_map[side] = {"cam": cam_s, "thigh": thigh_s}
-    fk.model_map["verified"][side] = bool(b.get("verified", True))
+    fk.model_map[side].update({"cam": cam_s, "thigh": thigh_s})
+    if "flip_view" in b:
+        fk.model_map[side]["flip_view"] = bool(b["flip_view"])
+    if "verified" in b:
+        fk.model_map["verified"][side] = bool(b["verified"])
+    else:
+        fk.model_map["verified"][side] = True
     fk.save_map()
     return _ok(model_map={s: fk.model_map[s] for s in paths.SIDES},
                verified=dict(fk.model_map["verified"]))

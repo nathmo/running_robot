@@ -25,7 +25,10 @@ import calibrate_workspace as cw          # _binary_dilate for the feasibility m
 NODE_NAMES = ("cam", "thigh", "push", "knee", "ank", "ptip", "ee")
 FEAS_MARGIN_DEG = 5.0
 
-_DEFAULT_MAP = {"left": {"cam": 1, "thigh": 1}, "right": {"cam": 1, "thigh": 1},
+# flip_view: pure DISPLAY x-mirror of the EE canvas (viewing convention, like plot_reachability's
+# VIEW_X) — it never changes which LUT cell is looked up, only how the drawing is projected.
+_DEFAULT_MAP = {"left": {"cam": 1, "thigh": 1, "flip_view": False},
+                "right": {"cam": 1, "thigh": 1, "flip_view": False},
                 "verified": {"left": False, "right": False}}
 
 
@@ -34,14 +37,14 @@ class FkLut:
         self.available = False
         self.lut_path = lut_path
         self.map_path = map_path
-        self.model_map = dict(_DEFAULT_MAP)
+        self.model_map = {k: dict(v) for k, v in _DEFAULT_MAP.items()}
         if os.path.exists(map_path):
             try:
                 with open(map_path, "r", encoding="utf-8-sig") as f:   # -sig: tolerate a BOM
                     m = json.load(f)
                 for k in ("left", "right", "verified"):
                     if k in m:
-                        self.model_map[k] = m[k]
+                        self.model_map[k].update(m[k])     # merge: old files lack e.g. flip_view
             except (ValueError, OSError):
                 pass
         if not self.try_reload():
@@ -207,7 +210,7 @@ class FkLut:
             report[side] = {"scores": scores, "best": best[0], "coverage": best[1],
                             "decisive": decisive}
             if decisive:
-                self.model_map[side] = {"cam": sc, "thigh": st}
+                self.model_map[side].update({"cam": sc, "thigh": st})   # keep flip_view etc.
                 self.model_map["verified"][side] = True
         self.save_map()
         return report
