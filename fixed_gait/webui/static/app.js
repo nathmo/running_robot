@@ -18,7 +18,8 @@ const S = {
   latest: {},                    // motor -> latest telemetry values
   linkage: { left: null, right: null }, linkPrev: { left: null, right: null }, linkT: 0,
   mockTimers: {},
-  wizardDismissed: false,
+  preview: { on: false, t0: 0 },  // client-side both-legs gait preview animation
+  fkmInit: false,                 // sign-map selects synced from state once
 };
 
 /* ================================================================ tiny helpers */
@@ -91,6 +92,7 @@ function applyState(st) {
   updateRecordUI(st);
   updatePlaybackUI(st);
   updateFileLists(st);
+  syncFkMapSelects(st);
   $("panel-mock").classList.toggle("hidden", !st.mock);
   $("btn-estop").textContent = (st.estop && st.estop.latched) ? "CLEAR E-STOP" : "E-STOP";
 }
@@ -120,9 +122,21 @@ const INSTR = {
 
 function updateWizard(st) {
   const cal = st.calibration || {};
-  const show = cal.stage !== "complete" && !S.wizardDismissed;
-  $("wizard").classList.toggle("hidden", !show);
-  if (!show) return;
+  const complete = cal.stage === "complete";
+  $("wiz-steps").classList.toggle("hidden", complete);
+  $("wiz-summary").classList.toggle("hidden", !complete);
+  $("panel-calib").classList.toggle("attention", !complete);
+  // gate every actionable panel until calibrated (telemetry + mock stay usable — the wizard
+  // itself needs live values and mock dragging)
+  document.querySelectorAll("#main > .panel").forEach((p) => {
+    if (!["panel-calib", "panel-telemetry", "panel-mock"].includes(p.id))
+      p.classList.toggle("locked", !complete);
+  });
+  if (complete) {
+    $("calib-summary-text").textContent = `✓ calibrated (${cal.created || "unknown time"})` +
+      (cal.restored_from_disk ? " — RESTORED FROM DISK: only valid if motors were not power-cycled since" : "");
+    return;
+  }
   const step2 = cal.stage === "zero_set";
   $("wiz-step1").classList.toggle("hidden", step2);
   $("wiz-step2").classList.toggle("hidden", !step2);
@@ -172,6 +186,15 @@ function updateWizard(st) {
 $("btn-set-zero").onclick = () => api("/api/calibration/zero", { method: "POST" });
 $("btn-wiz-back").onclick = () => api("/api/calibration/reset", { method: "POST" });
 $("btn-wiz-done").onclick = () => api("/api/calibration/complete", { method: "POST" });
+$("btn-recal-zero").onclick = async () => {
+  if (!confirm("Re-zero: pose the robot at the URDF zero pose FIRST, then OK. " +
+               "Directions must be re-confirmed afterwards (they can invert across power cycles).")) return;
+  await api("/api/calibration/zero", { method: "POST" });   // -> stage zero_set, wizard reopens
+};
+$("btn-recal-reset").onclick = () => {
+  if (confirm("Reset calibration entirely? All motion stays locked until the wizard is redone."))
+    api("/api/calibration/reset", { method: "POST" });
+};
 
 /* ================================================================ strip charts */
 class StripChart {
@@ -787,20 +810,38 @@ function setupTrajCanvas() {
   });
 }
 
-let trajBackdrop = { key: null, grid: null };
+const TRAJ_COLORS = { right: "#ff35c8", left: "#35d0ff" };
+const trajBackdrops = {};                       // leg -> {key, grid} unpacked-bits cache
+
+function previewPhase() {
+  const period = Math.max(0.5, +$("pb-period").value || 8);
+  return (((performance.now() - S.preview.t0) / 1000) / period) % 1;
+}
+function previewIdx(tr, side, p) {
+  // path[i] = reconstruct(phase=i/N) which bakes in the FILE's phase_shift; emulate playback
+  // with the UI left-phase slider: canonical(p + L) -> i = N*(p + L - fileShift)
+  const N = tr.path.length;
+  let ph = p;
+  if (side === "left")
+    ph = p + (+$("pb-leftphase").value) - (tr.phase_shift !== undefined ? tr.phase_shift : 0.5);
+  return Math.floor((((ph % 1) + 1) % 1) * N) % N;
+}
+
 function renderTraj() {
   const v = trEd.view, g = v.g, cv = v.cv;
   g.fillStyle = "#10141a"; g.fillRect(0, 0, cv.width, cv.height);
   v.drawAxes();
-  // workspace backdrop for the selected leg (unpacked bits cached per leg+payload)
-  const d = S.ws && S.ws.legs ? S.ws.legs[S.trajLeg] : null;
-  if (d) {
+  // workspace backdrops for BOTH legs (active leg green, other faded — the normalized frames
+  // coincide, so overlap is meaningful)
+  for (const leg of ["left", "right"]) {
+    const d = S.ws && S.ws.legs ? S.ws.legs[leg] : null;
+    if (!d) continue;
     const k = d.knee;
-    const key = S.trajLeg + ":" + k.grid_b64;
-    if (trajBackdrop.key !== key)
-      trajBackdrop = { key, grid: unpackBits(k.grid_b64, k.shape[0] * k.shape[1]) };
-    const grid = trajBackdrop.grid;
-    g.fillStyle = "rgba(44,158,63,0.3)";
+    const key = k.grid_b64;
+    if (!trajBackdrops[leg] || trajBackdrops[leg].key !== key)
+      trajBackdrops[leg] = { key, grid: unpackBits(k.grid_b64, k.shape[0] * k.shape[1]) };
+    const grid = trajBackdrops[leg].grid;
+    g.fillStyle = leg === S.trajLeg ? "rgba(44,158,63,0.30)" : "rgba(120,150,170,0.10)";
     const cell = k.res_deg * v.scale;
     for (let i = 0; i < k.shape[0]; i++) {
       const x = (k.cam_origin + i * k.res_deg - v.ox) * v.scale;
@@ -813,8 +854,16 @@ function renderTraj() {
       }
     }
   }
-  const tr = S.traj && S.traj[S.trajLeg];
-  if (tr && tr.path) drawLoop(g, v, tr.path, COLORS.gait, 2);
+  // gait loops for BOTH legs (active leg emphasized)
+  for (const leg of ["left", "right"]) {
+    const tr = S.traj && S.traj[leg];
+    if (!tr || !tr.path) continue;
+    g.globalAlpha = leg === S.trajLeg ? 1 : 0.55;
+    if (leg !== S.trajLeg) g.setLineDash([6, 4]);
+    drawLoop(g, v, tr.path, TRAJ_COLORS[leg], leg === S.trajLeg ? 2.5 : 1.5);
+    g.setLineDash([]);
+    g.globalAlpha = 1;
+  }
   if (trEd.stroke.length > 1) {
     g.strokeStyle = COLORS.stroke; g.lineWidth = 2; g.beginPath();
     trEd.stroke.forEach((p, i) => {
@@ -828,13 +877,33 @@ function renderTraj() {
   }
   const [zx, zy] = v.toPx(0, 0);
   g.strokeStyle = COLORS.zero; g.lineWidth = 1.6; g.strokeRect(zx - 5, zy - 5, 10, 10);
-  const cam = S.latest[S.trajLeg + ".cam"], th = S.latest[S.trajLeg + ".thigh"];
-  if (cam && th && cam.pos_norm !== null) {
+  // live crosshairs for both legs
+  for (const leg of ["left", "right"]) {
+    const cam = S.latest[leg + ".cam"], th = S.latest[leg + ".thigh"];
+    if (!cam || !th || cam.pos_norm === null) continue;
     const [x, y] = v.toPx(cam.pos_norm, th.pos_norm);
+    g.globalAlpha = leg === S.trajLeg ? 1 : 0.45;
     g.strokeStyle = "#4da3ff"; g.lineWidth = 1.4;
     g.beginPath(); g.moveTo(x - 10, y); g.lineTo(x + 10, y);
     g.moveTo(x, y - 10); g.lineTo(x, y + 10); g.stroke();
+    g.globalAlpha = 1;
   }
+  // preview: two markers running along the loops with the playback period + dephasing
+  if (S.preview.on && S.traj) {
+    const p = previewPhase();
+    for (const leg of ["left", "right"]) {
+      const tr = S.traj[leg];
+      if (!tr || !tr.path) continue;
+      const pt = tr.path[previewIdx(tr, leg, p)];
+      const [x, y] = v.toPx(pt[0], pt[1]);
+      g.fillStyle = TRAJ_COLORS[leg]; g.strokeStyle = "#fff"; g.lineWidth = 1.5;
+      g.beginPath(); g.arc(x, y, 7, 0, 7); g.fill(); g.stroke();
+    }
+  }
+  // legend
+  g.font = "11px sans-serif";
+  g.fillStyle = TRAJ_COLORS.right; g.fillText("● right gait", 8, 16);
+  g.fillStyle = TRAJ_COLORS.left; g.fillText("● left gait", 8, 30);
 }
 function drawArrow(g, v, p0, p1, color) {
   const [x0, y0] = v.toPx(p0[0], p0[1]), [x1, y1] = v.toPx(p1[0], p1[1]);
@@ -879,6 +948,40 @@ $("btn-traj-usepath").onclick = async () => {
   S.traj = d.trajectory; S.trajName = $("traj-name").value;
   setBanner("drawn path processed + saved as " + $("traj-name").value, "", 3500);
   trEd.view.render(); wsEd.view.render(); renderEE();
+};
+
+function previewLoop() {
+  if (!S.preview.on) return;
+  trEd.view.render();
+  renderEE();
+  requestAnimationFrame(previewLoop);
+}
+$("btn-traj-preview").onclick = () => {
+  S.preview.on = !S.preview.on;
+  if (S.preview.on) {
+    if (!S.traj) { setBanner("show or draw a trajectory first", "warn", 3000); S.preview.on = false; return; }
+    S.preview.t0 = performance.now();
+    previewLoop();
+  }
+  $("btn-traj-preview").textContent = S.preview.on ? "■ stop preview" : "▶ preview both legs";
+  $("btn-traj-preview").classList.toggle("active-rec", S.preview.on);
+};
+
+$("btn-traj-copyleg").onclick = async () => {
+  const name = S.trajName || $("traj-name").value;
+  if (!name) { setBanner("show or save a trajectory first", "warn", 3000); return; }
+  const from = S.trajLeg, to = from === "right" ? "left" : "right";
+  if (!(S.traj && S.traj[from])) {
+    setBanner(`the shown trajectory has no ${from}-leg data — draw or record it first`, "warn", 4000);
+    return;
+  }
+  if (!confirm(`Copy the ${from}-leg gait onto the ${to} leg in "${name}"?\n(the ${to} leg plays ` +
+               `${to === "left" ? "dephased by the left-phase value" : "at phase 0"})`)) return;
+  const d = await api("/api/trajectory/mirror", { json: {
+    name, from, to, left_phase: +$("rec-leftphase").value } });
+  S.traj = d.trajectory; S.trajName = name;
+  setBanner(`gait copied ${from} → ${to}`, "", 3000);
+  trEd.view.render(); renderEE();
 };
 
 /* ---------------- gait teach recording ---------------- */
@@ -977,7 +1080,8 @@ function drawEESide(side) {
     g.fillStyle = "#8b97a8"; g.font = "12px sans-serif"; g.textAlign = "center";
     g.fillText(fkOk ? "FK sign map not verified for this side" : "no FK LUT (generate on desktop)",
       cv.width / 2, cv.height / 2 - 8);
-    g.fillText(fkOk ? "load a workspace + click 'verify FK sign map'" : "mujoco/spiderbot/gen_fk_lut.py",
+    g.fillText(fkOk ? "click 'verify FK sign map', or set signs + 'force enable' below"
+                    : "mujoco/spiderbot/gen_fk_lut.py — hot-loads once copied here",
       cv.width / 2, cv.height / 2 + 10);
     g.textAlign = "left";
     return;
@@ -1004,7 +1108,7 @@ function drawEESide(side) {
   // gait EE path
   const tr = S.traj && S.traj[side];
   if (tr && tr.ee_path) {
-    g.strokeStyle = COLORS.gait; g.lineWidth = 2; g.beginPath();
+    g.strokeStyle = TRAJ_COLORS[side]; g.lineWidth = 2; g.beginPath();
     let started = false;
     for (const p of tr.ee_path) {
       if (!p) { started = false; continue; }
@@ -1013,6 +1117,14 @@ function drawEESide(side) {
       started = true;
     }
     g.stroke();
+    if (S.preview.on) {                          // preview marker running along the foot path
+      const p = tr.ee_path[previewIdx(tr, side, previewPhase())];
+      if (p) {
+        const [x, y] = P(p[0], p[1]);
+        g.fillStyle = TRAJ_COLORS[side]; g.strokeStyle = "#fff"; g.lineWidth = 1.5;
+        g.beginPath(); g.arc(x, y, 7, 0, 7); g.fill(); g.stroke();
+      }
+    }
   }
   // zero EE marker
   if (legWs && legWs.ee_zero) {
@@ -1062,12 +1174,38 @@ $("btn-fk-verify").onclick = async () => {
     const e = r[s] || {};
     if (e.error) return `${s}: ${e.error}`;
     return `${s}: best signs ${e.best} coverage ${(e.coverage * 100).toFixed(0)}%` +
-      (e.decisive ? " ✓ verified" : " — NOT decisive, check the workspace");
+      (e.decisive ? " ✓ verified" : " — NOT decisive → use 'force enable' below if you know the signs");
   }).join("  ·  ");
+  await refreshEEData();
+};
+
+async function refreshEEData() {
   await pollState();
   await refreshWorkspace();
   if (S.trajName) showTrajectory(S.trajName);
-};
+}
+
+for (const side of ["left", "right"]) {
+  $(`btn-fkm-${side}`).onclick = async () => {
+    const cam = +$(`fkm-${side}-cam`).value, thigh = +$(`fkm-${side}-thigh`).value;
+    if (!confirm(`Force-enable the ${side} EE display with signs cam=${cam}, thigh=${thigh}?\n` +
+                 "Only do this if you know the mapping — a wrong sign draws a mirrored linkage " +
+                 "(display only; the workspace safety check is unaffected).")) return;
+    await api("/api/fk/map", { json: { side, cam, thigh, verified: true } });
+    setBanner(`${side} EE display enabled (cam=${cam}, thigh=${thigh})`, "", 3500);
+    await refreshEEData();
+  };
+}
+
+function syncFkMapSelects(st) {
+  if (S.fkmInit || !st.fk || !st.fk.available || !st.fk.model_map) return;
+  S.fkmInit = true;
+  for (const side of ["left", "right"]) {
+    const m = st.fk.model_map[side] || {};
+    $(`fkm-${side}-cam`).value = (m.cam >= 0 ? "+1" : "-1");
+    $(`fkm-${side}-thigh`).value = (m.thigh >= 0 ? "+1" : "-1");
+  }
+}
 
 /* ================================================================ playback */
 $("pb-period").oninput = () => $("pb-period-val").textContent = $("pb-period").value;

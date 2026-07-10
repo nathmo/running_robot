@@ -62,11 +62,10 @@ button.btn.active-rec { background: #7a2020; border-color: var(--bad); }
 label { display: inline-flex; align-items: center; gap: 6px; }
 .file-btn { display: inline-flex; align-items: center; }
 
-/* ---------------- wizard ---------------- */
-.overlay { position: fixed; inset: 0; background: rgba(5,8,12,.88); z-index: 100;
-  display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 30px 10px; }
-.wizard-box { background: var(--panel); border: 1px solid var(--accent); border-radius: 12px;
-  max-width: 860px; width: 100%; padding: 20px 24px; }
+/* ---------------- calibration panel / gating ---------------- */
+#panel-calib.attention { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn); }
+.panel.locked { opacity: .38; pointer-events: none; user-select: none; }
+#calib-summary-text { color: var(--good); font-size: 13px; }
 .wiz-live { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 6px;
   margin: 10px 0; font-family: ui-monospace, monospace; font-size: 13px; }
 .wiz-live div { background: var(--panel2); padding: 6px 8px; border-radius: 6px; }

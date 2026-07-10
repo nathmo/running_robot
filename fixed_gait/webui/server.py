@@ -466,6 +466,20 @@ def api_trajectory_draw():
     return _ok(trajectory=gaitstore.data_to_json(data, STATE["fk"]))
 
 
+@app.post("/api/trajectory/mirror")
+def api_trajectory_mirror():
+    b = request.get_json(force=True, silent=True) or {}
+    src, dst = b.get("from"), b.get("to")
+    if src not in paths.SIDES or dst not in paths.SIDES:
+        return _err("from/to must be right|left")
+    try:
+        data = gaitstore.mirror(b.get("name", ""), src, dst,
+                                left_phase=float(b.get("left_phase", 0.5)))
+    except (ValueError, FileNotFoundError) as e:
+        return _err(e)
+    return _ok(trajectory=gaitstore.data_to_json(data, STATE["fk"]))
+
+
 @app.get("/api/trajectory/export")
 def api_trajectory_export():
     try:
@@ -533,6 +547,29 @@ def api_playback_stop():
 def api_fk_verify():
     report = STATE["fk"].verify_against_workspace(STATE["wstore"])
     return _ok(report=report)
+
+
+@app.post("/api/fk/map")
+def api_fk_map():
+    """Manually set (and optionally force-verify) a side's sign map — the escape hatch when
+    auto-verify is not decisive (e.g. recorded cam travel exceeds the model's joint range)."""
+    b = request.get_json(force=True, silent=True) or {}
+    side = b.get("side")
+    if side not in paths.SIDES:
+        return _err("side must be right|left")
+    fk = STATE["fk"]
+    if not fk.available:
+        return _err("no FK LUT loaded")
+    try:
+        cam_s = 1 if int(b.get("cam", 1)) >= 0 else -1
+        thigh_s = 1 if int(b.get("thigh", 1)) >= 0 else -1
+    except (TypeError, ValueError):
+        return _err("cam/thigh must be ±1")
+    fk.model_map[side] = {"cam": cam_s, "thigh": thigh_s}
+    fk.model_map["verified"][side] = bool(b.get("verified", True))
+    fk.save_map()
+    return _ok(model_map={s: fk.model_map[s] for s in paths.SIDES},
+               verified=dict(fk.model_map["verified"]))
 
 
 @app.post("/api/mock/drag")

@@ -117,6 +117,23 @@ def draw_to_trajectory(name, leg, points, abd_hold=0.0, center=None,
     return new
 
 
+def mirror(name, from_leg, to_leg, left_phase=0.5):
+    """Copy one leg's gait onto the other within a trajectory file (normalized frames coincide
+    between legs). The destination keeps the conventional dephasing: left plays `left_phase`
+    (default 0.5 = 180°) ahead, right plays at 0."""
+    if from_leg == to_leg:
+        raise ValueError("source and destination leg are the same")
+    data = load(name)
+    src = data.get(from_leg)
+    if src is None:
+        raise ValueError(f"{name} has no {from_leg}-leg data to copy")
+    dst = {k: (v.copy() if hasattr(v, "copy") else v) for k, v in src.items()}
+    dst["phase_shift"] = float(left_phase) if to_leg == "left" else 0.0
+    data[to_leg] = dst
+    save(name, data)
+    return data
+
+
 def export_bytes(name):
     with open(_path(name), "rb") as f:
         return f.read(), os.path.basename(_path(name))

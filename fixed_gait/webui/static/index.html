@@ -25,36 +25,45 @@
 <div id="banner" class="banner hidden"></div>
 <div id="reject-banner" class="banner warn hidden"></div>
 
-<!-- ============================ calibration wizard overlay ============================ -->
-<div id="wizard" class="overlay hidden">
-  <div class="wizard-box">
-    <h2>Boot calibration</h2>
-    <p class="hint">Motor encoders wake up at a <b>random angle</b> (and possibly direction) after
-    every power cycle. Nothing can move until the robot is re-zeroed.</p>
+<main id="main">
 
-    <div id="wiz-step1">
-      <h3>1 — Zero pose</h3>
-      <p>Physically pose the robot in its <b>URDF zero pose</b> (the CAD assembly pose used for
-      the workspace ground truth), then capture it. Motors are limp — move the legs by hand.</p>
-      <div id="wiz-live" class="wiz-live"></div>
-      <button id="btn-set-zero" class="btn primary">📍 Set zero (capture all 6)</button>
-    </div>
+  <!-- ============================ calibration (always visible, gates the rest) ============================ -->
+  <section class="panel wide" id="panel-calib">
+    <h2>Boot calibration
+      <span class="hint">encoders wake at a random angle/direction — everything is locked until
+      the robot is re-zeroed; re-calibrate any time</span></h2>
 
-    <div id="wiz-step2" class="hidden">
-      <h3>2 — Direction check</h3>
-      <p>Backdrive each joint in its <b>positive direction</b> (URDF/sim convention — thigh
-      forward-swing, cam positive fold, abduction outward for the left leg / per URDF for the
-      right). The live number must <b>increase</b>. Wrong way? <i>Flip</i>, then <i>Confirm</i>.</p>
-      <div id="wiz-cards" class="wiz-cards"></div>
+    <div id="wiz-summary" class="hidden">
       <div class="row">
-        <button id="btn-wiz-back" class="btn">↩ Re-capture zero</button>
-        <button id="btn-wiz-done" class="btn primary" disabled>Finish calibration</button>
+        <span id="calib-summary-text"></span>
+        <span class="spacer"></span>
+        <button id="btn-recal-zero" class="btn">📍 Re-zero (re-capture + re-check directions)</button>
+        <button id="btn-recal-reset" class="btn">Reset calibration</button>
       </div>
     </div>
-  </div>
-</div>
 
-<main id="main">
+    <div id="wiz-steps">
+      <div id="wiz-step1">
+        <h3>1 — Zero pose</h3>
+        <p>Physically pose the robot in its <b>URDF zero pose</b> (the CAD assembly pose used for
+        the workspace ground truth), then capture it. Motors are limp — move the legs by hand.</p>
+        <div id="wiz-live" class="wiz-live"></div>
+        <button id="btn-set-zero" class="btn primary">📍 Set zero (capture all 6)</button>
+      </div>
+
+      <div id="wiz-step2" class="hidden">
+        <h3>2 — Direction check</h3>
+        <p>Backdrive each joint in its <b>positive direction</b> (URDF/sim convention — thigh
+        forward-swing, cam positive fold, abduction outward for the left leg / per URDF for the
+        right). The live number must <b>increase</b>. Wrong way? <i>Flip</i>, then <i>Confirm</i>.</p>
+        <div id="wiz-cards" class="wiz-cards"></div>
+        <div class="row">
+          <button id="btn-wiz-back" class="btn">↩ Re-capture zero</button>
+          <button id="btn-wiz-done" class="btn primary" disabled>Finish calibration</button>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <!-- ============================ telemetry ============================ -->
   <section class="panel" id="panel-telemetry">
@@ -192,6 +201,8 @@
     <div class="row">
       <select id="traj-files" class="txt small"></select>
       <button id="btn-traj-show" class="btn small">Show on plots</button>
+      <button id="btn-traj-preview" class="btn small">▶ preview both legs</button>
+      <button id="btn-traj-copyleg" class="btn small">⇄ copy to other leg</button>
       <button id="btn-traj-export" class="btn small">⬇ Export</button>
       <label class="btn small file-btn">⬆ Import<input type="file" id="traj-import" accept=".npz" hidden></label>
     </div>
@@ -208,6 +219,20 @@
       <div><h3>right</h3><canvas id="ee-right" width="440" height="480"></canvas></div>
     </div>
     <div id="ee-status" class="hint"></div>
+    <div class="row small">
+      <span class="hint">manual sign map (if auto-verify is not decisive — e.g. cam range mismatch
+        vs the model):</span>
+      <span>left: cam <select id="fkm-left-cam" class="num small"><option value="+1">+1</option>
+        <option value="-1">−1</option></select>
+        thigh <select id="fkm-left-thigh" class="num small"><option value="+1">+1</option>
+        <option value="-1">−1</option></select>
+        <button id="btn-fkm-left" class="btn small">force enable</button></span>
+      <span>right: cam <select id="fkm-right-cam" class="num small"><option value="+1">+1</option>
+        <option value="-1">−1</option></select>
+        thigh <select id="fkm-right-thigh" class="num small"><option value="+1">+1</option>
+        <option value="-1">−1</option></select>
+        <button id="btn-fkm-right" class="btn small">force enable</button></span>
+    </div>
   </section>
 
   <!-- ============================ playback ============================ -->
