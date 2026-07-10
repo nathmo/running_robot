@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpiderBot Control</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header id="header">
+  <div class="hgroup">
+    <span class="brand">🕷 SpiderBot</span>
+    <span id="mode-badge" class="badge">—</span>
+    <span id="calib-badge" class="badge">—</span>
+    <span id="daemon-dot" class="dot" title="daemon">●</span>
+    <span id="loop-info" class="loopinfo"></span>
+  </div>
+  <div class="hgroup">
+    <button id="btn-limp" class="btn">Limp</button>
+    <button id="btn-estop" class="btn estop">E-STOP</button>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+<div id="reject-banner" class="banner warn hidden"></div>
+
+<!-- ============================ calibration wizard overlay ============================ -->
+<div id="wizard" class="overlay hidden">
+  <div class="wizard-box">
+    <h2>Boot calibration</h2>
+    <p class="hint">Motor encoders wake up at a <b>random angle</b> (and possibly direction) after
+    every power cycle. Nothing can move until the robot is re-zeroed.</p>
+
+    <div id="wiz-step1">
+      <h3>1 — Zero pose</h3>
+      <p>Physically pose the robot in its <b>URDF zero pose</b> (the CAD assembly pose used for
+      the workspace ground truth), then capture it. Motors are limp — move the legs by hand.</p>
+      <div id="wiz-live" class="wiz-live"></div>
+      <button id="btn-set-zero" class="btn primary">📍 Set zero (capture all 6)</button>
+    </div>
+
+    <div id="wiz-step2" class="hidden">
+      <h3>2 — Direction check</h3>
+      <p>Backdrive each joint in its <b>positive direction</b> (URDF/sim convention — thigh
+      forward-swing, cam positive fold, abduction outward for the left leg / per URDF for the
+      right). The live number must <b>increase</b>. Wrong way? <i>Flip</i>, then <i>Confirm</i>.</p>
+      <div id="wiz-cards" class="wiz-cards"></div>
+      <div class="row">
+        <button id="btn-wiz-back" class="btn">↩ Re-capture zero</button>
+        <button id="btn-wiz-done" class="btn primary" disabled>Finish calibration</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<main id="main">
+
+  <!-- ============================ telemetry ============================ -->
+  <section class="panel" id="panel-telemetry">
+    <h2>Telemetry <span class="hint">raw°, normalized°, A, °C — live</span></h2>
+    <div id="motor-cards" class="motor-cards"></div>
+  </section>
+
+  <!-- ============================ manual control ============================ -->
+  <section class="panel" id="panel-manual">
+    <h2>Manual control</h2>
+    <div class="row">
+      <button id="btn-hold" class="btn primary">Hold pose (enter manual)</button>
+      <button id="btn-release" class="btn">Release → limp</button>
+      <label class="override"><input type="checkbox" id="chk-override">
+        <span>⚠ override safe workspace</span></label>
+      <label>slew <input type="number" id="inp-slew" value="60" min="5" max="240" step="5"
+        class="num small"> °/s</label>
+    </div>
+    <div id="manual-rows"></div>
+  </section>
+
+  <!-- ============================ workspace ============================ -->
+  <section class="panel" id="panel-workspace">
+    <h2>Safe workspace <span id="ws-source" class="hint"></span></h2>
+    <div class="tabs" id="ws-tabs">
+      <button class="tab active" data-leg="right">right leg</button>
+      <button class="tab" data-leg="left">left leg</button>
+    </div>
+
+    <div class="ws-abd">
+      <canvas id="ws-abd-canvas" width="640" height="70"></canvas>
+      <div class="row small">
+        abduction safe: <input type="number" id="abd-min" class="num small" step="0.5">
+        … <input type="number" id="abd-max" class="num small" step="0.5"> °
+        <button id="btn-abd-apply" class="btn small">apply</button>
+      </div>
+    </div>
+
+    <div class="toolbar" id="ws-toolbar">
+      <button class="tool active" data-tool="pan" title="pan/zoom">✋</button>
+      <button class="tool" data-tool="draw" title="draw safe cells">✏️</button>
+      <button class="tool" data-tool="erase" title="erase cells">🧽</button>
+      <button class="tool" data-tool="fill" title="flood fill">🪣</button>
+      <select id="brush-size" class="num small">
+        <option value="1">1px</option><option value="3" selected>3px</option>
+        <option value="5">5px</option><option value="9">9px</option>
+      </select>
+      <button id="btn-undo" class="btn small">↩ undo</button>
+      <button id="btn-redo" class="btn small">↪ redo</button>
+      <span class="spacer"></span>
+      <button id="btn-ws-apply" class="btn small primary">Apply to robot</button>
+      <button id="btn-ws-revert" class="btn small">Revert</button>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="ws-canvas" width="900" height="620"></canvas>
+      <div id="ws-coords" class="coords"></div>
+    </div>
+    <div id="ws-stats" class="hint"></div>
+
+    <div class="row">
+      <input type="text" id="ws-name" class="txt" placeholder="workspace name" value="workspace_web">
+      <button id="btn-ws-save" class="btn small">💾 Save</button>
+      <button id="btn-ws-export" class="btn small">⬇ Export</button>
+      <label class="btn small file-btn">⬆ Import<input type="file" id="ws-import" accept=".npz" hidden></label>
+      <select id="ws-files" class="txt small"></select>
+      <button id="btn-ws-load" class="btn small">Load</button>
+    </div>
+
+    <details class="rec-block">
+      <summary>Record a new workspace sweep (backdrive, motors limp)</summary>
+      <div class="row">
+        <button id="btn-wsrec-mode" class="btn">Enter sweep mode</button>
+        <button id="btn-wsrec-take" class="btn" disabled>▶ start segment</button>
+        <button id="btn-wsrec-undo" class="btn small" disabled>undo segment</button>
+        <span id="wsrec-status" class="hint"></span>
+      </div>
+      <div class="row small">
+        margin <input type="number" id="wsrec-margin" class="num small" value="3" step="0.5">°
+        grid <input type="number" id="wsrec-grid" class="num small" value="1" step="0.5">°
+        dilate <input type="number" id="wsrec-dilate" class="num small" value="2" step="0.5">°
+        <button id="btn-wsrec-process" class="btn small primary" disabled>Process → workspace</button>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============================ trajectory / gait ============================ -->
+  <section class="panel" id="panel-trajectory">
+    <h2>Gait trajectory</h2>
+    <div class="tabs" id="traj-tabs">
+      <button class="tab active" data-leg="right">right leg</button>
+      <button class="tab" data-leg="left">left leg</button>
+    </div>
+    <div class="toolbar">
+      <button class="tool active" data-ttool="pan" title="pan/zoom">✋</button>
+      <button class="tool" data-ttool="draw" title="draw path">✏️</button>
+      <button id="btn-traj-clear" class="btn small">clear stroke</button>
+      <button id="btn-traj-reverse" class="btn small">⇄ reverse</button>
+      <span class="spacer"></span>
+      <input type="text" id="traj-name" class="txt" value="gait_drawn" placeholder="trajectory name">
+      <button id="btn-traj-usepath" class="btn small primary">Use drawn path →</button>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="traj-canvas" width="900" height="620"></canvas>
+      <div id="traj-coords" class="coords"></div>
+    </div>
+    <div id="traj-stats" class="hint"></div>
+
+    <details class="rec-block" open>
+      <summary>Record a gait by hand (teach mode, motors limp)</summary>
+      <div class="row">
+        <button id="btn-rec-mode" class="btn">Enter teach mode</button>
+        <button id="btn-rec-take" class="btn" disabled>▶ start take</button>
+        <button id="btn-rec-center" class="btn small" disabled>📍 capture center</button>
+        <button id="btn-rec-undo" class="btn small" disabled>undo take</button>
+        <button id="btn-rec-reset" class="btn small">reset all</button>
+        <span id="rec-status" class="hint"></span>
+      </div>
+      <div class="row small">
+        name <input type="text" id="rec-name" class="txt small" value="gait_web">
+        harmonics <input type="number" id="rec-harmonics" class="num small" value="8" min="1" max="30">
+        split <input type="number" id="rec-split" class="num small" value="0.5" min="0.1" max="0.9" step="0.05">
+        left phase <input type="number" id="rec-leftphase" class="num small" value="0.5" min="0" max="1" step="0.05">
+        <button id="btn-rec-finish" class="btn small primary">Process + save</button>
+      </div>
+    </details>
+
+    <div class="row">
+      <select id="traj-files" class="txt small"></select>
+      <button id="btn-traj-show" class="btn small">Show on plots</button>
+      <button id="btn-traj-export" class="btn small">⬇ Export</button>
+      <label class="btn small file-btn">⬆ Import<input type="file" id="traj-import" accept=".npz" hidden></label>
+    </div>
+  </section>
+
+  <!-- ============================ EE animation ============================ -->
+  <section class="panel wide" id="panel-ee">
+    <h2>Leg linkage — end-effector space
+      <span class="hint">workspace ∙ gait path ∙ zero ∙ live linkage</span>
+      <button id="btn-fk-verify" class="btn small" style="float:right">verify FK sign map</button>
+    </h2>
+    <div class="ee-row">
+      <div><h3>left</h3><canvas id="ee-left" width="440" height="480"></canvas></div>
+      <div><h3>right</h3><canvas id="ee-right" width="440" height="480"></canvas></div>
+    </div>
+    <div id="ee-status" class="hint"></div>
+  </section>
+
+  <!-- ============================ playback ============================ -->
+  <section class="panel" id="panel-playback">
+    <h2>Gait playback</h2>
+    <div class="row">
+      <select id="pb-file" class="txt"></select>
+      <select id="pb-legs" class="txt small">
+        <option value="both">both legs</option><option value="right">right only</option>
+        <option value="left">left only</option>
+      </select>
+      <select id="pb-mode" class="txt small">
+        <option value="position">position mode</option>
+        <option value="current">current (torque-capped)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>period <input type="range" id="pb-period" min="2" max="20" value="8" step="0.5">
+        <span id="pb-period-val">8</span> s/cycle</label>
+      <label>left phase <input type="range" id="pb-leftphase" min="0" max="1" value="0.5" step="0.05">
+        <span id="pb-leftphase-val">0.5</span></label>
+    </div>
+    <div class="row small" id="pb-current-params">
+      I-limit <input type="number" id="pb-ilimit" class="num small" value="3" step="0.5"> A
+      kp <input type="number" id="pb-kp" class="num small" value="0.8" step="0.1">
+      ki <input type="number" id="pb-ki" class="num small" value="0.4" step="0.1">
+      kd <input type="number" id="pb-kd" class="num small" value="0.02" step="0.01">
+      ramp <input type="number" id="pb-ramp" class="num small" value="3" step="0.5"> s
+    </div>
+    <div class="row">
+      <button id="btn-pb-start" class="btn primary">▶ Play</button>
+      <button id="btn-pb-stop" class="btn">■ Stop</button>
+      <div class="phasebar"><div id="pb-phase" class="phasefill"></div></div>
+    </div>
+  </section>
+
+  <!-- ============================ mock tools ============================ -->
+  <section class="panel hidden" id="panel-mock">
+    <h2>Mock tools <span class="hint">simulated motors only</span></h2>
+    <div class="row">
+      <button id="btn-mock-sweep-right" class="btn small">auto-sweep right leg</button>
+      <button id="btn-mock-sweep-left" class="btn small">auto-sweep left leg</button>
+      <button id="btn-mock-stop" class="btn small">stop sweeps</button>
+    </div>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

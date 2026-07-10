@@ -56,3 +56,6 @@ Thumbs.db
 # scratch validation renders
 mujoco/spiderbot/_*.png
 fixed_gait/calibration/_selftest/
+
+# web UI runtime data (session calibration, saved workspaces/gaits) — machine-local
+fixed_gait/webui/data/

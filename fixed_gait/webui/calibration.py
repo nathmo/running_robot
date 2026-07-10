@@ -1,0 +1,226 @@
+"""Session calibration: per-motor encoder offset + sign, and the normalized<->raw conversion.
+
+The motors report a RANDOM raw angle (and possibly inverted direction) after every power cycle, so
+nothing recorded in raw degrees survives a reboot. The web UI therefore works in a NORMALIZED
+frame anchored to the URDF/CAD zero pose:
+
+    norm_deg = sign * (raw_deg - offset_deg)        raw_deg = offset_deg + sign * norm_deg
+
+offset = the raw angle captured while the user physically holds the robot in the zero pose;
+sign   = confirmed per motor in the guided direction check (flipped in the UI if wrong).
+
+Everything above the daemon's CAN boundary (workspace grids, gait files, plots, sliders) lives in
+normalized degrees; conversion happens only right after parse_status and right before set_pos.
+
+Legacy files from fixed_gait/ (calibrate_workspace.py / joint_limits.npz) store RAW degrees plus
+the raw zero captured in-session with the 'z' key — convert_legacy_limits() translates them into
+the normalized frame so yesterday's workspace keeps working after any number of reboots.
+"""
+import json
+import os
+import threading
+import time
+
+import numpy as np
+
+import paths
+
+
+class Calibration:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.offsets = {n: 0.0 for n in paths.MOTOR_NAMES}
+        self.signs = {n: 1.0 for n in paths.MOTOR_NAMES}
+        self.confirmed = {n: False for n in paths.MOTOR_NAMES}
+        self.stage = "none"                    # none | zero_set | complete
+        self.created = None
+        self.restored_from_disk = False        # UI shows a "re-zero if unsure" banner when True
+
+    # ------------------------------------------------------------------ persistence
+    @classmethod
+    def load_or_new(cls, path=paths.CALIB_FILE):
+        c = cls()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8-sig") as f:   # -sig: tolerate a BOM
+                    d = json.load(f)
+                for n, m in d.get("motors", {}).items():
+                    if n in c.offsets:
+                        c.offsets[n] = float(m.get("offset_deg", 0.0))
+                        c.signs[n] = 1.0 if float(m.get("sign", 1)) >= 0 else -1.0
+                        c.confirmed[n] = bool(m.get("confirmed", False))
+                c.stage = d.get("stage", "none")
+                c.created = d.get("created")
+                c.restored_from_disk = c.stage != "none"
+            except (ValueError, OSError) as e:
+                print(f"(could not read {path}: {e} — starting uncalibrated)")
+        return c
+
+    def save(self, path=paths.CALIB_FILE):
+        with self._lock:
+            d = {
+                "created": self.created,
+                "stage": self.stage,
+                "motors": {n: {"offset_deg": self.offsets[n], "sign": int(self.signs[n]),
+                               "confirmed": self.confirmed[n]} for n in paths.MOTOR_NAMES},
+            }
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+        os.replace(tmp, path)
+
+    # ------------------------------------------------------------------ conversion
+    @property
+    def complete(self):
+        return self.stage == "complete"
+
+    def norm(self, name, raw_deg):
+        return self.signs[name] * (raw_deg - self.offsets[name])
+
+    def raw(self, name, norm_deg):
+        return self.offsets[name] + self.signs[name] * norm_deg
+
+    def norm_array(self, raw_by_index):
+        """Vectorized: raw array in MOTOR_NAMES order -> normalized array."""
+        off = np.array([self.offsets[n] for n in paths.MOTOR_NAMES])
+        sgn = np.array([self.signs[n] for n in paths.MOTOR_NAMES])
+        return sgn * (np.asarray(raw_by_index, float) - off)
+
+    # ------------------------------------------------------------------ wizard steps
+    def set_zero(self, raw_positions):
+        """raw_positions: {motor_name: raw_deg} for ALL motors (refuse partial capture)."""
+        missing = [n for n in paths.MOTOR_NAMES if raw_positions.get(n) is None]
+        if missing:
+            return False, f"no position from {', '.join(missing)} — cannot set zero"
+        with self._lock:
+            for n in paths.MOTOR_NAMES:
+                self.offsets[n] = float(raw_positions[n])
+                self.confirmed[n] = False
+            self.stage = "zero_set"
+            self.created = time.strftime("%Y-%m-%dT%H:%M:%S")
+            self.restored_from_disk = False
+        self.save()
+        return True, ""
+
+    def set_sign(self, name, sign):
+        if name not in self.signs:
+            return False, f"unknown motor {name}"
+        with self._lock:
+            self.signs[name] = 1.0 if sign >= 0 else -1.0
+            self.confirmed[name] = False
+        self.save()
+        return True, ""
+
+    def confirm(self, name):
+        if name not in self.confirmed:
+            return False, f"unknown motor {name}"
+        if self.stage == "none":
+            return False, "set zero first"
+        with self._lock:
+            self.confirmed[name] = True
+            if all(self.confirmed.values()):
+                self.stage = "complete"
+        self.save()
+        return True, ""
+
+    def complete_now(self):
+        if self.stage == "none":
+            return False, "set zero first"
+        not_conf = [n for n in paths.MOTOR_NAMES if not self.confirmed[n]]
+        if not_conf:
+            return False, f"direction not confirmed for: {', '.join(not_conf)}"
+        with self._lock:
+            self.stage = "complete"
+        self.save()
+        return True, ""
+
+    def reset(self):
+        with self._lock:
+            self.offsets = {n: 0.0 for n in paths.MOTOR_NAMES}
+            self.signs = {n: 1.0 for n in paths.MOTOR_NAMES}
+            self.confirmed = {n: False for n in paths.MOTOR_NAMES}
+            self.stage = "none"
+            self.restored_from_disk = False
+        self.save()
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "stage": self.stage,
+                "created": self.created,
+                "restored_from_disk": self.restored_from_disk,
+                "motors": {n: {"offset_deg": round(self.offsets[n], 2),
+                               "sign": int(self.signs[n]),
+                               "confirmed": self.confirmed[n]} for n in paths.MOTOR_NAMES},
+            }
+
+
+# ===================================================================== legacy conversion
+def _convert_axis(origin, n_cells, res, zero, sign):
+    """Normalized origin of a grid axis whose raw cell k spans [origin+k*res, origin+(k+1)*res].
+    With norm = sign*(raw - zero):  sign=+1 -> origin-zero (no flip);
+    sign=-1 -> cells reverse order and the new origin is -(origin + n*res - zero)."""
+    if sign >= 0:
+        return origin - zero, False
+    return -(origin + n_cells * res - zero), True
+
+
+def convert_legacy_limits(npz, signs=None):
+    """Convert a RAW-frame joint_limits npz (calibrate_workspace.py output) into normalized-frame
+    per-leg dicts using each leg's stored in-session zero.
+
+    npz: an opened np.load() result. signs: optional {leg: {"abd":±1,"cam":±1,"thigh":±1}} if the
+    recording session's motor directions differed from the normalized convention (default all +1).
+    Returns {leg: dict} in the workspace.WorkspaceStore leg format. Raises ValueError when a leg
+    never captured its zero (then it cannot be normalized).
+    """
+    signs = signs or {}
+    legs = {}
+    for leg in ("left", "right"):
+        if f"{leg}_abd_safe_min" not in npz.files:
+            continue
+        s = {**{"abd": 1.0, "cam": 1.0, "thigh": 1.0}, **signs.get(leg, {})}
+        abd_zero = float(npz[f"{leg}_abd_zero"])
+        knee_zero = np.asarray(npz[f"{leg}_knee_zero"], float)
+        if np.isnan(abd_zero) or np.isnan(knee_zero).any():
+            raise ValueError(f"{leg} leg: this legacy file never captured its zero pose "
+                             f"('z' during calibrate_workspace) — cannot normalize it")
+
+        a, b = s["abd"] * (float(npz[f"{leg}_abd_observed_min"]) - abd_zero), \
+               s["abd"] * (float(npz[f"{leg}_abd_observed_max"]) - abd_zero)
+        obs = (min(a, b), max(a, b))
+        a, b = s["abd"] * (float(npz[f"{leg}_abd_safe_min"]) - abd_zero), \
+               s["abd"] * (float(npz[f"{leg}_abd_safe_max"]) - abd_zero)
+        safe = (min(a, b), max(a, b))
+
+        grid = npz[f"{leg}_knee_grid"].astype(bool)
+        res = float(npz[f"{leg}_knee_grid_deg"])
+        cam_o, flip_c = _convert_axis(float(npz[f"{leg}_knee_cam_origin"]), grid.shape[0], res,
+                                      float(knee_zero[0]), s["cam"])
+        th_o, flip_t = _convert_axis(float(npz[f"{leg}_knee_thigh_origin"]), grid.shape[1], res,
+                                     float(knee_zero[1]), s["thigh"])
+        if flip_c:
+            grid = grid[::-1, :]
+        if flip_t:
+            grid = grid[:, ::-1]
+
+        legs[leg] = dict(abd_observed=obs, abd_safe=safe,
+                         knee_grid=np.ascontiguousarray(grid),
+                         knee_cam_origin=cam_o, knee_thigh_origin=th_o, knee_grid_deg=res,
+                         samples=None)
+    if not legs:
+        raise ValueError("file contains no leg calibration (not a joint_limits npz?)")
+    return legs
+
+
+def convert_legacy_raw_segments(npz, signs=None):
+    """Convert a RAW workspace-sweep file (calibrate_workspace.save_raw: p0..pn + zero) into
+    normalized segments {leg, segments:[...]} for re-processing. Needs the stored zero."""
+    leg = str(npz["leg"])
+    if not int(npz["has_zero"]):
+        raise ValueError(f"{leg} raw sweep file has no zero pose captured — cannot normalize")
+    zero = np.asarray(npz["zero"], float)          # [abd, cam, thigh] raw
+    s = signs or {"abd": 1.0, "cam": 1.0, "thigh": 1.0}
+    sgn = np.array([s["abd"], s["cam"], s["thigh"]])
+    segments = [sgn * (npz[f"p{i}"] - zero) for i in range(int(npz["n"]))]
+    return leg, segments

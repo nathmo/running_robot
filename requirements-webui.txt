@@ -1,0 +1,10 @@
+# SpiderBot web control interface (fixed_gait/webui/) — adds Flask on top of the Pi runtime.
+#
+# On the Pi (which has no internet in the field), pre-download the wheels on a connected machine:
+#     pip download flask -d wheels/          # on the desktop
+#     scp -r wheels nemo@<pi>:               # copy over Tailscale/SSH
+#     pip install --no-index --find-links wheels/ flask     # on the Pi
+#
+# Base runtime (numpy, python-can) comes from requirements-rpi.txt.
+-r requirements-rpi.txt
+flask>=3.0

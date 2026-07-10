@@ -1,0 +1,722 @@
+"""RobotDaemon — the single thread that owns both CAN buses and runs the 200 Hz control loop.
+
+Mirrors the proven loop structure of fixed_gait/play_trajectory.py:286-373 (drain -> compute ALL
+targets -> workspace-check up front -> command -> safety sweep) and the limp discipline of
+fixed_gait/record_trajectory.py:142-144 (limp = STREAM SET_CURRENT 0, never just stop sending).
+
+Frames: raw motor degrees only at the CAN boundary; the workspace check, recording buffers and
+published telemetry use the normalized zero-pose frame (see calibration.py).
+
+Modes:
+    LIMP            zero current streamed; telemetry runs; backdrivable
+    MANUAL          per-actuator position hold (sliders) and/or per-actuator sine — SET_POS
+    RECORD_GAIT     limp + sample takes for the gait recorder
+    RECORD_WS       limp + sample segments for the workspace sweep
+    PLAYBACK        trajectory replay, 'position' or 'current' control law
+    ESTOPPED        latched; zero current streamed until cleared
+HTTP handlers never touch the buses — they only post requests into this object and read snapshots.
+"""
+import threading
+import time
+import traceback
+
+import numpy as np
+
+import paths
+import canio
+import ringbuffer
+
+import play_trajectory as pt              # fixed_gait/ — Motor, drain, reconstruct-side helpers
+import trajectory as traj                 # fixed_gait/
+
+MODES = ("LIMP", "MANUAL", "RECORD_GAIT", "RECORD_WS", "PLAYBACK", "ESTOPPED")
+TICK_HZ = 200.0
+TELEMETRY_DIV = 10                        # ring/snapshot update every Nth tick (=> 20 Hz)
+MAX_TEMP_C = 80                           # run_hardware.py:102
+MAX_TRACK_ERR_DEG = 25.0                  # run_hardware.py:101 (position-command modes)
+DEFAULT_SLEW_DPS = 60.0
+# base never-exceed clamps, normalized deg (model joint ranges + small margin; cam +-1.5 rad,
+# thigh +-1.047 rad, abduction +-0.785 rad — mujoco/spiderbot/build_model.py J dict).
+# NOTE: the URDF ranges are CAD guesses (calibrate_workspace.py docstring) and the real cam is
+# multi-turn — a recorded workspace can legitimately exceed these, so _hard_bounds() widens the
+# net to the demonstrated envelope (+10 deg) whenever a workspace is loaded for that leg.
+HARD_CLAMP = {"abd": 48.0, "cam": 88.0, "thigh": 62.0}
+HARD_WIDEN_DEG = 10.0
+
+PLAYBACK_DEFAULTS = dict(period=8.0, mode="position", current_limit=3.0, kp=0.8, ki=0.4, kd=0.02,
+                         ramp=3.0, max_track_err=30.0, speed_limit=9000.0, max_speed=16000.0,
+                         left_phase=None, legs="both", abd_right=None, abd_left=None)
+
+
+class RobotDaemon(threading.Thread):
+    def __init__(self, interface="socketcan", mock=False, calib=None, wstore=None, fklut=None):
+        super().__init__(daemon=True, name="RobotDaemon")
+        self.interface = interface
+        self.mock = mock
+        self.calib = calib
+        self.wstore = wstore
+        self.fklut = fklut
+
+        self.lock = threading.Lock()
+        self.estop_event = threading.Event()
+        self.stop_event = threading.Event()
+
+        # -------- requests (web -> daemon, guarded by self.lock) --------
+        self._req_mode = None
+        self._req_clear_estop = False
+        self._manual_targets = {}          # name -> desired normalized deg
+        self._manual_override = False
+        self._slew_dps = DEFAULT_SLEW_DPS
+        self._sine = {n: dict(enabled=False, a=-10.0, b=10.0, freq=0.3, _blend0=None)
+                      for n in paths.MOTOR_NAMES}
+        self._playback_req = None          # dict: params + 'data'
+        self._playback_patch = None
+        self._record_cmds = []             # (cmd, leg) tuples
+
+        # -------- daemon-internal state --------
+        self.mode = "LIMP"
+        self.estop_reason = ""
+        self.loop_error = None
+        self.buses = {}
+        self.motors = []                   # pt.Motor list in paths.MOTOR_NAMES order
+        self.by_name = {}
+        self.motors_by_bus = {}
+        self.side_groups = {}
+        self._held = {}                    # name -> commanded normalized target (MANUAL)
+        self._last_cmd_raw = {}            # name -> last raw SET_POS (tracking-error guard)
+        self._pb = None                    # playback state dict
+        self._rec = dict(kind=None, active=False, leg=None, buf_t=[], buf_p=[], t0=0.0,
+                         takes={"right": [], "left": []}, segments={"right": [], "left": []},
+                         centers={"right": None, "left": None}, outside=False)
+        self._last_reject = ""             # last workspace-check refusal (surfaced in snapshot)
+        self._tick_count = 0
+        self._slip_count = 0
+        self.ring = ringbuffer.TelemetryRing()
+        self.snapshot = {"daemon_alive": False, "mode": "LIMP"}
+        self._started_ok = threading.Event()
+
+    # ================================================================= web-facing API
+    def request_mode(self, mode):
+        with self.lock:
+            self._req_mode = mode
+
+    def estop(self, reason="user e-stop"):
+        with self.lock:
+            self.estop_reason = reason
+        self.estop_event.set()
+
+    def clear_estop(self):
+        with self.lock:
+            self._req_clear_estop = True
+
+    def _hard_bounds(self, side, role):
+        """(lo, hi) never-exceed clamp: model limits, widened by the demonstrated workspace."""
+        lo, hi = -HARD_CLAMP[role], HARD_CLAMP[role]
+        leg = self.wstore.legs.get(side) if self.wstore else None
+        if leg:
+            if role == "abd":
+                olo, ohi = leg["abd_observed"]
+                lo, hi = min(lo, olo - HARD_WIDEN_DEG), max(hi, ohi + HARD_WIDEN_DEG)
+            elif "knee_grid" in leg:
+                o = leg["knee_cam_origin"] if role == "cam" else leg["knee_thigh_origin"]
+                n_cells = leg["knee_grid"].shape[0 if role == "cam" else 1]
+                r = leg["knee_grid_deg"]
+                lo = min(lo, o - HARD_WIDEN_DEG)
+                hi = max(hi, o + n_cells * r + HARD_WIDEN_DEG)
+        return lo, hi
+
+    def _validate_pose(self, targets, override):
+        """Check a FULL normalized pose {name: deg} (hard clamps + workspace / feasibility).
+        Called from HTTP threads at request time so refusals are immediate and the daemon never
+        chases an out-of-band target."""
+        for n, v in targets.items():
+            side, role = paths.split_name(n)
+            lo, hi = self._hard_bounds(side, role)
+            if not lo <= v <= hi:
+                return False, f"{n} {v:+.1f} deg exceeds the hard limit [{lo:+.0f}, {hi:+.0f}]"
+        limits = self.wstore.limits if (self.wstore and not override) else None
+        if limits is not None:
+            for side in paths.SIDES:
+                if not limits.has_leg(side):
+                    continue
+                ok, reason = limits.validate(side, targets[f"{side}.abd"],
+                                             targets[f"{side}.cam"], targets[f"{side}.thigh"])
+                if not ok:
+                    return False, reason
+        if override and self.fklut is not None and self.fklut.available:
+            for side in paths.SIDES:
+                ok, reason = self.fklut.feasible_check(side, targets[f"{side}.cam"],
+                                                       targets[f"{side}.thigh"])
+                if not ok:
+                    return False, reason
+        return True, ""
+
+    def _merged_pose(self, updates):
+        """Current held/desired pose merged with an update dict -> full 6-name pose."""
+        with self.lock:
+            base = {n: self._manual_targets.get(
+                        n, self._held.get(n, self.calib.norm(n, self.by_name[n].pos)
+                                          if self.by_name and self.by_name[n].pos is not None
+                                          else 0.0))
+                    for n in paths.MOTOR_NAMES}
+        base.update({k: float(v) for k, v in (updates or {}).items() if k in base})
+        return base
+
+    def manual_update(self, targets=None, override=None, slew_dps=None):
+        """Returns (ok, reason). Targets are validated as a full pose BEFORE being accepted;
+        ENTERING manual additionally requires the current pose itself to be inside the safe set
+        (else the hold command would be refused every tick) — backdrive the leg into the green
+        region first, extend the workspace, or use override."""
+        with self.lock:
+            eff_override = self._manual_override if override is None else bool(override)
+        if self.mode != "MANUAL" and self.by_name \
+                and all(m.pos is not None for m in self.motors):
+            pose_now = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items()}
+            ok, reason = self._validate_pose(pose_now, eff_override)
+            if not ok:
+                reason = ("cannot enter manual hold: the leg's CURRENT pose is outside the safe "
+                          "workspace (" + reason + ") — backdrive it inside the green region, "
+                          "extend the workspace in the editor, or use override")
+                with self.lock:
+                    self._last_reject = reason
+                return False, reason
+        if targets:
+            pose = self._merged_pose(targets)
+            ok, reason = self._validate_pose(pose, eff_override)
+            if not ok:
+                with self.lock:
+                    self._last_reject = reason
+                return False, reason
+        with self.lock:
+            if targets:
+                self._manual_targets.update({k: float(v) for k, v in targets.items()
+                                             if k in self.by_name})
+            if override is not None:
+                self._manual_override = bool(override)
+            if slew_dps is not None:
+                self._slew_dps = float(np.clip(slew_dps, 5.0, 240.0))
+            self._req_mode = "MANUAL"
+        return True, ""
+
+    def sine_update(self, actuator, enabled=None, a=None, b=None, freq=None):
+        if actuator not in self._sine:
+            return False, f"unknown actuator {actuator}"
+        with self.lock:
+            s = dict(self._sine[actuator])
+            override = self._manual_override
+        if a is not None:
+            s["a"] = float(a)
+        if b is not None:
+            s["b"] = float(b)
+        will_enable = s["enabled"] if enabled is None else bool(enabled)
+        if will_enable:
+            # both endpoints must be reachable with the other joints where they are now
+            for v in (s["a"], s["b"]):
+                ok, reason = self._validate_pose(self._merged_pose({actuator: v}), override)
+                if not ok:
+                    with self.lock:
+                        self._last_reject = reason
+                    return False, f"sine endpoint {v:+.1f}: {reason}"
+        with self.lock:
+            st = self._sine[actuator]
+            st["a"], st["b"] = s["a"], s["b"]
+            if freq is not None:
+                st["freq"] = float(np.clip(freq, 0.01, 3.0))
+            if enabled is not None:
+                if enabled and not st["enabled"]:
+                    st["_blend0"] = time.time()
+                st["enabled"] = bool(enabled)
+            self._req_mode = "MANUAL"
+        return True, ""
+
+    def playback_start(self, data, params):
+        p = {**PLAYBACK_DEFAULTS, **params}
+        with self.lock:
+            self._playback_req = {"data": data, **p}
+
+    def playback_patch(self, patch):
+        with self.lock:
+            self._playback_patch = dict(patch)
+
+    def record_command(self, cmd, leg, kind=None):
+        """cmd: start_mode|take_start|take_stop|undo|center|reset ; kind: gait|workspace."""
+        with self.lock:
+            self._record_cmds.append((cmd, leg, kind))
+
+    def get_recording(self):
+        """Copy of accumulated takes/segments/centers for the finish endpoints."""
+        with self.lock:
+            r = self._rec
+            return dict(kind=r["kind"],
+                        takes={s: list(r["takes"][s]) for s in ("right", "left")},
+                        segments={s: list(r["segments"][s]) for s in ("right", "left")},
+                        centers=dict(r["centers"]))
+
+    def latest_raw_positions(self):
+        return {n: (self.by_name[n].pos if self.by_name else None) for n in paths.MOTOR_NAMES}
+
+    def mock_drag(self, name, norm_target=None):
+        """Test hook: pull a limp mock joint toward a normalized angle (None = release)."""
+        if not self.mock or name not in self.by_name:
+            return False
+        m = self.by_name[name]
+        if norm_target is None:
+            m.bus.drag_release(m.cid)
+        else:
+            m.bus.drag(m.cid, self.calib.raw(name, float(norm_target)))
+        return True
+
+    # ================================================================= lifecycle
+    def run(self):
+        try:
+            self._setup()
+            self._started_ok.set()
+            self._loop()
+        except Exception:
+            self.loop_error = traceback.format_exc()
+            print(f"!! RobotDaemon crashed:\n{self.loop_error}")
+        finally:
+            self._release_and_close()
+            with self.lock:
+                snap = dict(self.snapshot)
+                snap["daemon_alive"] = False
+                snap["loop_error"] = self.loop_error
+                self.snapshot = snap
+
+    def _setup(self):
+        channels = sorted(set(paths.SIDE_CHANNEL.values()))
+        self.buses = canio.open_buses(self.interface, channels, mock=self.mock)
+        for side in paths.SIDES:
+            ch = paths.SIDE_CHANNEL[side]
+            self.motors_by_bus.setdefault(ch, {})
+            for col, role in enumerate(paths.ROLES):
+                m = pt.Motor(self.buses[ch], paths.ROLE_ID[role], side, col)
+                self.motors.append(m)
+                self.by_name[f"{side}.{role}"] = m
+                self.motors_by_bus[ch][m.cid] = m
+        self.side_groups = pt.group_by_side(self.motors)
+        self._name_of = {id(m): n for n, m in self.by_name.items()}
+        # preflight: limp-stream + wait for every motor to report (play_trajectory.preflight)
+        t_end = time.time() + 2.0
+        while time.time() < t_end and any(m.pos is None for m in self.motors):
+            for m in self.motors:
+                canio.set_current(m.bus, m.cid, 0.0)
+            pt.drain(self.buses, self.motors_by_bus, 0.0)
+            time.sleep(0.005)
+        silent = [self._name_of[id(m)] for m in self.motors if m.pos is None]
+        if silent:
+            print(f"!! preflight: no status from {silent} — motion blocked until they report")
+
+    def _release_and_close(self):
+        for m in self.motors:
+            try:
+                canio.set_current(m.bus, m.cid, 0.0)
+            except Exception:
+                pass
+        time.sleep(0.02)
+        for b in self.buses.values():
+            try:
+                b.shutdown()
+            except Exception:
+                pass
+        print("RobotDaemon: motors released (0 A), buses closed.")
+
+    # ================================================================= main loop
+    def _loop(self):
+        dt = 1.0 / TICK_HZ
+        next_t = time.time()
+        while not self.stop_event.is_set():
+            now = time.time()
+
+            # 1) e-stop first — latch (limp is streamed by the mode body below)
+            if self.estop_event.is_set() and self.mode != "ESTOPPED":
+                self.mode = "ESTOPPED"
+                self._pb = None
+                with self.lock:
+                    self._manual_targets = {}
+                    self._manual_override = False
+
+            # 2) always drain feedback (telemetry works even limp)
+            pt.drain(self.buses, self.motors_by_bus, dt)
+
+            # 3) consume web requests
+            self._consume_requests(now)
+
+            # 4) mode body
+            if self.mode in ("LIMP", "RECORD_GAIT", "RECORD_WS", "ESTOPPED"):
+                self._stream_limp()
+                if self.mode in ("RECORD_GAIT", "RECORD_WS"):
+                    self._tick_recording(now)
+            elif self.mode == "MANUAL":
+                self._tick_manual(now, dt)
+            elif self.mode == "PLAYBACK":
+                self._tick_playback(now, dt)
+
+            # 5) safety sweep (err flag / temp in every mode; run_hardware.safety_check semantics)
+            for m in self.motors:
+                if m.pos is None:
+                    continue
+                if m.err:
+                    self._trip(f"{self._name_of[id(m)]} error code {m.err}")
+                elif m.temp >= MAX_TEMP_C:
+                    self._trip(f"{self._name_of[id(m)]} temp {m.temp}C >= {MAX_TEMP_C}")
+
+            # 6) telemetry + snapshot at 20 Hz
+            self._tick_count += 1
+            if self._tick_count % TELEMETRY_DIV == 0:
+                self._publish(now)
+
+            next_t += dt
+            sleep = next_t - time.time()
+            if sleep > 0:
+                time.sleep(sleep)
+            else:
+                self._slip_count += 1
+                next_t = time.time()
+
+    def _trip(self, reason):
+        if not self.estop_event.is_set():
+            with self.lock:
+                self.estop_reason = reason
+            self.estop_event.set()
+            print(f"!! SAFETY STOP: {reason}")
+
+    def _stream_limp(self):
+        for m in self.motors:
+            canio.set_current(m.bus, m.cid, 0.0)
+        self._last_cmd_raw.clear()
+
+    def _motion_allowed(self):
+        if not self.calib.complete:
+            return False, "calibration incomplete — finish the zero/direction wizard first"
+        silent = [self._name_of[id(m)] for m in self.motors if m.pos is None]
+        if silent:
+            return False, f"motor(s) silent: {', '.join(silent)} — never commanding blind"
+        return True, ""
+
+    # ----------------------------------------------------------------- requests
+    def _consume_requests(self, now):
+        with self.lock:
+            req_mode = self._req_mode
+            self._req_mode = None
+            clear = self._req_clear_estop
+            self._req_clear_estop = False
+            pb_req = self._playback_req
+            self._playback_req = None
+            pb_patch = self._playback_patch
+            self._playback_patch = None
+            rec_cmds = self._record_cmds
+            self._record_cmds = []
+
+        if clear and self.mode == "ESTOPPED":
+            self.estop_event.clear()
+            with self.lock:
+                self.estop_reason = ""
+            self.mode = "LIMP"
+
+        if self.mode == "ESTOPPED":
+            return                                          # latched: ignore everything else
+
+        for cmd, leg, kind in rec_cmds:
+            self._handle_record_cmd(cmd, leg, kind, now)
+
+        if pb_req is not None:
+            ok, why = self._motion_allowed()
+            if ok:
+                self._start_playback(pb_req, now)
+            else:
+                self._last_reject = why
+        if pb_patch is not None and self._pb is not None:
+            self._apply_playback_patch(pb_patch, now)
+
+        if req_mode and req_mode != self.mode:
+            if req_mode == "LIMP":
+                self.mode = "LIMP"
+                self._pb = None
+                self._end_active_record()
+                with self.lock:
+                    self._manual_targets = {}
+                    self._manual_override = False          # override never survives a mode change
+            elif req_mode == "MANUAL":
+                ok, why = self._motion_allowed()
+                if ok:
+                    if self.mode != "MANUAL":
+                        # enter without a jump: hold the current pose; keep targets that were
+                        # posted with this request, fill the rest from the held pose
+                        self._held = {n: self.calib.norm(n, m.pos)
+                                      for n, m in self.by_name.items()}
+                        with self.lock:
+                            for n, v in self._held.items():
+                                self._manual_targets.setdefault(n, v)
+                            for s in self._sine.values():
+                                s["enabled"] = False
+                    self.mode = "MANUAL"
+                else:
+                    self._last_reject = why
+
+    # ----------------------------------------------------------------- MANUAL (hold + sine)
+    def _tick_manual(self, now, dt):
+        ok, why = self._motion_allowed()
+        if not ok:
+            self._trip(why)
+            return
+        with self.lock:
+            desired = dict(self._manual_targets)
+            override = self._manual_override
+            slew = self._slew_dps
+            sine = {n: dict(s) for n, s in self._sine.items()}
+
+        held_before = dict(self._held)
+        targets_norm = {}
+        for n, m in self.by_name.items():
+            cur = self._held.get(n, self.calib.norm(n, m.pos))
+            s = sine[n]
+            if s["enabled"]:
+                mid, amp = (s["a"] + s["b"]) / 2.0, (s["b"] - s["a"]) / 2.0
+                want = mid + amp * np.sin(2.0 * np.pi * s["freq"] * (now - (s["_blend0"] or now)))
+            else:
+                want = desired.get(n, cur)
+            step = slew * dt                              # slew applies to sine too: no jumps ever
+            tgt = cur + float(np.clip(want - cur, -step, step))
+            self._held[n] = tgt
+            side, role = paths.split_name(n)
+            lo, hi = self._hard_bounds(side, role)
+            targets_norm[n] = float(np.clip(tgt, lo, hi))
+
+        # workspace check on the FULL tick before sending anything (play_trajectory.py:299-309)
+        if not override:
+            limits = self.wstore.limits if self.wstore else None
+            tgt_by_motor = {self.by_name[n]: targets_norm[n] for n in targets_norm}
+            ok, reason = pt.check_workspace(self.side_groups, tgt_by_motor, limits)
+            if not ok:
+                self._last_reject = reason
+                self._held = held_before                   # do NOT advance through refused space
+                return                                     # hold previous commands, don't send
+        elif self.fklut is not None and self.fklut.available:
+            for side in paths.SIDES:                       # physically-assemblable band net
+                ok, reason = self.fklut.feasible_check(side, targets_norm[f"{side}.cam"],
+                                                       targets_norm[f"{side}.thigh"])
+                if not ok:
+                    self._last_reject = reason
+                    self._held = held_before
+                    return
+        self._last_reject = ""
+
+        for n, m in self.by_name.items():
+            raw = self.calib.raw(n, targets_norm[n])
+            canio.set_pos(m.bus, m.cid, raw)
+            self._last_cmd_raw[n] = raw
+            if abs(m.pos - raw) > MAX_TRACK_ERR_DEG:
+                self._trip(f"{n} tracking error {m.pos - raw:+.1f} deg (> {MAX_TRACK_ERR_DEG})")
+                return
+
+    # ----------------------------------------------------------------- PLAYBACK
+    def _start_playback(self, req, now):
+        data = req["data"]
+        sides = [s for s in (("right", "left") if req["legs"] == "both" else (req["legs"],))
+                 if data.get(s) is not None]
+        if not sides:
+            self._last_reject = f"trajectory has no data for legs={req['legs']}"
+            return
+        if req["left_phase"] is not None and data.get("left") is not None:
+            data["left"]["phase_shift"] = float(req["left_phase"])
+        for m in self.motors:
+            m.integ = 0.0
+            m.prev_target = None
+            m.tvel = 0.0
+        self._pb = dict(req, data=data, sides=sides, t0=now,
+                        start_pos={id(m): self.calib.norm(self._name_of[id(m)], m.pos)
+                                   for m in self.motors})
+        self.mode = "PLAYBACK"
+
+    def _apply_playback_patch(self, patch, now):
+        pb = self._pb
+        old_period = pb["period"]
+        elapsed = now - pb["t0"]
+        play_t = max(0.0, elapsed - pb["ramp"])
+        phase = (play_t / old_period) % 1.0
+        for k in ("period", "current_limit", "kp", "ki", "kd", "speed_limit",
+                  "max_speed", "max_track_err"):
+            if k in patch and patch[k] is not None:
+                pb[k] = float(patch[k])
+        if "left_phase" in patch and patch["left_phase"] is not None \
+                and pb["data"].get("left") is not None:
+            pb["data"]["left"]["phase_shift"] = float(patch["left_phase"])
+        if pb["period"] != old_period and elapsed > pb["ramp"]:
+            # keep phase continuity: re-anchor t0 so phase is unchanged at the new period
+            pb["t0"] = now - pb["ramp"] - phase * pb["period"]
+
+    def _tick_playback(self, now, dt):
+        pb = self._pb
+        if pb is None:
+            self.mode = "LIMP"
+            return
+        ok, why = self._motion_allowed()
+        if not ok:
+            self._trip(why)
+            return
+        # === re-implementation of play_trajectory.py:286-373 in the normalized frame ===
+        elapsed = now - pb["t0"]
+        ramp = min(1.0, elapsed / pb["ramp"]) if pb["ramp"] > 0 else 1.0
+        play_t = max(0.0, elapsed - pb["ramp"])
+        phase = (play_t / pb["period"]) % 1.0
+        lim = ramp * pb["current_limit"]
+        abd_override = {"right": pb["abd_right"], "left": pb["abd_left"]}
+        active = [m for m in self.motors if m.side in pb["sides"]]
+
+        targets_norm = {}
+        for m in active:
+            tgt_full = traj.reconstruct(pb["data"], m.side, phase,
+                                        abduction_override=abd_override[m.side])[m.col]
+            targets_norm[m] = (1 - ramp) * pb["start_pos"][id(m)] + ramp * float(tgt_full)
+
+        limits = self.wstore.limits if self.wstore else None
+        ok, reason = pt.check_workspace(pt.group_by_side(active), targets_norm, limits)
+        if not ok:
+            self._trip(f"playback workspace: {reason}")
+            return
+
+        pb["phase"] = phase
+        for m in active:
+            n = self._name_of[id(m)]
+            target_raw = self.calib.raw(n, targets_norm[m])
+            if pb["mode"] == "position":
+                canio.set_pos(m.bus, m.cid, target_raw)
+                self._last_cmd_raw[n] = target_raw
+                if abs(target_raw - m.pos) > pb["max_track_err"]:
+                    self._trip(f"{n} tracking err {target_raw - m.pos:+.0f} deg "
+                               f"(> {pb['max_track_err']:.0f}) — hitting a stop?")
+                    return
+            else:
+                # current mode: software PID in RAW frame -> SET_CURRENT, hard torque cap
+                # (play_trajectory.py:325-345 verbatim, incl. governor + runaway cut)
+                if m.prev_target is not None:
+                    m.tvel = 0.3 * (target_raw - m.prev_target) / dt + 0.7 * m.tvel
+                m.prev_target = target_raw
+                err = target_raw - m.pos
+                if ramp >= 1.0 and pb["ki"] > 0:
+                    m.integ += err * dt
+                    m.integ = float(np.clip(m.integ, -lim / pb["ki"], lim / pb["ki"]))
+                curr = pb["kp"] * err + pb["ki"] * m.integ + pb["kd"] * (m.tvel - m.vel)
+                curr = float(np.clip(curr, -lim, lim))
+                if pb["speed_limit"] > 0 and curr * m.spd > 0 and abs(m.spd) > pb["speed_limit"]:
+                    band = 0.3 * pb["speed_limit"]
+                    curr *= float(np.clip((pb["speed_limit"] + band - abs(m.spd)) / band, 0.0, 1.0))
+                canio.set_current(m.bus, m.cid, curr)
+                if abs(m.spd) > pb["max_speed"]:
+                    self._trip(f"{n} runaway {m.spd:.0f} ERPM (> {pb['max_speed']:.0f})")
+                    return
+
+    # ----------------------------------------------------------------- RECORDING
+    def _handle_record_cmd(self, cmd, leg, kind, now):
+        r = self._rec
+        if cmd == "start_mode":
+            ok, why = ((True, "") if self.calib.complete
+                       else (False, "calibration incomplete — recordings must be normalized"))
+            if not ok:
+                self._last_reject = why
+                return
+            r["kind"] = kind
+            self.mode = "RECORD_GAIT" if kind == "gait" else "RECORD_WS"
+            self._pb = None
+        elif cmd == "take_start" and not r["active"]:
+            r.update(active=True, leg=leg, buf_t=[], buf_p=[], t0=now)
+        elif cmd == "take_stop" and r["active"]:
+            self._end_active_record()
+        elif cmd == "undo" and not r["active"]:
+            store = r["takes"] if r["kind"] == "gait" else r["segments"]
+            if store[leg]:
+                store[leg].pop()
+        elif cmd == "center":
+            r["centers"][leg] = [self.calib.norm(f"{leg}.{role}",
+                                                 self.by_name[f"{leg}.{role}"].pos)
+                                 for role in paths.ROLES]
+        elif cmd == "reset":
+            r["takes"] = {"right": [], "left": []}
+            r["segments"] = {"right": [], "left": []}
+            r["centers"] = {"right": None, "left": None}
+            r["active"] = False
+
+    def _end_active_record(self):
+        r = self._rec
+        if not r["active"]:
+            return
+        r["active"] = False
+        leg = r["leg"]
+        if r["kind"] == "gait" and len(r["buf_t"]) > 20:      # record_trajectory.py:158 min length
+            r["takes"][leg].append((np.array(r["buf_t"]), np.array(r["buf_p"])))
+        elif r["kind"] == "workspace" and len(r["buf_p"]) > 10:
+            r["segments"][leg].append(np.array(r["buf_p"], float))
+        r["buf_t"], r["buf_p"] = [], []
+
+    def _tick_recording(self, now):
+        r = self._rec
+        leg = r["leg"]
+        if r["active"] and leg:
+            names = [f"{leg}.{role}" for role in paths.ROLES]
+            if all(self.by_name[n].pos is not None for n in names):
+                r["buf_t"].append(now - r["t0"])
+                r["buf_p"].append([self.calib.norm(n, self.by_name[n].pos) for n in names])
+        # live outside-workspace warning (record_trajectory.py:180-185)
+        limits = self.wstore.limits if self.wstore else None
+        r["outside"] = False
+        if leg and limits is not None and limits.has_leg(leg):
+            vals = [self.by_name[f"{leg}.{role}"].pos for role in paths.ROLES]
+            if all(v is not None for v in vals):
+                normed = [self.calib.norm(f"{leg}.{r_}", v) for r_, v in zip(paths.ROLES, vals)]
+                ok, _ = limits.validate(leg, *normed)
+                r["outside"] = not ok
+
+    # ----------------------------------------------------------------- publish
+    def _publish(self, now):
+        raw = np.full(paths.N_MOTORS, np.nan)
+        spd = np.full(paths.N_MOTORS, np.nan)
+        cur = np.full(paths.N_MOTORS, np.nan)
+        temp = np.full(paths.N_MOTORS, np.nan)
+        err = np.zeros(paths.N_MOTORS)
+        for i, n in enumerate(paths.MOTOR_NAMES):
+            m = self.by_name[n]
+            if m.pos is not None:
+                raw[i], spd[i], cur[i], temp[i], err[i] = m.pos, m.spd, m.cur, m.temp, m.err
+        norm = self.calib.norm_array(raw)
+        self.ring.push(now, dict(pos_raw=raw, pos_norm=norm, spd=spd, cur=cur, temp=temp, err=err))
+
+        r = self._rec
+        with self.lock:
+            sine_pub = {n: {k: v for k, v in s.items() if not k.startswith("_")}
+                        for n, s in self._sine.items()}
+            override = self._manual_override
+            manual_targets = dict(self._manual_targets)
+            self.snapshot = dict(
+                daemon_alive=True, mode=self.mode, mock=self.mock,
+                estop=dict(latched=self.mode == "ESTOPPED", reason=self.estop_reason),
+                loop=dict(hz=TICK_HZ, slip=self._slip_count),
+                loop_error=self.loop_error,
+                last_reject=self._last_reject,
+                motors={n: dict(alive=self.by_name[n].pos is not None,
+                                pos_raw=None if np.isnan(raw[i]) else round(float(raw[i]), 2),
+                                pos_norm=None if np.isnan(norm[i]) else round(float(norm[i]), 2),
+                                spd=None if np.isnan(spd[i]) else round(float(spd[i]), 0),
+                                cur=None if np.isnan(cur[i]) else round(float(cur[i]), 2),
+                                temp=None if np.isnan(temp[i]) else int(temp[i]),
+                                err=int(err[i]))
+                        for i, n in enumerate(paths.MOTOR_NAMES)},
+                manual=dict(targets=manual_targets, override=override, slew_dps=self._slew_dps,
+                            sine=sine_pub),
+                playback=(None if self._pb is None else dict(
+                    running=self.mode == "PLAYBACK", phase=round(self._pb.get("phase", 0.0), 3),
+                    period=self._pb["period"], mode=self._pb["mode"], sides=self._pb["sides"],
+                    current_limit=self._pb["current_limit"])),
+                recording=dict(kind=r["kind"], active=r["active"], leg=r["leg"],
+                               outside_workspace=r["outside"],
+                               n_samples=len(r["buf_p"]),
+                               takes={s: len(r["takes"][s]) for s in ("right", "left")},
+                               segments={s: len(r["segments"][s]) for s in ("right", "left")},
+                               centers={s: (None if r["centers"][s] is None
+                                            else [round(v, 1) for v in r["centers"][s]])
+                                        for s in ("right", "left")}),
+            )
+
+    def get_snapshot(self):
+        with self.lock:
+            return dict(self.snapshot)
