@@ -20,6 +20,8 @@ const S = {
   mockTimers: {},
   preview: { on: false, t0: 0 },  // client-side both-legs gait preview animation
   fkmInit: false,                 // sign-map selects synced from state once
+  sineDefaults: {},               // motor -> {a,b,center,...} 70%-of-safe-range sine presets
+  sineDefFetched: false,          // presets pulled once after calibration completes
 };
 
 /* ================================================================ tiny helpers */
@@ -91,10 +93,26 @@ function applyState(st) {
   updateMotorCards(st);
   updateRecordUI(st);
   updatePlaybackUI(st);
+  updateManualStatus(st);
   updateFileLists(st);
   syncFkMapSelects(st);
   $("panel-mock").classList.toggle("hidden", !st.mock);
   $("btn-estop").textContent = (st.estop && st.estop.latched) ? "CLEAR E-STOP" : "E-STOP";
+  if (cal.stage === "complete" && !S.sineDefFetched) { S.sineDefFetched = true; fetchSineDefaults(); }
+}
+
+/* homing banner + keep the override checkbox in sync with the daemon */
+function updateManualStatus(st) {
+  const man = st.manual || {};
+  if (man.homing) {
+    const atHome = MOTORS.every((n) => S.latest[n] && S.latest[n].pos_norm !== null &&
+                                       Math.abs(S.latest[n].pos_norm) < 1.0);
+    $("home-status").textContent = atHome ? "🏠 at home ✓ (holding zero)" : "🏠 homing… (slow)";
+  } else {
+    $("home-status").textContent = "";
+  }
+  const chk = $("chk-override");
+  if (document.activeElement !== chk && man.override !== undefined) chk.checked = !!man.override;
 }
 
 /* ================================================================ e-stop / header */
@@ -308,7 +326,14 @@ function drawCharts() {
 }
 
 /* ================================================================ manual control */
+/* Each slider is a live gauge you can grab: when idle it tracks the motor's real position; while
+ * you drag it (or type in the number box) it commands a target. The number box mirrors the slider
+ * — live when idle, an exact setpoint when you type one. Sine start/stop preset to 70% of the safe
+ * range around the current pose (fetched from the daemon). manRow[n] tracks per-row edit state. */
 const manualDesired = {}; let manualDirty = false;
+const manRow = {};                 // n -> {editing, lastInteract, sineEdited}
+const GRACE_MS = 350;              // after a drag/edit, keep the value before resuming live-follow
+
 function buildManualRows() {
   $("manual-rows").innerHTML = MOTORS.map((n) => {
     const role = n.split(".")[1];
@@ -316,31 +341,92 @@ function buildManualRows() {
     <div class="man-row" id="man-${n.replace(".", "-")}">
       <span class="mr-name">${n}</span>
       <input type="range" class="mr-slider" min="${-HARD[role]}" max="${HARD[role]}" step="0.5" value="0">
-      <input type="number" class="num mr-num" step="0.5" value="0">
+      <span class="mr-numwrap">
+        <input type="number" class="num mr-num" step="0.5" value="0">
+        <span class="mr-target"></span>
+      </span>
       <span class="man-sine">
         <label><input type="checkbox" class="sn-en">sine</label>
-        <input type="number" class="num sn-a" value="-10" title="angle A °">↔
-        <input type="number" class="num sn-b" value="10" title="angle B °">
+        <input type="number" class="num sn-a" title="start angle ° (preset to 70% of the safe range)">↔<input type="number" class="num sn-b" title="stop angle ° (preset to 70% of the safe range)">
         <input type="number" class="num sn-f" value="0.3" step="0.05" min="0.02" max="3" title="Hz">Hz
+        <button class="btn small sn-auto" title="reset start/stop to 70% of the safe range around the current position">↺</button>
       </span>
     </div>`;
   }).join("");
   for (const n of MOTORS) {
+    manRow[n] = { editing: false, lastInteract: 0, sineEdited: false };
     const row = $("man-" + n.replace(".", "-"));
     const slider = row.querySelector(".mr-slider"), num = row.querySelector(".mr-num");
-    const set = (v) => { manualDesired[n] = +v; manualDirty = true; slider.value = v; num.value = v; };
-    slider.oninput = () => set(slider.value);
-    num.onchange = () => set(num.value);
+    const command = (v) => { manualDesired[n] = +v; manualDirty = true; manRow[n].lastInteract = performance.now(); };
+    const release = () => { manRow[n].editing = false; manRow[n].lastInteract = performance.now(); };
+    slider.addEventListener("pointerdown", () => { manRow[n].editing = true; });
+    slider.addEventListener("pointerup", release);
+    slider.addEventListener("pointercancel", () => { manRow[n].editing = false; });
+    slider.oninput = () => { num.value = (+slider.value).toFixed(1); command(slider.value); updateManualTargetHint(n); };
+    num.onfocus = () => { manRow[n].editing = true; };
+    num.onblur = release;
+    num.onchange = () => { slider.value = num.value; command(num.value); updateManualTargetHint(n); };
+
+    // ---- sine ----
     const sineSend = () => api("/api/sine", { json: {
       actuator: n, enabled: row.querySelector(".sn-en").checked,
       a_deg: +row.querySelector(".sn-a").value, b_deg: +row.querySelector(".sn-b").value,
       freq_hz: +row.querySelector(".sn-f").value } });
-    row.querySelector(".sn-en").onchange = sineSend;
+    row.querySelector(".sn-en").onchange = async () => {
+      if (row.querySelector(".sn-en").checked && !manRow[n].sineEdited) {
+        if (!S.sineDefaults[n]) await fetchSineDefaults();
+        applySineDefault(n);
+        if (row.querySelector(".sn-a").value === "") row.querySelector(".sn-a").value = -5;
+        if (row.querySelector(".sn-b").value === "") row.querySelector(".sn-b").value = 5;
+      }
+      sineSend();
+    };
+    row.querySelectorAll(".sn-a,.sn-b").forEach((i) =>
+      i.addEventListener("input", () => { manRow[n].sineEdited = true; }));
     row.querySelectorAll(".sn-a,.sn-b,.sn-f").forEach((i) => i.onchange = () => {
       if (row.querySelector(".sn-en").checked) sineSend();
     });
+    row.querySelector(".sn-auto").onclick = async () => {
+      manRow[n].sineEdited = false;
+      await fetchSineDefaults();
+      applySineDefault(n, true);
+      if (row.querySelector(".sn-en").checked) sineSend();
+    };
   }
 }
+
+/* slider/number follow the live motor position whenever the row is idle (not being dragged/typed,
+ * and past the post-release grace window). Purely display — never sets a target. */
+function updateManualLive() {
+  const now = performance.now();
+  for (const n of MOTORS) {
+    const st = manRow[n];
+    if (!st) continue;
+    const row = $("man-" + n.replace(".", "-"));
+    if (!row) continue;
+    const live = S.latest[n] ? S.latest[n].pos_norm : null;
+    const idle = !st.editing && (now - st.lastInteract > GRACE_MS);
+    if (idle && live !== null && live !== undefined) {
+      row.querySelector(".mr-slider").value = live;
+      const num = row.querySelector(".mr-num");
+      if (document.activeElement !== num) num.value = (+live).toFixed(1);
+    }
+    updateManualTargetHint(n);
+  }
+}
+
+/* small "⇒ target°" hint next to the number while the motor is still slewing to a commanded pose */
+function updateManualTargetHint(n) {
+  const row = $("man-" + n.replace(".", "-"));
+  if (!row) return;
+  const el = row.querySelector(".mr-target");
+  const live = S.latest[n] ? S.latest[n].pos_norm : null;
+  const tgt = manualDesired[n];
+  const manualMode = S.state && S.state.mode === "MANUAL";
+  el.textContent = (manualMode && tgt !== undefined && live !== null &&
+                    Math.abs(tgt - live) > 1.5) ? `⇒ ${(+tgt).toFixed(1)}°` : "";
+}
+
 setInterval(() => {         // 20 Hz slider flush (one final value lands after release too)
   if (!manualDirty) return;
   manualDirty = false;
@@ -348,16 +434,46 @@ setInterval(() => {         // 20 Hz slider flush (one final value lands after r
     override: $("chk-override").checked, slew_dps: +$("inp-slew").value } }).catch(() => {});
 }, 50);
 
+/* ---- sine 70%-of-safe-range presets ---- */
+let sineDefPending = null;
+async function fetchSineDefaults() {
+  const cal = S.state && S.state.calibration;
+  if (!(cal && cal.stage === "complete")) return;
+  if (sineDefPending) return sineDefPending;
+  sineDefPending = api("/api/manual/sine_defaults", { json: {} })
+    .then((d) => {
+      if (d && d.defaults) {
+        S.sineDefaults = d.defaults;
+        for (const n of MOTORS) applySineDefault(n);      // fill every un-edited row
+      }
+    }).catch(() => {}).finally(() => { sineDefPending = null; });
+  return sineDefPending;
+}
+function applySineDefault(n, force = false) {
+  const d = S.sineDefaults[n];
+  if (!d || (manRow[n].sineEdited && !force)) return;
+  const row = $("man-" + n.replace(".", "-"));
+  if (!row) return;
+  row.querySelector(".sn-a").value = d.a;
+  row.querySelector(".sn-b").value = d.b;
+}
+
 $("btn-hold").onclick = async () => {
   // enter manual at the current pose: seed sliders from live positions
   for (const n of MOTORS) {
     const v = S.latest[n] ? S.latest[n].pos_norm : 0;
     const row = $("man-" + n.replace(".", "-"));
     row.querySelector(".mr-slider").value = v;
-    row.querySelector(".mr-num").value = v;
+    row.querySelector(".mr-num").value = (+v).toFixed(1);
     manualDesired[n] = v;
+    manRow[n].lastInteract = 0;
   }
   await api("/api/manual", { json: { targets: { ...manualDesired } } });
+  fetchSineDefaults();
+};
+$("btn-home").onclick = async () => {
+  await api("/api/manual/home", { json: { slew_dps: +$("inp-home-slew").value } });
+  setBanner("homing to the zero pose (slow)…", "", 4000);
 };
 $("btn-release").onclick = () => api("/api/manual/release", { method: "POST" });
 $("chk-override").onchange = () => {
@@ -1086,11 +1202,14 @@ function drawEESide(side) {
     g.textAlign = "left";
     return;
   }
-  // view fit: region bounds + hip origin
+  // view fit: region bounds + hip origin + both zero markers
   let xs = [0], ys = [0];
   if (region) for (const p of region) { xs.push(p[0]); ys.push(p[1]); }
   const link = S.linkage[side];
   if (link && link.nodes) for (const p of link.nodes) { xs.push(p[0]); ys.push(p[1]); }
+  for (const z of [legWs && legWs.ee_zero, legWs && legWs.ee_model_zero]) {
+    if (z) { xs.push(z[0]); ys.push(z[1]); }
+  }
   const xmin = Math.min(...xs), xmax = Math.max(...xs), ymin = Math.min(...ys), ymax = Math.max(...ys);
   // display-only x-mirror, persisted per side in model_map.json ("mirror view" checkbox) —
   // pick whichever matches how you physically look at the robot
@@ -1129,7 +1248,14 @@ function drawEESide(side) {
       }
     }
   }
-  // zero EE marker
+  // model (URDF/MJCF qpos-0) zero — gray diamond; the calibrated zero is a DIFFERENT pose
+  if (legWs && legWs.ee_model_zero) {
+    const [x, y] = P(legWs.ee_model_zero[0], legWs.ee_model_zero[1]);
+    g.fillStyle = "#8b97a8"; g.strokeStyle = "#fff"; g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(x, y - 6); g.lineTo(x + 6, y); g.lineTo(x, y + 6); g.lineTo(x - 6, y);
+    g.closePath(); g.fill(); g.stroke();
+  }
+  // calibrated-zero EE marker (normalized 0,0 through the sign+offset map) — white circle
   if (legWs && legWs.ee_zero) {
     const [x, y] = P(legWs.ee_zero[0], legWs.ee_zero[1]);
     g.strokeStyle = "#fff"; g.lineWidth = 1.5;
@@ -1177,9 +1303,11 @@ $("btn-fk-verify").onclick = async () => {
   $("ee-status").textContent = ["left", "right"].map((s) => {
     const e = r[s] || {};
     if (e.error) return `${s}: ${e.error}`;
-    return `${s}: best signs ${e.best} coverage ${(e.coverage * 100).toFixed(0)}%` +
-      (e.decisive ? " ✓ verified" : " — NOT decisive → use 'force enable' below if you know the signs");
+    return `${s}: signs ${e.best} offsets (cam ${e.cam_off_deg}°, thigh ${e.thigh_off_deg}°) ` +
+      `coverage ${(e.coverage * 100).toFixed(0)}%` +
+      (e.decisive ? " ✓ verified" : " — NOT decisive → use 'force enable' below if you know the map");
   }).join("  ·  ");
+  S.fkmInit = false;                      // re-sync the manual inputs with the fitted map
   await refreshEEData();
 };
 
@@ -1192,19 +1320,26 @@ async function refreshEEData() {
 for (const side of ["left", "right"]) {
   $(`btn-fkm-${side}`).onclick = async () => {
     const cam = +$(`fkm-${side}-cam`).value, thigh = +$(`fkm-${side}-thigh`).value;
-    if (!confirm(`Force-enable the ${side} EE display with signs cam=${cam}, thigh=${thigh}?\n` +
-                 "Only do this if you know the mapping — a wrong sign animates the linkage " +
-                 "backwards (display only; the workspace safety check is unaffected).")) return;
+    const camOff = +$(`fkm-${side}-camoff`).value || 0;
+    const thighOff = +$(`fkm-${side}-thighoff`).value || 0;
+    if (!confirm(`Force-enable the ${side} EE display with cam=${cam}, thigh=${thigh}, ` +
+                 `offsets (${camOff}°, ${thighOff}°)?\n` +
+                 "Only do this if you know the mapping — a wrong sign/offset animates the " +
+                 "linkage wrong (display only; the workspace safety check is unaffected).")) return;
     await api("/api/fk/map", { json: { side, cam, thigh, verified: true,
+                                       cam_off_deg: camOff, thigh_off_deg: thighOff,
                                        flip_view: $(`fkm-${side}-flip`).checked } });
-    setBanner(`${side} EE display enabled (cam=${cam}, thigh=${thigh})`, "", 3500);
+    setBanner(`${side} EE display enabled (cam=${cam}, thigh=${thigh}, ` +
+              `off ${camOff}°/${thighOff}°)`, "", 3500);
     await refreshEEData();
   };
   $(`fkm-${side}-flip`).onchange = async () => {
-    // display-only mirror toggle: keep signs + verified state as they are
+    // display-only mirror toggle: keep signs + offsets + verified state as they are
     const v = S.state && S.state.fk && S.state.fk.verified ? !!S.state.fk.verified[side] : false;
     await api("/api/fk/map", { json: {
       side, cam: +$(`fkm-${side}-cam`).value, thigh: +$(`fkm-${side}-thigh`).value,
+      cam_off_deg: +$(`fkm-${side}-camoff`).value || 0,
+      thigh_off_deg: +$(`fkm-${side}-thighoff`).value || 0,
       verified: v, flip_view: $(`fkm-${side}-flip`).checked } });
     await refreshEEData();
   };
@@ -1217,6 +1352,8 @@ function syncFkMapSelects(st) {
     const m = st.fk.model_map[side] || {};
     $(`fkm-${side}-cam`).value = (m.cam >= 0 ? "+1" : "-1");
     $(`fkm-${side}-thigh`).value = (m.thigh >= 0 ? "+1" : "-1");
+    $(`fkm-${side}-camoff`).value = m.cam_off_deg || 0;
+    $(`fkm-${side}-thighoff`).value = m.thigh_off_deg || 0;
     $(`fkm-${side}-flip`).checked = !!m.flip_view;
   }
 }
@@ -1288,6 +1425,7 @@ function boot() {
   setInterval(pollTelemetry, 100);
   setInterval(() => { if (!document.hidden) {
     drawCharts();
+    updateManualLive();
     wsEd.view.render();
     trEd.view.render();
     drawAbd();

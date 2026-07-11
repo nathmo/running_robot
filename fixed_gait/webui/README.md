@@ -17,7 +17,7 @@ What it does (one page):
 |---|---|
 | Telemetry | live raw/normalized position, current, temperature per motor + strip charts |
 | Calibration wizard | **blocks all motion after boot** until zero pose + direction check are done |
-| Manual control | per-actuator slider + number, per-actuator sine (A↔B, frequency), workspace-override checkbox |
+| Manual control | per-actuator slider that **tracks the live motor position** (grab to jog) + exact-angle box; **🏠 Home** slowly returns every joint to the zero pose; per-actuator sine (start↔stop **preset to 70% of the safe range**, frequency); workspace-override checkbox |
 | Safe workspace | abduction bar + (cam, thigh) pixel editor — draw/erase/flood-fill, undo, save/export/import |
 | Gait trajectory | hand-**draw** a path, or **teach** by backdriving (record takes), smooth + save |
 | EE animation | live linkage + workspace + gait + zero in foot (end-effector) space, per leg |
@@ -51,18 +51,27 @@ python mujoco/spiderbot/gen_fk_lut.py --check
 
 It Newton-solves the closed 4-bar at every (cam, thigh) grid cell via
 `mujoco/spiderbot/plot_reachability.py` and stores all linkage node positions. The Pi only
-bilinearly interpolates it. After loading/importing a workspace, press **“verify FK sign map”**
-in the EE panel once: it tries all sign combinations of the normalized-degrees→model-radians map
-against the workspace band (the thin 4-bar assembly band makes the right combo obvious) and
-enables the EE display per leg only when the winner is decisive.
+bilinearly interpolates it. After loading/importing a workspace, press **“verify FK map
+(sign + offset)”** in the EE panel once: per side and per sign combination it FITS the offset
+that lands the workspace band on the LUT assembly band (thin diagonal ⇒ sharp fit) and enables
+the EE display per leg only when the winner is decisive.
 
-> **Known issue (found against `joint_limits_right_2.npz`)**: the recorded cam travel spans
-> ~249° normalized while the model's cam joint range is only ±86° (`spidebot.xml`, a CAD guess —
-> the real cam may be a full crank). Most workspace cells therefore fall outside the LUT grid for
-> EVERY sign combo and the verdict is *not decisive* (best 17% coverage for `-1,-1`). Until the
-> model's cam range / gearing vs the real motor is reconciled (or a workspace is recorded around
-> the zero pose within ±86° cam), the EE panels stay off. `data/model_map.json` can be hand-edited
-> to force signs + `verified` if you know them.
+> **Two zero poses — resolved (2026-07-11).** The robot's captured zero pose is NOT the model's
+> qpos-0 pose, so the map is `model° = sign·norm° + offset°` per side. Two facts, both verified
+> against recorded data:
+> 1. **The cam is a crank.** The 4-bar assembles at EVERY cam angle (checked by sweeping loop
+>    closure over the full circle); the MJCF's ±86° cam range is a CAD guess. The LUT is now
+>    generated over cam ∈ [−90°, +270°] (`gen_fk_lut.py` default), which is why the old sign-only
+>    verify failed (17% coverage): most of the real ~245° cam travel fell off the old grid.
+> 2. **The captured zero sits far from model zero.** The zero pose is taken with the leg
+>    near-extended — exactly the 4-bar dead-center, where big cam rotations barely move the leg —
+>    so the captured cam zero is unrepeatable and lands far from model cam 0 (fitted ≈ +135° on
+>    `joint_limits.npz`, both legs consistent, coverage 1.00 vs ≤0.95 for wrong signs). The EE
+>    panel shows both: ○ = calibrated zero, ◆ = URDF/model zero.
+>
+> All recordings map onto the same model window (cam ≈ [−64°, +183°]) — that window is the real
+> hard-stop travel expressed in model coordinates. `data/model_map.json` stores signs + offsets
+> and can still be hand-edited / force-enabled in the UI.
 
 ## Install on the Pi (offline)
 
@@ -107,8 +116,12 @@ ExecStartPre above, or do it once at boot elsewhere.)
 2. Unplug one motor: the app must flag it silent and refuse all motion.
 3. Run the calibration wizard for real; sanity-check a normalized angle with a protractor.
 4. Import yesterday's workspace (`fixed_gait/joint_limits_right_2.npz`) in the workspace panel.
-5. Press *verify FK sign map* — both legs should be decisive; the EE panels light up.
-6. Small manual moves near zero with safety checks ON (override OFF).
+5. Press *verify FK map (sign + offset)* — both legs should be decisive; the EE panels light up.
+6. Small manual moves near zero with safety checks ON (override OFF). The sliders track the live
+   position, so watch a joint follow your drag; then press **🏠 Home** and confirm all six slew
+   back to zero at the (slow) home speed. Homing trusts the CAD zero: it slews under the physical
+   feasibility net rather than the eroded gait polygon, so it still reaches 0 when 0 sits a degree
+   or so outside the hand-drawn safe region (a plain manual hold at zero is refused there).
 7. Record a workspace sweep + a gait via the UI; play it back slow in **position** mode
    (period ≥ 10 s), then try **current** mode with the 3 A default.
 

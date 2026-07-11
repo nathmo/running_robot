@@ -261,6 +261,31 @@ def api_manual_release():
     return _ok()
 
 
+@app.post("/api/manual/home")
+def api_manual_home():
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    ok, why = _dm().home(slew_dps=b.get("slew_dps"))
+    return _ok(token=token) if ok else _err(why)
+
+
+@app.post("/api/manual/sine_defaults")
+def api_sine_defaults():
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    out, err = _dm().sine_defaults(frac=float(b.get("frac", 0.7)))
+    if out is None:
+        return _err(err)
+    return _ok(defaults=out)
+
+
 @app.post("/api/sine")
 def api_sine():
     why = _require_calibrated()
@@ -285,7 +310,8 @@ def api_workspace():
         lj = ws.leg_json(leg)
         if lj is not None and fk.available and fk.side_verified(leg):
             lj["ee_region"] = fk.ee_region(leg, ws.legs[leg])
-            lj["ee_zero"] = fk.ee_zero(leg)
+            lj["ee_zero"] = fk.ee_zero(leg)                  # robot's calibrated zero pose
+            lj["ee_model_zero"] = fk.ee_model_zero()         # MJCF/URDF qpos-0 pose (differs!)
         out["legs"][leg] = lj
     return jsonify(out)
 
@@ -566,6 +592,15 @@ def api_fk_map():
     except (TypeError, ValueError):
         return _err("cam/thigh must be ±1")
     fk.model_map[side].update({"cam": cam_s, "thigh": thigh_s})
+    for key in ("cam_off_deg", "thigh_off_deg"):
+        if key in b:
+            try:
+                v = float(b[key])
+            except (TypeError, ValueError):
+                return _err(f"{key} must be a number (degrees)")
+            if not -360.0 <= v <= 360.0:
+                return _err(f"{key} out of range (±360°)")
+            fk.model_map[side][key] = v
     if "flip_view" in b:
         fk.model_map[side]["flip_view"] = bool(b["flip_view"])
     if "verified" in b:

@@ -91,15 +91,22 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 
 /* ---------------- manual ---------------- */
 #manual-rows { display: flex; flex-direction: column; gap: 6px; }
-.man-row { display: grid; grid-template-columns: 84px 1fr 78px auto; gap: 8px; align-items: center;
+.man-row { display: grid; grid-template-columns: 84px 1fr 88px auto; gap: 8px; align-items: center;
   background: var(--panel2); border-radius: 8px; padding: 6px 10px; }
 .man-row .mr-name { font-weight: 600; font-size: 13px; }
-.man-row input[type=range] { width: 100%; }
+.man-row input[type=range] { width: 100%; cursor: grab; height: 20px; }
+.man-row input[type=range]:active { cursor: grabbing; }
+.mr-numwrap { display: flex; flex-direction: column; gap: 2px; }
+.mr-numwrap .mr-num { width: 100%; }
+.mr-target { font: 10px ui-monospace, monospace; color: var(--accent); min-height: 12px;
+  text-align: right; white-space: nowrap; }
 .man-sine { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--dim);
   flex-wrap: nowrap; }
 .man-sine input.num { width: 52px; padding: 2px 4px; font-size: 11px; }
+.man-sine .sn-auto { padding: 2px 7px; font-size: 12px; }
 .override { color: var(--bad); font-weight: 600; }
 .override input { accent-color: var(--bad); }
+#home-status { min-width: 120px; }
 
 /* ---------------- canvases / tools ---------------- */
 .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
@@ -133,6 +140,6 @@ input[type=range] { accent-color: var(--accent); }
 
 @media (max-width: 700px) {
   #main { grid-template-columns: 1fr; padding: 8px; }
-  .man-row { grid-template-columns: 70px 1fr 64px; }
+  .man-row { grid-template-columns: 70px 1fr 74px; }
   .man-sine { grid-column: 1 / -1; }
 }

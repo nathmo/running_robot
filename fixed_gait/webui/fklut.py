@@ -7,10 +7,15 @@ closed-loop model (plot_reachability.Leg.fk + linkage_points). Contents:
     valid[nc, nt] bool          assembles & no self-collision & ankle in range
     feas[nc, nt] bool           assembles (the physical never-exceed band)
 
-Normalized motor degrees map into model radians per side via a sign map (model is the LEFT leg;
-the right leg mirrors). The map lives in data/model_map.json and is VERIFIED against a recorded
-workspace band by IoU — the (cam, thigh) assembly band is a thin diagonal, so a wrong sign mirrors
-it off the band and loses badly. EE displays stay disabled per side until verified.
+Normalized motor degrees map into model radians per side via a SIGN + OFFSET map (model is the
+LEFT leg; the right leg mirrors):  model_deg = sign * norm_deg + off_deg.
+The offset is essential: the robot's captured zero pose is NOT the MJCF qpos-0 pose. The zero is
+captured with the leg near-extended, i.e. right at the 4-bar dead-center where large cam
+rotations barely move the leg, so the zero lands far from model zero (measured ~ +135 deg of cam
+on real data). The map lives in data/model_map.json and is VERIFIED against a recorded workspace
+band: for every sign combo the offsets are fitted by maximizing the fraction of workspace cells
+inside the LUT assembly band (thin diagonal ribbon -> the fit is sharp). EE displays stay
+disabled per side until verified.
 """
 import json
 import math
@@ -27,9 +32,18 @@ FEAS_MARGIN_DEG = 5.0
 
 # flip_view: pure DISPLAY x-mirror of the EE canvas (viewing convention, like plot_reachability's
 # VIEW_X) — it never changes which LUT cell is looked up, only how the drawing is projected.
-_DEFAULT_MAP = {"left": {"cam": 1, "thigh": 1, "flip_view": False},
-                "right": {"cam": 1, "thigh": 1, "flip_view": False},
+# Defaults to True so the canvas matches plot_reachability's mirrored map out of the box.
+# cam_off_deg / thigh_off_deg: model_deg = sign * norm_deg + off_deg (see module docstring).
+_DEFAULT_MAP = {"left": {"cam": 1, "thigh": 1, "cam_off_deg": 0.0, "thigh_off_deg": 0.0,
+                         "flip_view": True},
+                "right": {"cam": 1, "thigh": 1, "cam_off_deg": 0.0, "thigh_off_deg": 0.0,
+                          "flip_view": True},
                 "verified": {"left": False, "right": False}}
+
+# offset-fit search bounds: cam zero is captured at the fold (huge uncertainty, and the LUT cam
+# axis spans a full turn) -> search the whole circle; thigh zero is directly observable -> small.
+OFF_CAM_MAX_DEG = 180.0
+OFF_THIGH_MAX_DEG = 25.0
 
 
 class FkLut:
@@ -92,8 +106,11 @@ class FkLut:
 
     # ------------------------------------------------------------------ deg <-> rad
     def to_rad(self, side, cam_deg, thigh_deg):
+        """Normalized degrees -> model radians:  model = sign * norm + offset."""
         s = self.model_map[side]
-        return (s["cam"] * np.radians(cam_deg), s["thigh"] * np.radians(thigh_deg))
+        return (np.radians(s["cam"] * np.asarray(cam_deg, float) + s.get("cam_off_deg", 0.0)),
+                np.radians(s["thigh"] * np.asarray(thigh_deg, float)
+                           + s.get("thigh_off_deg", 0.0)))
 
     # ------------------------------------------------------------------ lookups
     def _cell(self, cam_rad, thigh_rad):
@@ -173,13 +190,66 @@ class FkLut:
         return np.round(pts, 4).tolist()
 
     def ee_zero(self, side):
+        """EE at the robot's CALIBRATED zero pose (normalized 0,0 mapped through sign+offset)."""
         nodes, _ = self.interp_nodes(side, 0.0, 0.0)
         return None if nodes is None else nodes[6]
 
-    # ------------------------------------------------------------------ sign-map verification
+    def ee_model_zero(self):
+        """EE at the MODEL zero pose (MJCF/URDF qpos 0) — side-independent, no sign/offset.
+        Distinct from ee_zero(): the robot's captured zero is NOT the model zero pose."""
+        if not self.available:
+            return None
+        i0 = int(np.argmin(np.abs(self.cam)))
+        j0 = int(np.argmin(np.abs(self.thigh)))
+        ee = self.nodes[i0, j0, 6]
+        return None if not np.isfinite(ee).all() else np.round(ee, 4).tolist()
+
+    # ------------------------------------------------------------------ sign+offset verification
+    def _fit_side(self, cam_deg, thigh_deg):
+        """For each sign combo, fit the (cam, thigh) OFFSET that maximizes the fraction of the
+        given normalized workspace cells landing inside the LUT assembly band (coarse grid
+        search, then a 1-cell refine). Returns {(sc, st): (coverage, cam_off_deg, thigh_off_deg)}.
+        Offsets are needed because the captured zero pose is far from model zero (module doc)."""
+        dcd, dtd = np.degrees(self._dc), np.degrees(self._dt)
+        cam0d, th0d = np.degrees(self.cam[0]), np.degrees(self.thigh[0])
+        nc, nt = len(self.cam), len(self.thigh)
+        ki_max = int(round(OFF_CAM_MAX_DEG / dcd))
+        kj_max = int(round(OFF_THIGH_MAX_DEG / dtd))
+        out = {}
+        for sc in (1, -1):
+            for st in (1, -1):
+                bi = (sc * cam_deg - cam0d) / dcd          # fractional LUT cell at zero offset
+                bj = (st * thigh_deg - th0d) / dtd
+
+                def cov(ki, kj):
+                    i = np.round(bi + ki).astype(int)
+                    j = np.round(bj + kj).astype(int)
+                    ok = (i >= 0) & (i < nc) & (j >= 0) & (j < nt)
+                    if not ok.any():
+                        return 0.0
+                    inside = np.zeros(len(i), bool)
+                    inside[ok] = self.feas[i[ok], j[ok]]
+                    return float(inside.mean())
+
+                best = (-1.0, 0, 0)
+                for ki in range(-ki_max, ki_max + 1, 4):   # coarse: every 4th cell
+                    for kj in range(-kj_max, kj_max + 1, 4):
+                        c = cov(ki, kj)
+                        if c > best[0]:
+                            best = (c, ki, kj)
+                _, bki, bkj = best
+                for ki in range(bki - 4, bki + 5):         # refine +-4 cells at full resolution
+                    for kj in range(bkj - 4, bkj + 5):
+                        c = cov(ki, kj)
+                        if c > best[0]:
+                            best = (c, ki, kj)
+                out[(sc, st)] = (best[0], best[1] * dcd, best[2] * dtd)
+        return out
+
     def verify_against_workspace(self, wstore):
-        """Try all 4 sign combos per side; the one whose normalized workspace band lands on the
-        LUT feasibility band (max IoU) wins. Marks 'verified' when the winner is unambiguous."""
+        """Per side: fit sign + offset against the recorded workspace band (see _fit_side) and
+        mark 'verified' when the winner is unambiguous. The thin diagonal assembly band makes a
+        correct fit land ~100% of cells inside; wrong signs plateau visibly lower."""
         if not self.available:
             return {"error": "no FK LUT loaded"}
         report = {}
@@ -192,25 +262,23 @@ class FkLut:
             ci, tj = np.nonzero(grid)
             cam_deg = leg["knee_cam_origin"] + (ci + 0.5) * leg["knee_grid_deg"]
             thigh_deg = leg["knee_thigh_origin"] + (tj + 0.5) * leg["knee_grid_deg"]
-            scores = {}
-            for sc in (1, -1):
-                for st in (1, -1):
-                    cr = sc * np.radians(cam_deg)
-                    tr = st * np.radians(thigh_deg)
-                    i = np.round((cr - self.cam[0]) / self._dc).astype(int)
-                    j = np.round((tr - self.thigh[0]) / self._dt).astype(int)
-                    ok = (i >= 0) & (i < len(self.cam)) & (j >= 0) & (j < len(self.thigh))
-                    inside = np.zeros(len(cam_deg), bool)
-                    inside[ok] = self.feas[i[ok], j[ok]]
-                    scores[f"{sc:+d},{st:+d}"] = round(float(inside.mean()), 4)
-            ranked = sorted(scores.items(), key=lambda kv: -kv[1])
-            best, second = ranked[0], ranked[1]
-            sc, st = (int(v) for v in best[0].split(","))
-            decisive = best[1] > 0.5 and best[1] > 1.5 * max(second[1], 1e-6)
-            report[side] = {"scores": scores, "best": best[0], "coverage": best[1],
+            fits = self._fit_side(cam_deg, thigh_deg)
+            scores = {f"{sc:+d},{st:+d}": {"coverage": round(c, 4),
+                                           "cam_off_deg": round(oc, 1),
+                                           "thigh_off_deg": round(ot, 1)}
+                      for (sc, st), (c, oc, ot) in fits.items()}
+            ranked = sorted(fits.items(), key=lambda kv: -kv[1][0])
+            (sc, st), (cbest, oc, ot) = ranked[0]
+            second = ranked[1][1][0]
+            decisive = cbest >= 0.95 and (cbest - second) >= 0.03
+            report[side] = {"scores": scores, "best": f"{sc:+d},{st:+d}",
+                            "coverage": round(cbest, 4),
+                            "cam_off_deg": round(oc, 1), "thigh_off_deg": round(ot, 1),
                             "decisive": decisive}
             if decisive:
-                self.model_map[side].update({"cam": sc, "thigh": st})   # keep flip_view etc.
+                self.model_map[side].update({"cam": sc, "thigh": st,          # keep flip_view etc.
+                                             "cam_off_deg": round(oc, 1),
+                                             "thigh_off_deg": round(ot, 1)})
                 self.model_map["verified"][side] = True
         self.save_map()
         return report

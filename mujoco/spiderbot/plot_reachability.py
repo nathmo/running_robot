@@ -1,8 +1,10 @@
 """Plot the sagittal (X-Z) reachability of the LEFT foot tip for SpiderBot.
 
 REDUCED 2-DOF STUDY. Only the two LEFT hip motors move:
-  - cam   (HipLeftNCS-v1_Revolution-3, range +-1.5)  -> drives the knee through the parallel
-                                                         pushrod loop (knee is NOT a free input)
+  - cam   (HipLeftNCS-v1_Revolution-3) -> drives the knee through the parallel pushrod loop
+          (knee is NOT a free input). The cam is a CRANK: the 4-bar assembles at EVERY cam
+          angle (the MJCF's +-1.5 rad joint range is a CAD guess; recorded hardware sweeps
+          span ~245 deg), so the default sweep covers the full circle [-90, 270] deg.
   - thigh (HipLeftNCS-v1_Revolution-5, range +-1.047) -> swings the thigh
 Hip abduction (roll) is held at 0  -> leg stays vertical / in the sagittal plane.
 The foot is held PARALLEL TO THE THIGH (the clean reading of "what the ankle spring does"),
@@ -33,7 +35,7 @@ THE LOOP, SOLVED EXACTLY
   model. We track the single PHYSICAL assembly branch (the one containing the rest pose).
 
 Run:  .venv/Scripts/python.exe mujoco/spiderbot/plot_reachability.py
-      (optional)  --nc 161 --nt 131 --ankle-mode spring-rest --show
+      (optional)  --nc 361 --nt 131 --ankle-mode parallel-thigh --cam-lo -86 --cam-hi 86 --show
 """
 import argparse
 import numpy as np
@@ -69,9 +71,14 @@ def _build_collidable_model():
 
 
 class Leg:
-    """Forward kinematics of the reduced left-leg mechanism, backed by the MuJoCo model."""
+    """Forward kinematics of the reduced left-leg mechanism, backed by the MuJoCo model.
 
-    def __init__(self, ankle_mode="parallel-thigh"):
+    cam_range: optional (lo, hi) RADIANS override of the model's cam joint range. The MJCF's
+    +-1.5 rad cam range is a CAD guess; the real cam is a CRANK — the 4-bar assembles at EVERY
+    cam angle (verified by sweeping loop closure over the full circle), and recorded hardware
+    sweeps span ~245 deg of cam. Pass e.g. np.radians([-90, 270]) to study the true workspace."""
+
+    def __init__(self, ankle_mode="parallel-thigh", cam_range=None):
         self.m = _build_collidable_model()
         self.d = mujoco.MjData(self.m)
         self.ankle_mode = ankle_mode
@@ -91,7 +98,8 @@ class Leg:
         self.q_knee  = m.jnt_qposadr[self.j_knee]
         self.q_ank   = m.jnt_qposadr[self.j_ank]
 
-        self.cam_range   = m.jnt_range[self.j_cam].copy()
+        self.cam_range   = (np.asarray(cam_range, float) if cam_range is not None
+                            else m.jnt_range[self.j_cam].copy())
         self.thigh_range = m.jnt_range[self.j_thigh].copy()
         self.ank_range   = m.jnt_range[self.j_ank].copy()
 
@@ -559,10 +567,18 @@ def render_singularity_frames(leg, g, ov, outdir, per_family=40):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--nc", type=int, default=121, help="cam samples")
+    ap.add_argument("--nc", type=int, default=241, help="cam samples")
     ap.add_argument("--nt", type=int, default=101, help="thigh samples")
+    ap.add_argument("--cam-lo", type=float, default=-90.0, metavar="DEG",
+                    help="cam sweep start in DEGREES. The real cam is a CRANK (the 4-bar "
+                         "assembles at every angle; the model's ±86° joint range is a CAD "
+                         "guess), so the default sweeps the full circle [-90, 270]")
+    ap.add_argument("--cam-hi", type=float, default=270.0, metavar="DEG",
+                    help="cam sweep end in DEGREES")
     ap.add_argument("--ankle-mode", choices=["parallel-thigh", "spring-rest"],
-                    default="parallel-thigh")
+                    default="spring-rest",
+                    help="spring-rest matches the real preloaded passive ankle (and the web "
+                         "UI's FK LUT); parallel-thigh is the geometric idealization")
     ap.add_argument("--out", default="mujoco/spiderbot/_reachability.png",
                     help="clean reachability map (no linkage overlay)")
     ap.add_argument("--poses", type=int, default=50,
@@ -577,7 +593,7 @@ def main():
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
 
-    leg = Leg(ankle_mode=args.ankle_mode)
+    leg = Leg(ankle_mode=args.ankle_mode, cam_range=np.radians([args.cam_lo, args.cam_hi]))
     print(f"cam range   = {leg.cam_range}   ({args.nc} samples)")
     print(f"thigh range = {leg.thigh_range} ({args.nt} samples)")
     print(f"ankle mode  = {args.ankle_mode}  (ankle phys range {leg.ank_range})")

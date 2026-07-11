@@ -73,14 +73,20 @@
 
   <!-- ============================ manual control ============================ -->
   <section class="panel" id="panel-manual">
-    <h2>Manual control</h2>
+    <h2>Manual control <span class="hint">sliders track the live motor position — grab one to jog
+      that joint, or type an exact angle</span></h2>
     <div class="row">
       <button id="btn-hold" class="btn primary">Hold pose (enter manual)</button>
+      <button id="btn-home" class="btn">🏠 Home (slow → zero pose)</button>
+      <span id="home-status" class="hint"></span>
       <button id="btn-release" class="btn">Release → limp</button>
+      <span class="spacer"></span>
       <label class="override"><input type="checkbox" id="chk-override">
         <span>⚠ override safe workspace</span></label>
       <label>slew <input type="number" id="inp-slew" value="60" min="5" max="240" step="5"
         class="num small"> °/s</label>
+      <label title="speed of the homing move">home <input type="number" id="inp-home-slew"
+        value="20" min="5" max="120" step="5" class="num small"> °/s</label>
     </div>
     <div id="manual-rows"></div>
   </section>
@@ -211,8 +217,8 @@
   <!-- ============================ EE animation ============================ -->
   <section class="panel wide" id="panel-ee">
     <h2>Leg linkage — end-effector space
-      <span class="hint">workspace ∙ gait path ∙ zero ∙ live linkage</span>
-      <button id="btn-fk-verify" class="btn small" style="float:right">verify FK sign map</button>
+      <span class="hint">workspace ∙ gait path ∙ ○ calibrated zero ∙ ◆ URDF/model zero ∙ live linkage</span>
+      <button id="btn-fk-verify" class="btn small" style="float:right">verify FK map (sign + offset)</button>
     </h2>
     <div class="ee-row">
       <div><h3>left</h3><canvas id="ee-left" width="440" height="480"></canvas></div>
@@ -220,12 +226,14 @@
     </div>
     <div id="ee-status" class="hint"></div>
     <div class="row small">
-      <span class="hint">manual sign map (if auto-verify is not decisive — e.g. cam range mismatch
-        vs the model):</span>
+      <span class="hint">manual map (if auto-verify is not decisive): model° = sign·norm° + offset°
+        — the captured zero is NOT the model zero, so offsets matter:</span>
       <span>left: cam <select id="fkm-left-cam" class="num small"><option value="+1">+1</option>
         <option value="-1">−1</option></select>
         thigh <select id="fkm-left-thigh" class="num small"><option value="+1">+1</option>
         <option value="-1">−1</option></select>
+        cam off <input type="number" id="fkm-left-camoff" class="num small" step="1" value="0">°
+        thigh off <input type="number" id="fkm-left-thighoff" class="num small" step="1" value="0">°
         <label title="display-only x-mirror of the plot"><input type="checkbox" id="fkm-left-flip">
           mirror view</label>
         <button id="btn-fkm-left" class="btn small">force enable</button></span>
@@ -233,6 +241,8 @@
         <option value="-1">−1</option></select>
         thigh <select id="fkm-right-thigh" class="num small"><option value="+1">+1</option>
         <option value="-1">−1</option></select>
+        cam off <input type="number" id="fkm-right-camoff" class="num small" step="1" value="0">°
+        thigh off <input type="number" id="fkm-right-thighoff" class="num small" step="1" value="0">°
         <label title="display-only x-mirror of the plot"><input type="checkbox" id="fkm-right-flip">
           mirror view</label>
         <button id="btn-fkm-right" class="btn small">force enable</button></span>

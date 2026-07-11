@@ -15,6 +15,12 @@ Contents of fk_lut.npz:
     valid[nc,nt] bool         assembles & no self-collision & ankle in range
     feas[nc,nt]  bool         assembles (the physical never-exceed band)
     ankle_mode                'spring-rest' (matches the real passive ankle) or 'parallel-thigh'
+
+The cam axis defaults to the FULL CRANK window [-90, +270] deg, NOT the model's +-86 deg joint
+range: that range is a CAD guess, while the real cam is a crank (the 4-bar assembles at every
+cam angle; recorded hardware sweeps span ~245 deg landing on model cam ~[-64, +183] deg). The
+webui maps normalized degrees into this grid per side via sign AND offset (the robot's captured
+zero pose is not the MJCF qpos-0 pose) — see fixed_gait/webui/fklut.py.
 """
 import argparse
 import os
@@ -35,8 +41,8 @@ NODE_NAMES = ("cam", "thigh", "push", "knee", "ank", "ptip", "ee")
 OUT_DEFAULT = os.path.join(REPO, "fixed_gait", "webui", "fk_lut.npz")
 
 
-def generate(nc, nt, ankle_mode):
-    leg = reach.Leg(ankle_mode=ankle_mode)
+def generate(nc, nt, ankle_mode, cam_range=None):
+    leg = reach.Leg(ankle_mode=ankle_mode, cam_range=cam_range)
     cam = np.linspace(*leg.cam_range, nc)
     thigh = np.linspace(*leg.thigh_range, nt)
     i0 = int(np.argmin(np.abs(cam)))
@@ -130,16 +136,23 @@ def check(leg, cam, thigh, nodes, feas, sol, n=500, seed=1):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--nc", type=int, default=241)
+    ap.add_argument("--nc", type=int, default=501)
     ap.add_argument("--nt", type=int, default=201)
+    ap.add_argument("--cam-lo", type=float, default=-90.0, metavar="DEG",
+                    help="cam grid start, DEGREES (full-crank default -90)")
+    ap.add_argument("--cam-hi", type=float, default=270.0, metavar="DEG",
+                    help="cam grid end, DEGREES (full-crank default +270)")
     ap.add_argument("--ankle-mode", choices=["spring-rest", "parallel-thigh"],
                     default="spring-rest", help="spring-rest matches the real passive ankle")
     ap.add_argument("--out", default=OUT_DEFAULT)
     ap.add_argument("--check", action="store_true", help="verify LUT interpolation vs direct FK")
     args = ap.parse_args()
 
-    print(f"Generating FK LUT {args.nc}x{args.nt}, ankle={args.ankle_mode} ...")
-    leg, cam, thigh, nodes, feas, valid, sol = generate(args.nc, args.nt, args.ankle_mode)
+    cam_range = np.radians([args.cam_lo, args.cam_hi])
+    print(f"Generating FK LUT {args.nc}x{args.nt}, cam [{args.cam_lo:g},{args.cam_hi:g}] deg, "
+          f"ankle={args.ankle_mode} ...")
+    leg, cam, thigh, nodes, feas, valid, sol = generate(args.nc, args.nt, args.ankle_mode,
+                                                        cam_range)
     np.savez_compressed(args.out, cam=cam, thigh=thigh, nodes=nodes, feas=feas, valid=valid,
                         sol=sol, ankle_mode=args.ankle_mode)
     print(f"  wrote {args.out} ({os.path.getsize(args.out) / 1e6:.1f} MB)")

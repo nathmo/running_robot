@@ -67,6 +67,8 @@ class RobotDaemon(threading.Thread):
         self._manual_targets = {}          # name -> desired normalized deg
         self._manual_override = False
         self._slew_dps = DEFAULT_SLEW_DPS
+        self._home_active = False           # slow return-to-zero engaged (feasibility-net checked)
+        self._home_slew = 20.0
         self._sine = {n: dict(enabled=False, a=-10.0, b=10.0, freq=0.3, _blend0=None)
                       for n in paths.MOTOR_NAMES}
         self._playback_req = None          # dict: params + 'data'
@@ -191,6 +193,7 @@ class RobotDaemon(threading.Thread):
             if targets:
                 self._manual_targets.update({k: float(v) for k, v in targets.items()
                                              if k in self.by_name})
+                self._home_active = False           # user jogging cancels a homing move
             if override is not None:
                 self._manual_override = bool(override)
             if slew_dps is not None:
@@ -226,8 +229,82 @@ class RobotDaemon(threading.Thread):
                 if enabled and not st["enabled"]:
                     st["_blend0"] = time.time()
                 st["enabled"] = bool(enabled)
+            self._home_active = False               # touching sine cancels a homing move
             self._req_mode = "MANUAL"
         return True, ""
+
+    def home(self, slew_dps=None):
+        """Slowly drive every joint back to the URDF zero pose (normalized 0 = the stance we
+        manually zero to). Trusts the CAD zero: it slews under the physical-feasibility net (like
+        override) rather than the eroded gait polygon, so it can still reach 0 when 0 sits a
+        degree or so outside the hand-drawn safe region."""
+        ok, why = self._motion_allowed()
+        if not ok:
+            with self.lock:
+                self._last_reject = why
+            return False, why
+        with self.lock:
+            self._manual_targets = {n: 0.0 for n in paths.MOTOR_NAMES}
+            self._home_active = True
+            self._home_slew = float(np.clip(slew_dps if slew_dps else 20.0, 5.0, 120.0))
+            for s in self._sine.values():
+                s["enabled"] = False
+            self._req_mode = "MANUAL"
+        return True, ""
+
+    def sine_defaults(self, frac=0.7):
+        """Per-actuator sine endpoints = `frac` of the contiguous SAFE travel around the CURRENT
+        pose (the other joints held where they are now). So the caller gets start/stop presets that
+        stay inside the safe workspace without having to think about angles. Returns
+        ({name: {a, b, center, room_up, room_down}}, "") or (None, reason)."""
+        if not self.by_name or any(m.pos is None for m in self.motors):
+            return None, "not all motors are reporting yet"
+        frac = float(np.clip(frac, 0.05, 0.98))
+        pose = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items()}
+        out = {}
+        for n in paths.MOTOR_NAMES:
+            side, role = paths.split_name(n)
+            c = pose[n]
+            lo, hi = self._hard_bounds(side, role)
+            room_up = self._safe_room(pose, n, +1.0, hi - c)
+            room_dn = self._safe_room(pose, n, -1.0, c - lo)
+            out[n] = dict(a=round(c - frac * room_dn, 1), b=round(c + frac * room_up, 1),
+                          center=round(c, 1), room_up=round(room_up, 1),
+                          room_down=round(room_dn, 1))
+        return out, ""
+
+    def _safe_room(self, pose, name, direction, max_reach):
+        """Largest contiguous safe displacement of `name` from its current value in `direction`
+        (+1/-1), up to `max_reach` deg, judged by the safe-workspace check with the other joints
+        held at `pose`. Coarse outward scan then a bisection on the boundary."""
+        if max_reach <= 0.5:
+            return max(0.0, float(max_reach))
+        base = pose[name]
+        trial = dict(pose)
+
+        def ok_at(d):
+            trial[name] = base + direction * d
+            ok, _ = self._validate_pose(trial, override=False)
+            return ok
+
+        if not ok_at(0.0):
+            return 0.0                                     # current pose already outside safe set
+        step = 2.0
+        last_ok, d = 0.0, step
+        while d <= max_reach:
+            if not ok_at(d):
+                break
+            last_ok, d = d, d + step
+        else:
+            return float(max_reach)                        # safe all the way to the hard bound
+        lo, hi = last_ok, min(d, max_reach)
+        for _ in range(14):
+            mid = 0.5 * (lo + hi)
+            if ok_at(mid):
+                lo = mid
+            else:
+                hi = mid
+        return lo
 
     def playback_start(self, data, params):
         p = {**PLAYBACK_DEFAULTS, **params}
@@ -462,8 +539,9 @@ class RobotDaemon(threading.Thread):
             return
         with self.lock:
             desired = dict(self._manual_targets)
-            override = self._manual_override
-            slew = self._slew_dps
+            homing = self._home_active
+            override = self._manual_override or homing   # homing trusts the feasibility net, not
+            slew = self._home_slew if homing else self._slew_dps   # the eroded gait polygon
             sine = {n: dict(s) for n, s in self._sine.items()}
 
         held_before = dict(self._held)
@@ -702,7 +780,7 @@ class RobotDaemon(threading.Thread):
                                 err=int(err[i]))
                         for i, n in enumerate(paths.MOTOR_NAMES)},
                 manual=dict(targets=manual_targets, override=override, slew_dps=self._slew_dps,
-                            sine=sine_pub),
+                            sine=sine_pub, homing=self._home_active),
                 playback=(None if self._pb is None else dict(
                     running=self.mode == "PLAYBACK", phase=round(self._pb.get("phase", 0.0), 3),
                     period=self._pb["period"], mode=self._pb["mode"], sides=self._pb["sides"],
