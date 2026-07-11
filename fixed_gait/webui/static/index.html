@@ -93,124 +93,194 @@
 
   <!-- ============================ workspace ============================ -->
   <section class="panel" id="panel-workspace">
-    <h2>Safe workspace <span id="ws-source" class="hint"></span></h2>
-    <div class="tabs" id="ws-tabs">
-      <button class="tab active" data-leg="right">right leg</button>
-      <button class="tab" data-leg="left">left leg</button>
-    </div>
+    <h2>Safe workspace
+      <span class="hint">record a sweep → review &amp; edit → save / share</span>
+      <span id="ws-source" class="hint"></span></h2>
 
-    <div class="ws-abd">
-      <canvas id="ws-abd-canvas" width="640" height="70"></canvas>
-      <div class="row small">
-        abduction safe: <input type="number" id="abd-min" class="num small" step="0.5">
-        … <input type="number" id="abd-max" class="num small" step="0.5"> °
-        <button id="btn-abd-apply" class="btn small">apply</button>
+    <div class="row" style="margin-top:2px">
+      <span class="hint">working on:</span>
+      <div class="tabs" id="ws-tabs" style="margin-bottom:0">
+        <button class="tab active" data-leg="right">right leg</button>
+        <button class="tab" data-leg="left">left leg</button>
       </div>
-    </div>
-
-    <div class="toolbar" id="ws-toolbar">
-      <button class="tool active" data-tool="pan" title="pan/zoom">✋</button>
-      <button class="tool" data-tool="draw" title="draw safe cells">✏️</button>
-      <button class="tool" data-tool="erase" title="erase cells">🧽</button>
-      <button class="tool" data-tool="fill" title="flood fill">🪣</button>
-      <select id="brush-size" class="num small">
-        <option value="1">1px</option><option value="3" selected>3px</option>
-        <option value="5">5px</option><option value="9">9px</option>
-      </select>
-      <button id="btn-undo" class="btn small">↩ undo</button>
-      <button id="btn-redo" class="btn small">↪ redo</button>
       <span class="spacer"></span>
-      <button id="btn-ws-apply" class="btn small primary">Apply to robot</button>
-      <button id="btn-ws-revert" class="btn small">Revert</button>
-    </div>
-    <div class="canvas-wrap">
-      <canvas id="ws-canvas" width="900" height="620"></canvas>
-      <div id="ws-coords" class="coords"></div>
-    </div>
-    <div id="ws-stats" class="hint"></div>
-
-    <div class="row">
-      <input type="text" id="ws-name" class="txt" placeholder="workspace name" value="workspace_web">
-      <button id="btn-ws-save" class="btn small">💾 Save</button>
-      <button id="btn-ws-export" class="btn small">⬇ Export</button>
-      <label class="btn small file-btn">⬆ Import<input type="file" id="ws-import" accept=".npz" hidden></label>
-      <select id="ws-files" class="txt small"></select>
-      <button id="btn-ws-load" class="btn small">Load</button>
-    </div>
-    <div class="row small">
-      <button id="btn-ws-mirror" class="btn small">⇄ copy right → left</button>
-      <span class="hint">normalized frames coincide between legs; flip an axis only if a direction
-        convention turns out inverted:</span>
-      <label><input type="checkbox" id="mir-abd"> abd</label>
-      <label><input type="checkbox" id="mir-cam"> cam</label>
-      <label><input type="checkbox" id="mir-thigh"> thigh</label>
+      <span class="hint">loaded:</span>
+      <span id="ws-legs-loaded" class="leg-badges"></span>
     </div>
 
-    <details class="rec-block">
-      <summary>Record a new workspace sweep (backdrive, motors limp)</summary>
+    <!-- Step 1 — record a sweep -->
+    <div class="step" id="ws-step-record">
+      <div class="step-h"><span class="step-n">1</span> Record a sweep
+        <span class="hint">— per leg, one continuous take</span></div>
+      <p class="step-note">Motors go limp — <b>backdrive the <span class="wsrec-legname">right</span>
+        leg by hand</b>. A single pass captures <b>abduction, cam and hip together</b>; sweep the
+        whole reachable range in one motion (do extra passes if you missed a corner — they add up).
+        The yellow trail shows what you've covered so far. Hit <b>Process</b> when it looks complete.</p>
       <div class="row">
         <button id="btn-wsrec-mode" class="btn">Enter sweep mode</button>
-        <button id="btn-wsrec-take" class="btn" disabled>▶ start segment</button>
-        <button id="btn-wsrec-undo" class="btn small" disabled>undo segment</button>
+        <button id="btn-wsrec-take" class="btn" disabled>▶ start pass</button>
+        <button id="btn-wsrec-undo" class="btn small" disabled>undo last pass</button>
         <span id="wsrec-status" class="hint"></span>
       </div>
       <div class="row small">
         margin <input type="number" id="wsrec-margin" class="num small" value="3" step="0.5">°
         grid <input type="number" id="wsrec-grid" class="num small" value="1" step="0.5">°
         dilate <input type="number" id="wsrec-dilate" class="num small" value="2" step="0.5">°
-        <button id="btn-wsrec-process" class="btn small primary" disabled>Process → workspace</button>
+        <span class="spacer"></span>
+        <button id="btn-wsrec-process" class="btn small primary" disabled>Process → build workspace</button>
       </div>
-    </details>
+    </div>
+
+    <!-- Step 2 — review / edit -->
+    <div class="step" id="ws-step-edit">
+      <div class="step-h"><span class="step-n">2</span> Review &amp; edit the safe region</div>
+      <p class="step-note">Green cells are the safe (cam, hip) region; the bar is the safe abduction
+        range. Touch it up by hand if needed, then <b>Apply to robot</b> to arm the live safety check.</p>
+
+      <div class="ws-abd">
+        <canvas id="ws-abd-canvas" width="640" height="70"></canvas>
+        <div class="row small">
+          abduction safe: <input type="number" id="abd-min" class="num small" step="0.5">
+          … <input type="number" id="abd-max" class="num small" step="0.5"> °
+          <button id="btn-abd-apply" class="btn small">apply</button>
+        </div>
+      </div>
+
+      <div class="toolbar" id="ws-toolbar">
+        <button class="tool active" data-tool="pan" title="pan/zoom">✋</button>
+        <button class="tool" data-tool="draw" title="draw safe cells">✏️</button>
+        <button class="tool" data-tool="erase" title="erase cells">🧽</button>
+        <button class="tool" data-tool="fill" title="flood fill">🪣</button>
+        <select id="brush-size" class="num small">
+          <option value="1">1px</option><option value="3" selected>3px</option>
+          <option value="5">5px</option><option value="9">9px</option>
+        </select>
+        <button id="btn-undo" class="btn small">↩ undo</button>
+        <button id="btn-redo" class="btn small">↪ redo</button>
+        <span class="spacer"></span>
+        <button id="btn-ws-apply" class="btn small primary">Apply to robot</button>
+        <button id="btn-ws-revert" class="btn small">Revert</button>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="ws-canvas" width="900" height="620"></canvas>
+        <div id="ws-coords" class="coords"></div>
+      </div>
+      <div id="ws-stats" class="hint"></div>
+    </div>
+
+    <!-- Step 3 — save / share -->
+    <div class="step" id="ws-step-save">
+      <div class="step-h"><span class="step-n">3</span> Save &amp; share</div>
+      <div class="row small">
+        <button id="btn-ws-mirror" class="btn small">⇄ copy right → left</button>
+        <span class="hint">normalized frames coincide between legs; flip an axis only if a direction
+          convention turns out inverted:</span>
+        <label><input type="checkbox" id="mir-abd"> abd</label>
+        <label><input type="checkbox" id="mir-cam"> cam</label>
+        <label><input type="checkbox" id="mir-thigh"> thigh</label>
+      </div>
+      <div class="row">
+        <input type="text" id="ws-name" class="txt" placeholder="workspace name" value="workspace_web">
+        <button id="btn-ws-save" class="btn small">💾 Save on robot</button>
+        <select id="ws-files" class="txt small"></select>
+        <button id="btn-ws-load" class="btn small">Load</button>
+      </div>
+      <div class="row">
+        <button id="btn-ws-export" class="btn small">⬇ Export file</button>
+        <label class="btn small file-btn">⬆ Import file<input type="file" id="ws-import" accept=".npz" hidden></label>
+        <span class="hint">file contains:</span>
+        <span id="ws-legs-loaded2" class="leg-badges"></span>
+      </div>
+      <p class="step-note">Export writes <b>every leg currently loaded</b> into one <code>.npz</code>
+        (both legs, or whichever one you have). Import <b>merges</b> a file's legs into what's already
+        loaded — so a right-only file and a left-only file can be imported one after the other to
+        combine them into a both-legs workspace.</p>
+    </div>
   </section>
 
   <!-- ============================ trajectory / gait ============================ -->
   <section class="panel" id="panel-trajectory">
-    <h2>Gait trajectory</h2>
-    <div class="tabs" id="traj-tabs">
-      <button class="tab active" data-leg="right">right leg</button>
-      <button class="tab" data-leg="left">left leg</button>
-    </div>
-    <div class="toolbar">
-      <button class="tool active" data-ttool="pan" title="pan/zoom">✋</button>
-      <button class="tool" data-ttool="draw" title="draw path">✏️</button>
-      <button id="btn-traj-clear" class="btn small">clear stroke</button>
-      <button id="btn-traj-reverse" class="btn small">⇄ reverse</button>
+    <h2>Gait trajectory
+      <span class="hint">teach/draw each leg → process &amp; save → play</span></h2>
+
+    <div class="row" style="margin-top:2px">
+      <span class="hint">working on:</span>
+      <div class="tabs" id="traj-tabs" style="margin-bottom:0">
+        <button class="tab active" data-leg="right">right leg</button>
+        <button class="tab" data-leg="left">left leg</button>
+      </div>
       <span class="spacer"></span>
-      <input type="text" id="traj-name" class="txt" value="gait_drawn" placeholder="trajectory name">
-      <button id="btn-traj-usepath" class="btn small primary">Use drawn path →</button>
+      <span class="hint">shown gait has:</span>
+      <span id="traj-legs-loaded" class="leg-badges"></span>
     </div>
-    <div class="canvas-wrap">
-      <canvas id="traj-canvas" width="900" height="620"></canvas>
-      <div id="traj-coords" class="coords"></div>
-    </div>
-    <div id="traj-stats" class="hint"></div>
 
-    <details class="rec-block" open>
-      <summary>Record a gait by hand (teach mode, motors limp)</summary>
+    <!-- Step 1 — teach or draw one leg -->
+    <div class="step" id="traj-step-record">
+      <div class="step-h"><span class="step-n">1</span>
+        Teach or draw the <span class="traj-legname">right</span>-leg loop</div>
+      <p class="step-note"><b>One leg at a time.</b> Record (or draw) this leg, then switch the tab
+        above to the other leg and do the same — or do one side and use <b>⇄ copy to other leg</b> in
+        step 3. Both legs live in the <b>same</b> gait file, so give them the same name.</p>
+
+      <details class="rec-block" open>
+        <summary>A · Teach by hand — backdrive the leg, motors limp</summary>
+        <div class="row">
+          <button id="btn-rec-mode" class="btn">Enter teach mode</button>
+          <button id="btn-rec-take" class="btn" disabled>▶ start take</button>
+          <button id="btn-rec-center" class="btn small" disabled>📍 capture center</button>
+          <button id="btn-rec-undo" class="btn small" disabled>undo take</button>
+          <button id="btn-rec-reset" class="btn small">reset all</button>
+          <span id="rec-status" class="hint"></span>
+        </div>
+        <div class="row small">
+          name <input type="text" id="rec-name" class="txt small" value="gait_web">
+          harmonics <input type="number" id="rec-harmonics" class="num small" value="8" min="1" max="30">
+          split <input type="number" id="rec-split" class="num small" value="0.5" min="0.1" max="0.9" step="0.05">
+          left phase <input type="number" id="rec-leftphase" class="num small" value="0.5" min="0" max="1" step="0.05">
+          <span class="spacer"></span>
+          <button id="btn-rec-finish" class="btn small primary">Process + save</button>
+        </div>
+      </details>
+
+      <details class="rec-block">
+        <summary>B · Draw the loop on the plot below instead</summary>
+        <div class="toolbar" style="margin-bottom:0">
+          <button class="tool active" data-ttool="pan" title="pan/zoom">✋</button>
+          <button class="tool" data-ttool="draw" title="draw path">✏️</button>
+          <button id="btn-traj-clear" class="btn small">clear stroke</button>
+          <button id="btn-traj-reverse" class="btn small">⇄ reverse</button>
+          <span class="spacer"></span>
+          <input type="text" id="traj-name" class="txt" value="gait_drawn" placeholder="trajectory name">
+          <button id="btn-traj-usepath" class="btn small primary">Use drawn path →</button>
+        </div>
+      </details>
+    </div>
+
+    <!-- Step 2 — review -->
+    <div class="step" id="traj-step-view">
+      <div class="step-h"><span class="step-n">2</span> Review both legs</div>
+      <div class="canvas-wrap">
+        <canvas id="traj-canvas" width="900" height="620"></canvas>
+        <div id="traj-coords" class="coords"></div>
+      </div>
+      <div id="traj-stats" class="hint"></div>
+    </div>
+
+    <!-- Step 3 — combine legs, preview, share -->
+    <div class="step" id="traj-step-save">
+      <div class="step-h"><span class="step-n">3</span> Combine legs, preview &amp; share</div>
       <div class="row">
-        <button id="btn-rec-mode" class="btn">Enter teach mode</button>
-        <button id="btn-rec-take" class="btn" disabled>▶ start take</button>
-        <button id="btn-rec-center" class="btn small" disabled>📍 capture center</button>
-        <button id="btn-rec-undo" class="btn small" disabled>undo take</button>
-        <button id="btn-rec-reset" class="btn small">reset all</button>
-        <span id="rec-status" class="hint"></span>
+        <select id="traj-files" class="txt small"></select>
+        <button id="btn-traj-show" class="btn small">Show on plots</button>
+        <button id="btn-traj-preview" class="btn small">▶ preview both legs</button>
+        <button id="btn-traj-copyleg" class="btn small">⇄ copy to other leg</button>
       </div>
-      <div class="row small">
-        name <input type="text" id="rec-name" class="txt small" value="gait_web">
-        harmonics <input type="number" id="rec-harmonics" class="num small" value="8" min="1" max="30">
-        split <input type="number" id="rec-split" class="num small" value="0.5" min="0.1" max="0.9" step="0.05">
-        left phase <input type="number" id="rec-leftphase" class="num small" value="0.5" min="0" max="1" step="0.05">
-        <button id="btn-rec-finish" class="btn small primary">Process + save</button>
+      <div class="row">
+        <button id="btn-traj-export" class="btn small">⬇ Export file</button>
+        <label class="btn small file-btn">⬆ Import file<input type="file" id="traj-import" accept=".npz" hidden></label>
+        <span class="hint">a gait file holds one loop with a right and/or left leg — export/import
+          moves the whole file.</span>
       </div>
-    </details>
-
-    <div class="row">
-      <select id="traj-files" class="txt small"></select>
-      <button id="btn-traj-show" class="btn small">Show on plots</button>
-      <button id="btn-traj-preview" class="btn small">▶ preview both legs</button>
-      <button id="btn-traj-copyleg" class="btn small">⇄ copy to other leg</button>
-      <button id="btn-traj-export" class="btn small">⬇ Export</button>
-      <label class="btn small file-btn">⬆ Import<input type="file" id="traj-import" accept=".npz" hidden></label>
     </div>
   </section>
 

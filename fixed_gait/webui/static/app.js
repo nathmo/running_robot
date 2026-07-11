@@ -22,11 +22,21 @@ const S = {
   fkmInit: false,                 // sign-map selects synced from state once
   sineDefaults: {},               // motor -> {a,b,center,...} 70%-of-safe-range sine presets
   sineDefFetched: false,          // presets pulled once after calibration completes
+  wsTrail: [],                    // live (cam,thigh) trail accumulated during a workspace sweep
+  wsAbdSweep: [Infinity, -Infinity],  // live min/max abduction swept during a sweep
 };
 
 /* ================================================================ tiny helpers */
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v)) ? "—" : (+v).toFixed(d);
+
+/* "right ✓ / left —" pills that spell out which legs a workspace or gait actually contains */
+function legBadges(el, hasRight, hasLeft) {
+  if (!el) return;
+  el.innerHTML =
+    `<span class="leg-badge ${hasRight ? "has" : ""}">right ${hasRight ? "✓" : "—"}</span>` +
+    `<span class="leg-badge ${hasLeft ? "has" : ""}">left ${hasLeft ? "✓" : "—"}</span>`;
+}
 
 async function api(path, opts = {}) {
   const o = { headers: {}, ...opts };
@@ -311,6 +321,7 @@ async function pollTelemetry() {
     for (const side of ["left", "right"]) {
       if (d.linkage[side]) { S.linkPrev[side] = S.linkage[side]; S.linkage[side] = d.linkage[side]; S.linkT = performance.now(); }
     }
+    accumulateWsTrail();
   } catch (e) { /* banner handled by state poll */ }
 }
 
@@ -611,6 +622,14 @@ function renderWs() {
       g.fillRect(x - 1, y - 1, 2, 2);
     }
   }
+  // live sweep trail (accumulates AS YOU MOVE while recording a workspace pass)
+  if (S.wsTrail.length > 1) {
+    g.strokeStyle = COLORS.stroke; g.lineWidth = 2; g.beginPath();
+    S.wsTrail.forEach((p, i) => { const [x, y] = v.toPx(p[0], p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+    const [hx, hy] = v.toPx(...S.wsTrail[S.wsTrail.length - 1]);
+    g.fillStyle = COLORS.stroke; g.beginPath(); g.arc(hx, hy, 3.5, 0, 7); g.fill();
+  }
   // gait path of the shown trajectory
   const tr = S.traj && S.traj[S.wsLeg];
   if (tr && tr.path) drawLoop(g, v, tr.path, COLORS.gait, 2);
@@ -810,6 +829,11 @@ function drawAbd() {
   g.beginPath(); g.moveTo(X(d.abd_observed[0]), y); g.lineTo(X(d.abd_observed[1]), y); g.stroke();
   g.strokeStyle = COLORS.good;
   g.beginPath(); g.moveTo(X(d.abd_safe[0]), y); g.lineTo(X(d.abd_safe[1]), y); g.stroke();
+  // live abduction swept so far during the current sweep (thin yellow overlay above the bar)
+  if (S.wsAbdSweep[0] <= S.wsAbdSweep[1]) {
+    g.strokeStyle = COLORS.stroke; g.lineWidth = 4;
+    g.beginPath(); g.moveTo(X(S.wsAbdSweep[0]), y - 12); g.lineTo(X(S.wsAbdSweep[1]), y - 12); g.stroke();
+  }
   g.strokeStyle = "#fff"; g.lineWidth = 1.5; g.setLineDash([4, 3]);
   g.beginPath(); g.moveTo(X(0), 6); g.lineTo(X(0), cv.height - 6); g.stroke(); g.setLineDash([]);
   const live = S.latest[S.wsLeg + ".abd"];
@@ -830,6 +854,9 @@ $("btn-abd-apply").onclick = () => api("/api/workspace/abduction", { json: {
 async function refreshWorkspace() {
   S.ws = await (await fetch("/api/workspace")).json();
   $("ws-source").textContent = S.ws.source ? "· " + S.ws.source : "";
+  const legs = (S.ws && S.ws.legs) || {};
+  legBadges($("ws-legs-loaded"), !!legs.right, !!legs.left);
+  legBadges($("ws-legs-loaded2"), !!legs.right, !!legs.left);
   loadWsIntoEditor();
   updateManualRanges();
   renderEE();
@@ -861,8 +888,11 @@ $("ws-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
   S.wsLeg = b.dataset.leg;
   $("btn-ws-mirror").textContent =
     S.wsLeg === "right" ? "⇄ copy right → left" : "⇄ copy left → right";
+  document.querySelectorAll(".wsrec-legname").forEach((s) => s.textContent = S.wsLeg);
+  resetWsTrail();                    // the sweep trail belongs to the leg you were recording
   loadWsIntoEditor();
 });
+function resetWsTrail() { S.wsTrail = []; S.wsAbdSweep = [Infinity, -Infinity]; }
 $("btn-ws-mirror").onclick = async () => {
   const from = S.wsLeg, to = from === "right" ? "left" : "right";
   if (!confirm(`Overwrite the ${to} leg's workspace with a copy of ${from}?`)) return;
@@ -896,7 +926,7 @@ $("btn-ws-load").onclick = async () => {
   await refreshWorkspace();
 };
 
-$("btn-wsrec-mode").onclick = () => api("/api/record/mode", { json: { kind: "workspace" } });
+$("btn-wsrec-mode").onclick = () => { resetWsTrail(); api("/api/record/mode", { json: { kind: "workspace" } }); };
 $("btn-wsrec-take").onclick = () => {
   const active = S.state.recording && S.state.recording.active;
   api("/api/record/take", { json: { leg: S.wsLeg, action: active ? "stop" : "start" } });
@@ -904,7 +934,29 @@ $("btn-wsrec-take").onclick = () => {
 $("btn-wsrec-undo").onclick = () => api("/api/record/undo", { json: { leg: S.wsLeg } });
 $("btn-wsrec-process").onclick = () => api("/api/workspace/process", { json: {
   leg: S.wsLeg, margin_deg: +$("wsrec-margin").value, grid_deg: +$("wsrec-grid").value,
-  dilate_deg: +$("wsrec-dilate").value } }).then(refreshWorkspace);
+  dilate_deg: +$("wsrec-dilate").value } }).then(() => {   // the built green region now stands in for the raw trail
+    resetWsTrail(); refreshWorkspace();
+    setBanner(`${S.wsLeg} workspace built from the sweep`, "", 2500);
+  });
+
+/* Accumulate the live (cam,thigh) trail + swept abduction range while a workspace pass is running,
+ * so the plot fills in AS YOU MOVE. Cleared automatically once you leave sweep mode. */
+function accumulateWsTrail() {
+  const st = S.state;
+  if (!st || st.mode !== "RECORD_WS") { if (S.wsTrail.length) resetWsTrail(); return; }
+  const rec = st.recording || {};
+  if (!rec.active) return;                      // only extend while a pass is actually recording
+  const leg = rec.leg || S.wsLeg;
+  const cam = S.latest[leg + ".cam"], th = S.latest[leg + ".thigh"], ab = S.latest[leg + ".abd"];
+  if (!cam || !th || cam.pos_norm == null || th.pos_norm == null) return;
+  const p = [cam.pos_norm, th.pos_norm];
+  const last = S.wsTrail[S.wsTrail.length - 1];
+  if (!last || Math.hypot(p[0] - last[0], p[1] - last[1]) > 0.25) S.wsTrail.push(p);
+  if (ab && ab.pos_norm != null) {
+    S.wsAbdSweep[0] = Math.min(S.wsAbdSweep[0], ab.pos_norm);
+    S.wsAbdSweep[1] = Math.max(S.wsAbdSweep[1], ab.pos_norm);
+  }
+}
 
 /* ================================================================ trajectory panel */
 const trEd = { view: null, stroke: [], tool: "pan" };
@@ -1040,10 +1092,15 @@ $("traj-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
   $("traj-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
   S.trajLeg = b.dataset.leg;
+  document.querySelectorAll(".traj-legname").forEach((s) => s.textContent = S.trajLeg);
   trEd.stroke = [];
   fitTrajView();
   trEd.view.render();
 });
+function updateTrajLegBadges() {
+  const t = S.traj || {};
+  legBadges($("traj-legs-loaded"), !!t.right, !!t.left);
+}
 function fitTrajView() {
   const d = S.ws && S.ws.legs ? S.ws.legs[S.trajLeg] : null;
   if (d) {
@@ -1062,6 +1119,7 @@ $("btn-traj-usepath").onclick = async () => {
     points: trEd.stroke.map((p) => [p[0], p[1]]),
     abd_hold: abd && abd.pos_norm !== null ? abd.pos_norm : 0 } });
   S.traj = d.trajectory; S.trajName = $("traj-name").value;
+  updateTrajLegBadges();
   setBanner("drawn path processed + saved as " + $("traj-name").value, "", 3500);
   trEd.view.render(); wsEd.view.render(); renderEE();
 };
@@ -1096,6 +1154,7 @@ $("btn-traj-copyleg").onclick = async () => {
   const d = await api("/api/trajectory/mirror", { json: {
     name, from, to, left_phase: +$("rec-leftphase").value } });
   S.traj = d.trajectory; S.trajName = name;
+  updateTrajLegBadges();
   setBanner(`gait copied ${from} → ${to}`, "", 3000);
   trEd.view.render(); renderEE();
 };
@@ -1114,6 +1173,7 @@ $("btn-rec-finish").onclick = async () => {
     name: $("rec-name").value, harmonics: +$("rec-harmonics").value,
     split: +$("rec-split").value, left_phase: +$("rec-leftphase").value } });
   S.traj = d.trajectory; S.trajName = $("rec-name").value;
+  updateTrajLegBadges();
   setBanner("gait processed + saved as " + $("rec-name").value, "", 3500);
   trEd.view.render(); wsEd.view.render(); renderEE();
 };
@@ -1121,21 +1181,43 @@ $("btn-rec-finish").onclick = async () => {
 function updateRecordUI(st) {
   const r = st.recording || {};
   const inGait = st.mode === "RECORD_GAIT", inWs = st.mode === "RECORD_WS";
+
+  // ---- gait teach ----
+  const gTakes = r.takes || { right: 0, left: 0 };
+  const gCtr = r.centers || { right: null, left: null };
   $("btn-rec-take").disabled = !inGait;
   $("btn-rec-center").disabled = !inGait;
-  $("btn-rec-undo").disabled = !inGait || r.active;
+  $("btn-rec-undo").disabled = !inGait || r.active || !gTakes[S.trajLeg];
   $("btn-rec-take").textContent = (inGait && r.active) ? `■ stop take (${r.n_samples})` : "▶ start take";
   $("btn-rec-take").classList.toggle("active-rec", inGait && r.active);
+  const legWord = (leg) => leg === S.trajLeg ? `[${leg}]` : leg;      // bracket the leg you're on
   $("rec-status").textContent = inGait ?
-    `takes R:${r.takes.right} L:${r.takes.left} · center R:${r.centers.right ? "set" : "—"} L:${r.centers.left ? "set" : "—"}` +
+    `${legWord("right")}: ${gTakes.right || "no"} take${gTakes.right === 1 ? "" : "s"}` +
+    ` · ${legWord("left")}: ${gTakes.left || "no"} take${gTakes.left === 1 ? "" : "s"}` +
+    ` · center R:${gCtr.right ? "✓" : "—"} L:${gCtr.left ? "✓" : "—"}` +
     (r.outside_workspace ? " · ⚠ OUTSIDE WORKSPACE" : "") : "";
+  // Process+save works with one leg (then ⇄ copy across), but says exactly what it will save
+  const gr = !!gTakes.right, gl = !!gTakes.left;
+  const fin = $("btn-rec-finish");
+  fin.disabled = !(gr || gl);
+  fin.textContent = !(gr || gl) ? "Process + save (record a leg first)"
+    : (gr && gl) ? "Process + save (right + left)"
+    : `Process + save (${gr ? "right" : "left"} only — copy across in step 3)`;
+
+  // ---- workspace sweep ----
+  const wSeg = r.segments || { right: 0, left: 0 };
+  const activeSeg = wSeg[S.wsLeg] || 0;
   $("btn-wsrec-take").disabled = !inWs;
-  $("btn-wsrec-undo").disabled = !inWs || r.active;
-  $("btn-wsrec-process").disabled = !(r.segments && (r.segments.right || r.segments.left));
-  $("btn-wsrec-take").textContent = (inWs && r.active) ? `■ stop segment (${r.n_samples})` : "▶ start segment";
+  $("btn-wsrec-undo").disabled = !inWs || r.active || !activeSeg;
+  $("btn-wsrec-process").disabled = !activeSeg;
+  $("btn-wsrec-take").textContent = (inWs && r.active) ? `■ stop pass (${r.n_samples})` : "▶ start pass";
   $("btn-wsrec-take").classList.toggle("active-rec", inWs && r.active);
+  $("btn-wsrec-process").textContent =
+    activeSeg ? `Process ${S.wsLeg} → build workspace` : "Process → build workspace";
+  const swept = (S.wsAbdSweep[0] <= S.wsAbdSweep[1])
+    ? ` · abd swept ${S.wsAbdSweep[0].toFixed(0)}…${S.wsAbdSweep[1].toFixed(0)}°` : "";
   $("wsrec-status").textContent = inWs ?
-    `segments R:${r.segments.right} L:${r.segments.left}` +
+    `${S.wsLeg} leg · ${activeSeg} pass${activeSeg === 1 ? "" : "es"} recorded` + swept +
     (r.outside_workspace ? " · ⚠ outside current workspace" : "") : "";
 }
 
@@ -1145,6 +1227,7 @@ async function showTrajectory(name) {
     const d = await (await fetch(`/api/trajectory?name=${encodeURIComponent(name)}`)).json();
     if (d.error) { setBanner(d.error, "error", 6000); return; }
     S.traj = d; S.trajName = name;
+    updateTrajLegBadges();
     trEd.view.render(); wsEd.view.render(); renderEE();
   } catch (e) { /* ignore */ }
 }
@@ -1419,6 +1502,7 @@ function boot() {
   buildManualRows();
   setupWsCanvas();
   setupTrajCanvas();
+  updateTrajLegBadges();
   refreshWorkspace().then(fitTrajView);
   pollState();
   setInterval(pollState, 500);
