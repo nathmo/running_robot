@@ -59,3 +59,8 @@ fixed_gait/calibration/_selftest/
 
 # web UI runtime data (session calibration, saved workspaces/gaits) — machine-local
 fixed_gait/webui/data/
+
+# RL run intermediates — keep only final model + summary artifacts
+rl/runs/**/ppo_*_steps.zip
+rl/runs/**/ppo_vecnormalize_*_steps.pkl
+rl/runs/**/events.out.tfevents.*
