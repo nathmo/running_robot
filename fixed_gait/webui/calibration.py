@@ -25,12 +25,20 @@ import numpy as np
 
 import paths
 
+# Measured-correct direction-check signs (booth calibration, 2026-07-14): saves re-flipping every
+# card each session. Physical motor wiring can still invert across a power cycle — the wizard
+# always makes the user re-confirm each sign, this is only the starting guess.
+DEFAULT_SIGNS = {
+    "right.abd": 1.0, "right.cam": 1.0, "right.thigh": -1.0,
+    "left.abd": -1.0, "left.cam": -1.0, "left.thigh": 1.0,
+}
+
 
 class Calibration:
     def __init__(self):
         self._lock = threading.Lock()
         self.offsets = {n: 0.0 for n in paths.MOTOR_NAMES}
-        self.signs = {n: 1.0 for n in paths.MOTOR_NAMES}
+        self.signs = {n: DEFAULT_SIGNS.get(n, 1.0) for n in paths.MOTOR_NAMES}
         self.confirmed = {n: False for n in paths.MOTOR_NAMES}
         self.stage = "none"                    # none | zero_set | complete
         self.created = None
@@ -137,7 +145,7 @@ class Calibration:
     def reset(self):
         with self._lock:
             self.offsets = {n: 0.0 for n in paths.MOTOR_NAMES}
-            self.signs = {n: 1.0 for n in paths.MOTOR_NAMES}
+            self.signs = {n: DEFAULT_SIGNS.get(n, 1.0) for n in paths.MOTOR_NAMES}
             self.confirmed = {n: False for n in paths.MOTOR_NAMES}
             self.stage = "none"
             self.restored_from_disk = False

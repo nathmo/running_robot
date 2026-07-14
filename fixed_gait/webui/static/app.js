@@ -140,12 +140,12 @@ document.addEventListener("keydown", (e) => {
 
 /* ================================================================ calibration wizard */
 const INSTR = {
-  "right.abd": "Push the RIGHT leg outward/inward per the URDF +roll direction.",
-  "right.cam": "Backdrive the RIGHT cam in its + direction (same sense as +cam in sim).",
-  "right.thigh": "Swing the RIGHT thigh FORWARD (URDF + direction).",
-  "left.abd": "Push the LEFT leg per the URDF +roll direction.",
-  "left.cam": "Backdrive the LEFT cam in its + direction (same sense as +cam in sim).",
-  "left.thigh": "Swing the LEFT thigh FORWARD (URDF + direction).",
+  "right.abd": "Abduct the RIGHT leg so the FOOT LIFTS OFF THE GROUND.",
+  "right.cam": "Backdrive the RIGHT cam DOWN.",
+  "right.thigh": "Swing the RIGHT thigh FORWARD.",
+  "left.abd": "Abduct the LEFT leg so the FOOT LIFTS OFF THE GROUND.",
+  "left.cam": "Backdrive the LEFT cam DOWN.",
+  "left.thigh": "Swing the LEFT thigh FORWARD.",
 };
 
 function updateWizard(st) {
@@ -350,13 +350,15 @@ function buildManualRows() {
     const role = n.split(".")[1];
     return `
     <div class="man-row" id="man-${n.replace(".", "-")}">
-      <span class="mr-name">${n}</span>
-      <input type="range" class="mr-slider" min="${-HARD[role]}" max="${HARD[role]}" step="0.5" value="0">
-      <span class="mr-numwrap">
+      <span class="mr-line mr-line1">
+        <span class="mr-name">${n}</span>
+        <input type="range" class="mr-slider" min="${-HARD[role]}" max="${HARD[role]}" step="0.5" value="0">
+      </span>
+      <span class="mr-line mr-line2">
         <input type="number" class="num mr-num" step="0.5" value="0">
         <span class="mr-target"></span>
       </span>
-      <span class="man-sine">
+      <span class="mr-line man-sine">
         <label><input type="checkbox" class="sn-en">sine</label>
         <input type="number" class="num sn-a" title="start angle ° (preset to 70% of the safe range)">↔<input type="number" class="num sn-b" title="stop angle ° (preset to 70% of the safe range)">
         <input type="number" class="num sn-f" value="0.3" step="0.05" min="0.02" max="3" title="Hz">Hz
