@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream the hard-coded walking gait to SpiderBot's six CubeMars/AK motors over CAN (servo mode).
+"""Stream the hard-coded walking gait to DASH-01's six CubeMars/AK motors over CAN (servo mode).
 
 Runs on the Raspberry Pi (onnxruntime/numpy/python-can only — NO mujoco). Imports the SAME
 gait.py the simulator uses, so what you saw in sim_fixed_base.py is exactly what the motors get.

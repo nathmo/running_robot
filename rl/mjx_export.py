@@ -7,7 +7,7 @@ This is a pure weight copy, not a retrain: rl/mjx_train.py's network is delibera
 noise_std_type='log') to be structurally IDENTICAL to SB3's default continuous-action MlpPolicy,
 so every layer maps 1:1. Both sides of every mapping below were confirmed against the actually-
 installed packages, not assumed from memory:
-  - brax: mujoco/spiderbot/../rl/mjx_train.py's saved params (introspected directly -- see the
+  - brax: mujoco/dash01/../rl/mjx_train.py's saved params (introspected directly -- see the
     policy/value key dump this docstring's author ran before writing this file).
   - SB3: stable_baselines3/common/torch_layers.py's MlpExtractor.__init__ (Sequential layer
     order) and common/policies.py's ActorCriticPolicy._build + DiagGaussianDistribution.
@@ -39,7 +39,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from .config import get_config
-from .env import SpiderBotEnv
+from .env import Dash01Env
 
 
 def _copy_linear(torch_linear, kernel, bias):
@@ -60,7 +60,7 @@ def build_sb3_model(cfg, checkpoint):
     value = checkpoint["value_params"]["params"]
     normalizer = checkpoint["normalizer_params"]
 
-    raw = SpiderBotEnv(cfg)
+    raw = Dash01Env(cfg)
     venv = DummyVecEnv([lambda: raw])
     model = PPO(
         "MlpPolicy", venv,

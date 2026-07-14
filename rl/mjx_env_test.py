@@ -1,6 +1,6 @@
 """CPU/MJX reward parity test -- Phase 2 of the MJX training migration.
 
-Drives rl.env.SpiderBotEnv (CPU, source of truth) and rl.mjx_env.SpiderBotMjxEnv (GPU port) with
+Drives rl.env.Dash01Env (CPU, source of truth) and rl.mjx_env.Dash01MjxEnv (GPU port) with
 an IDENTICAL action sequence from an IDENTICAL, deterministic starting state and diffs every entry
 of `reward_terms` at every step. This is the guardrail against the two hand-tuned reward
 implementations drifting apart -- rerun after touching either rl/env.py or rl/mjx_env.py.
@@ -10,7 +10,7 @@ numpy's PCG64 and MJX uses JAX's threefry, two RNG algorithms that can never agr
 given "the same seed". Leaving noise/pushes on would make every step's state diverge for a reason
 that has nothing to do with whether the PORT is correct. Disabling them isolates what this test
 actually checks: given the SAME state trajectory (guaranteed here since physics is otherwise
-deterministic, confirmed non-chaotic-over-this-horizon by mujoco/spiderbot/validate_mjx.py), do
+deterministic, confirmed non-chaotic-over-this-horizon by mujoco/dash01/validate_mjx.py), do
 the two reward implementations compute the same numbers? The command is pinned to a moderate
 forward+yaw value (not (0,0)) so the gait-shaping terms (stance_time/clearance, which are gated
 off near stand) actually get exercised by this test too.
@@ -23,8 +23,8 @@ import jax
 import jax.numpy as jnp
 
 from .config import Config
-from .env import SpiderBotEnv
-from .mjx_env import SpiderBotMjxEnv
+from .env import Dash01Env
+from .mjx_env import Dash01MjxEnv
 
 N_STEPS = 150
 SEED = 0
@@ -33,7 +33,7 @@ ACTION_STEP_STD = 0.05
 # Calibrated empirically (see the printed rationale below), not guessed: across many reruns of
 # both scenarios, steady-state per-term error tops out around 0.03-0.07 (float32-vs-float64
 # accumulation over a chaotic-but-not-yet-collapsing trajectory); this model has NO passive
-# standing equilibrium (mujoco/spiderbot/validate_model.py's gate 4 note: "passive topple
+# standing equilibrium (mujoco/dash01/validate_model.py's gate 4 note: "passive topple
 # expected, RL adds active balance in M1"), so even gentle random actions fall within ~55-80
 # control steps regardless of command -- there is no way to get a long fall-free comparison
 # window with an untrained/random action sequence, only a wider guard around the topple itself.
@@ -42,15 +42,16 @@ TERMINAL_GUARD = 8   # steps right before a fall are an inherently chaotic multi
                       # a single instant -- see the note printed below for why this is excluded
 
 
-def run_scenario(cmd_vx, cmd_yaw, n_steps):
-    cfg = Config(reset_joint_noise=0.0, push_interval_s=0.0)
+def run_scenario(cmd_vx, cmd_yaw, n_steps, cfg=None):
+    if cfg is None:
+        cfg = Config(reset_joint_noise=0.0, push_interval_s=0.0)
 
-    raw = SpiderBotEnv(cfg)
+    raw = Dash01Env(cfg)
     raw.reset(seed=SEED)
     raw._resample_every = 10 ** 9
     raw._command[:] = [cmd_vx, cmd_yaw]
 
-    env = SpiderBotMjxEnv(cfg)
+    env = Dash01MjxEnv(cfg)
     env._resample_every = 10 ** 9
     state = env.reset(jax.random.PRNGKey(SEED))
     state = state.replace(command=jnp.array([cmd_vx, cmd_yaw], dtype=jnp.float32))
@@ -123,12 +124,25 @@ def main():
           "signal for the excluded tail.\n")
 
     walk_err, _ = run_scenario(CMD_VX, CMD_YAW, N_STEPS)
-    ok_walk = report("walk vx=0.4 yaw=0.1", walk_err, TERMINAL_GUARD)
+    ok_walk = report("walk vx=0.4 yaw=0.1 (free base)", walk_err, TERMINAL_GUARD)
 
     stand_err, _ = run_scenario(0.0, 0.0, N_STEPS)
-    ok_stand = report("stand (0,0)", stand_err, TERMINAL_GUARD)
+    ok_stand = report("stand (0,0) (free base)", stand_err, TERMINAL_GUARD)
 
-    print(f"\n{'PASS' if ok_walk and ok_stand else 'FAIL'}")
+    # locked-base scenarios exercise the new base-DOF locks + max-speed reward in both envs.
+    # (a) M2 mask (Y + rotations railed, X/Z free), command-tracking reward.
+    m2_cfg = Config(reset_joint_noise=0.0, push_interval_s=0.0, base_lock=(0, 1, 0, 1, 1, 1))
+    m2_err, _ = run_scenario(CMD_VX, 0.0, N_STEPS, cfg=m2_cfg)
+    ok_m2 = report("M2 mask (X,Z free) tracking", m2_err, TERMINAL_GUARD)
+
+    # (b) M1 mask (only X free) with Z pinned at the stand height (z_rail_randomize=False so the CPU
+    # per-episode randomization is off and both sides lock Z at the same height), speed_mode reward.
+    m1_cfg = Config(reset_joint_noise=0.0, push_interval_s=0.0, base_lock=(0, 1, 1, 1, 1, 1),
+                    z_rail_randomize=False, speed_mode=True)
+    m1_err, _ = run_scenario(0.0, 0.0, N_STEPS, cfg=m1_cfg)
+    ok_m1 = report("M1 mask (rail, Z@stand) speed_mode", m1_err, TERMINAL_GUARD)
+
+    print(f"\n{'PASS' if (ok_walk and ok_stand and ok_m2 and ok_m1) else 'FAIL'}")
 
 
 if __name__ == "__main__":

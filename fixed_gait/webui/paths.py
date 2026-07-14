@@ -1,4 +1,4 @@
-"""Shared paths + motor naming for the SpiderBot web UI.
+"""Shared paths + motor naming for the DASH-01 web UI.
 
 Importing this module makes the flat fixed_gait/ scripts importable (same sys.path trick as
 fixed_gait/validate_gait.py) and guarantees the runtime data directories exist. Every webui module

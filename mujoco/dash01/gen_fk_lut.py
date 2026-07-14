@@ -6,8 +6,8 @@ cell is Newton-solved against the model via plot_reachability.Leg — exactly th
 reachability study (sweep(), plot_reachability.py:294-335), but storing the FULL linkage node
 geometry per cell instead of only the foot tip.
 
-    python mujoco/spiderbot/gen_fk_lut.py                 # -> fixed_gait/webui/fk_lut.npz
-    python mujoco/spiderbot/gen_fk_lut.py --check         # + interpolation-accuracy self-check
+    python mujoco/dash01/gen_fk_lut.py                 # -> fixed_gait/webui/fk_lut.npz
+    python mujoco/dash01/gen_fk_lut.py --check         # + interpolation-accuracy self-check
 
 Contents of fk_lut.npz:
     cam[nc], thigh[nt]        grid axes (rad, model joint space, LEFT leg; right leg mirrors)
@@ -35,7 +35,7 @@ sys.path.insert(0, HERE)
 
 import plot_reachability as reach                                     # noqa: E402
 
-reach.MODEL = os.path.join(HERE, "spiderbot.xml")                     # CWD-independent
+reach.MODEL = os.path.join(HERE, "dash01.xml")                     # CWD-independent
 
 NODE_NAMES = ("cam", "thigh", "push", "knee", "ank", "ptip", "ee")
 OUT_DEFAULT = os.path.join(REPO, "fixed_gait", "webui", "fk_lut.npz")

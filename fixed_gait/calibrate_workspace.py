@@ -8,7 +8,7 @@ logged. Nothing ever drives the motors here.
 Why this exists: the URDF/MJCF joint ranges for cam (105) and thigh (106) are CAD-derived guesses,
 not validated hardstops -- and worse, cam and thigh are NOT independent. They drive a closed 4-bar
 loop through the passive pushrod + knee, so only a thin, non-rectangular BAND of (cam, thigh)
-combinations is mechanically assemblable (see the spiderbot-hardware notes). A per-joint min/max
+combinations is mechanically assemblable (see the dash01-hardware notes). A per-joint min/max
 box is provably wrong for that pair. So instead of asking you to type in two numbers, this script
 records the actual (cam, thigh) samples you sweep out by hand and derives a safe region straight
 from that scatter.

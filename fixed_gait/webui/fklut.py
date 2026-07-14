@@ -1,6 +1,6 @@
 """FK lookup table runtime — pure numpy, no mujoco (Pi-safe).
 
-fk_lut.npz is generated OFFLINE on the desktop by mujoco/spiderbot/gen_fk_lut.py from the real
+fk_lut.npz is generated OFFLINE on the desktop by mujoco/dash01/gen_fk_lut.py from the real
 closed-loop model (plot_reachability.Leg.fk + linkage_points). Contents:
     cam[nc], thigh[nt]          grid axes, radians (model joint space, LEFT leg)
     nodes[nc, nt, 7, 2] f32     XZ of linkage nodes per cell: cam, thigh, push, knee, ank, ptip, ee
@@ -63,7 +63,7 @@ class FkLut:
                 pass
         if not self.try_reload():
             print(f"(no FK LUT at {lut_path} — EE animation disabled; generate it with "
-                  f"mujoco/spiderbot/gen_fk_lut.py — it hot-loads once the file appears)")
+                  f"mujoco/dash01/gen_fk_lut.py — it hot-loads once the file appears)")
 
     def try_reload(self):
         """Load (or hot-load) fk_lut.npz. Safe to call repeatedly — cheap when absent or already

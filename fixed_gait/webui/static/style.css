@@ -1,4 +1,4 @@
-/* SpiderBot web UI — dark, dense, robot-lab style. No external assets. */
+/* DASH-01 web UI — dark, dense, robot-lab style. No external assets. */
 * { box-sizing: border-box; }
 :root {
   --bg: #14171c; --panel: #1c2129; --panel2: #232a35; --line: #313a48;

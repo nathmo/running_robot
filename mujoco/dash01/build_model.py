@@ -11,7 +11,7 @@ with measured values later) and layers on everything needed to actually simulate
   - a standing keyframe
 
 All tunable numbers live in MOTORS / JOINTS below so the eventual real values are a one-edit swap.
-Re-run after CAD regen:  .venv/Scripts/python.exe mujoco/spiderbot/build_model.py
+Re-run after CAD regen:  .venv/Scripts/python.exe mujoco/dash01/build_model.py
 """
 import xml.etree.ElementTree as ET
 import numpy as np
@@ -40,34 +40,36 @@ def compute_standing_keyframe(model, init_ctrl):
     mujoco.mj_resetDataKeyframe(model, data, 0)
     g = model.opt.gravity.copy()
     model.opt.gravity[:] = 0
-    data.qpos[:3] = [0, 0, 1.5]
-    data.qpos[3:7] = [1, 0, 0, 0]
-    base_q = data.qpos[:7].copy()
+    # base qpos[0:6] = x,y,z,roll,pitch,yaw (composite scalar joints; identity attitude = zero hinges).
+    # The base-lock equalities are inactive here (active="false"), so the base is held manually.
+    data.qpos[0:3] = [0, 0, 1.5]
+    data.qpos[3:6] = 0
+    base_q = data.qpos[:6].copy()
     data.ctrl[:] = init_ctrl
     for _ in range(2000):
         mujoco.mj_step(model, data)
-        data.qpos[:7] = base_q
+        data.qpos[:6] = base_q
         data.qvel[:6] = 0
     mujoco.mj_forward(model, data)
     model.opt.gravity[:] = g
     foot_g = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col") for s in "LR"]
     zmin = min(data.geom_xpos[gg][2] - model.geom_rbound[gg] for gg in foot_g)  # sphere bottom
     data.qpos[0:3] = [0, 0, 1.5 - zmin + 0.002]   # drop torso so feet just touch z=0
-    data.qpos[3:7] = [1, 0, 0, 0]
+    data.qpos[3:6] = 0
     data.qvel[:] = 0
-    for _ in range(1500):                          # 1.5 s loaded settle, xy + attitude pinned
+    for _ in range(1500):                          # 1.5 s loaded settle, xy + attitude pinned, z free
         mujoco.mj_step(model, data)
         data.qpos[0:2] = 0
-        data.qpos[3:7] = [1, 0, 0, 0]
+        data.qpos[3:6] = 0
         data.qvel[0:2] = 0
         data.qvel[3:6] = 0
     data.qvel[:] = 0
     mujoco.mj_forward(model, data)
     return data.qpos.copy()
 
-OPEN_B = "robotCADdescription/MJCF_OPEN_MUJOCO_B/SpiderBot/SpiderBot.xml"
-OUT = "mujoco/spiderbot/spiderbot.xml"
-MESHDIR = "../../robotCADdescription/MJCF_OPEN_MUJOCO_B/SpiderBot"  # relative to OUT
+OPEN_B = "robotCADdescription/MJCF_OPEN_MUJOCO_B/dash01/dash01.xml"
+OUT = "mujoco/dash01/dash01.xml"
+MESHDIR = "../../robotCADdescription/MJCF_OPEN_MUJOCO_B/dash01"  # relative to OUT
 
 # --- Motor specs (output/joint side, after gearbox). Edit here when real values are known. ---
 # mass/inertia: the CAD part inertials OMIT the actuators (~7.1 kg of motors on a ~5.7 kg CAD
@@ -147,7 +149,7 @@ def build():
     anchors, tips, heels = loop_anchors(), foot_tips(), foot_heels()
     tree = ET.parse(OPEN_B)
     root = tree.getroot()
-    root.set("model", "spiderbot")
+    root.set("model", "dash01")
 
     # compiler
     comp = root.find("compiler")
@@ -172,7 +174,7 @@ def build():
     # knobs: torsional ~ (2/3)*mu*patch_radius ~ 0.008 m, rolling ~ Crr*r ~ 0.001 m.
     default = ET.fromstring(
         '<default>'
-        '<default class="spiderbot">'
+        '<default class="dash01">'
         '<geom contype="0" conaffinity="0" group="2"/>'
         '<site group="4" size="0.012" rgba="0.95 0.45 0.1 1"/>'
         '<default class="collision">'
@@ -203,15 +205,32 @@ def build():
                                'solimp="0.95 0.99 0.001"/>'))
     wb.insert(0, ET.fromstring('<light name="top" pos="0 0 3" dir="0 0 -1" directional="true"/>'))
 
-    # base body: childclass + freejoint + imu site
+    # base body: childclass + composite 6-DOF base + imu site.
+    # Instead of a single <freejoint>, the base carries 6 explicit world-aligned scalar joints
+    # (3 slide, then 3 hinge) so each base DOF can be locked INDEPENDENTLY at runtime (see the
+    # <equality><joint> locks below). The order (slides first, world axes) reproduces a freejoint's
+    # qpos/qvel index semantics exactly: base at world origin + identity attitude => qpos[0:3] is the
+    # world position, qpos[2] the height, qvel[0:3] the world linear velocity. So the RL reward/
+    # termination math (which reads those indices) is unchanged; only the hinge block shifts from
+    # qpos[7:] to qpos[6:] (nq 19->18, nv stays 18). damping/armature=0 keeps it as neutral as a
+    # freejoint. Orientation/ang-vel are read from xmat / the imu_gyro sensor, never qpos[3:6], so
+    # the composite's gimbal singularity (pitch=+-90 deg, unreachable inside a valid episode) is moot.
     base = wb.find("body")
-    base.set("childclass", "spiderbot")
+    base.set("childclass", "dash01")
     base.insert(0, ET.fromstring('<site name="imu" pos="0 0 0" size="0.015" rgba="0.1 0.5 0.95 1"/>'))
-    base.insert(0, ET.fromstring('<freejoint name="root"/>'))
+    BASE_JOINTS = [
+        ("base_x", "slide", "1 0 0"), ("base_y", "slide", "0 1 0"), ("base_z", "slide", "0 0 1"),
+        ("base_roll", "hinge", "1 0 0"), ("base_pitch", "hinge", "0 1 0"), ("base_yaw", "hinge", "0 0 1"),
+    ]
+    for i, (jn, jt, ax) in enumerate(BASE_JOINTS):
+        base.insert(i, ET.fromstring(
+            f'<joint name="{jn}" type="{jt}" axis="{ax}" limited="false" damping="0" armature="0"/>'))
 
-    # configure every joint
+    # configure every leg joint (the base joints are already fully specified at creation above)
     for jnt in root.iter("joint"):
         name = jnt.get("name")
+        if name not in J:
+            continue
         role, rng, damping, armature, _ = J[name]
         jnt.set("damping", str(damping))
         jnt.set("armature", str(armature))
@@ -241,12 +260,21 @@ def build():
             f'<geom name="heel_{s}_col" class="collision" type="sphere" '
             f'size="{HEEL_SPHERE_R}" pos="{f3(heels[s])}"/>'))
 
-    # equality: close both loops
+    # equality: close both loops, then the per-DOF base locks
     eq = ET.SubElement(root, "equality")
     for s in "LR":
         eq.append(ET.fromstring(
             f'<connect name="loop_{s}" site1="pushrod_tip_{s}" site2="leg_anchor_{s}" '
             f'solref="0.005 1" solimp="0.95 0.99 0.001"/>'))
+    # base DOF locks: one joint-equality per base joint, INACTIVE by default. The RL env activates
+    # the masked subset at reset (data.eq_active) to rail/lock those DOFs; with a single joint the
+    # constraint reduces to qpos[joint] = polycoef0 = eq_data[k,0] (default 0). M1 randomizes the
+    # base_z lock target per episode by writing eq_data[lock_z,0] = ride-height. Stiff solref so the
+    # rail is rigid: the solver supplies the exact reaction wrench, keeping leg torques faithful.
+    for jn, _, _ in BASE_JOINTS:
+        eq.append(ET.fromstring(
+            f'<joint name="lock_{jn[5:]}" joint1="{jn}" polycoef="0 0 0 0 0" '
+            f'active="false" solref="0.005 1" solimp="0.95 0.99 0.001"/>'))
 
     # actuators (PD position)
     act = ET.SubElement(root, "actuator")
@@ -271,7 +299,7 @@ def build():
     # placeholder keyframe (overwritten below, once the model can be simulated)
     kf = ET.SubElement(root, "keyframe")
     key = ET.fromstring(
-        f'<key name="stand" qpos="{f3([0,0,1.0,1,0,0,0]+[0.0]*12)}" ctrl="{f3([0]*6)}"/>')
+        f'<key name="stand" qpos="{f3([0,0,1.0,0,0,0]+[0.0]*12)}" ctrl="{f3([0]*6)}"/>')
     kf.append(key)
     ET.indent(tree, space="  ")
     tree.write(OUT, encoding="unicode", xml_declaration=False)

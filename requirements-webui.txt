@@ -1,4 +1,4 @@
-# SpiderBot web control interface (fixed_gait/webui/) — adds Flask on top of the Pi runtime.
+# DASH-01 web control interface (fixed_gait/webui/) — adds Flask on top of the Pi runtime.
 #
 # On the Pi (which has no internet in the field), pre-download the wheels on a connected machine:
 #     pip download flask -d wheels/          # on the desktop

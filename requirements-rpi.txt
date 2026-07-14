@@ -1,4 +1,4 @@
-# SpiderBot — Raspberry Pi DEPLOYMENT (run) dependencies only.
+# DASH-01 — Raspberry Pi DEPLOYMENT (run) dependencies only.
 #
 # This is the minimal runtime to execute a trained .onnx policy and drive the
 # motors over CAN. It deliberately excludes the training stack (mujoco, torch,

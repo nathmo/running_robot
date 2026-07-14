@@ -1,4 +1,4 @@
-# SpiderBot web control interface
+# DASH-01 web control interface
 
 One Flask app, served **on the robot's Raspberry Pi**, reachable from any phone/laptop on the
 robot's WiFi hotspot. No internet needed at runtime — every asset is served locally.
@@ -46,11 +46,11 @@ saved data.
 `fk_lut.npz` is generated **on the desktop** (needs mujoco, the Pi doesn't have it):
 
 ```
-python mujoco/spiderbot/gen_fk_lut.py --check
+python mujoco/dash01/gen_fk_lut.py --check
 ```
 
 It Newton-solves the closed 4-bar at every (cam, thigh) grid cell via
-`mujoco/spiderbot/plot_reachability.py` and stores all linkage node positions. The Pi only
+`mujoco/dash01/plot_reachability.py` and stores all linkage node positions. The Pi only
 bilinearly interpolates it. After loading/importing a workspace, press **“verify FK map
 (sign + offset)”** in the EE panel once: per side and per sign combination it FITS the offset
 that lands the workspace band on the LUT assembly band (thin diagonal ⇒ sharp fit) and enables
@@ -88,27 +88,62 @@ sudo ip link set can1 up type can bitrate 1000000
 python fixed_gait/webui/server.py
 ```
 
-Optional systemd unit (`/etc/systemd/system/spiderbot-webui.service`):
+### Run at boot (two systemd units)
+
+Bringing CAN up needs root (`CAP_NET_ADMIN`); the web UI does not. Splitting them keeps the
+app running as the unprivileged `nemo` user, and keeps the interfaces up even if the app
+restarts. **One** unit brings CAN up (root, oneshot), the **other** starts the UI (as `nemo`)
+and waits for the first.
+
+**1. CAN bring-up — `/etc/systemd/system/can-up.service`** (runs as root; no `User=`):
 
 ```
 [Unit]
-Description=SpiderBot web control UI
-After=network.target
+Description=Bring up CAN interfaces (can0/can1)
+After=sys-subsystem-net-devices-can0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ip link set can0 up type can bitrate 1000000
+ExecStart=/sbin/ip link set can1 up type can bitrate 1000000
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**2. Web UI — `/etc/systemd/system/dash01-webui.service`** (runs as `nemo`, waits for CAN):
+
+```
+[Unit]
+Description=DASH-01 web control UI
+After=network.target can-up.service
+Wants=can-up.service
 
 [Service]
 User=nemo
 WorkingDirectory=/home/nemo/running_robot
-ExecStartPre=-/sbin/ip link set can0 up type can bitrate 1000000
-ExecStartPre=-/sbin/ip link set can1 up type can bitrate 1000000
-ExecStart=/usr/bin/python3 fixed_gait/webui/server.py --port 8080
+ExecStart=/home/nemo/running_robot/.venv/bin/python fixed_gait/webui/server.py --port 8080
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-(`sudo systemctl enable --now spiderbot-webui`; bringing CAN up needs root — either the
-ExecStartPre above, or do it once at boot elsewhere.)
+Note `ExecStart` uses the venv's Python by absolute path — systemd runs no shell, so it won't
+find `python` on `PATH` or activate a venv. Enable both:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now can-up.service dash01-webui.service
+ip -details link show can0                     # confirm state UP, bitrate 1000000
+systemctl status dash01-webui               # confirm active (running)
+journalctl -u dash01-webui -f               # live logs
+```
+
+> Don't put `ip link set` in the webui unit's `ExecStartPre`: that step would run as `nemo` and
+> fail with `RTNETLINK answers: Operation not permitted`. If you must keep it in one unit, run
+> just that line elevated with the `+` prefix (`ExecStartPre=+-/sbin/ip link set can0 up …`).
 
 ## First hardware bring-up (in this order)
 

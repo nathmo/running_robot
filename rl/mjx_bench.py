@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import optax
 
 from .config import get_config
-from .mjx_env import SpiderBotMjxEnv
+from .mjx_env import Dash01MjxEnv
 from .mjx_train import make_networks, make_train_step
 from brax.training.agents.ppo import losses as ppo_losses
 from brax.training.acme import running_statistics
@@ -27,7 +27,7 @@ def main():
     args = ap.parse_args()
 
     cfg = get_config(args.preset)
-    env = SpiderBotMjxEnv(cfg)
+    env = Dash01MjxEnv(cfg)
     nets = make_networks(env, cfg)
 
     key = jax.random.PRNGKey(0)

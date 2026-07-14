@@ -12,7 +12,7 @@ Provides:
 import numpy as np
 import mujoco
 
-OPEN_B = "robotCADdescription/MJCF_OPEN_MUJOCO_B/SpiderBot/SpiderBot.xml"
+OPEN_B = "robotCADdescription/MJCF_OPEN_MUJOCO_B/dash01/dash01.xml"
 
 _SIDES = {
     "L": dict(pushrod="PushrodLeftNCS-v1",  leg="LegLeftNCS-v1",  foot="FootLeftNCS-v1"),

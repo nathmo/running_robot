@@ -1,4 +1,4 @@
-"""Hard-coded straight-walking gait for SpiderBot — the single source of truth.
+"""Hard-coded straight-walking gait for DASH-01 — the single source of truth.
 
 PURE NUMPY, NO MUJOCO. This module runs unchanged on the Raspberry Pi (whose runtime is
 onnxruntime/numpy/python-can only — see requirements-rpi.txt) and on the desktop sim. The sim
@@ -31,7 +31,7 @@ so every commanded target is in range by construction.
 from dataclasses import dataclass, field
 import numpy as np
 
-# actuator/ctrl indices (order matches mujoco/spiderbot/spiderbot.xml <actuator>)
+# actuator/ctrl indices (order matches mujoco/dash01/dash01.xml <actuator>)
 HIP_ROLL_L, CAM_L, THIGH_L, HIP_ROLL_R, CAM_R, THIGH_R = range(6)
 N_ACT = 6
 

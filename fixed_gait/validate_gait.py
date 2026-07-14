@@ -9,7 +9,7 @@ only collides the foot spheres) and checks the three things that matter for a sa
      penetration past a threshold is flagged),
   3. the foot traces a smooth, bounded path (no lock-up / fold / NaN).
 
-It also overlays the foot path on the reachability map from mujoco/spiderbot/plot_reachability.py
+It also overlays the foot path on the reachability map from mujoco/dash01/plot_reachability.py
 for context. (That idealized map holds the foot parallel to the thigh / at spring rest and uses a
 seeded kinematic solver, so it under-covers the forward edge and flags designed-adjacent meshes as
 "collisions" — the dynamic sim here is the authority, the map is a backdrop.)
@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, "mujoco/spiderbot")
+sys.path.insert(0, "mujoco/dash01")
 from sim_fixed_base import build_fixed_base_model, home_hinges           # noqa: E402
 from gait import GaitParams, GaitGenerator, CTRL_LIMIT                    # noqa: E402
 

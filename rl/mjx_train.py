@@ -1,4 +1,4 @@
-"""Train a SpiderBot locomotion policy with PPO on GPU via MuJoCo MJX + Brax's low-level PPO
+"""Train a DASH-01 locomotion policy with PPO on GPU via MuJoCo MJX + Brax's low-level PPO
 primitives (NOT brax.training.agents.ppo.train.train() -- see below for why).
 
 Examples:
@@ -49,7 +49,7 @@ from brax.training import types as brax_types
 from brax.training.acme import running_statistics
 
 from .config import get_config
-from .mjx_env import SpiderBotMjxEnv, TERM_NAMES
+from .mjx_env import Dash01MjxEnv, TERM_NAMES
 
 
 def make_networks(env, cfg):
@@ -281,7 +281,7 @@ def main():
     run.mkdir(parents=True, exist_ok=True)
     (run / "preset.json").write_text(json.dumps({"preset": args.preset, "backend": "mjx"}))
 
-    env = SpiderBotMjxEnv(cfg)
+    env = Dash01MjxEnv(cfg)
     nets = make_networks(env, cfg)
 
     key = jax.random.PRNGKey(cfg.seed)

@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<robot name="SpiderBot">
+<robot name="dash01">
     <link name="bodyNCS-v1">
         <inertial>
             <origin xyz="0.0016690918854414011 4.297697354650468e-07 9.498539066587414e-06" rpy="0.0 0.0 0.0" />

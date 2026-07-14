@@ -1,4 +1,4 @@
-"""All tunable parameters for SpiderBot RL, in one place.
+"""All tunable parameters for DASH-01 RL, in one place.
 
 Grouped as a single dataclass so training scripts can override fields and presets are explicit.
 Milestones raise a few knobs (e.g. command ranges, domain randomization); see the presets below.
@@ -10,9 +10,23 @@ from typing import List
 @dataclass
 class Config:
     # ----- model & timing -----
-    model_path: str = "mujoco/spiderbot/spiderbot.xml"
+    model_path: str = "mujoco/dash01/dash01.xml"
     control_decimation: int = 20        # sim steps per control step. sim is 1 kHz -> 50 Hz control
     keyframe: str = "stand"
+
+    # ----- base DOF locking (the M1..M6 curriculum) -----
+    # The base has 6 explicit scalar joints [X, Y, Z, roll, pitch, yaw] (build_model.py). A milestone
+    # locks a subset of them to a rigid rail; base_lock[i]=1 activates that DOF's <equality><joint>
+    # lock at reset (data.eq_active). Default = all free = today's free-floating plant (M6).
+    base_lock: tuple = (0, 0, 0, 0, 0, 0)   # 1 = locked
+    # M1 rails Z at a ride-height that is RANDOMIZED per episode so the policy adapts to any height.
+    # The legs are seated to that height from a ride-height->posture table (measure_ride_band.py).
+    z_rail_randomize: bool = False
+    # meters. Default is a sane sub-band around the natural stance (1.0235 m); the FULL measured
+    # feasible band is ~[0.81, 1.04] but the low end needs deep fore/aft lunges (the linkage can't
+    # crouch without swinging the toe), so we keep the default moderate. Widen for more adaptation.
+    z_rail_range: tuple = (0.90, 1.03)
+    ride_height_lut: str = "mujoco/dash01/ride_height_lut.npz"
 
     # ----- joystick command -----
     # command is 2 numbers in [-1, 1]: [forward, yaw]. These map to physical units:
@@ -70,6 +84,16 @@ class Config:
     w_torque: float = 1.0e-4            # on torque ABOVE the standing baseline (see env), so stance
     #                                     load-sharing isn't cheaper than single-support by design
     w_alive: float = 0.5
+    # ----- maximum-forward-speed objective (M1..M5: run as fast as possible on the rail) -----
+    # When speed_mode is on, the command-TRACKING terms (track_vx/progress/track_pos/track_heading/
+    # yaw/pos_pen) are switched off and replaced by a single monotone linear reward on forward speed,
+    # clip(vx, 0, v_ceiling). "Faster is strictly better" up to the cap; bounded so the per-step
+    # return stays below the fall-penalty/(1-gamma) suicide threshold. Straightness is enforced by the
+    # base locks (Y/yaw locked in M1..M3) plus the surviving lat_vel/heading penalties, and the gait
+    # gate is driven from v_ceiling so all the anti-skating terms stay active at speed.
+    speed_mode: bool = False
+    w_fwd_speed: float = 2.0
+    v_ceiling: float = 2.5              # m/s cap on the speed reward (well above the current ~1.5 max)
     # ----- gait shaping (all sim-side, reward-only; nothing enters the observation) -----
     # foot slip — THE anti-skate term: horizontal toe speed while grounded, quadratic above a
     # deadband, capped. Sized so skating at command speed costs ~1.5-2/step (comparable to the
@@ -193,11 +217,59 @@ def m2_walk() -> Config:
 
 
 def m3_turn() -> Config:
-    """Milestone 3: full joystick (forward + yaw)."""
+    """Milestone 3 (legacy): full joystick (forward + yaw) on the free-floating plant."""
     return Config(cmd_vx_frac=1.0, cmd_yaw_frac=1.0, p_stand=0.15)
 
 
-PRESETS = {"m1_stand": m1_stand, "m2_walk": m2_walk, "m3_turn": m3_turn, "default": Config}
+# ----- base-DOF curriculum M1..M6 (base_lock = [X, Y, Z, roll, pitch, yaw], 1 = locked) -----
+# Each milestone frees one more base DOF and asks the robot to run forward as fast as possible.
+# One shared model (mujoco/dash01/dash01.xml) serves them all; only the lock mask changes.
+def _speed(**kw) -> Config:
+    """Common max-forward-speed setup: rail the base, drive the command forward at the speed ceiling,
+    forward-only, no protected low-speed regime. Anti-skating gait terms stay on (see reward)."""
+    base = dict(speed_mode=True, cmd_forward_only=True, vx_max=2.5, cmd_vx_frac=1.0,
+                cmd_vx_min_frac=1.0, cmd_yaw_frac=0.0, p_stand=0.0, push_interval_s=0.0)
+    base.update(kw)
+    return Config(**base)
+
+
+def m1() -> Config:
+    """M1: only X (fore/aft) free; Y,Z,roll,pitch,yaw railed. Z locked at a per-episode RANDOM
+    ride-height so the policy adapts to any height. Max forward speed, alternating L/R gait."""
+    return _speed(base_lock=(0, 1, 1, 1, 1, 1), z_rail_randomize=True, z_rail_range=(0.90, 1.03))
+
+
+def m2() -> Config:
+    """M2: X and Z free (robot maintains its own height); Y and all rotation railed. Straight, fast."""
+    return _speed(base_lock=(0, 1, 0, 1, 1, 1))
+
+
+def m3() -> Config:
+    """M3: X, Z, pitch free; Y, roll, yaw railed."""
+    return _speed(base_lock=(0, 1, 0, 1, 0, 1))
+
+
+def m4() -> Config:
+    """M4: X, Y, Z, pitch free; roll, yaw railed. (Y free -> lat_vel penalty keeps it straight.)"""
+    return _speed(base_lock=(0, 0, 0, 1, 0, 1))
+
+
+def m5() -> Config:
+    """M5: X, Y, Z, roll, pitch free; only yaw railed."""
+    return _speed(base_lock=(0, 0, 0, 0, 0, 1))
+
+
+def m6() -> Config:
+    """M6: everything free (the full free-floating plant). Max forward speed, fully unconstrained."""
+    return _speed(base_lock=(0, 0, 0, 0, 0, 0))
+
+
+PRESETS = {
+    # base-DOF curriculum
+    "m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6,
+    # legacy free-floating presets (all-free plant)
+    "m1_stand": m1_stand, "m2_walk": m2_walk, "m3_turn": m3_turn, "default": Config,
+}
 
 
 def get_config(name: str = "default") -> Config:

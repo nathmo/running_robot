@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Visualize the hard-coded walking gait on SpiderBot with the base FIXED IN SPACE (in the air).
+"""Visualize the hard-coded walking gait on DASH-01 with the base FIXED IN SPACE (in the air).
 
 This is the desktop counterpart to run_hardware.py: it drives the SAME gait.py trajectory into a
 MuJoCo model whose floating base has been welded to the world, so the robot hangs in the air and
 you watch all six motors cycle through the walking pattern. No balance, no ground — just the legs.
 
-The model is derived from mujoco/spiderbot/spiderbot.xml at load time (via MjSpec): the root
+The model is derived from mujoco/dash01/dash01.xml at load time (via MjSpec): the root
 freejoint is removed (base fixed), the standing keyframe and the floor are dropped, and gravity is
 turned off by default (the gait choice you picked). Nothing about the real model is duplicated on
 disk, so this can never drift from the robot description.
@@ -26,19 +26,26 @@ import mujoco
 
 from gait import GaitParams, GaitGenerator
 
-MODEL = "mujoco/spiderbot/spiderbot.xml"
+MODEL = "mujoco/dash01/dash01.xml"
 CONTROL_HZ = 100.0            # rate the position targets are refreshed (matches the CAN streamer)
 
 
 def build_fixed_base_model(gravity=False, floor=False, base_height=None, collidable=False):
-    """Load spiderbot.xml and weld the base to the world: drop the root freejoint (so the torso is
+    """Load dash01.xml and weld the base to the world: drop the root freejoint (so the torso is
     fixed in space), the standing keyframe (its qpos carries the now-removed free dofs), and — for
     an in-air demo — the floor. With collidable=True the leg meshes are made collidable so the
     validator can detect link self-collision (the normal model only collides the foot spheres).
     Returns a compiled MjModel."""
     spec = mujoco.MjSpec.from_file(MODEL)
+    # weld the base: delete the 6 composite base joints (base_x/y/z, base_roll/pitch/yaw) AND their
+    # <equality><joint> locks (which reference those joints and would otherwise dangle). The two
+    # closed-loop <connect> equalities are kept.
+    base_joints = {"base_x", "base_y", "base_z", "base_roll", "base_pitch", "base_yaw"}
+    for eq in list(spec.equalities):
+        if eq.name.startswith("lock_"):
+            spec.delete(eq)
     for j in list(spec.joints):
-        if j.name == "root":
+        if j.name in base_joints:
             spec.delete(j)
     for k in list(spec.keys):
         spec.delete(k)
@@ -59,11 +66,11 @@ def build_fixed_base_model(gravity=False, floor=False, base_height=None, collida
 
 
 def home_hinges():
-    """The 12 hinge angles of the standing keyframe (drop the 7 free-joint qpos entries), used to
+    """The 12 hinge angles of the standing keyframe (drop the 6 base-joint qpos entries), used to
     start the sim on the physical assembly branch of the closed pushrod loop."""
     m0 = mujoco.MjModel.from_xml_path(MODEL)
     kid = mujoco.mj_name2id(m0, mujoco.mjtObj.mjOBJ_KEY, "stand")
-    return m0.key_qpos[kid][7:].copy()
+    return m0.key_qpos[kid][6:].copy()
 
 
 def make_params(args):

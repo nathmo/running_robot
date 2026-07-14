@@ -1,4 +1,4 @@
-"""Recorded-trajectory processing for SpiderBot's teach-and-replay gait.
+"""Recorded-trajectory processing for DASH-01's teach-and-replay gait.
 
 PURE NUMPY, NO MUJOCO — runs on the Raspberry Pi. Shared by record_trajectory.py (smooths +
 re-times + exports the takes you record by hand) and play_trajectory.py (reconstructs per-side

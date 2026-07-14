@@ -6,14 +6,14 @@ sweep the ankle springref, settle the standing pose resting on the toe spheres, 
 clearance of the 'rest of the foot' (foot-mesh vertices away from the toe). Pick the springref
 that lifts the heel well clear, then bake it into build_model.
 
-Run:  .venv/Scripts/python.exe mujoco/spiderbot/tune_foot_posture.py
+Run:  .venv/Scripts/python.exe mujoco/dash01/tune_foot_posture.py
 """
 import numpy as np
 import mujoco
 from PIL import Image
 from build_model import INIT_CTRL
 
-model = mujoco.MjModel.from_xml_path("mujoco/spiderbot/spiderbot.xml")
+model = mujoco.MjModel.from_xml_path("mujoco/dash01/dash01.xml")
 np.set_printoptions(precision=3, suppress=True)
 ANK = {s: model.jnt_qposadr[mujoco.mj_name2id(
     model, mujoco.mjtObj.mjOBJ_JOINT, f"Leg{'Left' if s=='L' else 'Right'}NCS-v1_Révolution-{9 if s=='L' else 10}")]
@@ -82,5 +82,5 @@ d = settle_stance(best[0])
 r = mujoco.Renderer(model, 360, 640)
 cam = mujoco.MjvCamera(); mujoco.mjv_defaultFreeCamera(model, cam)
 cam.distance, cam.elevation, cam.azimuth = 1.6, -5, 90; cam.lookat[:] = [0, 0, 0.25]
-r.update_scene(d, cam); Image.fromarray(r.render()).save("mujoco/spiderbot/_posture_best.png"); r.close()
+r.update_scene(d, cam); Image.fromarray(r.render()).save("mujoco/dash01/_posture_best.png"); r.close()
 print("rendered _posture_best.png")

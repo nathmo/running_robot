@@ -1,4 +1,4 @@
-"""Drive a trained SpiderBot policy live with the keyboard (a software joystick).
+"""Drive a trained DASH-01 policy live with the keyboard (a software joystick).
 
 Open a live viewer and steer the robot with the arrow keys (or WASD). Each key press **nudges the
 target command by a fixed step** (default 0.2 m/s forward, 0.3 rad/s yaw), clamped to the policy's

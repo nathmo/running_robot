@@ -1,4 +1,4 @@
-"""SpiderBotMjxEnv -- a functional, vmap-able JAX/MJX port of SpiderBotEnv (rl/env.py) for
+"""Dash01MjxEnv -- a functional, vmap-able JAX/MJX port of Dash01Env (rl/env.py) for
 GPU-parallel training.
 
 This is a PORT, not a reimplementation: every reward/gait-shaping term below mirrors the CPU
@@ -24,7 +24,7 @@ object-oriented/imperative:
     an SB3 callback via env_method.
 
 Physics fidelity (closed-loop parallel-knee equality constraint, condim=6 elliptic-cone contact,
-ankle spring) is validated against CPU MuJoCo in mujoco/spiderbot/validate_mjx.py -- read that
+ankle spring) is validated against CPU MuJoCo in mujoco/dash01/validate_mjx.py -- read that
 before changing anything physics-related here.
 
 NOTE: an analytical (spring-damper) foot contact model was attempted here to cut Newton-solver
@@ -51,6 +51,7 @@ FRAME_DIM = 6 + 6 + 6 + 3 + 3 + 6 + 2
 # otherwise jax.lax.scan over repeated step() calls starting from a reset() carry raises a
 # structure-mismatch error the first time it's used in a rollout loop.
 TERM_NAMES = [
+    "fwd_speed",
     "track_vx", "track_yaw", "progress", "track_pos", "track_heading", "pos_pen", "yaw_rate",
     "heading_pen", "lat_vel", "ang_xy", "upright", "height", "vz", "action_rate", "torque",
     "stance", "hip_roll", "alive", "foot_slip", "air_time", "stance_time", "clearance",
@@ -116,7 +117,7 @@ def ang_vel_body(data, gyro_adr):
 
 def foot_contacts(data, foot_contact_slot):
     """Which foot-tip spheres touch the floor, via MJX's static per-model contact-pair slots
-    (see SpiderBotMjxEnv.__init__ for how these slots are discovered)."""
+    (see Dash01MjxEnv.__init__ for how these slots are discovered)."""
     return data.contact.dist[foot_contact_slot] < 0.0
 
 
@@ -203,22 +204,37 @@ def reward_fn(data, cfg, action, prev_action, command, des_xy, des_yaw, base_id,
     grav = gravity_body(data, base_id)
 
     t = {}
-    t["track_vx"] = cfg.w_track_vx * jnp.exp(-((cmd_vx - vx) ** 2) / cfg.track_sigma_vx ** 2)
-    t["track_yaw"] = cfg.w_track_yaw * jnp.exp(-((cmd_yaw - yaw_rate) ** 2) / cfg.track_sigma_yaw ** 2)
-    progress_frac = jnp.where(jnp.abs(cmd_vx) > 1e-6, jnp.clip(vx / jnp.where(cmd_vx == 0, 1.0, cmd_vx), 0.0, 1.0), 0.0)
-    t["progress"] = cfg.w_progress * progress_frac ** 2
-    pos_err = jnp.linalg.norm(data.qpos[0:2] - des_xy)
-    t["track_pos"] = cfg.w_track_pos * jnp.exp(-pos_err ** 2 / cfg.track_sigma_pos ** 2)
-    yaw_err = jnp.arctan2(jnp.sin(base_yaw(data, base_id) - des_yaw), jnp.cos(base_yaw(data, base_id) - des_yaw))
-    t["track_heading"] = cfg.w_track_heading * jnp.exp(-(yaw_err ** 2) / cfg.track_sigma_heading ** 2)
-    t["pos_pen"] = _pen(-cfg.w_pos_l1 * pos_err, cfg.penalty_term_cap)
-    t["yaw_rate"] = _pen(-cfg.w_yaw_rate * (yaw_rate - cmd_yaw) ** 2, cfg.penalty_term_cap)
-    t["heading_pen"] = _pen(-cfg.w_heading_pen * yaw_err ** 2, cfg.penalty_term_cap)
+    # speed_mode / Z-lock are STATIC (cfg fields are Python scalars), so these branches resolve at
+    # trace time -- exact mirror of rl/env.py._reward. Dicts flatten by sorted key in JAX, so both
+    # branches producing the same key SET keeps the reward_terms pytree structure stable.
+    if cfg.speed_mode:
+        t["fwd_speed"] = cfg.w_fwd_speed * jnp.clip(vx, 0.0, cfg.v_ceiling)
+        for k in ("track_vx", "track_yaw", "progress", "track_pos",
+                  "track_heading", "pos_pen", "yaw_rate", "heading_pen"):
+            t[k] = jnp.asarray(0.0)
+        progress_frac = jnp.clip(vx / cfg.v_ceiling, 0.0, 1.0)
+    else:
+        t["fwd_speed"] = jnp.asarray(0.0)
+        t["track_vx"] = cfg.w_track_vx * jnp.exp(-((cmd_vx - vx) ** 2) / cfg.track_sigma_vx ** 2)
+        t["track_yaw"] = cfg.w_track_yaw * jnp.exp(-((cmd_yaw - yaw_rate) ** 2) / cfg.track_sigma_yaw ** 2)
+        progress_frac = jnp.where(jnp.abs(cmd_vx) > 1e-6, jnp.clip(vx / jnp.where(cmd_vx == 0, 1.0, cmd_vx), 0.0, 1.0), 0.0)
+        t["progress"] = cfg.w_progress * progress_frac ** 2
+        pos_err = jnp.linalg.norm(data.qpos[0:2] - des_xy)
+        t["track_pos"] = cfg.w_track_pos * jnp.exp(-pos_err ** 2 / cfg.track_sigma_pos ** 2)
+        yaw_err = jnp.arctan2(jnp.sin(base_yaw(data, base_id) - des_yaw), jnp.cos(base_yaw(data, base_id) - des_yaw))
+        t["track_heading"] = cfg.w_track_heading * jnp.exp(-(yaw_err ** 2) / cfg.track_sigma_heading ** 2)
+        t["pos_pen"] = _pen(-cfg.w_pos_l1 * pos_err, cfg.penalty_term_cap)
+        t["yaw_rate"] = _pen(-cfg.w_yaw_rate * (yaw_rate - cmd_yaw) ** 2, cfg.penalty_term_cap)
+        t["heading_pen"] = _pen(-cfg.w_heading_pen * yaw_err ** 2, cfg.penalty_term_cap)
     t["lat_vel"] = _pen(-cfg.w_lat_vel * v_body[1] ** 2, cfg.penalty_term_cap)
     t["ang_xy"] = _pen(-cfg.w_angvel_xy * (angv[0] ** 2 + angv[1] ** 2), cfg.penalty_term_cap)
     t["upright"] = _pen(-cfg.w_upright * (grav[0] ** 2 + grav[1] ** 2), cfg.penalty_term_cap)
-    t["height"] = _pen(-cfg.w_height * (data.qpos[2] - height_target) ** 2, cfg.penalty_term_cap)
-    t["vz"] = _pen(-cfg.w_vz * data.qvel[2] ** 2, cfg.penalty_term_cap)
+    if bool(cfg.base_lock[2]):                        # Z railed -> height/vz meaningless, neutralize
+        t["height"] = jnp.asarray(0.0)
+        t["vz"] = jnp.asarray(0.0)
+    else:
+        t["height"] = _pen(-cfg.w_height * (data.qpos[2] - height_target) ** 2, cfg.penalty_term_cap)
+        t["vz"] = _pen(-cfg.w_vz * data.qvel[2] ** 2, cfg.penalty_term_cap)
     t["action_rate"] = _pen(-cfg.w_action_rate * jnp.sum((action - prev_action) ** 2), cfg.penalty_term_cap)
     exc = jnp.maximum(jnp.abs(data.actuator_force[:nu]) - jnp.abs(stand_torque), 0.0)
     t["torque"] = _pen(-cfg.w_torque * jnp.sum(exc ** 2), cfg.penalty_term_cap)
@@ -244,7 +260,7 @@ def gait_reward(data, cfg, control_dt, command, air_time, contact_time, grounded
                       jnp.maximum(0.0, slip_v - cfg.slip_deadband) ** 2, 0.0)
     terms["foot_slip"] = -jnp.minimum(cfg.w_foot_slip * jnp.sum(slip), cfg.penalty_term_cap)
 
-    cmd_speed = jnp.abs(command[0]) * cfg.vx_max
+    cmd_speed = cfg.v_ceiling if cfg.speed_mode else jnp.abs(command[0]) * cfg.vx_max
     gait_on = cmd_speed >= cfg.gait_cmd_gate
 
     # touchdown credit computed BEFORE clocks advance (landing step isn't counted as swing),
@@ -281,7 +297,7 @@ def fallen(data, cfg, base_id, floor_pairs):
     return bad
 
 
-class SpiderBotMjxEnv:
+class Dash01MjxEnv:
     """Bundles the static model/config; reset()/step() are pure functions of (state, ...) ->
     state, meant to be jax.vmap'd across parallel envs and jax.jit'd by the caller (see
     rl/mjx_train.py). No brax.envs.base.Env / wrapper dependency -- see the module docstring for
@@ -335,7 +351,7 @@ class SpiderBotMjxEnv:
         self.stand_torque = jnp.array(mj_data.actuator_force[:self.nu])
 
         # template Data built via mjx.put_data from a real, forward-computed CPU MjData -- the
-        # exact construction path validated in mujoco/spiderbot/validate_mjx.py (Phase 0). Not
+        # exact construction path validated in mujoco/dash01/validate_mjx.py (Phase 0). Not
         # mjx.make_data(): that's a different, unvalidated init path.
         self.data_template = mjx.put_data(mj_model, mj_data)
 
@@ -344,12 +360,33 @@ class SpiderBotMjxEnv:
                         .startswith("hip_roll")]
         self.hip_roll_idx = jnp.array(hip_roll_idx, dtype=jnp.int32)
 
+        # base-DOF locks (mirror of rl/env.py): activate cfg.base_lock's subset via a STATIC
+        # eq_active vector applied at reset. The mask is constant per run, so no per-env / batched-
+        # model plumbing is needed. base_z's lock target (its neutral height) is baked into the
+        # model's eq_data at the natural stance height. NOTE: the CPU env randomizes the M1
+        # ride-height per episode; here it is fixed (per-episode Z randomization on GPU is a deferred
+        # batched-eq_data refactor). Leg hinges start after the 6 base joints (qpos[6:]).
+        self.base_lock = tuple(int(x) for x in cfg.base_lock)
+        lock_eq_ids = [mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_EQUALITY, f"lock_{n}")
+                       for n in ("x", "y", "z", "roll", "pitch", "yaw")]
+        eq_active0 = mj_model.eq_active0.copy()
+        for eid, lk in zip(lock_eq_ids, self.base_lock):
+            eq_active0[eid] = lk
+        # match the template's eq_active dtype (also fails fast here if this MJX build lacks the
+        # Data.eq_active field -- the whole runtime-lock scheme depends on it, MJX >= 3.2.5).
+        self.eq_active_vec = jnp.asarray(eq_active0, dtype=self.data_template.eq_active.dtype)
+        if self.base_lock[2]:
+            mj_model.eq_data[lock_eq_ids[2], 0] = self.height_target
+        self.hinge_qadr_start = int(min(
+            mj_model.jnt_qposadr[j] for j in range(mj_model.njnt)
+            if mj_model.jnt_bodyid[j] != self.base_id))
+
         self.mjx_model = mjx.put_model(mj_model)
 
         # one-off (non-jitted) probe of MJX's static contact-pair layout for this model: the
         # candidate geom-pair SET and ORDER are a model-level property (broadphase filtering
         # done once at put_model time), identical for every mjx.Data derived from this model --
-        # see mujoco/spiderbot/validate_mjx.py's introspection for how this was confirmed.
+        # see mujoco/dash01/validate_mjx.py's introspection for how this was confirmed.
         probe = mjx.forward(self.mjx_model, self.data_template)
         pair_geoms = np.asarray(probe.contact.geom)
 
@@ -370,11 +407,14 @@ class SpiderBotMjxEnv:
         cfg = self.cfg
         rng, k_noise, k_push, k_cmd = jax.random.split(rng, 4)
 
-        qpos = self.default_qpos.at[7:].add(
-            jax.random.uniform(k_noise, (self.default_qpos.shape[0] - 7,),
+        h = self.hinge_qadr_start
+        qpos = self.default_qpos.at[h:].add(
+            jax.random.uniform(k_noise, (self.default_qpos.shape[0] - h,),
                                minval=-cfg.reset_joint_noise, maxval=cfg.reset_joint_noise))
+        # activate the milestone's base-DOF locks (constant per run -> static vector)
         data = self.data_template.replace(
-            qpos=qpos, qvel=jnp.zeros_like(self.data_template.qvel), ctrl=self.nominal_ctrl)
+            qpos=qpos, qvel=jnp.zeros_like(self.data_template.qvel), ctrl=self.nominal_ctrl,
+            eq_active=self.eq_active_vec)
         data = mjx.forward(self.mjx_model, data)
 
         command = sample_command(k_cmd, cfg, jnp.asarray(cmd_vx_frac))
@@ -422,7 +462,9 @@ class SpiderBotMjxEnv:
 
         do_push = (state.push_countdown - 1) <= 0
         ang = jax.random.uniform(k_push_dir, minval=0.0, maxval=2 * jnp.pi)
-        push_dv = jnp.where(do_push, cfg.push_dv, 0.0) * jnp.array([jnp.cos(ang), jnp.sin(ang)])
+        free_xy = jnp.array([1.0 - self.base_lock[0], 1.0 - self.base_lock[1]])   # only shove free axes
+        push_dv = (jnp.where(do_push, cfg.push_dv, 0.0)
+                   * jnp.array([jnp.cos(ang), jnp.sin(ang)]) * free_xy)
         data = state.data.replace(
             qvel=state.data.qvel.at[0:2].add(push_dv), ctrl=ctrl)
         new_countdown = jnp.where(do_push, next_push_in(k_push_next, cfg, self.control_dt),

@@ -3,14 +3,14 @@ standing pose. The ankle is a passive preloaded spring (0.5 Nm/deg, 2.27 Nm prel
 neutral angle is a free design choice, which we pick here so the long thin foot lies flat.
 
 Prints the best springref per side; bake into build_model.  (Run after build_model.)
-Run:  .venv/Scripts/python.exe mujoco/spiderbot/tune_ankle.py
+Run:  .venv/Scripts/python.exe mujoco/dash01/tune_ankle.py
 """
 import itertools
 import numpy as np
 import mujoco
 from build_model import INIT_CTRL
 
-model = mujoco.MjModel.from_xml_path("mujoco/spiderbot/spiderbot.xml")
+model = mujoco.MjModel.from_xml_path("mujoco/dash01/dash01.xml")
 np.set_printoptions(precision=3, suppress=True)
 C = np.array(list(itertools.product([-1, 1], repeat=3)))
 ANK = {s: model.jnt_qposadr[mujoco.mj_name2id(

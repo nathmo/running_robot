@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <sdf version="1.7">
-    <model name="SpiderBot">
+    <model name="dash01">
         <link name="bodyNCS-v1">
             <pose>0.0 0.0 0.0 0.0 -0.0 0.0</pose>
             <inertial>
@@ -18,7 +18,7 @@
             <visual name="bodyNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/bodyNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/bodyNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -26,7 +26,7 @@
             <collision name="bodyNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/bodyNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/bodyNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -49,7 +49,7 @@
             <visual name="HipLeftNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/HipLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/HipLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -57,7 +57,7 @@
             <collision name="HipLeftNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/HipLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/HipLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -80,7 +80,7 @@
             <visual name="HipRightNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/HipRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/HipRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -88,7 +88,7 @@
             <collision name="HipRightNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/HipRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/HipRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -111,7 +111,7 @@
             <visual name="CamLeftNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/CamLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/CamLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -119,7 +119,7 @@
             <collision name="CamLeftNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/CamLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/CamLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -142,7 +142,7 @@
             <visual name="CamRightNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/CamRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/CamRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -150,7 +150,7 @@
             <collision name="CamRightNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/CamRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/CamRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -173,7 +173,7 @@
             <visual name="ThighLeftNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/ThighLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/ThighLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -181,7 +181,7 @@
             <collision name="ThighLeftNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/ThighLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/ThighLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -204,7 +204,7 @@
             <visual name="ThighRightNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/ThighRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/ThighRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -212,7 +212,7 @@
             <collision name="ThighRightNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/ThighRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/ThighRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -235,7 +235,7 @@
             <visual name="LegLeftNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/LegLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/LegLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -243,7 +243,7 @@
             <collision name="LegLeftNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/LegLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/LegLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -266,7 +266,7 @@
             <visual name="LegRightNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/LegRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/LegRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -274,7 +274,7 @@
             <collision name="LegRightNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/LegRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/LegRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -297,7 +297,7 @@
             <visual name="FootLeftNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/FootLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/FootLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -305,7 +305,7 @@
             <collision name="FootLeftNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/FootLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/FootLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -328,7 +328,7 @@
             <visual name="FootRightNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/FootRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/FootRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -336,7 +336,7 @@
             <collision name="FootRightNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/FootRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/FootRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -359,7 +359,7 @@
             <visual name="PushrodLeftNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/PushrodLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/PushrodLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -367,7 +367,7 @@
             <collision name="PushrodLeftNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/PushrodLeftNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/PushrodLeftNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -390,7 +390,7 @@
             <visual name="PushrodRightNCS-v1_visual">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/PushrodRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/PushrodRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>
@@ -398,7 +398,7 @@
             <collision name="PushrodRightNCS-v1_collision">
                 <geometry>
                     <mesh>
-                        <uri>model://SpiderBot/meshes/PushrodRightNCS-v1.stl</uri>
+                        <uri>model://dash01/meshes/PushrodRightNCS-v1.stl</uri>
                         <scale>0.001 0.001 0.001</scale>
                     </mesh>
                 </geometry>

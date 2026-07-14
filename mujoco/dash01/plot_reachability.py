@@ -1,4 +1,4 @@
-"""Plot the sagittal (X-Z) reachability of the LEFT foot tip for SpiderBot.
+"""Plot the sagittal (X-Z) reachability of the LEFT foot tip for DASH-01.
 
 REDUCED 2-DOF STUDY. Only the two LEFT hip motors move:
   - cam   (HipLeftNCS-v1_Revolution-3) -> drives the knee through the parallel pushrod loop
@@ -34,14 +34,14 @@ THE LOOP, SOLVED EXACTLY
   2-unknown problem in (pushrod, knee) -- Newton-solved per (cam, thigh) on the validated
   model. We track the single PHYSICAL assembly branch (the one containing the rest pose).
 
-Run:  .venv/Scripts/python.exe mujoco/spiderbot/plot_reachability.py
+Run:  .venv/Scripts/python.exe mujoco/dash01/plot_reachability.py
       (optional)  --nc 361 --nt 131 --ankle-mode parallel-thigh --cam-lo -86 --cam-hi 86 --show
 """
 import argparse
 import numpy as np
 import mujoco
 
-MODEL = "mujoco/spiderbot/spiderbot.xml"
+MODEL = "mujoco/dash01/dash01.xml"
 FOOT_GEOM = "foot_L_col"                            # toe sphere = end effector
 S_PUSH, S_ANCH = "pushrod_tip_L", "leg_anchor_L"    # the closed-loop connect sites
 VIEW_X = -1.0                                        # mirror horizontally: view the leg from the other side
@@ -579,16 +579,16 @@ def main():
                     default="spring-rest",
                     help="spring-rest matches the real preloaded passive ankle (and the web "
                          "UI's FK LUT); parallel-thigh is the geometric idealization")
-    ap.add_argument("--out", default="mujoco/spiderbot/_reachability.png",
+    ap.add_argument("--out", default="mujoco/dash01/_reachability.png",
                     help="clean reachability map (no linkage overlay)")
     ap.add_argument("--poses", type=int, default=50,
                     help="how many single-pose frames to render (0 = none)")
     ap.add_argument("--pose-seed", type=int, default=0)
-    ap.add_argument("--frames-dir", default="mujoco/spiderbot/_reachability_poses",
+    ap.add_argument("--frames-dir", default="mujoco/dash01/_reachability_poses",
                     help="folder for the per-pose frames")
     ap.add_argument("--sing-frames", type=int, default=40,
                     help="max singularity-pose frames per family (0 = none)")
-    ap.add_argument("--sing-dir", default="mujoco/spiderbot/_reachability_singularities",
+    ap.add_argument("--sing-dir", default="mujoco/dash01/_reachability_singularities",
                     help="folder for the singularity-pose frames")
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()

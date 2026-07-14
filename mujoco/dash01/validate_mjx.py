@@ -20,7 +20,7 @@ What it checks, in order of how badly a failure here would break training:
      failure by itself -- growing SLOWLY is fine, blowing up immediately is not).
 
 Run on the training server (CUDA-enabled JAX):
-    .venv/bin/python mujoco/spiderbot/validate_mjx.py
+    .venv/bin/python mujoco/dash01/validate_mjx.py
 """
 import numpy as np
 import mujoco
@@ -28,7 +28,7 @@ from mujoco import mjx
 import jax
 import jax.numpy as jnp
 
-MODEL_PATH = "mujoco/spiderbot/spiderbot.xml"
+MODEL_PATH = "mujoco/dash01/dash01.xml"
 SEED = 0
 CONTROL_DECIMATION = 20     # matches rl/config.py: sim is 1kHz, control is 50Hz
 N_CONTROL_STEPS = 250       # 5 s of sim time -- long enough to fall over and

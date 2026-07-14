@@ -1,4 +1,4 @@
-"""Evaluate / visualize a trained SpiderBot policy.
+"""Evaluate / visualize a trained DASH-01 policy.
 
   # metrics over several episodes (headless)
   .venv/Scripts/python.exe -m rl.evaluate --run rl/runs/m1_stand --episodes 5
@@ -17,7 +17,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from .config import get_config
-from .env import SpiderBotEnv
+from .env import Dash01Env
 
 
 def infer_preset(run: Path):
@@ -67,7 +67,7 @@ def build(run: Path, preset, checkpoint):
     cfg = get_config(preset)
     cfg.push_interval_s = 0.0   # random shoves are a TRAINING disturbance; evaluation, videos and
     #                             the gait-probe gates must measure the policy, not push recovery
-    raw = SpiderBotEnv(cfg)
+    raw = Dash01Env(cfg)
     venv = DummyVecEnv([lambda: raw])
     model_path = pick_model(run, checkpoint)
     vn = pick_vecnormalize(run, model_path)

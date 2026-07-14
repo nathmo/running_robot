@@ -1,4 +1,4 @@
-"""SpiderBotEnv — a Gymnasium environment for command-conditioned biped locomotion.
+"""Dash01Env — a Gymnasium environment for command-conditioned biped locomotion.
 
 The agent sees only what the real robot can measure (motor pos/vel/torque, IMU-derived gravity
 direction + angular velocity, its own previous action, and the joystick command), stacked over a
@@ -17,7 +17,7 @@ from .config import Config
 FRAME_DIM = 6 + 6 + 6 + 3 + 3 + 6 + 2
 
 
-class SpiderBotEnv(gym.Env):
+class Dash01Env(gym.Env):
     metadata = {"render_modes": ["rgb_array"]}
 
     def __init__(self, cfg: Config = None, render_mode: str = None):
@@ -42,6 +42,32 @@ class SpiderBotEnv(gym.Env):
 
         self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")
         self._gyro_adr = self._sensor_adr("imu_gyro")
+
+        # base-DOF locks: 6 <equality><joint> constraints lock_{x,y,z,roll,pitch,yaw}, inactive by
+        # default. cfg.base_lock ([X,Y,Z,roll,pitch,yaw], 1=locked) selects which to activate at reset
+        # (data.eq_active). Each single-joint equality pins qpos[joint] = eq_data[k,0]: 0 is correct
+        # for X/Y (origin) and roll/pitch/yaw (level), but base_z must be pinned at its ride-height,
+        # so we set model.eq_data[lock_z,0] at reset. The loop equalities (ids 0,1) are left untouched.
+        self.base_lock = np.asarray(self.cfg.base_lock, dtype=np.int32)
+        self.lock_eq_ids = np.array([
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_EQUALITY, f"lock_{n}")
+            for n in ("x", "y", "z", "roll", "pitch", "yaw")], dtype=int)
+        self.lock_z_eq_id = int(self.lock_eq_ids[2])
+        self.z_locked = bool(self.base_lock[2])
+        # leg hinges begin at the first qpos address of any non-base joint (base joints are qpos 0..5)
+        self.hinge_qadr_start = int(min(
+            self.model.jnt_qposadr[j] for j in range(self.model.njnt)
+            if self.model.jnt_bodyid[j] != self.base_id))
+        # base X/Y translational dof addresses, for the (free-axis-only) random pushes
+        self._base_x_dadr = int(self.model.jnt_dofadr[
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "base_x")])
+        self._base_y_dadr = int(self.model.jnt_dofadr[
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "base_y")])
+        # ride-height -> leg-posture table for M1's per-episode random rail height (see measure_ride_band.py)
+        self._lut = None
+        if self.cfg.z_rail_randomize:
+            _d = np.load(self.cfg.ride_height_lut)
+            self._lut = dict(H=_d["H"], hinges=_d["hinges"], ctrl=_d["ctrl"])
 
         # foot spheres + floor, for the gait-shaping rewards (sim contact, reward-only). The TOE
         # sphere is the walking contact (gait logic keys on it); the HEEL sphere is a passive floor
@@ -202,6 +228,10 @@ class SpiderBotEnv(gym.Env):
 
     def _sample_command(self):
         c = self.cfg
+        if c.speed_mode:                        # max-speed milestones: always command forward-max
+            self._command[0] = 1.0
+            self._command[1] = 0.0
+            return
         if self.np_random.random() < c.p_stand:
             self._command[:] = 0.0
         else:
@@ -225,9 +255,25 @@ class SpiderBotEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.key_id)
-        # small random perturbation to the hinge joints (qpos[7:] are the 12 hinges)
+        # activate this milestone's base-DOF locks (the loop equalities are left active)
+        self.data.eq_active[self.lock_eq_ids] = self.base_lock
+        # M1: rail Z at a per-episode RANDOM ride-height and seat the legs to reach the floor there
+        # (from the ride-height LUT), so the episode starts in a valid on-floor stance. Otherwise a
+        # locked Z is pinned at the natural stance height. base_z's lock target lives in eq_data.
+        if self.z_locked:
+            if self._lut is not None:
+                H = float(self.np_random.uniform(*self.cfg.z_rail_range))
+                k = int(np.argmin(np.abs(self._lut["H"] - H)))
+                self.data.qpos[self.hinge_qadr_start:] = self._lut["hinges"][k]
+                self.nominal_ctrl = self._lut["ctrl"][k].astype(np.float64).copy()
+            else:
+                H = float(self.height_target)
+            self.model.eq_data[self.lock_z_eq_id, 0] = H
+            self.data.qpos[2] = H
+        # small random perturbation to the leg hinges (base qpos occupy 0..hinge_qadr_start-1)
         n = self.cfg.reset_joint_noise
-        self.data.qpos[7:] += self.np_random.uniform(-n, n, self.model.nq - 7)
+        self.data.qpos[self.hinge_qadr_start:] += self.np_random.uniform(
+            -n, n, self.model.nq - self.hinge_qadr_start)
         self.data.qvel[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
         self._prev_action[:] = 0.0
@@ -271,8 +317,10 @@ class SpiderBotEnv(gym.Env):
         self._push_countdown -= 1
         if self._push_countdown <= 0:
             ang = self.np_random.uniform(0.0, 2.0 * np.pi)
-            self.data.qvel[0] += c.push_dv * np.cos(ang)
-            self.data.qvel[1] += c.push_dv * np.sin(ang)
+            if not self.base_lock[0]:                       # only shove the FREE translational axes
+                self.data.qvel[self._base_x_dadr] += c.push_dv * np.cos(ang)
+            if not self.base_lock[1]:
+                self.data.qvel[self._base_y_dadr] += c.push_dv * np.sin(ang)
             self._push_countdown = self._next_push_in()
 
         # contact is OR-accumulated across the sim substeps so a sub-20 ms hop cannot pass as
@@ -328,7 +376,7 @@ class SpiderBotEnv(gym.Env):
                         np.maximum(0.0, slip_v - c.slip_deadband) ** 2, 0.0)
         terms["foot_slip"] = -min(c.w_foot_slip * float(slip.sum()), c.penalty_term_cap)
 
-        cmd_speed = abs(float(self._command[0])) * c.vx_max
+        cmd_speed = c.v_ceiling if c.speed_mode else abs(float(self._command[0])) * c.vx_max
         gait_on = cmd_speed >= c.gait_cmd_gate
 
         # air/stance clocks + one-sided capped touchdown credit (computed BEFORE the clocks
@@ -387,35 +435,52 @@ class SpiderBotEnv(gym.Env):
         grav = self._gravity_body()
 
         t = {}
-        t["track_vx"] = c.w_track_vx * np.exp(-((cmd_vx - vx) ** 2) / c.track_sigma_vx ** 2)
-        t["track_yaw"] = c.w_track_yaw * np.exp(-((cmd_yaw - yaw_rate) ** 2) / c.track_sigma_yaw ** 2)
-        # forward progress along the commanded heading: fraction of the commanded speed actually
-        # achieved (clipped to [0,1] so it can't be gamed by lunging), SQUARED so cruising at a
-        # fraction of the command is not a plateau. Zero when no motion is commanded.
-        if abs(cmd_vx) > 1e-6:
-            progress_frac = float(np.clip(vx / cmd_vx, 0.0, 1.0))
+        if c.speed_mode:
+            # maximum forward speed: one monotone linear reward, clip(vx, 0, v_ceiling) -- "faster is
+            # strictly better" up to a physical cap. The command-tracking terms are switched off
+            # (straightness comes from the base locks + the surviving lat_vel/heading penalties).
+            t["fwd_speed"] = c.w_fwd_speed * float(np.clip(vx, 0.0, c.v_ceiling))
+            for k in ("track_vx", "track_yaw", "progress", "track_pos",
+                      "track_heading", "pos_pen", "yaw_rate", "heading_pen"):
+                t[k] = 0.0
+            progress_frac = float(np.clip(vx / c.v_ceiling, 0.0, 1.0))
         else:
-            progress_frac = 0.0
-        t["progress"] = c.w_progress * progress_frac ** 2
-        # integrated command-pose tracking: be where the command says (kills spin, wander, and the
-        # "fake slow shuffle" gaming, because position/heading error accumulates over a few seconds)
-        pos_err = float(np.linalg.norm(self.data.qpos[0:2] - self._des_xy))
-        t["track_pos"] = c.w_track_pos * np.exp(-pos_err ** 2 / c.track_sigma_pos ** 2)
-        yaw_err = np.arctan2(np.sin(self._base_yaw() - self._des_yaw),
-                             np.cos(self._base_yaw() - self._des_yaw))
-        t["track_heading"] = c.w_track_heading * np.exp(-(yaw_err ** 2) / c.track_sigma_heading ** 2)
-        # linear companion to the saturating pos kernel: sustained under-speed keeps costing even
-        # once the exp kernel has flatlined (the v2 policy parked in exactly that plateau).
-        t["pos_pen"] = self._pen(-c.w_pos_l1 * pos_err)
-        # quadratic companions (bounded, see _pen) that keep a restoring gradient far from target,
-        # where the exp-kernel tracking rewards saturate to ~0 gradient.
-        t["yaw_rate"] = self._pen(-c.w_yaw_rate * (yaw_rate - cmd_yaw) ** 2)
-        t["heading_pen"] = self._pen(-c.w_heading_pen * yaw_err ** 2)
+            t["fwd_speed"] = 0.0
+            t["track_vx"] = c.w_track_vx * np.exp(-((cmd_vx - vx) ** 2) / c.track_sigma_vx ** 2)
+            t["track_yaw"] = c.w_track_yaw * np.exp(-((cmd_yaw - yaw_rate) ** 2) / c.track_sigma_yaw ** 2)
+            # forward progress along the commanded heading: fraction of the commanded speed actually
+            # achieved (clipped to [0,1] so it can't be gamed by lunging), SQUARED so cruising at a
+            # fraction of the command is not a plateau. Zero when no motion is commanded.
+            if abs(cmd_vx) > 1e-6:
+                progress_frac = float(np.clip(vx / cmd_vx, 0.0, 1.0))
+            else:
+                progress_frac = 0.0
+            t["progress"] = c.w_progress * progress_frac ** 2
+            # integrated command-pose tracking: be where the command says (kills spin, wander, and the
+            # "fake slow shuffle" gaming, because position/heading error accumulates over a few seconds)
+            pos_err = float(np.linalg.norm(self.data.qpos[0:2] - self._des_xy))
+            t["track_pos"] = c.w_track_pos * np.exp(-pos_err ** 2 / c.track_sigma_pos ** 2)
+            yaw_err = np.arctan2(np.sin(self._base_yaw() - self._des_yaw),
+                                 np.cos(self._base_yaw() - self._des_yaw))
+            t["track_heading"] = c.w_track_heading * np.exp(-(yaw_err ** 2) / c.track_sigma_heading ** 2)
+            # linear companion to the saturating pos kernel: sustained under-speed keeps costing even
+            # once the exp kernel has flatlined (the v2 policy parked in exactly that plateau).
+            t["pos_pen"] = self._pen(-c.w_pos_l1 * pos_err)
+            # quadratic companions (bounded, see _pen) that keep a restoring gradient far from target,
+            # where the exp-kernel tracking rewards saturate to ~0 gradient.
+            t["yaw_rate"] = self._pen(-c.w_yaw_rate * (yaw_rate - cmd_yaw) ** 2)
+            t["heading_pen"] = self._pen(-c.w_heading_pen * yaw_err ** 2)
         t["lat_vel"] = self._pen(-c.w_lat_vel * v_body[1] ** 2)         # go straight, don't wander
         t["ang_xy"] = self._pen(-c.w_angvel_xy * (angv[0] ** 2 + angv[1] ** 2))
         t["upright"] = self._pen(-c.w_upright * (grav[0] ** 2 + grav[1] ** 2))
-        t["height"] = self._pen(-c.w_height * (self.data.qpos[2] - self.height_target) ** 2)
-        t["vz"] = self._pen(-c.w_vz * self.data.qvel[2] ** 2)
+        # height/vz are meaningless when Z is railed (the base can't move vertically); neutralize them
+        # so a per-episode ride-height isn't billed as a constant off-target penalty.
+        if self.z_locked:
+            t["height"] = 0.0
+            t["vz"] = 0.0
+        else:
+            t["height"] = self._pen(-c.w_height * (self.data.qpos[2] - self.height_target) ** 2)
+            t["vz"] = self._pen(-c.w_vz * self.data.qvel[2] ** 2)
         t["action_rate"] = self._pen(-c.w_action_rate * np.sum((action - self._prev_action) ** 2))
         # torque ABOVE the standing baseline magnitude, one-sided: holding the stance is free,
         # relaxing (a swing leg unloading toward zero) is free, only exceeding the baseline pays.

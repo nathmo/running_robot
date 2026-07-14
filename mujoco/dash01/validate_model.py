@@ -1,20 +1,20 @@
-"""M0 gate: prove the SpiderBot model is physically sane before any RL.
+"""M0 gate: prove the DASH-01 model is physically sane before any RL.
 
 Checks:
   1. compiles; nu==6, neq==2
   2. closed loop holds at the keyframe (site coincidence < 0.5 mm, equality residual small)
   3. parallel mechanism works: sweeping a cam (hip) motor MOVES the knee through the linkage
   4. stands: 2 s drop with PD holding the keyframe -> no NaN, stays upright, settles
-Also renders a few frames to mujoco/spiderbot/_validate_*.png so we can eyeball the pose.
+Also renders a few frames to mujoco/dash01/_validate_*.png so we can eyeball the pose.
 
-Run:  .venv/Scripts/python.exe mujoco/spiderbot/validate_model.py
+Run:  .venv/Scripts/python.exe mujoco/dash01/validate_model.py
 """
 import os
 import sys
 import numpy as np
 import mujoco
 
-XML = "mujoco/spiderbot/spiderbot.xml"
+XML = "mujoco/dash01/dash01.xml"
 model = mujoco.MjModel.from_xml_path(XML)
 data = mujoco.MjData(model)
 np.set_printoptions(precision=4, suppress=True)
@@ -65,10 +65,10 @@ def render(tag):
         r.close()
         try:
             from PIL import Image
-            Image.fromarray(px).save(f"mujoco/spiderbot/_validate_{tag}.png")
+            Image.fromarray(px).save(f"mujoco/dash01/_validate_{tag}.png")
         except ImportError:
             import matplotlib.image as mpimg
-            mpimg.imsave(f"mujoco/spiderbot/_validate_{tag}.png", px)
+            mpimg.imsave(f"mujoco/dash01/_validate_{tag}.png", px)
         print(f"  rendered _validate_{tag}.png")
     except Exception as e:
         render_ok = False
@@ -77,7 +77,9 @@ def render(tag):
 
 print("== 1. basics ==")
 check("nu == 6", model.nu == 6, f"nu={model.nu}")
-check("neq == 2", model.neq == 2, f"neq={model.neq}")
+# 2 closed-loop <connect> equalities + 6 base-DOF <joint> locks (lock_x..lock_yaw, inactive by
+# default; the RL env activates the milestone's subset via data.eq_active).
+check("neq == 8", model.neq == 8, f"neq={model.neq}")
 check("has 'stand' keyframe", model.nkey >= 1)
 
 print("== 2. closed loop holds at keyframe ==")

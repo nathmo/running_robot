@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SpiderBot web control interface — run this ON THE ROBOT (Raspberry Pi), browse from the hotspot.
+"""DASH-01 web control interface — run this ON THE ROBOT (Raspberry Pi), browse from the hotspot.
 
     python fixed_gait/webui/server.py                 # real robot (socketcan can0/can1)
     python fixed_gait/webui/server.py --mock          # simulated motors (UI dev on any machine)
@@ -673,7 +673,7 @@ def main():
     d._started_ok.wait(5.0)
     atexit.register(_shutdown)
 
-    print(f"\nSpiderBot web UI: http://{args.host}:{args.port}/  "
+    print(f"\nDASH-01 web UI: http://{args.host}:{args.port}/  "
           f"({'MOCK motors' if args.mock else f'{args.interface} can0/can1'})")
     app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
 

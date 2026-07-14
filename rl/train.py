@@ -1,4 +1,4 @@
-"""Train a SpiderBot locomotion policy with PPO (Stable-Baselines3).
+"""Train a DASH-01 locomotion policy with PPO (Stable-Baselines3).
 
 Examples:
   # short pipeline check (a few minutes on CPU)
@@ -22,12 +22,12 @@ from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList,
 from stable_baselines3.common.logger import configure
 
 from .config import get_config
-from .env import SpiderBotEnv
+from .env import Dash01Env
 
 
 def make_env(preset):
     def _init():
-        return Monitor(SpiderBotEnv(get_config(preset)))
+        return Monitor(Dash01Env(get_config(preset)))
     return _init
 
 

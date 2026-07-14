@@ -1,4 +1,4 @@
-"""Reusable hard-limit / workspace safety check for SpiderBot's legs.
+"""Reusable hard-limit / workspace safety check for DASH-01's legs.
 
 PURE NUMPY -- no matplotlib/scipy import here. This module is imported by the Pi-deployed hardware
 runners (run_hardware.py, play_trajectory.py) as well as the teach recorder (record_trajectory.py),
@@ -8,7 +8,7 @@ Built by fixed_gait/calibrate_workspace.py from hand-backdriven recordings:
   - abduction (single DOF, motor 104): a plain [min, max], eroded a bit inside what was physically
     demonstrated.
   - knee (cam=105, thigh=106 -- coupled through the parallel pushrod/knee loop): the valid set is a
-    2-D region, not a box (see the spiderbot-hardware 4-bar assembly-band findings), so it's stored
+    2-D region, not a box (see the dash01-hardware 4-bar assembly-band findings), so it's stored
     as a boolean occupancy GRID over the swept (cam, thigh) samples. calibrate_workspace.py already
     dilates (fills sampling gaps) then erodes (safety margin) the grid at build time; this module
     only does the O(1) cell lookup at check time.

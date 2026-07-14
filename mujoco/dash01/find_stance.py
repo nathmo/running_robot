@@ -1,4 +1,4 @@
-"""Search for a stable standing pose (keyframe) for SpiderBot.
+"""Search for a stable standing pose (keyframe) for DASH-01.
 
 The knee is passively driven by the cam through the closed loop, and the L/R sagittal joint
 axes are mirrored, so a symmetric stance uses ctrl = [hr, c, t, -hr, -c, -t]. For each candidate
@@ -8,13 +8,13 @@ axes are mirrored, so a symmetric stance uses ctrl = [hr, c, t, -hr, -c, -t]. Fo
   3. drop-test under gravity and score by final height + uprightness + stillness.
 Prints the best pose's qpos/ctrl (paste into build_model's keyframe) and renders it.
 
-Run:  .venv/Scripts/python.exe mujoco/spiderbot/find_stance.py
+Run:  .venv/Scripts/python.exe mujoco/dash01/find_stance.py
 """
 import itertools
 import numpy as np
 import mujoco
 
-model = mujoco.MjModel.from_xml_path("mujoco/spiderbot/spiderbot.xml")
+model = mujoco.MjModel.from_xml_path("mujoco/dash01/dash01.xml")
 data = mujoco.MjData(model)
 np.set_printoptions(precision=3, suppress=True)
 
@@ -37,11 +37,11 @@ def reach_pose(ctrl, steps=1500):
     g = model.opt.gravity.copy()
     model.opt.gravity[:] = 0
     data.qpos[2] = 1.5
-    base_q = data.qpos[:7].copy()
+    base_q = data.qpos[:6].copy()          # base is 6 scalar joints (x,y,z,roll,pitch,yaw)
     data.ctrl[:] = ctrl
     for _ in range(steps):
         mujoco.mj_step(model, data)
-        data.qpos[:7] = base_q
+        data.qpos[:6] = base_q
         data.qvel[:6] = 0
     mujoco.mj_forward(model, data)
     model.opt.gravity[:] = g
@@ -96,7 +96,7 @@ else:
         cam.distance, cam.elevation, cam.azimuth = 2.2, -15, 120
         cam.lookat[:] = [0, 0, 0.4]
         r.update_scene(data, cam)
-        Image.fromarray(r.render()).save("mujoco/spiderbot/_stance_best.png")
+        Image.fromarray(r.render()).save("mujoco/dash01/_stance_best.png")
         r.close()
         print("rendered _stance_best.png")
     except Exception as e:

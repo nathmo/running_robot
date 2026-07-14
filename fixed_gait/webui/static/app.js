@@ -1,4 +1,4 @@
-/* SpiderBot web UI — vanilla JS, no external assets.
+/* DASH-01 web UI — vanilla JS, no external assets.
  * Data flow: /api/state @2 Hz (modes, calibration, files), /api/telemetry @10 Hz (samples,
  * linkage). All angles displayed/edited are NORMALIZED degrees (zero pose = 0). */
 "use strict";
@@ -1315,7 +1315,7 @@ function drawEESide(side) {
     g.fillText(fkOk ? "FK sign map not verified for this side" : "no FK LUT (generate on desktop)",
       cv.width / 2, cv.height / 2 - 8);
     g.fillText(fkOk ? "click 'verify FK sign map', or set signs + 'force enable' below"
-                    : "mujoco/spiderbot/gen_fk_lut.py — hot-loads once copied here",
+                    : "mujoco/dash01/gen_fk_lut.py — hot-loads once copied here",
       cv.width / 2, cv.height / 2 + 10);
     g.textAlign = "left";
     return;

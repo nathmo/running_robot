@@ -1,4 +1,4 @@
-# SpiderBot RL dependencies — CPU only, no GPU required.
+# DASH-01 RL dependencies — CPU only, no GPU required.
 # Install torch first from the CPU index, then this file:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 #   pip install -r rl/requirements.txt

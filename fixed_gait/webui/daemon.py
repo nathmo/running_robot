@@ -36,7 +36,7 @@ MAX_TEMP_C = 80                           # run_hardware.py:102
 MAX_TRACK_ERR_DEG = 25.0                  # run_hardware.py:101 (position-command modes)
 DEFAULT_SLEW_DPS = 60.0
 # base never-exceed clamps, normalized deg (model joint ranges + small margin; cam +-1.5 rad,
-# thigh +-1.047 rad, abduction +-0.785 rad — mujoco/spiderbot/build_model.py J dict).
+# thigh +-1.047 rad, abduction +-0.785 rad — mujoco/dash01/build_model.py J dict).
 # NOTE: the URDF ranges are CAD guesses (calibrate_workspace.py docstring) and the real cam is
 # multi-turn — a recorded workspace can legitimately exceed these, so _hard_bounds() widens the
 # net to the demonstrated envelope (+10 deg) whenever a workspace is loaded for that leg.

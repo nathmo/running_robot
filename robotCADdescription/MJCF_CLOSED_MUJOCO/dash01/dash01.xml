@@ -1,4 +1,4 @@
-<mujoco model="SpiderBot">
+<mujoco model="dash01">
     <compiler angle="radian" />
     <asset>
         <mesh name="bodyNCS-v1" file="meshes/bodyNCS-v1.stl" scale="0.001 0.001 0.001" />
