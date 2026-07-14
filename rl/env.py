@@ -116,12 +116,24 @@ class Dash01Env(gym.Env):
              if (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) or "")
              .startswith("hip_roll")], dtype=int)
 
-        self.action_space = spaces.Box(-1.0, 1.0, (self.nu,), np.float32)
-        obs_dim = FRAME_DIM * self.cfg.history_len
+        # action representation: "pd" = 6 per-step PD targets (default); "fourier" = per-cycle gait
+        # coefficients (cam+thigh Fourier + frequency + abduction reflex gains). See rl/fourier_gait.py.
+        if self.cfg.action_mode == "fourier":
+            from . import fourier_gait
+            self._fourier = fourier_gait
+            self.action_dim = fourier_gait.action_dim(self.cfg.n_harmonics)
+        else:
+            self._fourier = None
+            self.action_dim = self.nu
+        self.action_space = spaces.Box(-1.0, 1.0, (self.action_dim,), np.float32)
+        # per-frame obs = motor pos/vel/trq (6+6+6) + gravity(3) + gyro(3) + prev_action + command(2)
+        self.frame_dim = 6 + 6 + 6 + 3 + 3 + self.action_dim + 2
+        obs_dim = self.frame_dim * self.cfg.history_len
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
 
-        self._history = np.zeros((self.cfg.history_len, FRAME_DIM), np.float32)
-        self._prev_action = np.zeros(self.nu, np.float32)
+        self._history = np.zeros((self.cfg.history_len, self.frame_dim), np.float32)
+        self._prev_action = np.zeros(self.action_dim, np.float32)     # policy output (obs); coeffs in fourier
+        self._prev_motor_cmd = np.zeros(self.nu, np.float32)          # normalized 6 motor targets, for action_rate
         self._filt_target = self.nominal_ctrl.copy()
         self._delay_buf = [np.zeros(self.nu, np.float32)
                            for _ in range(self.cfg.action_delay_steps)]
@@ -131,6 +143,8 @@ class Dash01Env(gym.Env):
         self._des_xy = np.zeros(2, np.float64)
         self._des_yaw = 0.0
         self._step = 0
+        self._phase = 0.0            # gait phase (fourier mode): continuous, kept in [0, 2*pi)
+        self._elapsed_t = 0.0        # cumulative sim time this episode (fourier time-based truncation)
 
     # ---------- helpers ----------
     def set_cmd_vx_frac(self, frac):
@@ -277,6 +291,9 @@ class Dash01Env(gym.Env):
         self.data.qvel[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
         self._prev_action[:] = 0.0
+        self._prev_motor_cmd[:] = 0.0
+        self._phase = 0.0
+        self._elapsed_t = 0.0
         self._filt_target[:] = self.nominal_ctrl
         self._delay_buf = [np.zeros(self.nu, np.float32)
                            for _ in range(self.cfg.action_delay_steps)]
@@ -299,21 +316,33 @@ class Dash01Env(gym.Env):
         s = c.push_interval_s * self.np_random.uniform(0.7, 1.3)
         return max(1, int(round(s / self.control_dt)))
 
+    def _run_physics(self, target6):
+        """One control step of plant: EMA-filter the target, clip to ctrlrange, and run
+        control_decimation sim substeps (OR-accumulating foot contact across them so a sub-20 ms hop
+        can't pass as continuous flight/contact at the 50 Hz boundary). Shared by PD and fourier."""
+        c = self.cfg
+        self._filt_target = c.action_filter * self._filt_target + (1 - c.action_filter) * target6
+        self.data.ctrl[:] = np.clip(self._filt_target, self.ctrl_lo, self.ctrl_hi)
+        contact_acc = np.zeros(2, bool)
+        for _ in range(c.control_decimation):
+            mujoco.mj_step(self.model, self.data)
+            if not contact_acc.all():
+                contact_acc |= self._foot_contacts()
+        return contact_acc
+
     def step(self, action):
+        if self.cfg.action_mode == "fourier":
+            return self._step_fourier(action)
         c = self.cfg
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
         # fixed actuation delay (plant truth: Pi inference + moteus/CAN is ~one 50 Hz step).
-        # The observation's prev_action stays the policy's own output, like on hardware.
         # (append-then-pop is a no-op passthrough when action_delay_steps == 0)
         self._delay_buf.append(action)
         applied = self._delay_buf.pop(0)
-        raw_target = self.nominal_ctrl + c.action_scale * applied
-        self._filt_target = c.action_filter * self._filt_target + (1 - c.action_filter) * raw_target
-        self.data.ctrl[:] = np.clip(self._filt_target, self.ctrl_lo, self.ctrl_hi)
+        target6 = self.nominal_ctrl + c.action_scale * applied
 
-        # gentle random shove BEFORE the physics runs, so its effect is integrated by the
-        # dynamics and reaches this step's sensors/reward as real state — never as a bare qvel
-        # edit that the reward would bill to (or credit against) the pre-push action.
+        # gentle random shove BEFORE the physics runs, so its effect is integrated by the dynamics
+        # and reaches this step's sensors/reward as real state (not a bare qvel edit).
         self._push_countdown -= 1
         if self._push_countdown <= 0:
             ang = self.np_random.uniform(0.0, 2.0 * np.pi)
@@ -323,13 +352,7 @@ class Dash01Env(gym.Env):
                 self.data.qvel[self._base_y_dadr] += c.push_dv * np.sin(ang)
             self._push_countdown = self._next_push_in()
 
-        # contact is OR-accumulated across the sim substeps so a sub-20 ms hop cannot pass as
-        # continuous flight (or continuous contact) at the 50 Hz sampling boundary.
-        contact_acc = np.zeros(2, bool)
-        for _ in range(c.control_decimation):
-            mujoco.mj_step(self.model, self.data)
-            if not contact_acc.all():
-                contact_acc |= self._foot_contacts()
+        contact_acc = self._run_physics(target6)
 
         self._step += 1
         if self._step % self._resample_every == 0:
@@ -343,15 +366,60 @@ class Dash01Env(gym.Env):
             self._advance_command_pose()              # else advance target by the command
 
         self._push_frame(self._proprio())
-        reward, terms, progress_frac = self._reward(action)
+        reward, terms, progress_frac = self._reward(action)      # PD: motor_cmd == action
         reward += self._gait_reward(terms, progress_frac, contact_acc)
         terminated = self._fallen()
         if terminated:
             reward -= c.fall_penalty
         truncated = self._step >= self.max_steps
         self._prev_action[:] = action
+        self._prev_motor_cmd[:] = action
         info = {"reward_terms": terms, "command": self._command.copy()}
         return self._obs(), float(reward), bool(terminated), bool(truncated), info
+
+    def _step_fourier(self, action):
+        """MACRO-step = one full gait cycle. The action is the per-cycle gait spec (cam+thigh Fourier
+        coeffs + frequency + abduction reflex gains, see rl/fourier_gait.py). We replay the cycle at
+        50 Hz — reconstructing the 6 PD targets each control step (abduction driven by the reflex on
+        current roll/roll-rate) — and return the MEAN per-control-step reward (keeps the per-step
+        reward tuning scale). One obs frame is emitted at the cycle boundary."""
+        c = self.cfg
+        action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        cam_c, thigh_c, freq_raw, reflex = self._fourier.decode(action, c.n_harmonics)
+        f = self._fourier.frequency(freq_raw, c.gait_freq_hz)
+        K = max(1, int(round(1.0 / (f * self.control_dt))))     # control steps per gait cycle
+        dphi = 2.0 * np.pi / K
+
+        cyc_reward, term_sum, terminated, n = 0.0, None, False, 0
+        for _ in range(K):
+            roll = float(self._gravity_body()[1])               # ~roll angle (small-angle: grav_y)
+            roll_rate = float(self._ang_vel_body()[0])          # roll rate (gyro x)
+            target6 = self._fourier.assemble(cam_c, thigh_c, reflex, self._phase,
+                                             roll, roll_rate, self.nominal_ctrl, c)
+            motor_cmd = ((target6 - self.nominal_ctrl) / c.action_scale).astype(np.float32)
+            contact_acc = self._run_physics(target6)
+            reward, terms, progress_frac = self._reward(motor_cmd)
+            reward += self._gait_reward(terms, progress_frac, contact_acc)
+            self._prev_motor_cmd[:] = motor_cmd
+            cyc_reward += reward
+            term_sum = dict(terms) if term_sum is None else {k: term_sum[k] + terms[k] for k in terms}
+            n += 1
+            self._phase = (self._phase + dphi) % (2.0 * np.pi)
+            self._elapsed_t += self.control_dt
+            if self._fallen():
+                terminated = True
+                break
+
+        macro_reward = cyc_reward / n
+        if terminated:
+            macro_reward -= c.fall_penalty
+        truncated = self._elapsed_t >= c.episode_s
+        mean_terms = {k: v / n for k, v in term_sum.items()}
+        self._prev_action[:] = action
+        self._push_frame(self._proprio())                       # one obs frame per cycle
+        self._step += 1
+        info = {"reward_terms": mean_terms, "command": self._command.copy()}
+        return self._obs(), float(macro_reward), bool(terminated), bool(truncated), info
 
     def _gait_reward(self, terms, progress_frac, contact_acc):
         """Gait-shaping terms (all sim-side, reward-only). The measured failure mode of v2 was
@@ -423,7 +491,9 @@ class Dash01Env(gym.Env):
         directly, and no reachable state may make dying cheaper than living (suicide-proofing)."""
         return max(float(v), -self.cfg.penalty_term_cap)
 
-    def _reward(self, action):
+    def _reward(self, motor_cmd):
+        # motor_cmd = the normalized 6-vector motor command this control step (PD: == the action;
+        # fourier: (reconstructed target - nominal)/action_scale). Only action_rate uses it.
         c = self.cfg
         R = self._base_rot()
         v_body = R.T @ self.data.qvel[0:3]
@@ -481,7 +551,7 @@ class Dash01Env(gym.Env):
         else:
             t["height"] = self._pen(-c.w_height * (self.data.qpos[2] - self.height_target) ** 2)
             t["vz"] = self._pen(-c.w_vz * self.data.qvel[2] ** 2)
-        t["action_rate"] = self._pen(-c.w_action_rate * np.sum((action - self._prev_action) ** 2))
+        t["action_rate"] = self._pen(-c.w_action_rate * np.sum((motor_cmd - self._prev_motor_cmd) ** 2))
         # torque ABOVE the standing baseline magnitude, one-sided: holding the stance is free,
         # relaxing (a swing leg unloading toward zero) is free, only exceeding the baseline pays.
         # (Raw tau^2 made one-leg support cost 2x two-leg support by construction.)

@@ -305,6 +305,11 @@ class Dash01MjxEnv:
 
     def __init__(self, cfg: Config = None):
         self.cfg = cfg = cfg or Config()
+        if getattr(cfg, "action_mode", "pd") != "pd":
+            raise NotImplementedError(
+                "Dash01MjxEnv only supports action_mode='pd'. The fourier per-cycle gait policy is "
+                "CPU-only for now (variable-length cycle scan + per-cycle macro-step is deferred in "
+                "MJX, like the GPU ride-height randomization). Train fourier presets with rl.train.")
         mj_model = mujoco.MjModel.from_xml_path(cfg.model_path)
         mj_data = mujoco.MjData(mj_model)
         self.sim_dt = float(mj_model.opt.timestep)

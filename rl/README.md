@@ -210,6 +210,22 @@ need large fore/aft lunges and up to ~100 Nm holding torque, so the M1 default `
 moderate `(0.90, 1.03)`. **GPU/MJX height randomization is deferred** (CPU path gets exact
 per-episode; MJX pins Z at the stand height for now).
 
+### Fourier cyclic-gait policy (`m1_fourier`, `m2_fourier`)
+
+Alternative policy **action representation** for the speed milestones (`action_mode="fourier"`): a
+locomotion gait is cyclic, so instead of 6 per-step PD targets the policy emits, **once per gait
+cycle**, a compact spec — cam+thigh **Fourier coefficients** (N=3 harmonics, symmetric mirror+antiphase),
+a **learnable cadence**, and a **learned abduction (hip_roll) balance reflex** on roll/roll-rate that
+runs at 50 Hz inside the cycle (feedforward CPG for propulsion + feedback for balance). `env.step`
+becomes a macro-step = one cycle (~30/episode instead of 1000). Reconstruction math is in the
+numpy-only `rl/fourier_gait.py` (Pi-shareable, like `fixed_gait/gait.py`). CPU-only for now (MJX raises
+on fourier mode; parity gate still runs PD). The abduction reflex is inert while roll/Y are locked
+(M1–M3) and activates at M4+.
+```bash
+python -m rl.smoke_test --preset m1_fourier         # obs 220, action 18, ~30 cycles/episode
+python -m rl.train --preset m1_fourier --n-envs 8 --steps 800000 --no-progress
+```
+
 ## Milestones (legacy free-floating track: `m1_stand`/`m2_walk`/`m3_turn`)
 | # | preset | goal | status |
 |---|---|---|---|

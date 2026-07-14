@@ -59,6 +59,23 @@ class Config:
     action_delay_steps: int = 1         # fixed actuation delay in control steps: the Pi + moteus/CAN
     #                                     round trip is ~one 50 Hz step on hardware — plant truth, not DR
 
+    # ----- action representation -----
+    # "pd": the policy outputs 6 per-step PD targets (default, unchanged). "fourier": the policy
+    # instead outputs, ONCE PER GAIT CYCLE, a Fourier series for cam+thigh (a periodic propulsion gait)
+    # + a learnable frequency + a learned abduction (hip_roll) balance reflex. See rl/fourier_gait.py.
+    # In fourier mode env.step is a MACRO-step = one full gait cycle (~30/episode instead of 1000).
+    action_mode: str = "pd"             # "pd" | "fourier"
+    n_harmonics: int = 3                # Fourier harmonics per joint (coeffs/joint = 1 + 2N)
+    gait_freq_hz: tuple = (0.5, 3.0)    # learnable cadence range (Hz); policy picks f in this band
+    # max Fourier DEVIATION (rad) of cam/thigh from the nominal stance posture (which is always an
+    # in-band, validated pose). Kept within the empirically-valid ctrl ranges here (cam ~[-0.6,0.6],
+    # thigh ~[-0.2,0.8] from the ride-height LUT) so the coupled 4-bar stays assemblable.
+    cam_amp: float = 0.30
+    thigh_amp: float = 0.35
+    reflex_kp_scale: float = 0.5        # abduction reflex: hip_roll += kp*roll (rad per rad), policy-scaled
+    reflex_kd_scale: float = 0.1        #                 + kd*roll_rate (rad per rad/s)
+    reflex_bias_scale: float = 0.2      #                 + bias (rad, per-cycle lateral offset)
+
     # ----- reward weights -----
     # Every penalty term is floored at -penalty_term_cap so no reachable state makes per-step
     # reward so negative that diving into the floor becomes value-optimal (reward normalization
@@ -264,9 +281,31 @@ def m6() -> Config:
     return _speed(base_lock=(0, 0, 0, 0, 0, 0))
 
 
+# Fourier cyclic-gait variants: same rail + max-speed task, but the policy outputs a per-cycle Fourier
+# gait (cam+thigh) + learnable cadence + a learned abduction balance reflex. gamma is lowered because
+# a macro-step is now a whole gait cycle (~0.3-1 s), so the effective horizon is ~30 steps not 1000.
+# a macro-step is one gait cycle (~0.3-1 s = ~15-65 control steps), so a "timestep" here is a whole
+# cycle: use a shorter rollout, a smaller total budget (in cycles), and a lower gamma than the PD path.
+_FOURIER_TRAIN = dict(action_mode="fourier", gamma=0.93,
+                      n_steps=256, batch_size=512, total_steps=800_000)
+
+
+def m1_fourier() -> Config:
+    """M1 (rail, random ride-height) with the Fourier cyclic-gait policy."""
+    return _speed(base_lock=(0, 1, 1, 1, 1, 1), z_rail_randomize=True, z_rail_range=(0.90, 1.03),
+                  **_FOURIER_TRAIN)
+
+
+def m2_fourier() -> Config:
+    """M2 (X,Z free) with the Fourier cyclic-gait policy."""
+    return _speed(base_lock=(0, 1, 0, 1, 1, 1), **_FOURIER_TRAIN)
+
+
 PRESETS = {
     # base-DOF curriculum
     "m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6,
+    # Fourier cyclic-gait variants
+    "m1_fourier": m1_fourier, "m2_fourier": m2_fourier,
     # legacy free-floating presets (all-free plant)
     "m1_stand": m1_stand, "m2_walk": m2_walk, "m3_turn": m3_turn, "default": Config,
 }

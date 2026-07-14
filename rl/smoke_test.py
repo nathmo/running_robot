@@ -5,7 +5,7 @@ Run:  .venv/Scripts/python.exe -m rl.smoke_test [--preset m1]
 import argparse
 import numpy as np
 from .config import get_config
-from .env import Dash01Env, FRAME_DIM
+from .env import Dash01Env
 
 
 def main():
@@ -15,13 +15,14 @@ def main():
 
     cfg = get_config(args.preset)
     env = Dash01Env(cfg)
-    print(f"preset={args.preset}  base_lock={cfg.base_lock}  speed_mode={cfg.speed_mode}  "
-          f"z_rail_randomize={cfg.z_rail_randomize}")
+    zero_action = np.zeros(env.action_dim, np.float32)
+    print(f"preset={args.preset}  action_mode={cfg.action_mode}  base_lock={cfg.base_lock}  "
+          f"speed_mode={cfg.speed_mode}  z_rail_randomize={cfg.z_rail_randomize}")
     print(f"sim_dt={env.sim_dt}  control_dt={env.control_dt:.3f}s ({1/env.control_dt:.0f} Hz)  "
           f"max_steps={env.max_steps}")
-    print(f"obs space  = {env.observation_space.shape}  (expect {FRAME_DIM}*{cfg.history_len}="
-          f"{FRAME_DIM*cfg.history_len})")
-    print(f"action     = {env.action_space.shape}  (expect {env.nu})")
+    print(f"obs space  = {env.observation_space.shape}  (frame_dim {env.frame_dim} x "
+          f"history {cfg.history_len})")
+    print(f"action dim = {env.action_dim}  (pd=6 motor targets; fourier=cam+thigh coeffs+freq+reflex)")
 
     obs, _ = env.reset(seed=0)
     assert obs.shape == env.observation_space.shape
@@ -47,8 +48,10 @@ def main():
         obs, _ = env.reset(seed=100 + ep)
         h0 = float(env.data.qpos[2])
         ride_heights.append(h0)
-        for _ in range(60):
-            env.step(np.zeros(env.nu, np.float32))
+        for _ in range(60):                          # steps (macro-steps in fourier mode)
+            _, _, term, trunc, _ = env.step(zero_action)
+            if term or trunc:
+                break
         qb, vb = env.data.qpos[:6], env.data.qvel[:6]
         for i in range(6):
             if locked[i]:
@@ -68,13 +71,13 @@ def main():
     obs, _ = env.reset(seed=1)
     steps, rt = 0, None
     for _ in range(env.max_steps):
-        obs, r, term, trunc, info = env.step(np.zeros(env.nu, np.float32))
+        obs, r, term, trunc, info = env.step(zero_action)
         rt = info["reward_terms"]
         steps += 1
         if term or trunc:
             break
-    print(f"zero-action hold: survived {steps}/{env.max_steps} control steps "
-          f"({steps*env.control_dt:.2f}s) before fall/timeout")
+    unit = "cycles" if cfg.action_mode == "fourier" else "control steps"
+    print(f"zero-action hold: survived {steps} {unit} before fall/timeout")
     print(f"reward terms (last step): " + ", ".join(f"{k}={v:+.3f}" for k, v in rt.items()))
     print(f"command sampled: {info['command']}")
     print("SMOKE TEST OK")
