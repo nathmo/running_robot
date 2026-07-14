@@ -353,6 +353,27 @@
     </div>
   </section>
 
+  <!-- ============================ manage / delete files ============================ -->
+  <section class="panel" id="panel-files">
+    <h2>Manage files
+      <span class="hint">permanently delete a saved workspace-calibration or gait file you no
+        longer need</span></h2>
+    <div class="row">
+      <select id="del-kind" class="txt small">
+        <option value="workspace">workspace (calibration)</option>
+        <option value="trajectory">gait pattern</option>
+      </select>
+      <select id="del-file" class="txt"></select>
+      <button id="btn-del-file" class="btn">🗑 Delete…</button>
+    </div>
+    <div class="row hidden" id="del-confirm-row">
+      <span class="del-warn">Delete <b id="del-confirm-name"></b> permanently? This cannot be undone.</span>
+      <span class="spacer"></span>
+      <button id="btn-del-confirm" class="btn estop">Yes, delete</button>
+      <button id="btn-del-cancel" class="btn">Cancel</button>
+    </div>
+  </section>
+
   <!-- ============================ mock tools ============================ -->
   <section class="panel hidden" id="panel-mock">
     <h2>Mock tools <span class="hint">simulated motors only</span></h2>

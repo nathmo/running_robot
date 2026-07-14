@@ -40,6 +40,14 @@ def save(name, data):
     return p
 
 
+def delete(name):
+    p = _path(name)                        # _path sanitizes the name (no path traversal)
+    if not os.path.exists(p):
+        raise FileNotFoundError(f"gait '{name}' not found")
+    os.remove(p)
+    return os.path.basename(p)
+
+
 def data_to_json(data, fk=None):
     """JSON-ready trajectory (+ EE-projected paths when the FK LUT side is verified)."""
     out = dict(N=int(data["N"]), split=float(data["split"]))

@@ -190,6 +190,19 @@ class WorkspaceStore:
             return f"rebuilt {leg} workspace from legacy raw sweep" + (f" ({warn})" if warn else "")
         raise ValueError("unrecognized npz: not a webui workspace, joint_limits, or raw sweep file")
 
+    def delete_file(self, name):
+        """Delete a saved workspace file. The active (currently-loaded) workspace is untouched —
+        only the on-disk copy goes away."""
+        base = _safe_name(name)            # sanitized: no path traversal
+        path = os.path.join(paths.WORKSPACE_DIR, base + ".npz")
+        if not os.path.exists(path):
+            return False, f"workspace '{name}' not found"
+        os.remove(path)
+        with self._lock:
+            if self.source == base + ".npz":
+                self.source = None          # display-only; keeps the active workspace loaded
+        return True, ""
+
     def list_files(self):
         return sorted(f for f in os.listdir(paths.WORKSPACE_DIR) if f.endswith(".npz"))
 

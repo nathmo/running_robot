@@ -360,6 +360,13 @@ def api_workspace_save():
     return _ok(saved=path)
 
 
+@app.post("/api/workspace/delete")
+def api_workspace_delete():
+    b = request.get_json(force=True, silent=True) or {}
+    ok, why = STATE["wstore"].delete_file(b.get("name", ""))
+    return _ok() if ok else _err(why, 404)
+
+
 @app.get("/api/workspace/export")
 def api_workspace_export():
     blob, fname = STATE["wstore"].export_bytes(request.args.get("name"))
@@ -526,6 +533,18 @@ def api_trajectory_import():
     except ValueError as e:
         return _err(e)
     return _ok(imported=name)
+
+
+@app.post("/api/trajectory/delete")
+def api_trajectory_delete():
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        removed = gaitstore.delete(b.get("name", ""))
+    except FileNotFoundError as e:
+        return _err(e, 404)
+    except ValueError as e:
+        return _err(e)
+    return _ok(deleted=removed)
 
 
 # ===================================================================== playback

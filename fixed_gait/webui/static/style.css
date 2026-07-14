@@ -111,6 +111,10 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 .override input { accent-color: var(--bad); }
 #home-status { min-width: 120px; }
 
+/* ---------------- manage / delete files ---------------- */
+.del-warn { color: var(--bad); font-weight: 600; }
+#del-confirm-row { align-items: center; }
+
 /* ---------------- canvases / tools ---------------- */
 .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
 .tab { background: var(--panel2); border: 1px solid var(--line); color: var(--dim);

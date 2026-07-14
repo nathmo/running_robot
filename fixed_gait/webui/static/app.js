@@ -157,7 +157,7 @@ function updateWizard(st) {
   // gate every actionable panel until calibrated (telemetry + mock stay usable — the wizard
   // itself needs live values and mock dragging)
   document.querySelectorAll("#main > .panel").forEach((p) => {
-    if (!["panel-calib", "panel-telemetry", "panel-mock"].includes(p.id))
+    if (!["panel-calib", "panel-telemetry", "panel-mock", "panel-files"].includes(p.id))
       p.classList.toggle("locked", !complete);
   });
   if (complete) {
@@ -1253,6 +1253,7 @@ function updateFileLists(st) {
   fillSelect($("ws-files"), (st.workspace || {}).files || []);
   fillSelect($("traj-files"), st.trajectories || []);
   fillSelect($("pb-file"), st.trajectories || []);
+  fillSelect($("del-file"), delFiles(st));
 }
 function fillSelect(sel, items) {
   const cur = sel.value;
@@ -1262,6 +1263,38 @@ function fillSelect(sel, items) {
   sel.innerHTML = items.map((f) => `<option>${f}</option>`).join("");
   if (items.includes(cur)) sel.value = cur;
 }
+
+/* ---------------- file management (delete) ---------------- */
+function delFiles(st) {
+  return $("del-kind").value === "trajectory"
+    ? (st.trajectories || [])
+    : ((st.workspace || {}).files || []);
+}
+function hideDelConfirm() { $("del-confirm-row").classList.add("hidden"); }
+$("del-kind").onchange = () => {
+  hideDelConfirm();
+  if (S.state) fillSelect($("del-file"), delFiles(S.state));   // swap the list to the new kind
+};
+$("del-file").onchange = hideDelConfirm;       // changing the target cancels a pending confirm
+$("btn-del-file").onclick = () => {
+  const name = $("del-file").value;
+  if (!name) { setBanner("no file selected to delete", "warn", 2500); return; }
+  const label = $("del-kind").value === "trajectory" ? "gait " : "workspace ";
+  $("del-confirm-name").textContent = label + name;
+  $("del-confirm-row").classList.remove("hidden");
+};
+$("btn-del-cancel").onclick = hideDelConfirm;
+$("btn-del-confirm").onclick = async () => {
+  const kind = $("del-kind").value, name = $("del-file").value;
+  hideDelConfirm();
+  if (!name) return;
+  const url = kind === "trajectory" ? "/api/trajectory/delete" : "/api/workspace/delete";
+  try {
+    await api(url, { json: { name } });
+    setBanner("deleted " + name, "", 3500);
+  } catch (_) { /* api() already surfaced the error banner */ }
+  if (S.state) fillSelect($("del-file"), delFiles(S.state));
+};
 
 /* ================================================================ EE animation */
 const eeView = { left: null, right: null };   // cached fit per side
