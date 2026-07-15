@@ -250,6 +250,15 @@ python -m rl.train --preset m1_sprint_fourier --n-envs 8 --no-progress
 python -m rl.train --preset m1_sprint_fourier --name m1_sprint_ft --resume rl/runs/m1_fourier/final_model.zip
 python -m rl.evaluate --run rl/runs/m1_sprint_fourier --episodes 3   # prints per-dash line/stop times
 ```
+`m2_sprint_fourier` is the same dash with the **height DOF free** (`base_lock=(0,1,0,1,1,1)`): no
+ride-height rail, the height/vz reward terms come back on, and `term_height` is live — the Z-free
+plant collapses in ~1.4 s under a passive hold (true of the existing `m2`/`m2_fourier` too), so the
+policy must actively support its own height while sprinting. Warm-start it (base_lock doesn't change
+the obs/action dims, so any m1 fourier checkpoint loads as-is):
+```bash
+python -m rl.train --preset m2_sprint_fourier --name m2_sprint_ft \
+    --resume rl/runs/m1_sprint_fourier/final_model.zip --n-envs 8 --subproc --no-progress
+```
 
 ## Milestones (legacy free-floating track: `m1_stand`/`m2_walk`/`m3_turn`)
 | # | preset | goal | status |

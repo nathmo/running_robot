@@ -345,6 +345,17 @@ def m1_sprint_fourier() -> Config:
                   sprint_curriculum_steps=400_000, **_FOURIER_TRAIN, **_SPRINT)
 
 
+def m2_sprint_fourier() -> Config:
+    """M2 (X and Z free) 100 m dash with the Fourier cyclic-gait policy: the robot carries its own
+    ride height for the whole dash. Strictly harder than m1_sprint_fourier — z_rail_randomize is
+    moot (nothing to rail), the height/vz reward terms come back on (the env neutralizes them only
+    while Z is locked), and term_height is live, so a gait that doesn't support the body now FALLS
+    instead of hanging from the rail. Warm-start it from an m1 sprint policy: base_lock doesn't
+    change the obs/action dims (220/18), so the checkpoint loads as-is."""
+    return _speed(base_lock=(0, 1, 0, 1, 1, 1), sprint_curriculum_steps=400_000,
+                  **_FOURIER_TRAIN, **_SPRINT)
+
+
 PRESETS = {
     # base-DOF curriculum
     "m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6,
@@ -352,6 +363,7 @@ PRESETS = {
     "m1_fourier": m1_fourier, "m2_fourier": m2_fourier,
     # 100 m dash
     "m1_sprint": m1_sprint, "m1_sprint_fourier": m1_sprint_fourier,
+    "m2_sprint_fourier": m2_sprint_fourier,
     # legacy free-floating presets (all-free plant)
     "m1_stand": m1_stand, "m2_walk": m2_walk, "m3_turn": m3_turn, "default": Config,
 }
