@@ -10,6 +10,7 @@
   .venv/Scripts/python.exe -m rl.evaluate --run rl/runs/m2_walk --vx 0.7 --yaw 0.0 --viewer
 """
 import argparse
+import time
 from pathlib import Path
 import numpy as np
 import mujoco
@@ -95,7 +96,8 @@ def main():
     ap.add_argument("--vx", type=float, default=None, help="fixed forward command in [-1,1]")
     ap.add_argument("--yaw", type=float, default=None, help="fixed yaw command in [-1,1]")
     ap.add_argument("--video", default=None, help="path to write an mp4 of episode 1")
-    ap.add_argument("--seconds", type=float, default=8.0, help="max video length")
+    ap.add_argument("--seconds", type=float, default=None,
+                    help="max video length (default: the whole episode — a full 100 m dash)")
     ap.add_argument("--viewer", action="store_true", help="live passive viewer (local only)")
     ap.add_argument("--stochastic", action="store_true",
                     help="sample actions like training does (a policy with a large std behaves "
@@ -113,60 +115,96 @@ def main():
         if fixed:
             set_command(raw, args.vx or 0.0, args.yaw or 0.0)
         with mjviewer.launch_passive(raw.model, raw.data) as v:
+            # sync + pace once per 50 Hz CONTROL step via the env hook — in fourier mode one
+            # env.step() replays a whole gait cycle, so syncing per step() jumped a cycle a frame
+            t_next = [time.perf_counter()]
+
+            def on_ctrl():
+                v.sync()
+                t_next[0] += raw.control_dt
+                lag = t_next[0] - time.perf_counter()
+                if lag > 0:
+                    time.sleep(lag)
+                else:
+                    t_next[0] = time.perf_counter()   # slow frame: don't bank a fast-forward debt
+            raw.on_control_step = on_ctrl
             while v.is_running():
                 a, _ = model.predict(obs, deterministic=True)
                 obs, _, done, _ = venv.step(a)
                 if fixed:
                     set_command(raw, args.vx or 0.0, args.yaw or 0.0)
-                v.sync()
                 if done[0]:
                     obs = venv.reset()
                     if fixed:
                         set_command(raw, args.vx or 0.0, args.yaw or 0.0)
         return
 
-    renderer = None
-    frames = []
+    renderer, writer = None, None
     if args.video:
+        try:
+            import imageio.v2 as imageio
+        except ImportError as e:
+            raise SystemExit(f"--video needs imageio (+imageio-ffmpeg): {e}")
         renderer = mujoco.Renderer(raw.model, 480, 640)
+        # STREAM frames to the encoder: a whole-episode video (60 s dash = 3000 frames) is ~2.7 GB
+        # as a raw in-memory frame list — do not buffer it.
+        writer = imageio.get_writer(args.video, fps=int(round(1 / raw.control_dt)))
     cam = mujoco.MjvCamera()
     mujoco.mjv_defaultFreeCamera(raw.model, cam)
     cam.distance, cam.elevation = 2.5, -15
 
+    # frames + vx error are sampled per 50 Hz CONTROL step via the env hook. In fourier mode one
+    # env.step() replays a whole gait cycle, so the old per-step() capture produced one frame per
+    # CYCLE played back at 50 fps — the 'twitching robot' video — and cycle-boundary-only metrics.
     lengths, returns, vx_err = [], [], []
+    n_ctrl = [0]              # control steps so far (== ep_len bookkeeping across both modes)
+    capture = [False]
+    n_frames = [0]
+    video_s = args.seconds if args.seconds is not None else raw.cfg.episode_s
+    max_frames = int(video_s / raw.control_dt)
+
+    def on_ctrl():
+        n_ctrl[0] += 1
+        v_body = raw._base_rot().T @ raw.data.qvel[0:3]
+        vx_err.append(abs(raw._command[0] * raw.cfg.vx_max - v_body[0]))
+        if capture[0] and writer is not None and n_frames[0] < max_frames:
+            cam.lookat[:] = raw.data.qpos[:3]           # follow-cam: tracks the base the whole run
+            renderer.update_scene(raw.data, cam)
+            writer.append_data(renderer.render())
+            n_frames[0] += 1
+    raw.on_control_step = on_ctrl
+
+    sprints = []
     for ep in range(args.episodes):
         obs = venv.reset()
         if fixed:
             set_command(raw, args.vx or 0.0, args.yaw or 0.0)
-        done, ep_len, ep_ret = [False], 0, 0.0
+        capture[0] = ep == 0
+        ep_start = n_ctrl[0]
+        done, ep_ret, sprint = [False], 0.0, None
         while not done[0]:
             a, _ = model.predict(obs, deterministic=not args.stochastic)
             obs, r, done, info = venv.step(a)
             if fixed:
                 set_command(raw, args.vx or 0.0, args.yaw or 0.0)
-            ep_len += 1
             ep_ret += float(r[0])   # raw env reward incl. fall penalty (norm_reward off at eval)
-            v_body = raw._base_rot().T @ raw.data.qvel[0:3]
-            vx_err.append(abs(raw._command[0] * raw.cfg.vx_max - v_body[0]))
-            if ep == 0 and renderer is not None and len(frames) < args.seconds / raw.control_dt:
-                cam.lookat[:] = raw.data.qpos[:3]
-                renderer.update_scene(raw.data, cam)
-                frames.append(renderer.render())
-        lengths.append(ep_len)
+            sprint = info[0].get("sprint", sprint)
+        lengths.append(n_ctrl[0] - ep_start)   # control steps, comparable across pd/fourier
         returns.append(ep_ret)
+        if sprint:
+            sprints.append(sprint)
     print(f"episodes={args.episodes}  ep_len {np.mean(lengths):.0f}+/-{np.std(lengths):.0f} "
-          f"(max {raw.max_steps})  mean_return {np.mean(returns):.1f}  "
+          f"control steps (max {raw.max_steps})  mean_return {np.mean(returns):.1f}  "
           f"mean |vx-cmd| {np.mean(vx_err):.3f} m/s")
+    for i, s in enumerate(sprints):
+        line = f"line {s['t_line']:6.2f} s" if s["t_line"] is not None else "line    DNF"
+        stop = f"stopped at {s['t']:.2f} s" if s["finished"] else "never stopped"
+        print(f"  dash ep{i}: {s['d']:6.1f} m of {s['dist_target']:.0f} m   {line}   {stop}   "
+              f"avg {s['d'] / max(s['t'], 1e-9):.2f} m/s")
 
-    if args.video and frames:
-        try:
-            import imageio.v2 as imageio
-            imageio.mimsave(args.video, frames, fps=int(1 / raw.control_dt))
-            print(f"wrote {args.video} ({len(frames)} frames)")
-        except Exception as e:
-            from PIL import Image
-            Image.fromarray(frames[len(frames) // 2]).save(args.video.replace(".mp4", ".png"))
-            print(f"(imageio unavailable: {e}); saved a single PNG instead")
+    if writer is not None:
+        writer.close()
+        print(f"wrote {args.video} ({n_frames[0]} frames, {n_frames[0] * raw.control_dt:.1f} s)")
 
 
 if __name__ == "__main__":

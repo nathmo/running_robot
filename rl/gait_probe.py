@@ -30,55 +30,65 @@ def probe_condition(model, venv, raw, vx_cmd, episodes, max_steps, deterministic
     """Metrics come from the env's OWN gait state (raw._grounded_prev / raw._air_time, updated
     with substep-accumulated contact) so the probe measures the same 'grounded' the reward
     machinery gates on — a boundary-sampled re-derivation would classify sub-20 ms hops
-    differently than the terms being validated."""
+    differently than the terms being validated.
+
+    Sampling happens in the env's per-CONTROL-step hook (raw.on_control_step), not per env.step():
+    in fourier mode one step() replays a whole gait cycle, so per-step() polling saw the gait
+    state only at cycle boundaries (duty/swing/slip garbage) and counted cycles against a
+    control-step budget. The hook also fires while raw.data still holds the true state — the
+    VecEnv auto-reset only swaps in a fresh keyframe after step() returns."""
     dt = raw.control_dt
     duty = np.zeros(2)
-    both = neither = total = 0
+    counts = dict(both=0, neither=0, total=0)
     touchdowns = np.zeros(2)
     air_times = []
     slips = []
     fwd_vels = []
     torques = []
     ep_lens, drift_10s = [], []
+    st = {}   # per-episode sampling state: prev grounded/air/xy + control-step count
+
+    def on_ctrl():
+        if st["n"] >= max_steps:      # hold the step budget exactly (a fourier macro-step
+            return                    # would otherwise overshoot it mid-cycle)
+        grounded = raw._grounded_prev.copy()          # this control step's grounded, env-defined
+        air_now = raw._air_time.copy()
+        xy = raw.data.geom_xpos[raw.foot_gids_arr, 0:2].copy()
+        v = np.linalg.norm(xy - st["prev_xy"], axis=1) / dt
+        for i in range(2):
+            if grounded[i]:
+                duty[i] += 1
+                if st["prev_grounded"][i]:            # both-ends gating, like the slip term
+                    slips.append(float(v[i]))
+                if st["prev_air"][i] > 0 and air_now[i] == 0:
+                    touchdowns[i] += 1
+                    air_times.append(float(st["prev_air"][i]))
+        counts["both"] += bool(grounded.all())
+        counts["neither"] += bool(~grounded.any())
+        counts["total"] += 1
+        fwd_vels.append(float((raw._base_rot().T @ raw.data.qvel[0:3])[0]))
+        torques.append(np.abs(raw.data.actuator_force[:raw.nu]))
+        st["prev_grounded"], st["prev_air"], st["prev_xy"] = grounded, air_now, xy
+        st["last_xy"] = raw.data.qpos[0:2].copy()
+        st["n"] += 1
+
+    raw.on_control_step = on_ctrl
     for _ in range(episodes):
         obs = venv.reset()
         set_command(raw, vx_cmd, 0.0)
-        prev_grounded = raw._grounded_prev.copy()
-        prev_air = raw._air_time.copy()
-        prev_xy = raw.data.geom_xpos[raw.foot_gids_arr, 0:2].copy()
         start = raw.data.qpos[0:2].copy()
-        last_xy = start.copy()
-        done, steps = [False], 0
-        while not done[0] and steps < max_steps:
+        st.update(n=0, prev_grounded=raw._grounded_prev.copy(), prev_air=raw._air_time.copy(),
+                  prev_xy=raw.data.geom_xpos[raw.foot_gids_arr, 0:2].copy(), last_xy=start.copy())
+        done = [False]
+        while not done[0] and st["n"] < max_steps:
             a, _ = model.predict(obs, deterministic=deterministic)
             obs, _, done, _ = venv.step(a)
-            steps += 1
-            if done[0]:
-                break            # the VecEnv auto-reset: raw.data is a fresh keyframe, not the
-            #                      episode's final state — sampling it would corrupt every metric
             set_command(raw, vx_cmd, 0.0)
-            grounded = raw._grounded_prev.copy()          # this step's grounded, env-defined
-            air_now = raw._air_time.copy()
-            xy = raw.data.geom_xpos[raw.foot_gids_arr, 0:2].copy()
-            v = np.linalg.norm(xy - prev_xy, axis=1) / dt
-            for i in range(2):
-                if grounded[i]:
-                    duty[i] += 1
-                    if prev_grounded[i]:                  # both-ends gating, like the slip term
-                        slips.append(float(v[i]))
-                    if prev_air[i] > 0 and air_now[i] == 0:
-                        touchdowns[i] += 1
-                        air_times.append(float(prev_air[i]))
-            both += bool(grounded.all())
-            neither += bool(~grounded.any())
-            total += 1
-            fwd_vels.append(float((raw._base_rot().T @ raw.data.qvel[0:3])[0]))
-            torques.append(np.abs(raw.data.actuator_force[:raw.nu]))
-            prev_grounded, prev_air, prev_xy = grounded, air_now, xy
-            last_xy = raw.data.qpos[0:2].copy()
-        ep_lens.append(steps)
-        dist = float(np.linalg.norm(last_xy - start))
-        drift_10s.append(dist / max(steps * dt, 1e-9) * 10.0)
+        ep_lens.append(st["n"])                       # control steps, in pd AND fourier mode
+        dist = float(np.linalg.norm(st["last_xy"] - start))
+        drift_10s.append(dist / max(st["n"] * dt, 1e-9) * 10.0)
+    raw.on_control_step = None
+    total = counts["total"]
     swings = [a for a in air_times if a > dt * 1.5]     # real swings, not 1-step chatter
     tq = np.sqrt(np.mean(np.square(torques), axis=0)) if torques else np.zeros(raw.nu)
     act_names = [mujoco.mj_id2name(raw.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
@@ -88,8 +98,8 @@ def probe_condition(model, venv, raw, vx_cmd, episodes, max_steps, deterministic
         cmd_vx_mps=vx_cmd * raw.cfg.vx_max,
         mean_vx_mps=round(float(np.mean(fwd_vels)), 3) if fwd_vels else 0.0,
         duty_factor=[round(float(d / max(total, 1)), 3) for d in duty],
-        frac_both=round(both / max(total, 1), 3),
-        frac_neither=round(neither / max(total, 1), 3),
+        frac_both=round(counts["both"] / max(total, 1), 3),
+        frac_neither=round(counts["neither"] / max(total, 1), 3),
         touchdowns_per_s=[round(float(t / max(seconds, 1e-9)), 2) for t in touchdowns],
         swing_air_s=dict(n=len(swings),
                          median=round(float(np.median(swings)), 3) if swings else 0.0,

@@ -310,6 +310,10 @@ class Dash01MjxEnv:
                 "Dash01MjxEnv only supports action_mode='pd'. The fourier per-cycle gait policy is "
                 "CPU-only for now (variable-length cycle scan + per-cycle macro-step is deferred in "
                 "MJX, like the GPU ride-height randomization). Train fourier presets with rl.train.")
+        if getattr(cfg, "sprint_mode", False):
+            raise NotImplementedError(
+                "Dash01MjxEnv does not implement sprint_mode (100 m dash phases/termination are "
+                "CPU-only for now). Train sprint presets with rl.train.")
         mj_model = mujoco.MjModel.from_xml_path(cfg.model_path)
         mj_data = mujoco.MjData(mj_model)
         self.sim_dt = float(mj_model.opt.timestep)

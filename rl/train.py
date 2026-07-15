@@ -87,6 +87,37 @@ class CurriculumCallback(BaseCallback):
         return True
 
 
+class SprintCurriculumCallback(BaseCallback):
+    """Linearly ramp the sprint finish line from `start` to `target` meters over `warmup`
+    timesteps. Early policies are slow — at 0.5 m/s a 100 m line is 200 s away, outside the
+    episode, so the stop + finish bonus would never be experienced. Starting the line close
+    teaches the whole dash (accelerate, cross, stop) from the first rollouts, then stretches it.
+    Persists to curriculum.json (sprint presets disable the cmd_vx ramp, so no key clashes)."""
+    def __init__(self, target, warmup, start, run_dir=None):
+        super().__init__()
+        self.target, self.warmup, self.start = float(target), int(warmup), float(start)
+        self.run_dir = run_dir
+        self._last = None
+
+    def _on_rollout_start(self) -> None:
+        frac = 1.0 if self.warmup <= 0 else min(1.0, self.num_timesteps / self.warmup)
+        val = self.start + frac * (self.target - self.start)
+        self.logger.record("curriculum/sprint_dist_m", val)
+        if val == self._last:
+            return
+        self._last = val
+        self.training_env.env_method("set_sprint_dist", val)
+        if self.run_dir:
+            try:
+                (Path(self.run_dir) / "curriculum.json").write_text(
+                    json.dumps({"sprint_dist_m": val}))
+            except OSError:
+                pass
+
+    def _on_step(self) -> bool:
+        return True
+
+
 class EntropyCallback(BaseCallback):
     """Two jobs, both per rollout:
     1. Clamp log_std at cfg.max_log_std — the entropy bonus of a CLIPPED Gaussian keeps paying as
@@ -203,6 +234,7 @@ def main():
     # suicide-proofed against the raw fall penalty); the old norm_reward=True divided it all by a
     # running return-std that reached ~110, shrinking the fall penalty to ~1.8 and every shaping
     # term to noise. Observation normalization stays on.
+    resumed_sprint_dist = False
     if args.resume:
         # ONLY resume checkpoints trained on the CURRENT model + reward (v3, 2026-07-06+).
         # Pre-v3 checkpoints are incompatible three ways: the plant changed (+7.1 kg motor mass,
@@ -233,9 +265,14 @@ def main():
         # counter, so re-ramping would silently retrain on easier commands than the policy knows)
         cur = Path(ckpt).parent / "curriculum.json"
         if cur.exists():
-            val = json.loads(cur.read_text()).get("cmd_vx_frac", cfg.cmd_vx_frac)
-            base_venv.env_method("set_cmd_vx_frac", val)
-            print(f"[train] resumed curriculum cmd_vx_frac={val:.3f} <- {cur}")
+            saved = json.loads(cur.read_text())
+            if "cmd_vx_frac" in saved:
+                base_venv.env_method("set_cmd_vx_frac", saved["cmd_vx_frac"])
+                print(f"[train] resumed curriculum cmd_vx_frac={saved['cmd_vx_frac']:.3f} <- {cur}")
+            if "sprint_dist_m" in saved:
+                base_venv.env_method("set_sprint_dist", saved["sprint_dist_m"])
+                resumed_sprint_dist = True
+                print(f"[train] resumed curriculum sprint_dist_m={saved['sprint_dist_m']:.1f} <- {cur}")
     else:
         venv = VecNormalize(base_venv, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=cfg.gamma)
         lr = lambda p: cfg.lr_final + p * (cfg.learning_rate - cfg.lr_final)  # p: 1 -> 0 over the run
@@ -266,6 +303,16 @@ def main():
                                           cfg.cmd_vx_frac_start, run_dir=run))
         print(f"[train] curriculum: cmd_vx_frac {cfg.cmd_vx_frac_start} -> {cfg.cmd_vx_frac} "
               f"over {cfg.curriculum_steps} steps")
+    # distance ramp: attach on fresh sprint runs AND when warm-starting a sprint from a NON-sprint
+    # checkpoint (e.g. --resume rl/runs/m1_fourier — the walking policy still needs a near line to
+    # ever experience the stop + bonus). Only a resumed SPRINT run holds its restored distance.
+    if cfg.sprint_mode and cfg.sprint_curriculum_steps > 0 \
+            and cfg.sprint_dist_m > cfg.sprint_dist_start_m \
+            and not (args.resume and resumed_sprint_dist):
+        cb_list.append(SprintCurriculumCallback(cfg.sprint_dist_m, cfg.sprint_curriculum_steps,
+                                                cfg.sprint_dist_start_m, run_dir=run))
+        print(f"[train] curriculum: sprint_dist_m {cfg.sprint_dist_start_m} -> {cfg.sprint_dist_m} "
+              f"over {cfg.sprint_curriculum_steps} steps")
     callbacks = CallbackList(cb_list)
 
     print(f"[train] preset={args.preset} n_envs={n_envs} ({vec_cls.__name__}) "

@@ -111,6 +111,29 @@ class Config:
     speed_mode: bool = False
     w_fwd_speed: float = 2.0
     v_ceiling: float = 2.5              # m/s cap on the speed reward (well above the current ~1.5 max)
+    # ----- 100 m sprint objective (sprint_mode) -----
+    # One episode = one dash: start standing at x0, run to a finish line sprint_dist_m ahead, then
+    # STOP. Reward = dense speed income while running + a constant per-step clock cost + a stop
+    # bonus. The clock is what makes TIME matter: per-step vx alone integrates to w*distance no
+    # matter how fast it's covered, while sum(-w_time) = -w_time * T — maximizing reward minimizes
+    # the dash time. The policy's 'stop' signal is the command channel flipping [1,0] -> [0,0] at
+    # the line ([1,0] is exactly what speed_mode policies trained on, so sprint fine-tunes cleanly).
+    sprint_mode: bool = False
+    sprint_dist_m: float = 100.0        # the finish line (meters of base X from the reset pose)
+    sprint_dist_start_m: float = 25.0   # curriculum: line starts here so slow early policies still
+    sprint_curriculum_steps: int = 0    #   reach it and learn the stop; 0 = no ramp
+    sprint_brake_m: float = 5.0         # free braking zone past the line (sprinters run THROUGH
+    #                                     the line; fourier reacts at the next cycle boundary)
+    w_time: float = 0.5                 # per-control-step clock cost until stopped; with w_fwd_speed
+    #                                     income this sets the break-even pace (~0.25 m/s) below
+    #                                     which moving is worse than useless
+    w_stop_vel: float = 2.0             # stop-phase income for being stationary: w*exp(-(vx/sigma)^2)
+    stop_sigma: float = 0.3             # m/s width of the 'stationary' kernel
+    w_overrun: float = 1.0              # per-meter penalty past line+brake zone (capped, see _pen)
+    stop_speed_eps: float = 0.15        # |vx| below this counts as stopped
+    stop_hold_s: float = 1.0            # must stay stopped this long -> success termination
+    finish_bonus: float = 100.0         # terminal success bonus (mirror of fall_penalty; must beat
+    #                                     farming the stop-phase income, so keep gamma modest)
     # ----- gait shaping (all sim-side, reward-only; nothing enters the observation) -----
     # foot slip — THE anti-skate term: horizontal toe speed while grounded, quadratic above a
     # deadband, capped. Sized so skating at command speed costs ~1.5-2/step (comparable to the
@@ -301,11 +324,34 @@ def m2_fourier() -> Config:
     return _speed(base_lock=(0, 1, 0, 1, 1, 1), **_FOURIER_TRAIN)
 
 
+# 100 m dash (see sprint_mode in Config): run to the line as fast as possible, then stop.
+# w_alive must be 0 — a sprinter must not be paid per second of existence (the clock cost w_time
+# replaces it); curriculum_steps=0 keeps the cmd_vx ramp (pointless under speed sampling) from
+# clobbering curriculum.json, which the sprint distance ramp uses.
+_SPRINT = dict(sprint_mode=True, episode_s=60.0, w_alive=0.0, curriculum_steps=0)
+
+
+def m1_sprint() -> Config:
+    """M1 rail 100 m dash, per-step PD policy. gamma lowered so farming the stop-phase income
+    can never out-value the finish bonus (2.0/(1-0.99) = 200 gross vs bonus 100 + episode end —
+    the hold detector terminates anyway; this just removes the incentive to jitter at the line)."""
+    return _speed(base_lock=(0, 1, 1, 1, 1, 1), z_rail_randomize=True, z_rail_range=(0.90, 1.03),
+                  gamma=0.99, sprint_curriculum_steps=6_000_000, **_SPRINT)
+
+
+def m1_sprint_fourier() -> Config:
+    """M1 rail 100 m dash with the Fourier cyclic-gait policy."""
+    return _speed(base_lock=(0, 1, 1, 1, 1, 1), z_rail_randomize=True, z_rail_range=(0.90, 1.03),
+                  sprint_curriculum_steps=400_000, **_FOURIER_TRAIN, **_SPRINT)
+
+
 PRESETS = {
     # base-DOF curriculum
     "m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6,
     # Fourier cyclic-gait variants
     "m1_fourier": m1_fourier, "m2_fourier": m2_fourier,
+    # 100 m dash
+    "m1_sprint": m1_sprint, "m1_sprint_fourier": m1_sprint_fourier,
     # legacy free-floating presets (all-free plant)
     "m1_stand": m1_stand, "m2_walk": m2_walk, "m3_turn": m3_turn, "default": Config,
 }

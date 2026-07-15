@@ -89,29 +89,36 @@ def main():
     step = max(args.accel * dt, 1e-6)        # per-control-step ramp increment (normalized units)
 
     with mjviewer.launch_passive(raw.model, raw.data, key_callback=on_key) as v:
-        while v.is_running():
-            t0 = time.perf_counter()
+        # command ramp + viewer sync + real-time pacing run once per 50 Hz CONTROL step via the
+        # env hook — in fourier mode one env.step() replays a whole gait cycle, so doing this
+        # per step() synced/slept once per CYCLE (a ~30x fast-forward slideshow).
+        t_next = [time.perf_counter()]
 
+        def on_ctrl():
             # normalize the stepped physical target, then ramp the live command toward it
             target_norm = np.array([target[0] / vx_max, target[1] / yaw_max], np.float32)
-            live += np.clip(target_norm - live, -step, step)
+            live[:] = live + np.clip(target_norm - live, -step, step)
             raw._command[:] = live
+            v.sync()
+            if not args.no_realtime:
+                t_next[0] += dt
+                lag = t_next[0] - time.perf_counter()
+                if lag > 0:
+                    time.sleep(lag)
+                else:
+                    t_next[0] = time.perf_counter()   # slow frame: don't bank fast-forward debt
+        raw.on_control_step = on_ctrl
 
+        while v.is_running():
             a, _ = model.predict(obs, deterministic=True)
             obs, _, done, _ = venv.step(a)
             raw._command[:] = live           # env.step pushed the obs frame; keep command pinned
-            v.sync()
 
             if done[0] or want_reset[0]:
                 want_reset[0] = False
                 obs = venv.reset()
                 live[:] = 0.0                # restart from standing; keep the user's target
                 raw._command[:] = live
-
-            if not args.no_realtime:
-                lag = dt - (time.perf_counter() - t0)
-                if lag > 0:
-                    time.sleep(lag)
 
 
 if __name__ == "__main__":

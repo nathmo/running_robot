@@ -145,12 +145,23 @@ class Dash01Env(gym.Env):
         self._step = 0
         self._phase = 0.0            # gait phase (fourier mode): continuous, kept in [0, 2*pi)
         self._elapsed_t = 0.0        # cumulative sim time this episode (fourier time-based truncation)
+        # optional zero-arg hook fired once per 50 Hz CONTROL step, after the gait state
+        # (_grounded_prev/_air_time) has been updated. Rollout scripts (evaluate/gait_probe/
+        # joystick) must sample HERE, not per env.step(): in fourier mode one step() is a whole
+        # gait cycle, so per-step() sampling strobes at cycle rate (twitching videos, garbage
+        # duty/swing metrics).
+        self.on_control_step = None
 
     # ---------- helpers ----------
     def set_cmd_vx_frac(self, frac):
         """Curriculum hook: set the sampled forward-command fraction (called via VecEnv.env_method so
         it reaches SubprocVecEnv worker processes too). Takes effect on the next command resample."""
         self.cfg.cmd_vx_frac = float(frac)
+
+    def set_sprint_dist(self, d):
+        """Curriculum hook (VecEnv.env_method): move the sprint finish line. Applies from the NEXT
+        reset — the line never moves mid-dash."""
+        self.cfg.sprint_dist_m = float(d)
 
     def _sensor_adr(self, name):
         sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, name)
@@ -242,6 +253,10 @@ class Dash01Env(gym.Env):
 
     def _sample_command(self):
         c = self.cfg
+        if c.sprint_mode:                       # sprint: full throttle until the line, then stop.
+            self._command[0] = 0.0 if self._sprint_crossed else 1.0
+            self._command[1] = 0.0              # ([1,0] == the speed_mode training distribution,
+            return                              #  so a speed policy fine-tunes into sprint cleanly)
         if c.speed_mode:                        # max-speed milestones: always command forward-max
             self._command[0] = 1.0
             self._command[1] = 0.0
@@ -303,6 +318,15 @@ class Dash01Env(gym.Env):
         self._prev_toe_xy = self.data.geom_xpos[self.foot_gids_arr, 0:2].copy()
         self._push_countdown = self._next_push_in()
         self._step = 0
+        # sprint state: the finish line is frozen per episode (curriculum moves it between dashes)
+        self._x0 = float(self.data.qpos[0])
+        self._sprint_D = float(self.cfg.sprint_dist_m)
+        self._sprint_crossed = False
+        self._sprint_t_line = None
+        self._sprint_d = 0.0
+        self._stop_hold = 0.0
+        if self.cfg.sprint_mode:
+            self._resample_every = 10 ** 9    # the dash owns the command (run=[1,0] / stop=[0,0])
         self._sample_command()
         self._anchor_command_pose()                   # target starts at the actual standing pose
         frame = self._proprio()
@@ -315,6 +339,25 @@ class Dash01Env(gym.Env):
             return 10 ** 9
         s = c.push_interval_s * self.np_random.uniform(0.7, 1.3)
         return max(1, int(round(s / self.control_dt)))
+
+    def _update_sprint(self):
+        """One control step of sprint bookkeeping (call after physics): distance, the line-crossing
+        latch (freezes the dash time + flips the policy's command to 'stop'), and the stopped-hold
+        detector. Returns True when the robot has come to rest past the line (success)."""
+        self._sprint_d = float(self.data.qpos[0]) - self._x0
+        if not self._sprint_crossed and self._sprint_d >= self._sprint_D:
+            self._sprint_crossed = True                 # latched: recrossing backward doesn't un-finish
+            self._sprint_t_line = self._elapsed_t
+            self._command[:] = 0.0                      # the stop signal the policy observes
+        if self._sprint_crossed:
+            vx = float((self._base_rot().T @ self.data.qvel[0:3])[0])
+            if abs(vx) <= self.cfg.stop_speed_eps:
+                self._stop_hold += self.control_dt
+                if self._stop_hold >= self.cfg.stop_hold_s:
+                    return True
+            else:
+                self._stop_hold = 0.0
+        return False
 
     def _run_physics(self, target6):
         """One control step of plant: EMA-filter the target, clip to ctrlrange, and run
@@ -353,6 +396,8 @@ class Dash01Env(gym.Env):
             self._push_countdown = self._next_push_in()
 
         contact_acc = self._run_physics(target6)
+        self._elapsed_t += self.control_dt
+        finished = c.sprint_mode and self._update_sprint()
 
         self._step += 1
         if self._step % self._resample_every == 0:
@@ -371,10 +416,17 @@ class Dash01Env(gym.Env):
         terminated = self._fallen()
         if terminated:
             reward -= c.fall_penalty
+        elif finished:                     # dash complete: stopped past the line
+            terminated = True
+            reward += c.finish_bonus
         truncated = self._step >= self.max_steps
         self._prev_action[:] = action
         self._prev_motor_cmd[:] = action
+        if self.on_control_step is not None:
+            self.on_control_step()
         info = {"reward_terms": terms, "command": self._command.copy()}
+        if c.sprint_mode:
+            info["sprint"] = self._sprint_info(finished)
         return self._obs(), float(reward), bool(terminated), bool(truncated), info
 
     def _step_fourier(self, action):
@@ -390,7 +442,7 @@ class Dash01Env(gym.Env):
         K = max(1, int(round(1.0 / (f * self.control_dt))))     # control steps per gait cycle
         dphi = 2.0 * np.pi / K
 
-        cyc_reward, term_sum, terminated, n = 0.0, None, False, 0
+        cyc_reward, term_sum, fell, finished, n = 0.0, None, False, False, 0
         for _ in range(K):
             roll = float(self._gravity_body()[1])               # ~roll angle (small-angle: grav_y)
             roll_rate = float(self._ang_vel_body()[0])          # roll rate (gyro x)
@@ -398,6 +450,8 @@ class Dash01Env(gym.Env):
                                              roll, roll_rate, self.nominal_ctrl, c)
             motor_cmd = ((target6 - self.nominal_ctrl) / c.action_scale).astype(np.float32)
             contact_acc = self._run_physics(target6)
+            self._elapsed_t += self.control_dt
+            finished = c.sprint_mode and self._update_sprint()
             reward, terms, progress_frac = self._reward(motor_cmd)
             reward += self._gait_reward(terms, progress_frac, contact_acc)
             self._prev_motor_cmd[:] = motor_cmd
@@ -405,20 +459,28 @@ class Dash01Env(gym.Env):
             term_sum = dict(terms) if term_sum is None else {k: term_sum[k] + terms[k] for k in terms}
             n += 1
             self._phase = (self._phase + dphi) % (2.0 * np.pi)
-            self._elapsed_t += self.control_dt
+            if self.on_control_step is not None:
+                self.on_control_step()
+            if finished:                                        # dash complete: stop mid-cycle
+                break
             if self._fallen():
-                terminated = True
+                fell = True
                 break
 
         macro_reward = cyc_reward / n
-        if terminated:
+        if fell:
             macro_reward -= c.fall_penalty
+        elif finished:
+            macro_reward += c.finish_bonus
+        terminated = fell or finished
         truncated = self._elapsed_t >= c.episode_s
         mean_terms = {k: v / n for k, v in term_sum.items()}
         self._prev_action[:] = action
         self._push_frame(self._proprio())                       # one obs frame per cycle
         self._step += 1
         info = {"reward_terms": mean_terms, "command": self._command.copy()}
+        if c.sprint_mode:
+            info["sprint"] = self._sprint_info(finished)
         return self._obs(), float(macro_reward), bool(terminated), bool(truncated), info
 
     def _gait_reward(self, terms, progress_frac, contact_acc):
@@ -444,7 +506,12 @@ class Dash01Env(gym.Env):
                         np.maximum(0.0, slip_v - c.slip_deadband) ** 2, 0.0)
         terms["foot_slip"] = -min(c.w_foot_slip * float(slip.sum()), c.penalty_term_cap)
 
-        cmd_speed = c.v_ceiling if c.speed_mode else abs(float(self._command[0])) * c.vx_max
+        if c.sprint_mode:      # run phase = full-speed gait shaping; stop phase = standing, no gait
+            cmd_speed = 0.0 if self._sprint_crossed else c.v_ceiling
+        elif c.speed_mode:
+            cmd_speed = c.v_ceiling
+        else:
+            cmd_speed = abs(float(self._command[0])) * c.vx_max
         gait_on = cmd_speed >= c.gait_cmd_gate
 
         # air/stance clocks + one-sided capped touchdown credit (computed BEFORE the clocks
@@ -505,7 +572,29 @@ class Dash01Env(gym.Env):
         grav = self._gravity_body()
 
         t = {}
-        if c.speed_mode:
+        if c.sprint_mode:
+            # 100 m dash. Run phase: dense speed income (same monotone term as speed_mode).
+            # Stop phase (line crossed): income flips to 'be stationary', with a free braking
+            # zone then a per-meter overrun penalty. Both phases pay the constant clock cost —
+            # sum(vx)*dt integrates to the DISTANCE whatever the pace, so the clock term
+            # (-w_time * T total) is what actually prices the dash time; it also replaces
+            # w_alive, which would pay the policy per second of dawdling.
+            for k in ("track_vx", "track_yaw", "progress", "track_pos",
+                      "track_heading", "pos_pen", "yaw_rate", "heading_pen"):
+                t[k] = 0.0
+            t["time"] = -c.w_time
+            if not self._sprint_crossed:
+                t["fwd_speed"] = c.w_fwd_speed * float(np.clip(vx, 0.0, c.v_ceiling))
+                t["stop"] = 0.0
+                t["overrun"] = 0.0
+                progress_frac = float(np.clip(vx / c.v_ceiling, 0.0, 1.0))
+            else:
+                t["fwd_speed"] = 0.0
+                t["stop"] = c.w_stop_vel * float(np.exp(-((vx / c.stop_sigma) ** 2)))
+                over = max(0.0, self._sprint_d - (self._sprint_D + c.sprint_brake_m))
+                t["overrun"] = self._pen(-c.w_overrun * over)
+                progress_frac = 0.0
+        elif c.speed_mode:
             # maximum forward speed: one monotone linear reward, clip(vx, 0, v_ceiling) -- "faster is
             # strictly better" up to a physical cap. The command-tracking terms are switched off
             # (straightness comes from the base locks + the surviving lat_vel/heading penalties).
@@ -567,6 +656,12 @@ class Dash01Env(gym.Env):
         t["hip_roll"] = self._pen(-c.w_hip_roll * float(np.sum(hr ** 2)))
         t["alive"] = c.w_alive
         return sum(t.values()), t, progress_frac
+
+    def _sprint_info(self, finished):
+        """Dash telemetry for eval tooling: distance covered, elapsed time, time at the line."""
+        return dict(d=round(self._sprint_d, 2), t=round(self._elapsed_t, 2),
+                    t_line=None if self._sprint_t_line is None else round(self._sprint_t_line, 2),
+                    dist_target=self._sprint_D, finished=bool(finished))
 
     def _fallen(self):
         if not np.all(np.isfinite(self.data.qpos)):

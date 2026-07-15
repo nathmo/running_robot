@@ -225,6 +225,31 @@ on fourier mode; parity gate still runs PD). The abduction reflex is inert while
 python -m rl.smoke_test --preset m1_fourier         # obs 220, action 18, ~30 cycles/episode
 python -m rl.train --preset m1_fourier --n-envs 8 --steps 800000 --no-progress
 ```
+`evaluate.py` / `gait_probe.py` / `joystick.py` work unchanged on fourier runs: they sample frames,
+gait metrics, viewer syncs and real-time pacing through the env's per-**control-step** hook
+(`Dash01Env.on_control_step`), not per `env.step()` — a step() is a whole cycle in fourier mode, so
+per-step() sampling strobed at cycle rate (one video frame per cycle, cycle-boundary-only metrics).
+Any new rollout script must do the same.
+
+### 100 m dash (`m1_sprint`, `m1_sprint_fourier`)
+
+`sprint_mode`: one episode = one dash — start standing, run to a line `sprint_dist_m` ahead, STOP.
+Reward = dense speed income while running (the speed_mode term) **plus a constant per-step clock
+cost `w_time`**. The clock is what prices time: per-step vx alone integrates to w·distance no
+matter the pace, while the clock integrates to −w_time·T (w_alive is 0 for the same reason —
+a sprinter must not be paid per second of existence). At the line, the command channel the policy
+observes flips [1,0]→[0,0] (its stop signal; [1,0] is exactly the speed_mode training distribution,
+so a speed policy warm-starts cleanly), income switches to *be stationary* with a 5 m free braking
+zone + overrun penalty, and coming to rest (|vx| ≤ 0.15 m/s held 1 s) ends the episode with
+`finish_bonus`. The line starts at 25 m and ramps to 100 m (`sprint_curriculum_steps`) so slow
+early policies still reach it and learn the stop; a `--resume` from a NON-sprint checkpoint
+(e.g. `rl/runs/m1_fourier`) also gets the ramp.
+```bash
+python -m rl.train --preset m1_sprint_fourier --n-envs 8 --no-progress
+# or warm-start from the walking policy:
+python -m rl.train --preset m1_sprint_fourier --name m1_sprint_ft --resume rl/runs/m1_fourier/final_model.zip
+python -m rl.evaluate --run rl/runs/m1_sprint_fourier --episodes 3   # prints per-dash line/stop times
+```
 
 ## Milestones (legacy free-floating track: `m1_stand`/`m2_walk`/`m3_turn`)
 | # | preset | goal | status |
