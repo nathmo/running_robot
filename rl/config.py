@@ -324,6 +324,12 @@ def m2_fourier() -> Config:
     return _speed(base_lock=(0, 1, 0, 1, 1, 1), **_FOURIER_TRAIN)
 
 
+def m3_fourier() -> Config:
+    """M3 (X, Z, pitch free) with the Fourier cyclic-gait policy. Freeing pitch on top of m2_fourier;
+    base_lock doesn't change the obs/action dims (220/18), so an m2 Fourier checkpoint loads as-is."""
+    return _speed(base_lock=(0, 1, 0, 1, 0, 1), **_FOURIER_TRAIN)
+
+
 # 100 m dash (see sprint_mode in Config): run to the line as fast as possible, then stop.
 # w_alive must be 0 — a sprinter must not be paid per second of existence (the clock cost w_time
 # replaces it); curriculum_steps=0 keeps the cmd_vx ramp (pointless under speed sampling) from
@@ -356,14 +362,23 @@ def m2_sprint_fourier() -> Config:
                   **_FOURIER_TRAIN, **_SPRINT)
 
 
+def m3_sprint_fourier() -> Config:
+    """M3 (X, Z, pitch free) 100 m dash with the Fourier cyclic-gait policy: the m2_sprint_fourier
+    task with the pitch DOF additionally freed, so the body must also stabilize fore/aft attitude
+    while it sprints. base_lock doesn't change the obs/action dims (220/18), so an m2 sprint Fourier
+    checkpoint loads as-is."""
+    return _speed(base_lock=(0, 1, 0, 1, 0, 1), sprint_curriculum_steps=400_000,
+                  **_FOURIER_TRAIN, **_SPRINT)
+
+
 PRESETS = {
     # base-DOF curriculum
     "m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6,
     # Fourier cyclic-gait variants
-    "m1_fourier": m1_fourier, "m2_fourier": m2_fourier,
+    "m1_fourier": m1_fourier, "m2_fourier": m2_fourier, "m3_fourier": m3_fourier,
     # 100 m dash
     "m1_sprint": m1_sprint, "m1_sprint_fourier": m1_sprint_fourier,
-    "m2_sprint_fourier": m2_sprint_fourier,
+    "m2_sprint_fourier": m2_sprint_fourier, "m3_sprint_fourier": m3_sprint_fourier,
     # legacy free-floating presets (all-free plant)
     "m1_stand": m1_stand, "m2_walk": m2_walk, "m3_turn": m3_turn, "default": Config,
 }
