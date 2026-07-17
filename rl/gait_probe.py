@@ -141,9 +141,8 @@ def main():
                     help="ALSO probe sampled actions (training-time behavior)")
     args = ap.parse_args()
     run = Path(args.run)
-    preset = args.preset or infer_preset(run)
-
-    model, venv, raw = build(run, preset, args.checkpoint)
+    # None -> build() prefers the run's resolved_config.json, then preset inference
+    model, venv, raw = build(run, args.preset, args.checkpoint)
     out = {"walk": probe_condition(model, venv, raw, args.vx, args.episodes, args.steps),
            "stand": probe_condition(model, venv, raw, 0.0, args.episodes, args.steps)}
     if args.stochastic:

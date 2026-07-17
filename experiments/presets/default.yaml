@@ -1,0 +1,5 @@
+# == rl/config.py `default` (bare Config()). Parity anchor: proves dash01_base mirrors
+# the Config defaults exactly (tests/test_preset_parity.py).
+name: default
+description: "Config() defaults — free-floating joystick plant (parity anchor for dash01_base)."
+inherits: dash01_base

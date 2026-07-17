@@ -1,0 +1,11 @@
+# Library base — DASH-01 max-forward-speed task on the base-lock rails (rl/config.py
+# `_speed()` convention): the command is pinned at the speed ceiling, forward only, no
+# stand episodes. A milestone file then only sets base_dof (which rail).
+name: dash01_speed
+inherits: dash01_base
+
+command:
+  mode: speed                                      # monotone clip(vx, 0, v_ceiling) reward
+  vx_max: 2.5
+  forward_only: true
+  p_stand: 0.0

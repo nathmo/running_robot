@@ -1,0 +1,23 @@
+# Library base — DASH-01 with the PER-STEP Fourier override controllers + max-speed
+# objective. Same gait spec as dash01_fourier, but `update: per_step` on the pattern
+# generators: the network re-emits the coefficients at EVERY 50 Hz control step (env
+# action_mode "fourier_step" — instant override, PD tracks the freshly reconstructed
+# setpoint; mid-cycle rewrites are priced by the phase-gated w_coef_rate penalty, free
+# at the cycle boundary). One env.step == one control step again, so there is NO ppo
+# override block — the stock per-step PPO defaults from dash01_base apply.
+name: dash01_fourier_step
+inherits: dash01_speed
+
+joints:
+  cam_L:      {controller: pattern_gen, n_harmonics: 3, amp: 0.30, freq_hz: [0.5, 3.0], drives: position, update: per_step}
+  thigh_L:    {controller: pattern_gen, n_harmonics: 3, amp: 0.35, freq_hz: [0.5, 3.0], drives: position, update: per_step}
+  hip_roll_L: {controller: reflex, inputs: [roll, roll_rate], gains: learned,
+               kp_scale: 0.5, kd_scale: 0.1, bias_scale: 0.2}
+
+symmetry:
+  gait_pair:
+    mirror: {cam_R: cam_L, thigh_R: thigh_L, hip_roll_R: hip_roll_L}
+    sign: -1
+    phase: {mode: antiphase, tune: fixed}
+
+backend: {device: cpu}                             # pattern_gen unsupported on MJX

@@ -1,0 +1,6 @@
+# == rl/config.py `m1_fourier`: the M1 ride-height rail with the Fourier cyclic gait.
+name: m1_fourier
+description: "M1 rail (random ride height) with the per-cycle Fourier gait policy."
+inherits: dash01_fourier
+
+base_dof: [free, lock, {rail: [0.90, 1.03]}, lock, lock, lock]

@@ -1,0 +1,6 @@
+# == rl/config.py `m2_fourier_step`: X,Z free with the per-step Fourier override.
+name: m2_fourier_step
+description: "M2 (X,Z free) with the per-step Fourier override policy + phase-gated change penalty."
+inherits: dash01_fourier_step
+
+base_dof: [free, lock, free, lock, lock, lock]

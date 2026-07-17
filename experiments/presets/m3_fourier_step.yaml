@@ -1,0 +1,6 @@
+# == rl/config.py `m3_fourier_step`: X, Z, pitch free with the per-step Fourier override.
+name: m3_fourier_step
+description: "M3 (X,Z,pitch free) with the per-step Fourier override policy + phase-gated change penalty."
+inherits: dash01_fourier_step
+
+base_dof: [free, lock, free, lock, free, lock]

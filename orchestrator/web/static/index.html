@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RL run orchestrator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <h1>DASH-01 runs</h1>
+  <button id="btn-new" class="primary">New run</button>
+  <span id="conn" class="dot"></span>
+  <span id="conn-label" class="muted"></span>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<!-- ===================== launch form (modal) ===================== -->
+<div id="launch-back" class="modal-back hidden">
+  <div id="launch" class="modal">
+    <h2>Launch a training run</h2>
+    <label>Base
+      <select id="l-base"></select>
+    </label>
+    <div id="l-base-desc" class="muted small"></div>
+    <label>Name <span class="muted small">[A-Za-z0-9_.-]+ , must be new</span>
+      <input id="l-name" type="text" spellcheck="false" placeholder="m3_ft_lr3e4">
+    </label>
+    <label>Description <span class="req">required — what is this run trying?</span>
+      <textarea id="l-desc" rows="3" placeholder="e.g. m3_fourier with halved action_rate penalty; checking if skating returns"></textarea>
+    </label>
+    <div class="row">
+      <label>Steps <input id="l-steps" type="number" min="1" placeholder="(config default)"></label>
+      <label>n-envs <input id="l-nenvs" type="number" min="1" placeholder="(config default)"></label>
+      <label class="check"><input id="l-subproc" type="checkbox" checked> subproc</label>
+    </div>
+    <label>Overrides <span class="muted small">one field=value per line (value = JSON or bare)</span>
+      <textarea id="l-ovr" rows="4" spellcheck="false" placeholder="learning_rate=0.0003&#10;ent_coef=0.005"></textarea>
+    </label>
+    <div id="l-error" class="error hidden"></div>
+    <div class="row right">
+      <button id="l-cancel">Cancel</button>
+      <button id="l-go" class="primary" disabled>Launch</button>
+    </div>
+  </div>
+</div>
+
+<main>
+  <!-- ===================== left: runs table ===================== -->
+  <section id="left">
+    <table id="runs-table">
+      <thead>
+        <tr><th>run</th><th>status</th><th>steps</th><th class="num">ep_rew</th>
+            <th class="num">sps</th><th>probe</th><th></th></tr>
+      </thead>
+      <tbody id="runs-body"></tbody>
+    </table>
+  </section>
+
+  <!-- ===================== right: run detail ===================== -->
+  <section id="right">
+    <div id="detail-empty" class="muted center">select a run</div>
+    <div id="detail" class="hidden">
+      <div class="detail-head">
+        <h2 id="d-name"></h2>
+        <span id="d-status" class="pill"></span>
+        <span id="d-tool" class="muted small"></span>
+      </div>
+      <div id="d-source" class="muted small"></div>
+      <div id="d-desc" class="desc"></div>
+
+      <div class="row actions">
+        <button id="d-kill" class="danger">Kill</button>
+        <button id="d-eval">Evaluate (video)</button>
+        <button id="d-probe">Gait probe</button>
+        <a id="d-plots" class="btn hidden" target="_blank">training_plots.png</a>
+        <a id="d-runmp4" class="btn hidden" target="_blank">run.mp4</a>
+        <a id="d-evalmp4" class="btn hidden" target="_blank">eval.mp4</a>
+        <a id="d-probejson" class="btn hidden" target="_blank">gait_probe.json</a>
+      </div>
+
+      <div class="charts-head">
+        <h3>charts</h3>
+        <select id="chart-add"><option value="">+ add column…</option></select>
+      </div>
+      <div id="charts"></div>
+
+      <h3>train.log</h3>
+      <pre id="log" class="log"></pre>
+
+      <details id="diff-wrap">
+        <summary>config diff vs defaults (<span id="diff-count">0</span>)</summary>
+        <table id="diff-table" class="diff">
+          <thead><tr><th>field</th><th>default</th><th>this run</th></tr></thead>
+          <tbody id="diff-body"></tbody>
+        </table>
+      </details>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

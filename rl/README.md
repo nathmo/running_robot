@@ -231,6 +231,27 @@ gait metrics, viewer syncs and real-time pacing through the env's per-**control-
 per-step() sampling strobed at cycle rate (one video frame per cycle, cycle-boundary-only metrics).
 Any new rollout script must do the same.
 
+### Per-step Fourier override (`m1_fourier_step`, `m2_fourier_step`, `m3_fourier_step`)
+
+`action_mode="fourier_step"`: the **same 18-dim gait-spec action** as fourier, but re-emitted at
+**every 50 Hz control step** — no per-cycle latching, so the policy is no longer sluggish (the
+per-cycle mode reacts once per ~0.3–1 s cycle). Each step the env decodes the freshly emitted
+coefficients and PD tracks the newly reconstructed setpoint, i.e. the network can instantly
+override the gait mid-cycle (push recovery, terrain reactions). One `env.step` == one control step
+again, so the stock per-step PPO settings apply (gamma 0.995, n_steps 1024 — none of the fourier
+macro-step overrides). What keeps it a *gait* rather than free-form PD-through-a-basis: a new
+**`coef_rate` reward nudge**, `sum((applied − prev_applied)²) · sin(phase/2)²` weighted by
+`w_coef_rate` (capped by `penalty_term_cap`) — the gate is ZERO at the cycle boundary
+(phase ≈ 0 ≡ 2π), so re-planning the next cycle at the seam is free while mid-cycle rewrites pay.
+The obs frame gains a final `[sin(phase), cos(phase)]` pair (frame 46, obs 230 at history 5) so the
+policy knows where in the cycle its spec lands. With a constant action the per-step env reproduces
+the per-cycle trajectory exactly (`tests/test_fourier_step.py`); a fixed actuation delay applies to
+the coefficient vector like the pd path.
+```bash
+python -m rl.smoke_test --preset m2_fourier_step    # obs 230, action 18, 50 Hz steps
+python -m rl.train --preset m2_fourier_step --n-envs 8 --subproc --no-progress
+```
+
 ### 100 m dash (`m1_sprint`, `m1_sprint_fourier`)
 
 `sprint_mode`: one episode = one dash — start standing, run to a line `sprint_dist_m` ahead, STOP.

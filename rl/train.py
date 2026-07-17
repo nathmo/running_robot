@@ -21,13 +21,15 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList, BaseCallback
 from stable_baselines3.common.logger import configure
 
-from .config import get_config
+from .config import config_from_dict, config_to_dict, get_config
 from .env import Dash01Env
 
 
-def make_env(preset):
+def make_env(cfg):
+    # closes over the Config OBJECT (plain dataclass, pickles into SubprocVecEnv
+    # workers) so externally-resolved configs (--experiment/--config) work too
     def _init():
-        return Monitor(Dash01Env(get_config(preset)))
+        return Monitor(Dash01Env(cfg))
     return _init
 
 
@@ -205,7 +207,13 @@ class PlotCallback(BaseCallback):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="m1_stand")
-    ap.add_argument("--name", default=None, help="run folder name (default: preset)")
+    ap.add_argument("--experiment", default=None,
+                    help="experiments/ folder or .yaml — loaded + compiled via framework/ "
+                         "(overrides --preset)")
+    ap.add_argument("--config", default=None,
+                    help="resolved-config JSON written by a previous run / the orchestrator "
+                         "(overrides --preset and --experiment)")
+    ap.add_argument("--name", default=None, help="run folder name (default: preset/experiment)")
     ap.add_argument("--steps", type=int, default=None, help="override total timesteps")
     ap.add_argument("--n-envs", type=int, default=None)
     ap.add_argument("--subproc", action="store_true", help="use SubprocVecEnv (true parallelism)")
@@ -217,18 +225,48 @@ def main():
     ap.add_argument("--no-progress", action="store_true", help="disable the rich progress bar (for logs)")
     args = ap.parse_args()
 
-    cfg = get_config(args.preset)
+    compiled = None
+    if args.config:
+        d = json.loads(Path(args.config).read_text())
+        cfg = config_from_dict(d.get("config", d))
+        default_name = Path(args.config).stem
+        source = {"config": str(args.config)}
+    elif args.experiment:
+        from framework.compile import compile_experiment
+        from framework.loader import load_experiment
+        compiled = compile_experiment(load_experiment(args.experiment))
+        cfg = compiled.config
+        default_name = compiled.name
+        source = {"experiment": compiled.name, "description": compiled.description}
+    else:
+        cfg = get_config(args.preset)
+        default_name = args.preset
+        source = {"preset": args.preset}
     n_envs = args.n_envs or cfg.n_envs
     total = args.steps or cfg.total_steps
-    name = args.name or args.preset
+    name = args.name or default_name
     run = Path("rl/runs") / name
     run.mkdir(parents=True, exist_ok=True)
-    # record the preset so evaluate/gait_probe rebuild the SAME env config later, whatever the
-    # run folder is called (name-based inference is only the legacy fallback)
-    (run / "preset.json").write_text(json.dumps({"preset": args.preset}))
+    # record the config source so evaluate/gait_probe rebuild the SAME env config later,
+    # whatever the run folder is called (name-based inference is only the legacy fallback)
+    (run / "preset.json").write_text(json.dumps(source))
+    # the full resolved config is the ground truth for reproduction / eval / diffs
+    (run / "resolved_config.json").write_text(json.dumps(
+        {"config": config_to_dict(cfg), "n_envs": n_envs, "total_steps": total}, indent=1))
+
+    # an experiment can carry its warm-start (run.warm_start) — a --resume flag wins
+    if compiled is not None and compiled.warm_start and not args.resume:
+        ws = Path(compiled.warm_start)
+        for cand in (ws, Path("rl") / ws, Path("rl/runs") / ws):
+            if cand.exists():
+                args.resume = str(cand)
+                print(f"[train] warm_start from experiment: {args.resume}")
+                break
+        else:
+            raise SystemExit(f"[train] run.warm_start '{compiled.warm_start}' not found")
 
     vec_cls = SubprocVecEnv if (args.subproc and n_envs > 1) else DummyVecEnv
-    base_venv = vec_cls([make_env(args.preset) for _ in range(n_envs)])
+    base_venv = vec_cls([make_env(cfg) for _ in range(n_envs)])
 
     # NOTE: reward normalization is OFF. The reward is hand-balanced in raw units (and
     # suicide-proofed against the raw fall penalty); the old norm_reward=True divided it all by a
@@ -276,12 +314,18 @@ def main():
     else:
         venv = VecNormalize(base_venv, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=cfg.gamma)
         lr = lambda p: cfg.lr_final + p * (cfg.learning_rate - cfg.lr_final)  # p: 1 -> 0 over the run
+        policy_kwargs = dict(net_arch=list(cfg.policy_hidden))
+        if cfg.network_module:      # experiment ./network.py architecture escape hatch
+            from framework.modules import load_callable
+            policy_kwargs = load_callable(cfg.network_module, cfg.experiment_dir,
+                                          "policy_kwargs")(cfg)
+            print(f"[train] policy_kwargs from {cfg.network_module}: {policy_kwargs}")
         model = PPO(
             "MlpPolicy", venv,
             n_steps=cfg.n_steps, batch_size=cfg.batch_size, n_epochs=cfg.n_epochs,
             gamma=cfg.gamma, gae_lambda=cfg.gae_lambda, learning_rate=lr,
             clip_range=cfg.clip_range, ent_coef=cfg.ent_coef, target_kl=cfg.target_kl,
-            policy_kwargs=dict(net_arch=list(cfg.policy_hidden)),
+            policy_kwargs=policy_kwargs,
             seed=cfg.seed, verbose=1, tensorboard_log=str(run),
         )
 
@@ -313,9 +357,18 @@ def main():
                                                 cfg.sprint_dist_start_m, run_dir=run))
         print(f"[train] curriculum: sprint_dist_m {cfg.sprint_dist_start_m} -> {cfg.sprint_dist_m} "
               f"over {cfg.sprint_curriculum_steps} steps")
+    # experiment ./curriculum.py stages (framework.curriculum contract); resume holds
+    # its restored point like the built-in ramps do
+    if cfg.curriculum_module and not args.resume:
+        from framework.curriculum import StageCallback
+        from framework.modules import load_callable
+        stages = load_callable(cfg.curriculum_module, cfg.experiment_dir, "stages")(cfg)
+        if stages:
+            cb_list.append(StageCallback(stages, run_dir=run))
+            print(f"[train] curriculum module: {cfg.curriculum_module} ({len(stages)} stages)")
     callbacks = CallbackList(cb_list)
 
-    print(f"[train] preset={args.preset} n_envs={n_envs} ({vec_cls.__name__}) "
+    print(f"[train] source={source} n_envs={n_envs} ({vec_cls.__name__}) "
           f"total_steps={total} -> {run}")
     model.learn(total_timesteps=total, callback=callbacks, progress_bar=not args.no_progress)
     model.save(run / "final_model")

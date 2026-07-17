@@ -1,0 +1,7 @@
+# == rl/config.py `m1_stand`: learn to stand/balance at command (0,0), free-floating.
+name: m1_stand
+description: "M1 legacy: stand/balance at command (0,0) on the free-floating plant."
+inherits: dash01_base
+
+command:
+  p_stand: 1.0

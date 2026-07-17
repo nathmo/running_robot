@@ -6,6 +6,8 @@ short history. It outputs 6 PD position targets; the knee follows the parallel l
 ankle follows its spring. Reward tracks the commanded body-frame velocity + yaw rate while staying
 upright. No foot-contact sensor is used anywhere.
 """
+from types import SimpleNamespace
+
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -117,8 +119,9 @@ class Dash01Env(gym.Env):
              .startswith("hip_roll")], dtype=int)
 
         # action representation: "pd" = 6 per-step PD targets (default); "fourier" = per-cycle gait
-        # coefficients (cam+thigh Fourier + frequency + abduction reflex gains). See rl/fourier_gait.py.
-        if self.cfg.action_mode == "fourier":
+        # coefficients (cam+thigh Fourier + frequency + abduction reflex gains); "fourier_step" =
+        # the same 18 coefficients, re-emitted at every 50 Hz control step. See rl/fourier_gait.py.
+        if self.cfg.action_mode in ("fourier", "fourier_step"):
             from . import fourier_gait
             self._fourier = fourier_gait
             self.action_dim = fourier_gait.action_dim(self.cfg.n_harmonics)
@@ -126,24 +129,55 @@ class Dash01Env(gym.Env):
             self._fourier = None
             self.action_dim = self.nu
         self.action_space = spaces.Box(-1.0, 1.0, (self.action_dim,), np.float32)
+        self._prev_action = np.zeros(self.action_dim, np.float32)     # policy output (obs); coeffs in fourier
+        self._prev_motor_cmd = np.zeros(self.nu, np.float32)          # normalized 6 motor targets, for action_rate
+        self._command = np.zeros(2, np.float32)
+        # fourier_step: the last APPLIED gait spec + the phase-gated change penalty state
+        # (billed = sum((applied - prev_applied)^2) * sin(phase/2)^2 — see cfg.w_coef_rate)
+        self._prev_applied = np.zeros(self.action_dim, np.float32)
+        self._coef_rate_gated = 0.0
+        self._phase = 0.0            # gait phase (fourier modes): continuous, kept in [0, 2*pi);
+        #                              defined BEFORE the obs-module probe below (the facade exposes it)
+
+        # framework module injection ("" = built-in): an experiment can override the
+        # reward and/or observation with a local python module (framework/compile.py sets
+        # cfg.reward_module / cfg.obs_module). The stock library modules are pinned
+        # numerically identical to the built-in paths by tests/test_module_parity.py.
+        self._reward_fn = None
+        self._obs_fn = None
+        if self.cfg.reward_module or self.cfg.obs_module:
+            from framework.modules import load_callable
+            if self.cfg.reward_module:
+                self._reward_fn = load_callable(self.cfg.reward_module,
+                                                self.cfg.experiment_dir, "reward")
+            if self.cfg.obs_module:
+                self._obs_fn = load_callable(self.cfg.obs_module,
+                                             self.cfg.experiment_dir, "features")
+
         # per-frame obs = motor pos/vel/trq (6+6+6) + gravity(3) + gyro(3) + prev_action + command(2)
-        self.frame_dim = 6 + 6 + 6 + 3 + 3 + self.action_dim + 2
+        # (+ [sin(phase), cos(phase)] in fourier_step mode, appended after the command);
+        # an injected observation module defines its own frame (sized by a probe call —
+        # self.data holds the forwarded keyframe at this point)
+        if self._obs_fn is not None:
+            self.frame_dim = int(np.asarray(self._obs_fn(self._obs_state(), self.cfg)).shape[0])
+        else:
+            self.frame_dim = 6 + 6 + 6 + 3 + 3 + self.action_dim + 2
+            if self.cfg.action_mode == "fourier_step":
+                self.frame_dim += 2
         obs_dim = self.frame_dim * self.cfg.history_len
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
 
         self._history = np.zeros((self.cfg.history_len, self.frame_dim), np.float32)
-        self._prev_action = np.zeros(self.action_dim, np.float32)     # policy output (obs); coeffs in fourier
-        self._prev_motor_cmd = np.zeros(self.nu, np.float32)          # normalized 6 motor targets, for action_rate
         self._filt_target = self.nominal_ctrl.copy()
-        self._delay_buf = [np.zeros(self.nu, np.float32)
+        # delay buffer holds POLICY actions (action_dim: == nu for pd, 18 for fourier_step;
+        # the per-cycle fourier macro path doesn't use it)
+        self._delay_buf = [np.zeros(self.action_dim, np.float32)
                            for _ in range(self.cfg.action_delay_steps)]
-        self._command = np.zeros(2, np.float32)
         # integrated command-pose target (world xy + heading); re-anchored to the actual pose on
         # reset and on every command resample so tracking error stays bounded.
         self._des_xy = np.zeros(2, np.float64)
         self._des_yaw = 0.0
         self._step = 0
-        self._phase = 0.0            # gait phase (fourier mode): continuous, kept in [0, 2*pi)
         self._elapsed_t = 0.0        # cumulative sim time this episode (fourier time-based truncation)
         # optional zero-arg hook fired once per 50 Hz CONTROL step, after the gait state
         # (_grounded_prev/_air_time) has been updated. Rollout scripts (evaluate/gait_probe/
@@ -234,15 +268,33 @@ class Dash01Env(gym.Env):
                         return True
         return False
 
+    def _obs_state(self):
+        """State facade an injected observation module reads (see _lib/obs/standard.py)."""
+        return SimpleNamespace(
+            motor_pos=self.data.qpos[self.act_qadr] - self.default_motor_pos,
+            motor_vel=self.data.qvel[self.act_dadr].copy(),
+            motor_torque=self.data.actuator_force[:self.nu].copy(),
+            gravity_body=self._gravity_body(),
+            ang_vel=self._ang_vel_body(),
+            command=self._command.copy(),
+            prev_action=self._prev_action.copy(),
+            gait_phase=self._phase,
+        )
+
     def _proprio(self):
+        if self._obs_fn is not None:
+            return np.asarray(self._obs_fn(self._obs_state(), self.cfg), dtype=np.float32)
         s = self.cfg.obs_scales
         motor_pos = (self.data.qpos[self.act_qadr] - self.default_motor_pos) * s["motor_pos"]
         motor_vel = self.data.qvel[self.act_dadr] * s["motor_vel"]
         motor_trq = self.data.actuator_force[:self.nu] * s["motor_torque"]
         grav = self._gravity_body() * s["gravity"]
         angv = self._ang_vel_body() * s["ang_vel"]
-        return np.concatenate([motor_pos, motor_vel, motor_trq, grav, angv,
-                               self._prev_action, self._command]).astype(np.float32)
+        parts = [motor_pos, motor_vel, motor_trq, grav, angv,
+                 self._prev_action, self._command]
+        if self.cfg.action_mode == "fourier_step":     # + gait phase (the policy needs to know
+            parts.append(np.array([np.sin(self._phase), np.cos(self._phase)]))  # where in the cycle
+        return np.concatenate(parts).astype(np.float32)                         # its spec lands)
 
     def _obs(self):
         return self._history.reshape(-1).astype(np.float32)
@@ -307,10 +359,12 @@ class Dash01Env(gym.Env):
         mujoco.mj_forward(self.model, self.data)
         self._prev_action[:] = 0.0
         self._prev_motor_cmd[:] = 0.0
+        self._prev_applied[:] = 0.0
+        self._coef_rate_gated = 0.0
         self._phase = 0.0
         self._elapsed_t = 0.0
         self._filt_target[:] = self.nominal_ctrl
-        self._delay_buf = [np.zeros(self.nu, np.float32)
+        self._delay_buf = [np.zeros(self.action_dim, np.float32)
                            for _ in range(self.cfg.action_delay_steps)]
         self._air_time[:] = 0.0
         self._contact_time[:] = 0.0
@@ -376,6 +430,8 @@ class Dash01Env(gym.Env):
     def step(self, action):
         if self.cfg.action_mode == "fourier":
             return self._step_fourier(action)
+        if self.cfg.action_mode == "fourier_step":
+            return self._step_fourier_step(action)
         c = self.cfg
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
         # fixed actuation delay (plant truth: Pi inference + moteus/CAN is ~one 50 Hz step).
@@ -411,8 +467,7 @@ class Dash01Env(gym.Env):
             self._advance_command_pose()              # else advance target by the command
 
         self._push_frame(self._proprio())
-        reward, terms, progress_frac = self._reward(action)      # PD: motor_cmd == action
-        reward += self._gait_reward(terms, progress_frac, contact_acc)
+        reward, terms = self._compute_reward(action, contact_acc)   # PD: motor_cmd == action
         terminated = self._fallen()
         if terminated:
             reward -= c.fall_penalty
@@ -452,8 +507,7 @@ class Dash01Env(gym.Env):
             contact_acc = self._run_physics(target6)
             self._elapsed_t += self.control_dt
             finished = c.sprint_mode and self._update_sprint()
-            reward, terms, progress_frac = self._reward(motor_cmd)
-            reward += self._gait_reward(terms, progress_frac, contact_acc)
+            reward, terms = self._compute_reward(motor_cmd, contact_acc)
             self._prev_motor_cmd[:] = motor_cmd
             cyc_reward += reward
             term_sum = dict(terms) if term_sum is None else {k: term_sum[k] + terms[k] for k in terms}
@@ -482,6 +536,76 @@ class Dash01Env(gym.Env):
         if c.sprint_mode:
             info["sprint"] = self._sprint_info(finished)
         return self._obs(), float(macro_reward), bool(terminated), bool(truncated), info
+
+    def _step_fourier_step(self, action):
+        """Per-STEP Fourier override: same 18-dim gait-spec action as the per-cycle mode, but
+        re-emitted at EVERY 50 Hz control step — the policy can instantly rewrite the coefficients
+        mid-cycle and PD tracks the freshly reconstructed setpoint (mirrors the pd step structure,
+        NOT the macro loop). Abrupt rewrites are priced by the phase-gated coef_rate penalty,
+        which is ZERO at the cycle boundary (sin(phase/2)^2 gate). With a constant action this
+        reproduces the per-cycle trajectory exactly (tests/test_fourier_step.py)."""
+        c = self.cfg
+        action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        # fixed actuation delay, like pd: the DELAYED spec is what the plant actually runs
+        self._delay_buf.append(action)
+        applied = self._delay_buf.pop(0)
+        cam_c, thigh_c, freq_raw, reflex = self._fourier.decode(applied, c.n_harmonics)
+        f = self._fourier.frequency(freq_raw, c.gait_freq_hz)
+        phase_used = self._phase
+        # phase-gated coefficient-change penalty state (read by _reward as term "coef_rate"):
+        # changing the gait spec exactly at a cycle boundary (phase ~ 0 == 2pi) is FREE
+        self._coef_rate_gated = (float(np.sum((applied - self._prev_applied) ** 2))
+                                 * float(np.sin(phase_used / 2.0) ** 2))
+        self._prev_applied = applied.copy()
+        roll = float(self._gravity_body()[1])               # ~roll angle (small-angle: grav_y)
+        roll_rate = float(self._ang_vel_body()[0])          # roll rate (gyro x)
+        target6 = self._fourier.assemble(cam_c, thigh_c, reflex, phase_used,
+                                         roll, roll_rate, self.nominal_ctrl, c)
+        motor_cmd = ((target6 - self.nominal_ctrl) / c.action_scale).astype(np.float32)
+
+        # gentle random shove BEFORE the physics runs (free translational axes only), like pd
+        self._push_countdown -= 1
+        if self._push_countdown <= 0:
+            ang = self.np_random.uniform(0.0, 2.0 * np.pi)
+            if not self.base_lock[0]:
+                self.data.qvel[self._base_x_dadr] += c.push_dv * np.cos(ang)
+            if not self.base_lock[1]:
+                self.data.qvel[self._base_y_dadr] += c.push_dv * np.sin(ang)
+            self._push_countdown = self._next_push_in()
+
+        contact_acc = self._run_physics(target6)
+        self._elapsed_t += self.control_dt
+        finished = c.sprint_mode and self._update_sprint()
+        # advance the gait phase AFTER assembly (the obs frame below carries the NEXT step's phase)
+        self._phase = (self._phase + 2.0 * np.pi * f * self.control_dt) % (2.0 * np.pi)
+
+        self._step += 1
+        if self._step % self._resample_every == 0:
+            self._sample_command()
+            self._anchor_command_pose()               # new command -> re-anchor target to here
+            # the gait clocks belong to the OLD command (see the pd path)
+            self._contact_time[:] = 0.0
+            self._air_time[:] = 0.0
+        else:
+            self._advance_command_pose()              # else advance target by the command
+
+        self._push_frame(self._proprio())
+        reward, terms = self._compute_reward(motor_cmd, contact_acc)
+        terminated = self._fallen()
+        if terminated:
+            reward -= c.fall_penalty
+        elif finished:                     # dash complete: stopped past the line
+            terminated = True
+            reward += c.finish_bonus
+        truncated = self._step >= self.max_steps
+        self._prev_action[:] = action
+        self._prev_motor_cmd[:] = motor_cmd
+        if self.on_control_step is not None:          # this mode: 1 env.step == 1 control step
+            self.on_control_step()
+        info = {"reward_terms": terms, "command": self._command.copy()}
+        if c.sprint_mode:
+            info["sprint"] = self._sprint_info(finished)
+        return self._obs(), float(reward), bool(terminated), bool(truncated), info
 
     def _gait_reward(self, terms, progress_frac, contact_acc):
         """Gait-shaping terms (all sim-side, reward-only). The measured failure mode of v2 was
@@ -553,6 +677,106 @@ class Dash01Env(gym.Env):
         return terms["foot_slip"] + air + terms["stance_time"] + clear
 
     # ---------- reward & termination ----------
+    def _compute_reward(self, motor_cmd, contact_acc):
+        """One control step of reward: the built-in _reward + _gait_reward pair, or an
+        injected experiment reward module fed the same state. Both paths advance the gait
+        clocks exactly once; tests/test_module_parity.py pins the stock library module
+        numerically identical to the built-in path."""
+        if self._reward_fn is None:
+            reward, terms, progress_frac = self._reward(motor_cmd)
+            reward += self._gait_reward(terms, progress_frac, contact_acc)
+            return reward, terms
+        state, cmd = self._reward_state(motor_cmd, contact_acc)
+        terms = self._reward_fn(state, cmd, self.cfg)
+        return float(sum(terms.values())), terms
+
+    def _reward_state(self, motor_cmd, contact_acc):
+        """Assemble the reward-module state facade AND advance the gait clocks — the
+        module path's equivalent of _gait_reward's bookkeeping (mutates _air_time /
+        _contact_time / _grounded_prev / _prev_toe_xy identically to the built-in path).
+        Field reference: experiments/_lib/rewards/gait_speed_v3.py docstring."""
+        c = self.cfg
+        dt = self.control_dt
+        R = self._base_rot()
+        v_body = R.T @ self.data.qvel[0:3]
+        # NOTE dtype fidelity: the built-in path mixes float64 state with float32
+        # command products and clocks; NumPy's promotion rules make the rounding depend
+        # on which side is a "weak" python float. The facade hands the module the SAME
+        # dtypes so both paths round identically — do not "clean up" with float() here
+        # (tests/test_module_parity.py is the guard).
+        vx = v_body[0]                                   # np.float64, like _reward
+        angv = self._ang_vel_body()
+        grav = self._gravity_body()
+        cmd_vx_phys = self._command[0] * c.vx_max        # float32 product, like _reward
+        cmd_yaw_phys = self._command[1] * c.yaw_max
+
+        # mode-specific quantities (mirrors _reward)
+        pos_err = yaw_err = sprint_overrun = 0.0
+        if c.sprint_mode:
+            progress_frac = 0.0 if self._sprint_crossed else float(np.clip(vx / c.v_ceiling, 0.0, 1.0))
+            sprint_overrun = max(0.0, self._sprint_d - (self._sprint_D + c.sprint_brake_m))
+            gate_vx = 0.0 if self._sprint_crossed else c.v_ceiling
+        elif c.speed_mode:
+            progress_frac = float(np.clip(vx / c.v_ceiling, 0.0, 1.0))
+            gate_vx = c.v_ceiling
+        else:
+            progress_frac = (float(np.clip(vx / cmd_vx_phys, 0.0, 1.0))
+                             if abs(cmd_vx_phys) > 1e-6 else 0.0)
+            pos_err = float(np.linalg.norm(self.data.qpos[0:2] - self._des_xy))
+            yaw_err = np.arctan2(np.sin(self._base_yaw() - self._des_yaw),
+                                 np.cos(self._base_yaw() - self._des_yaw))
+            gate_vx = cmd_vx_phys
+
+        # gait bookkeeping (mirrors _gait_reward; advances the same clocks)
+        toe_pos = self.data.geom_xpos[self.foot_gids_arr].copy()
+        heights = toe_pos[:, 2] - self._toe_r
+        grounded = contact_acc | (heights < c.grounded_h)
+        grounded_recent = grounded | self._grounded_prev
+        slip_v = np.linalg.norm(toe_pos[:, 0:2] - self._prev_toe_xy, axis=1) / dt
+        feet = []
+        for i in range(2):
+            billable = bool(grounded[i] and self._grounded_prev[i])
+            just_landed = bool(grounded[i] and self._air_time[i] > 0)
+            air_basis = self._air_time[i]                # float32 scalar (clock dtype)
+            if grounded[i]:
+                self._air_time[i] = 0.0
+                self._contact_time[i] += dt
+            else:
+                self._air_time[i] += dt
+                self._contact_time[i] = 0.0
+            feet.append(SimpleNamespace(
+                grounded=bool(grounded[i]),
+                slip_speed=float(slip_v[i]) if billable else 0.0,
+                just_landed=just_landed,
+                air_time=air_basis,
+                stance_time=self._contact_time[i],       # float32 scalar (clock dtype)
+                fresh_swing=bool(not grounded_recent[i]
+                                 and 0.0 < self._air_time[i] <= c.swing_fresh_s),
+                clearance=float(heights[i]),
+            ))
+        self._grounded_prev = grounded
+        self._prev_toe_xy = toe_pos[:, 0:2]
+
+        hr = (self.data.qpos[self.act_qadr[self.hip_roll_idx]]
+              - self.default_motor_pos[self.hip_roll_idx])
+        state = SimpleNamespace(
+            vx=vx, vy=v_body[1],
+            vz=self.data.qvel[2], height=self.data.qpos[2],
+            height_target=self.height_target, z_locked=self.z_locked,
+            gravity_body=grav, ang_vel=angv, yaw_rate=angv[2],
+            pos_err=pos_err, yaw_err=yaw_err, progress_frac=progress_frac,
+            motor_torque=self.data.actuator_force[:self.nu].copy(),
+            stand_torque=np.abs(self._stand_torque),
+            action_rate_sq=np.sum((motor_cmd - self._prev_motor_cmd) ** 2),  # float32, like _reward
+            coef_rate_gated=self._coef_rate_gated,   # phase-gated gait-spec change (fourier_step)
+            hip_roll=hr, foot_sep=self._foot_lateral_sep(),
+            sprint_crossed=bool(getattr(self, "_sprint_crossed", False)),
+            sprint_overrun_m=sprint_overrun,
+            footL=feet[0], footR=feet[1],
+        )
+        cmd = SimpleNamespace(vx=gate_vx, yaw=cmd_yaw_phys)
+        return state, cmd
+
     def _pen(self, v):
         """Floor a penalty term: reward normalization is off, so these raw scales reach PPO
         directly, and no reachable state may make dying cheaper than living (suicide-proofing)."""
@@ -641,6 +865,10 @@ class Dash01Env(gym.Env):
             t["height"] = self._pen(-c.w_height * (self.data.qpos[2] - self.height_target) ** 2)
             t["vz"] = self._pen(-c.w_vz * self.data.qvel[2] ** 2)
         t["action_rate"] = self._pen(-c.w_action_rate * np.sum((motor_cmd - self._prev_motor_cmd) ** 2))
+        # fourier_step only: the phase-gated gait-spec change penalty (state set in
+        # _step_fourier_step). CONDITIONAL key — old modes must not gain it (golden term-key sets).
+        if c.action_mode == "fourier_step":
+            t["coef_rate"] = self._pen(-c.w_coef_rate * self._coef_rate_gated)
         # torque ABOVE the standing baseline magnitude, one-sided: holding the stance is free,
         # relaxing (a swing leg unloading toward zero) is free, only exceeding the baseline pays.
         # (Raw tau^2 made one-leg support cost 2x two-leg support by construction.)

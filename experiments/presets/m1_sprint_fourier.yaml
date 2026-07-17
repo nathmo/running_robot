@@ -1,0 +1,15 @@
+# == rl/config.py `m1_sprint_fourier`: M1 rail 100 m dash with the Fourier gait.
+name: m1_sprint_fourier
+description: "100 m dash on the M1 ride-height rail with the per-cycle Fourier gait policy."
+inherits: dash01_fourier
+
+base_dof: [free, lock, {rail: [0.90, 1.03]}, lock, lock, lock]
+
+command:
+  mode: sprint
+  episode_s: 60.0
+  sprint: {curriculum_steps: 400_000}
+
+reward:
+  module: gait_speed_v3
+  params: {w_alive: 0.0}

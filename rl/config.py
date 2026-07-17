@@ -64,7 +64,11 @@ class Config:
     # instead outputs, ONCE PER GAIT CYCLE, a Fourier series for cam+thigh (a periodic propulsion gait)
     # + a learnable frequency + a learned abduction (hip_roll) balance reflex. See rl/fourier_gait.py.
     # In fourier mode env.step is a MACRO-step = one full gait cycle (~30/episode instead of 1000).
-    action_mode: str = "pd"             # "pd" | "fourier"
+    # "fourier_step": the SAME 18-dim Fourier action, but re-emitted (and applied) at EVERY 50 Hz
+    # control step — the policy can instantly override the gait spec mid-cycle (PD tracks the freshly
+    # reconstructed setpoint); abrupt mid-cycle rewrites are priced by w_coef_rate (phase-gated:
+    # free at the cycle boundary). One env.step == one control step, like "pd".
+    action_mode: str = "pd"             # "pd" | "fourier" | "fourier_step"
     n_harmonics: int = 3                # Fourier harmonics per joint (coeffs/joint = 1 + 2N)
     gait_freq_hz: tuple = (0.5, 3.0)    # learnable cadence range (Hz); policy picks f in this band
     # max Fourier DEVIATION (rad) of cam/thigh from the nominal stance posture (which is always an
@@ -163,6 +167,11 @@ class Config:
     w_air_time: float = 2.0
     foot_air_time_min: float = 0.25     # seconds; minimum swing that earns touchdown credit
     air_credit_cap_s: float = 0.45      # credit saturates: long holds can't be farmed
+    # fourier_step only: phase-gated coefficient-change penalty. The policy may rewrite the whole
+    # gait spec at any 50 Hz step; billed = sum((applied_action - prev_applied_action)**2)
+    # * sin(phase/2)**2, so changing the gait spec exactly at a cycle boundary (phase ~ 0 == 2pi)
+    # is FREE and mid-cycle changes pay proportionally. Capped by penalty_term_cap.
+    w_coef_rate: float = 0.5
     # a foot counts as grounded if it has sim contact OR its sphere bottom is within grounded_h of
     # the floor (accumulated across all sim substeps + debounced 1 control step), so micro-hops and
     # 1-2 mm ghost-contact dragging can't dodge the contact-gated terms.
@@ -236,6 +245,16 @@ class Config:
     max_log_std: float = 0.0            # std <= 1.0: beyond the clipped action range is pure farming
     seed: int = 0
     policy_hidden: List[int] = field(default_factory=lambda: [256, 256])
+
+    # ----- framework module injection (experiments/ schema; "" = built-in) -----
+    # Set by framework/compile.py when an experiment overrides an axis with a local
+    # python module ("./reward.py" etc.). Paths are relative to experiment_dir.
+    reward_module: str = ""
+    obs_module: str = ""
+    curriculum_module: str = ""
+    network_module: str = ""
+    steering_module: str = ""
+    experiment_dir: str = ""
 
     @property
     def control_dt(self) -> float:
@@ -330,6 +349,27 @@ def m3_fourier() -> Config:
     return _speed(base_lock=(0, 1, 0, 1, 0, 1), **_FOURIER_TRAIN)
 
 
+# Per-STEP Fourier override variants ("fourier_step"): the same 18-dim gait-spec action, but the
+# network re-emits it at every 50 Hz control step (instant override; mid-cycle rewrites priced by
+# the phase-gated w_coef_rate penalty, free at the cycle boundary). One env.step == one control
+# step again, so NONE of the _FOURIER_TRAIN macro-step overrides apply — the stock per-step PPO
+# settings (gamma 0.995, n_steps 1024, batch 4096, 20M steps) are correct here.
+def m1_fourier_step() -> Config:
+    """M1 (rail, random ride-height) with the per-step Fourier override policy."""
+    return _speed(base_lock=(0, 1, 1, 1, 1, 1), z_rail_randomize=True, z_rail_range=(0.90, 1.03),
+                  action_mode="fourier_step")
+
+
+def m2_fourier_step() -> Config:
+    """M2 (X,Z free) with the per-step Fourier override policy."""
+    return _speed(base_lock=(0, 1, 0, 1, 1, 1), action_mode="fourier_step")
+
+
+def m3_fourier_step() -> Config:
+    """M3 (X, Z, pitch free) with the per-step Fourier override policy."""
+    return _speed(base_lock=(0, 1, 0, 1, 0, 1), action_mode="fourier_step")
+
+
 # 100 m dash (see sprint_mode in Config): run to the line as fast as possible, then stop.
 # w_alive must be 0 — a sprinter must not be paid per second of existence (the clock cost w_time
 # replaces it); curriculum_steps=0 keeps the cmd_vx ramp (pointless under speed sampling) from
@@ -376,6 +416,9 @@ PRESETS = {
     "m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6,
     # Fourier cyclic-gait variants
     "m1_fourier": m1_fourier, "m2_fourier": m2_fourier, "m3_fourier": m3_fourier,
+    # per-step Fourier override variants
+    "m1_fourier_step": m1_fourier_step, "m2_fourier_step": m2_fourier_step,
+    "m3_fourier_step": m3_fourier_step,
     # 100 m dash
     "m1_sprint": m1_sprint, "m1_sprint_fourier": m1_sprint_fourier,
     "m2_sprint_fourier": m2_sprint_fourier, "m3_sprint_fourier": m3_sprint_fourier,
@@ -386,3 +429,49 @@ PRESETS = {
 
 def get_config(name: str = "default") -> Config:
     return PRESETS[name]()
+
+
+# ----- serialization (orchestrator / --config path) -----------------------------------
+# JSON round-trip: lists come back where tuples went in, so coerce by field default type.
+_TUPLE_FIELDS = None
+
+
+def _tuple_fields():
+    global _TUPLE_FIELDS
+    if _TUPLE_FIELDS is None:
+        from dataclasses import fields as _f, MISSING
+        _TUPLE_FIELDS = {x.name for x in _f(Config)
+                         if x.default is not MISSING and isinstance(x.default, tuple)}
+    return _TUPLE_FIELDS
+
+
+def config_to_dict(cfg: Config) -> dict:
+    from dataclasses import asdict
+    return asdict(cfg)
+
+
+def config_from_dict(d: dict) -> Config:
+    """Rebuild a Config from a JSON-loaded dict. Unknown keys are warned about and
+    dropped (forward compatibility with configs written by newer code)."""
+    from dataclasses import fields as _f
+    known = {x.name for x in _f(Config)}
+    clean = {}
+    for k, v in d.items():
+        if k not in known:
+            print(f"[config] WARNING: dropping unknown Config field '{k}'")
+            continue
+        clean[k] = tuple(v) if k in _tuple_fields() and isinstance(v, list) else v
+    return Config(**clean)
+
+
+def apply_overrides(cfg: Config, overrides: dict) -> Config:
+    """Return a copy of cfg with `overrides` applied. Unknown field names are a hard
+    error (a typo'd sweep axis must fail at submit time, not train silently)."""
+    from dataclasses import replace, fields as _f
+    known = {x.name for x in _f(Config)}
+    unknown = sorted(set(overrides) - known)
+    if unknown:
+        raise KeyError(f"unknown Config field(s): {unknown}")
+    fixed = {k: (tuple(v) if k in _tuple_fields() and isinstance(v, list) else v)
+             for k, v in overrides.items()}
+    return replace(cfg, **fixed)

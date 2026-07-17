@@ -307,9 +307,10 @@ class Dash01MjxEnv:
         self.cfg = cfg = cfg or Config()
         if getattr(cfg, "action_mode", "pd") != "pd":
             raise NotImplementedError(
-                "Dash01MjxEnv only supports action_mode='pd'. The fourier per-cycle gait policy is "
-                "CPU-only for now (variable-length cycle scan + per-cycle macro-step is deferred in "
-                "MJX, like the GPU ride-height randomization). Train fourier presets with rl.train.")
+                "Dash01MjxEnv only supports action_mode='pd'. The fourier gait policies "
+                "(per-cycle 'fourier' and per-step 'fourier_step') are CPU-only for now "
+                "(variable-length cycle scan / phase bookkeeping is deferred in MJX, like the GPU "
+                "ride-height randomization). Train fourier presets with rl.train.")
         if getattr(cfg, "sprint_mode", False):
             raise NotImplementedError(
                 "Dash01MjxEnv does not implement sprint_mode (100 m dash phases/termination are "

@@ -1,0 +1,6 @@
+# == rl/config.py `m1_fourier_step`: the M1 ride-height rail with the per-step Fourier override.
+name: m1_fourier_step
+description: "M1 rail (random ride height) with the per-step Fourier override policy + phase-gated change penalty."
+inherits: dash01_fourier_step
+
+base_dof: [free, lock, {rail: [0.90, 1.03]}, lock, lock, lock]

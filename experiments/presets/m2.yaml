@@ -1,0 +1,6 @@
+# == rl/config.py `m2`: X and Z free (robot maintains its own height); rest railed.
+name: m2
+description: "M2 rail: X,Z free — the robot carries its own ride height; max forward speed."
+inherits: dash01_speed
+
+base_dof: [free, lock, free, lock, lock, lock]

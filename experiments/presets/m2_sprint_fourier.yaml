@@ -1,0 +1,17 @@
+# == rl/config.py `m2_sprint_fourier`: X,Z free 100 m dash with the Fourier gait — the
+# robot carries its own ride height for the whole dash (height/vz terms live, falls are
+# real). Warm-start from an m1 sprint policy: dims match (obs 220 / act 18).
+name: m2_sprint_fourier
+description: "100 m dash with X,Z free (self-supported height) and the Fourier gait policy."
+inherits: dash01_fourier
+
+base_dof: [free, lock, free, lock, lock, lock]
+
+command:
+  mode: sprint
+  episode_s: 60.0
+  sprint: {curriculum_steps: 400_000}
+
+reward:
+  module: gait_speed_v3
+  params: {w_alive: 0.0}

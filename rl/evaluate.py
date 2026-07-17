@@ -64,8 +64,24 @@ def pick_vecnormalize(run: Path, model_path: str):
     return run / "vecnormalize.pkl"
 
 
+def load_run_config(run: Path, preset=None):
+    """Rebuild the env config for a run. Precedence: an explicit --preset; else the full
+    resolved config recorded at train time (resolved_config.json — required for
+    experiment runs whose overrides changed env-shaping fields); else preset.json /
+    name inference (legacy runs)."""
+    if preset:
+        return get_config(preset)
+    rc = run / "resolved_config.json"
+    if rc.exists():
+        import json
+        from .config import config_from_dict
+        d = json.loads(rc.read_text())
+        return config_from_dict(d.get("config", d))
+    return get_config(infer_preset(run))
+
+
 def build(run: Path, preset, checkpoint):
-    cfg = get_config(preset)
+    cfg = load_run_config(run, preset)
     cfg.push_interval_s = 0.0   # random shoves are a TRAINING disturbance; evaluation, videos and
     #                             the gait-probe gates must measure the policy, not push recovery
     raw = Dash01Env(cfg)
@@ -104,9 +120,8 @@ def main():
                          "differently deterministic vs sampled — check the gap before hardware)")
     args = ap.parse_args()
     run = Path(args.run)
-    preset = args.preset or infer_preset(run)
-
-    model, venv, raw = build(run, preset, args.checkpoint)
+    # None -> build() prefers the run's resolved_config.json, then preset inference
+    model, venv, raw = build(run, args.preset, args.checkpoint)
     fixed = args.vx is not None or args.yaw is not None
 
     if args.viewer:
