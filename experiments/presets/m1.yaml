@@ -1,6 +1,0 @@
-# == rl/config.py `m1`: only X free; Z railed at a per-episode RANDOM ride height.
-name: m1
-description: "M1 rail: X free, Z railed at a random ride height per episode; max forward speed."
-inherits: dash01_speed
-
-base_dof: [free, lock, {rail: [0.90, 1.03]}, lock, lock, lock]

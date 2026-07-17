@@ -1,6 +1,0 @@
-# == rl/config.py `m2_fourier`: X,Z free with the Fourier cyclic gait.
-name: m2_fourier
-description: "M2 (X,Z free) with the per-cycle Fourier gait policy."
-inherits: dash01_fourier
-
-base_dof: [free, lock, free, lock, lock, lock]

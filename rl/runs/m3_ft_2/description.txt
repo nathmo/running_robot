@@ -1,1 +1,0 @@
-allowed changing of pattern generator at any time.

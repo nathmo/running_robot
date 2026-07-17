@@ -1,6 +1,0 @@
-# == rl/config.py `m4`: X, Y, Z, pitch free; roll, yaw railed.
-name: m4
-description: "M4 rail: +Y free (lat_vel penalty keeps it straight); max forward speed."
-inherits: dash01_speed
-
-base_dof: [free, free, free, lock, free, lock]

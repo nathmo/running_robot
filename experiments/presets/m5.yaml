@@ -1,6 +1,0 @@
-# == rl/config.py `m5`: only yaw railed.
-name: m5
-description: "M5 rail: +roll free, only yaw railed; max forward speed."
-inherits: dash01_speed
-
-base_dof: [free, free, free, free, free, lock]

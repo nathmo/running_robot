@@ -1,4 +1,0 @@
-# == rl/config.py `m6`: everything free (the full free-floating plant), max speed.
-name: m6
-description: "M6: fully free-floating untethered max-forward-speed run — the end goal plant."
-inherits: dash01_speed

@@ -1,9 +1,0 @@
-# == rl/config.py `m3_turn` (legacy): full joystick (forward + yaw), free-floating.
-name: m3_turn
-description: "M3 legacy: full joystick (forward + yaw) on the free-floating plant."
-inherits: dash01_base
-
-command:
-  vx_frac: 1.0
-  yaw_frac: 1.0
-  p_stand: 0.15

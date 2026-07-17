@@ -1,0 +1,272 @@
+"""All tunable parameters for DASH-01 sprint training, in one place.
+
+One dataclass, explicit presets. The design is the post-review "state of the art" stack
+(2026-07-17): per-step Fourier gait spec + residuals (CPG-RL / PMTG hybrid), privileged
+base-velocity + distance-to-go observations, dense speed income + per-step clock cost,
+phase-gated contact scheduling (Siekmann) with a stance-ratio curriculum that morphs the
+gait from walking (stance 65%) toward running (stance 42% -> double-swing flight window),
+and Cassie-100m-style efficiency terms (torque / motor-velocity / mechanical power).
+
+Milestone curriculum: base_lock rails base DOFs ([X, Y, Z, roll, pitch, yaw], 1 = locked).
+m1 = only X free (Z railed at a randomized ride height), m2 = +Z, m3 = +pitch,
+m4 = +Y, m5 = +roll, m6 = fully free. Warm-start each stage from the previous one:
+base_lock does not change obs/action dims, so checkpoints load as-is.
+"""
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class Config:
+    # ----- model & timing -----
+    model_path: str = "model/dash01.xml"   # resolved relative to this package if not found from CWD
+    control_decimation: int = 20           # sim steps per control step. sim is 1 kHz -> 50 Hz control
+    keyframe: str = "stand"
+
+    # ----- base DOF locking (the m1..m6 curriculum) -----
+    base_lock: tuple = (0, 0, 0, 0, 0, 0)  # [X, Y, Z, roll, pitch, yaw], 1 = locked (rail)
+    z_rail_randomize: bool = False         # m1: rail Z at a per-episode RANDOM ride height
+    z_rail_range: tuple = (0.90, 1.03)     # meters; sub-band of the measured feasible ride band
+    ride_height_lut: str = "model/ride_height_lut.npz"
+
+    # ----- objective -----
+    # "sprint": one episode = one dash — stand at x0, run sprint_dist_m, stop past the line.
+    #   Reward = dense speed income + a constant per-step clock cost (what actually prices TIME:
+    #   per-step vx alone integrates to w*distance no matter the pace) + stop-phase income +
+    #   finish bonus. The stop signal the policy observes is the task obs flipping run->stop.
+    # "speed": endless max-forward-speed on the same plant (debug / gait-shaping runs).
+    objective: str = "sprint"
+    v_ceiling: float = 3.0              # m/s cap on the speed income (kinematic ceiling ~ stride*cadence)
+    # income per m/s, linear and SYMMETRIC: clip(vx, -v_ceiling, +v_ceiling). Backward motion must
+    # pay negative income — with a one-sided clip(vx, 0, ...) a policy can shuttle back and forth
+    # in front of the line forever (forward legs earn, backward legs only pay the clock) and that
+    # strictly out-values ever crossing (verified exploit, review 2026-07-17).
+    w_fwd_speed: float = 2.0
+    w_alive: float = 0.0                # MUST stay 0 in sprint (paying per second rewards dawdling);
+    #                                     the speed presets set 0.5 (no clock exists there)
+    sprint_dist_m: float = 100.0        # the finish line (meters of base X from the reset pose)
+    sprint_dist_start_m: float = 25.0   # curriculum: line starts near so slow early policies still
+    sprint_curriculum_steps: int = 30_000_000   # reach it and learn the stop; 0 = no ramp
+    sprint_brake_m: float = 5.0         # free braking zone past the line (sprinters run THROUGH it)
+    w_time: float = 0.5                 # per-control-step clock cost until stopped; with w_fwd_speed
+    #                                     this sets the break-even pace (0.25 m/s) below which
+    #                                     moving is worse than useless
+    # stop-phase 'be stationary' kernel: w*exp(-(vx/sigma)^2). MUST stay BELOW w_time so the stop
+    # phase is net-negative per step (max 0.4 - 0.5 = -0.1): the hold-timer reset is under policy
+    # control, so any net-positive stop income is farmable forever by twitching just before the
+    # 1 s hold completes (verified exploit: at the old w=2.0, hovering at the line paid ~149
+    # discounted vs ~120 for finishing). Net-negative + finish_bonus makes finishing dominant
+    # while the kernel still provides the braking gradient.
+    w_stop_vel: float = 0.4
+    stop_sigma: float = 0.3             # m/s width of the 'stationary' kernel
+    w_overrun: float = 1.0              # per-meter penalty past line+brake zone (capped, see _pen)
+    stop_speed_eps: float = 0.15        # |vx| below this counts as stopped
+    stop_hold_s: float = 1.0            # must stay stopped this long -> success termination
+    finish_bonus: float = 100.0         # terminal success bonus (mirror of fall_penalty)
+
+    # ----- observation -----
+    # per-frame: motor pos/vel/torque (6+6+6) + gravity (3) + gyro (3) + base velocity (3,
+    # PRIVILEGED sim state — the quantity the reward maximizes must be observable; needs a
+    # velocity estimator for hardware later) + [sin, cos] gait phase (2) + task channel (2:
+    # [run_flag, dist_to_go/100]) + prev action (24) = 55. Stacked over history_len frames.
+    history_len: int = 5
+    obs_scales: dict = field(default_factory=lambda: dict(
+        motor_pos=1.0, motor_vel=0.1, motor_torque=0.01, gravity=1.0, ang_vel=0.25, base_vel=1.0))
+
+    # ----- action: per-step Fourier gait spec + residuals (see fourier_gait.py) -----
+    # The policy re-emits the whole gait spec (cam+thigh Fourier coeffs + frequency + abduction
+    # reflex gains) at EVERY 50 Hz control step — it can rewrite the gait instantly, mid-cycle
+    # rewrites priced by the phase-gated w_coef_rate penalty (free at the cycle boundary) — plus
+    # 6 per-step residual target corrections (the PMTG fast-feedback channel; NOT coef_rate-billed).
+    n_harmonics: int = 3                # Fourier harmonics per joint (coeffs/joint = 1 + 2N)
+    gait_freq_hz: tuple = (0.5, 3.0)    # learnable cadence range (Hz)
+    # max Fourier DEVIATION (rad) of cam/thigh from the nominal stance posture. Raised from the
+    # walking-era 0.30/0.35 toward the empirically-valid ctrl band (cam ~[-0.6,0.6]): top speed is
+    # ~ 2 * step_length * cadence, and the Cassie 100 m result says the speed headroom lives in
+    # STRIDE LENGTH (long strides + flight), not cadence. The env's ctrl-range clip is the final
+    # guard that keeps the coupled 4-bar assemblable.
+    cam_amp: float = 0.45
+    thigh_amp: float = 0.45
+    reflex_kp_scale: float = 0.5        # abduction reflex: hip_roll += kp*roll (rad per rad)
+    reflex_kd_scale: float = 0.1        #                 + kd*roll_rate (rad per rad/s)
+    reflex_bias_scale: float = 0.2      #                 + bias (rad, lateral stance offset)
+    residual_scale: float = 0.08        # rad of per-step correction authority on each PD target
+    action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
+    action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
+    action_delay_steps: int = 1         # fixed actuation delay in control steps (Pi+CAN plant truth)
+
+    # ----- reward: caps & terminal -----
+    # Two-level suicide-proofing (reward normalization is OFF — raw scales reach PPO directly):
+    # each penalty term is floored at -penalty_term_cap (keeps per-term gradients), AND the
+    # per-step TOTAL is floored at -step_reward_floor before terminal bonuses. Per-term caps
+    # alone are not enough: the SUM of always-on run-phase penalties for a standing robot was
+    # ~-2.2/step, whose discounted value (-220 at gamma 0.99) made diving (-100) value-optimal
+    # for every pre-locomotion policy (verified, review 2026-07-17). With the total floored at
+    # -1.0/step, living forever (~-100) never loses to dying (-100), and any income tips it.
+    penalty_term_cap: float = 2.0
+    step_reward_floor: float = 1.0      # per-step total floored at -this, pre-terminal
+    fall_penalty: float = 100.0
+
+    # ----- reward: anti-skate gait shaping (sim-side, reward-only) -----
+    w_foot_slip: float = 8.0            # horizontal toe speed while grounded, quadratic > deadband
+    slip_deadband: float = 0.05         # m/s of tolerated in-contact toe motion
+    w_stance_time: float = 0.5          # per-foot stance-time cap: forces every foot to cycle
+    stance_cap_s: float = 0.7
+    stance_cap_slow_s: float = 1.0
+    stance_slow_speed: float = 0.4
+    w_clearance: float = 0.4            # fresh-swing height credit (gradient bridge for lift-off)
+    clearance_dead_m: float = 0.02
+    clearance_scale_m: float = 0.03
+    swing_fresh_s: float = 0.45
+    gait_cmd_gate: float = 0.25         # m/s of commanded speed above which gait terms engage
+    w_air_time: float = 2.0             # one-sided capped touchdown credit
+    foot_air_time_min: float = 0.25
+    air_credit_cap_s: float = 0.45
+    grounded_h: float = 0.005           # sphere-bottom height that still counts as grounded
+
+    # ----- reward: phase-gated contact schedule (Siekmann-style; NEW) -----
+    # The gait clock the ACTION uses is also the reward's contact schedule: each foot pays for
+    # being grounded during its expected SWING window (left window = phase in [0, 2pi*sr); right
+    # = antiphase). stance_ratio ramps DOWN over training: below 0.5 the two swing windows
+    # overlap -> both feet penalized for ground contact at once -> a flight phase is demanded.
+    # This is the one term that explicitly asks for RUNNING rather than fast walking.
+    w_phase_contact: float = 1.0
+    stance_ratio_start: float = 0.65    # walking duty factor (curriculum start)
+    stance_ratio_final: float = 0.42    # running duty factor (< 0.5 = flight window exists)
+    gait_curriculum_steps: int = 60_000_000   # env steps to ramp stance_ratio over; 0 = hold start
+
+    # ----- reward: efficiency (Cassie-100m recipe; annealed IN over efficiency_ramp_steps) -----
+    # Weighted to comparable magnitudes at running speed so the optimizer trades them off, which
+    # is what produced long-stride human-like running instead of frantic-cadence thrash. Ramped
+    # from 0 so they cannot smother gait emergence early (a known failure mode).
+    w_torque: float = 1.0e-4            # torque ABOVE the standing baseline, squared (stance is free)
+    w_motor_vel: float = 1.0e-4         # sum motor qvel^2 (the motor-velocity cost)
+    w_energy: float = 2.0e-4            # sum positive mechanical power |tau*qvel|_+ (CoT proxy)
+    efficiency_ramp_steps: int = 60_000_000   # linear 0 -> 1 multiplier on the three terms above
+
+    # ----- reward: smoothness & posture -----
+    w_action_rate: float = 0.1          # on the reconstructed normalized motor targets
+    w_coef_rate: float = 0.5            # phase-gated gait-SPEC change penalty: billed *sin^2(phi/2),
+    #                                     free at the cycle boundary (spec dims only, not residuals)
+    w_residual: float = 0.1             # keep the Fourier prior dominant: residuals are for
+    #                                     corrections, not for becoming the controller
+    w_upright: float = 5.0
+    w_height: float = 2.5               # only when Z is free (neutralized on the rail)
+    w_vz: float = 0.5
+    w_lat_vel: float = 1.0              # body-frame lateral velocity (go straight)
+    w_angvel_xy: float = 0.05
+    w_no_cross: float = 50.0            # one-sided stance-width penalty (legs must not scissor)
+    stance_min_sep: float = 0.25        # m; nominal stance is ~0.40
+    w_hip_roll: float = 3.0             # keep abduction near neutral
+
+    # ----- episode / termination -----
+    episode_s: float = 60.0
+    term_height: float = 0.45
+    term_gravity_z: float = -0.5        # tipped past ~60 deg
+    reset_joint_noise: float = 0.03
+    push_interval_s: float = 0.0        # random base shoves (training disturbance); 0 = off
+    push_dv: float = 0.4
+
+    # ----- PPO -----
+    n_envs: int = 8
+    total_steps: int = 240_000_000
+    n_steps: int = 1024
+    batch_size: int = 4096
+    n_epochs: int = 4
+    # gamma 0.99 (2 s horizon at 50 Hz): long enough to price falling + the dash structure,
+    # short enough that farming the stop-phase income (w_stop_vel/(1-gamma) = 200 gross, cut off
+    # by the 1 s hold-detector termination anyway) cannot out-value the finish bonus.
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    learning_rate: float = 3.0e-4       # linearly annealed to lr_final over the run
+    lr_final: float = 1.0e-4
+    clip_range: float = 0.2
+    target_kl: float = 0.03
+    # entropy: hold ent_coef until stepping has emerged (reward_terms/air_time > gate), THEN anneal
+    # to ent_final. A fixed low value collapses std onto a skating optimum; a fixed high value
+    # farms the clipped-Gaussian entropy bonus — which is also why log_std is clamped.
+    ent_coef: float = 0.01
+    ent_final: float = 0.002
+    ent_anneal_steps: int = 20_000_000
+    ent_gate_air_time: float = 0.02
+    max_log_std: float = 0.0            # std <= 1.0: beyond the clipped range is pure farming
+    seed: int = 0
+    policy_hidden: List[int] = field(default_factory=lambda: [256, 256])
+
+
+# ----- presets ---------------------------------------------------------------------------
+def _sprint(**kw) -> Config:
+    base = dict(objective="sprint", w_alive=0.0)
+    base.update(kw)
+    return Config(**base)
+
+
+def _speed(**kw) -> Config:
+    """Endless max-speed debug objective: no line, no clock, small alive bonus, 20 s episodes."""
+    base = dict(objective="speed", w_alive=0.5, episode_s=20.0,
+                sprint_curriculum_steps=0)
+    base.update(kw)
+    return Config(**base)
+
+
+LOCKS = {                       # [X, Y, Z, roll, pitch, yaw], 1 = locked
+    "m1": (0, 1, 1, 1, 1, 1),   # only X free; Z railed (random ride height)
+    "m2": (0, 1, 0, 1, 1, 1),   # + Z: carries its own ride height
+    "m3": (0, 1, 0, 1, 0, 1),   # + pitch: fore/aft attitude is live
+    "m4": (0, 0, 0, 1, 0, 1),   # + Y (lat_vel keeps it straight)
+    "m5": (0, 0, 0, 0, 0, 1),   # + roll: the abduction reflex becomes live
+    "m6": (0, 0, 0, 0, 0, 0),   # fully free
+}
+
+
+def _mk_sprint(m):
+    lock = LOCKS[m]
+    rail = dict(z_rail_randomize=True) if m == "m1" else {}
+    return lambda: _sprint(base_lock=lock, **rail)
+
+
+def _mk_speed(m):
+    lock = LOCKS[m]
+    rail = dict(z_rail_randomize=True) if m == "m1" else {}
+    return lambda: _speed(base_lock=lock, **rail)
+
+
+PRESETS = {**{f"{m}_sprint": _mk_sprint(m) for m in LOCKS},
+           **{f"{m}_speed": _mk_speed(m) for m in LOCKS},
+           "default": Config}
+
+
+def get_config(name: str = "default") -> Config:
+    return PRESETS[name]()
+
+
+# ----- serialization (resolved_config.json round-trip) -----------------------------------
+_TUPLE_FIELDS = None
+
+
+def _tuple_fields():
+    global _TUPLE_FIELDS
+    if _TUPLE_FIELDS is None:
+        from dataclasses import fields as _f, MISSING
+        _TUPLE_FIELDS = {x.name for x in _f(Config)
+                         if x.default is not MISSING and isinstance(x.default, tuple)}
+    return _TUPLE_FIELDS
+
+
+def config_to_dict(cfg: Config) -> dict:
+    from dataclasses import asdict
+    return asdict(cfg)
+
+
+def config_from_dict(d: dict) -> Config:
+    """Rebuild a Config from a JSON-loaded dict. Unknown keys are warned about and dropped
+    (forward compatibility with configs written by newer code)."""
+    from dataclasses import fields as _f
+    known = {x.name for x in _f(Config)}
+    clean = {}
+    for k, v in d.items():
+        if k not in known:
+            print(f"[config] WARNING: dropping unknown Config field '{k}'")
+            continue
+        clean[k] = tuple(v) if k in _tuple_fields() and isinstance(v, list) else v
+    return Config(**clean)

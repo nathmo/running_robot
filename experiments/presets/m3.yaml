@@ -1,6 +1,0 @@
-# == rl/config.py `m3`: X, Z, pitch free; Y, roll, yaw railed.
-name: m3
-description: "M3 rail: X,Z,pitch free — fore/aft attitude must be stabilized; max forward speed."
-inherits: dash01_speed
-
-base_dof: [free, lock, free, lock, free, lock]

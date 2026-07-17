@@ -1,8 +1,0 @@
-# == rl/config.py `m3_fourier`: X, Z, pitch free with the Fourier cyclic gait.
-# base_lock doesn't change obs/action dims (220/18), so an m2 fourier checkpoint
-# warm-starts this as-is.
-name: m3_fourier
-description: "M3 (X,Z,pitch free) with the per-cycle Fourier gait policy."
-inherits: dash01_fourier
-
-base_dof: [free, lock, free, lock, free, lock]
