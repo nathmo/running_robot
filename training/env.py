@@ -364,10 +364,15 @@ class DashEnv(gym.Env):
         d_spec = applied[:self.spec_dim] - self._prev_applied[:self.spec_dim]
         self._coef_rate_gated = float(np.sum(d_spec ** 2)) * float(np.sin(phase_used / 2.0) ** 2)
         self._prev_applied = applied.copy()
-        roll = float(self._gravity_body()[1])            # ~roll angle (small-angle: grav_y)
-        roll_rate = float(self._ang_vel_body()[0])       # roll rate (gyro x)
+        grav = self._gravity_body()
+        angv = self._ang_vel_body()
+        roll = float(grav[1])            # ~roll angle (small-angle: grav_y)
+        roll_rate = float(angv[0])       # roll rate (gyro x)
+        pitch = float(grav[0])           # ~pitch angle (grav_x ~ sin(pitch), + = nose-down)
+        pitch_rate = float(angv[1])      # pitch rate (gyro y)
         target6 = fourier_gait.assemble(cam_c, thigh_c, reflex, phase_used,
-                                        roll, roll_rate, self.nominal_ctrl, c)
+                                        roll, roll_rate, self.nominal_ctrl, c,
+                                        pitch=pitch, pitch_rate=pitch_rate)
         target6 = target6 + c.residual_scale * residual  # the per-step fast-feedback channel
         motor_cmd = ((target6 - self.nominal_ctrl) / c.action_scale).astype(np.float32)
         self._residual_sq = float(np.sum(residual ** 2))
@@ -536,6 +541,17 @@ class DashEnv(gym.Env):
             t["vz"] = self._pen(-c.w_vz * self.data.qvel[2] ** 2)
         t["lat_vel"] = self._pen(-c.w_lat_vel * v_body[1] ** 2)
         t["ang_xy"] = self._pen(-c.w_angvel_xy * (angv[0] ** 2 + angv[1] ** 2))
+        # centroidal angular-momentum regulation (mj_subtreeVel -> subtree_angmom about the CoM,
+        # world frame): penalize whole-robot pitch-axis (world Y) angular momentum so the gait's
+        # foot impulses average out to a body that isn't tumbling. Pitch component only while
+        # yaw/roll are locked (m3..m5); for m6 (yaw free) also add L[0]^2. Guarded so m1/m2 skip
+        # the O(nbody) call and pay nothing.
+        if c.w_angmom > 0.0:
+            mujoco.mj_subtreeVel(self.model, self.data)
+            L = self.data.subtree_angmom[self.base_id]
+            t["angmom"] = self._pen(-c.w_angmom * float(L[1] ** 2))
+        else:
+            t["angmom"] = 0.0
         sep = self._foot_lateral_sep()
         t["stance"] = self._pen(-c.w_no_cross * max(0.0, c.stance_min_sep - sep) ** 2)
         hr = self.data.qpos[self.act_qadr[self.hip_roll_idx]] \

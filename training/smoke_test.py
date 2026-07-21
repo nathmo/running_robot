@@ -6,7 +6,9 @@ Checks (in ~30 s, no GPU needed): the self-contained model loads; every preset b
 dims; a random-policy rollout stays finite; the sprint line latch + task-channel flip + stop-hold
 termination + finish bonus; the phase-gated stance indicator's shape (continuity at the wrap,
 antiphase overlap = flight window when stance_ratio < 0.5); the residual channel moves the
-targets; the coef_rate phase gate is free at the cycle boundary; curriculum setters reach the env.
+targets; the coef_rate phase gate is free at the cycle boundary; the fixed pitch reflex's sign /
+clip / kwargs back-compat and its kick-arrest on the m3 plant; the angular-momentum reward term;
+the VecNormalize warm-start rejuvenation; curriculum setters reach the env.
 Exits non-zero on the first failure (safe to gate an sbatch on it).
 """
 import sys
@@ -199,6 +201,116 @@ def test_residual_and_gate():
           str(info["reward_terms"]["coef_rate"]))
 
 
+def test_pitch_reflex():
+    print("pitch reflex (fourier_gait.assemble):")
+    cfg = Config()
+    N = cfg.n_harmonics
+    z_cam = np.zeros(fourier_gait.per_joint(N))
+    z_thigh = np.zeros(fourier_gait.per_joint(N))
+    z_reflex = np.zeros(3)
+    nominal = np.zeros(6)
+    # backward-compat: default pitch kwargs must reproduce a no-pitch call exactly
+    a = fourier_gait.assemble(z_cam, z_thigh, z_reflex, 0.5, 0.0, 0.0, nominal, cfg)
+    b = fourier_gait.assemble(z_cam, z_thigh, z_reflex, 0.5, 0.0, 0.0, nominal, cfg,
+                              pitch=0.0, pitch_rate=0.0)
+    check("default kwargs == no-pitch call", np.allclose(a, b))
+    # sign: nose-down pitch (grav_x > 0) -> u_p < 0 -> thigh_L < 0 < thigh_R (feet forward),
+    # symmetric magnitudes; roll/cam/hip_roll untouched by pitch
+    out = fourier_gait.assemble(z_cam, z_thigh, z_reflex, 0.3, 0.0, 0.0, nominal, cfg, pitch=0.2)
+    tL, tR = out[fourier_gait.THIGH_L], out[fourier_gait.THIGH_R]
+    check("nose-down -> feet forward (thL<0<thR)", tL < 0 < tR)
+    check("symmetric thigh offset", abs(tL + tR) < 1e-9, f"{tL:+.4f} {tR:+.4f}")
+    check("cam/hip_roll unaffected by pitch",
+          out[fourier_gait.CAM_L] == 0 and out[fourier_gait.HIP_ROLL_L] == 0)
+    # opposite sign for nose-up
+    out2 = fourier_gait.assemble(z_cam, z_thigh, z_reflex, 0.3, 0.0, 0.0, nominal, cfg, pitch=-0.2)
+    check("nose-up -> feet backward (thL>0>thR)",
+          out2[fourier_gait.THIGH_L] > 0 > out2[fourier_gait.THIGH_R])
+    # clip saturation: huge pitch -> |offset| == pitch_clip exactly
+    out3 = fourier_gait.assemble(z_cam, z_thigh, z_reflex, 0.3, 0.0, 0.0, nominal, cfg, pitch=10.0)
+    check("clip saturates at pitch_clip",
+          abs(abs(out3[fourier_gait.THIGH_L]) - cfg.pitch_clip) < 1e-9,
+          f"{out3[fourier_gait.THIGH_L]:.4f}")
+    # kd path: pure pitch_rate produces the right-sign offset
+    out4 = fourier_gait.assemble(z_cam, z_thigh, z_reflex, 0.3, 0.0, 0.0, nominal, cfg,
+                                 pitch=0.0, pitch_rate=1.0)
+    check("kd path signed correctly", out4[fourier_gait.THIGH_L] < 0)
+
+
+def test_pitch_reflex_plant():
+    """Plant-level acceptance GATE. The m3 plant cannot stand passively (zero action collapses in
+    height regardless of pitch — it needs an active gait), so the gate is NOT 'stands 20 s'; it is
+    'the reflex ARRESTS a pitch kick markedly better than no reflex' — isolated over a short
+    horizon where pitch dynamics dominate the slow height sag."""
+    print("pitch reflex on the m3 plant (kick-arrest gate):")
+    import mujoco
+    from dataclasses import replace
+    zero = np.zeros(24, np.float32)
+
+    def end_pitch(kp, kd, clip, kick, horizon=40):
+        cfg = replace(get_config("m3_speed"), pitch_kp=kp, pitch_kd=kd, pitch_clip=clip,
+                      reset_joint_noise=0.0, push_interval_s=0.0)
+        env = DashEnv(cfg)
+        env.reset(seed=0)
+        jid = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "base_pitch")
+        env.data.qvel[int(env.model.jnt_dofadr[jid])] = kick   # nose-up/down pitch rate
+        for _ in range(horizon):
+            env.step(zero)
+        return abs(float(env._gravity_body()[0]))
+
+    d = get_config("m3_speed")
+    for kick in (+1.2, -1.2):        # backward and forward kicks
+        off = end_pitch(0.0, 0.0, 0.0, kick)
+        on = end_pitch(d.pitch_kp, d.pitch_kd, d.pitch_clip, kick)
+        check(f"reflex arrests kick {kick:+.1f} (on {on:.3f} < 0.6*off {off:.3f})",
+              on < 0.6 * off, f"on={on:.3f} off={off:.3f}")
+
+
+def test_angmom_term():
+    print("angular-momentum reward term:")
+    from dataclasses import replace
+    rng = np.random.default_rng(0)
+    env = DashEnv(replace(get_config("m3_speed"), w_angmom=0.2))
+    env.reset(seed=0)
+    _, _, _, _, info = env.step(np.zeros(env.action_dim, np.float32))
+    t = info["reward_terms"]
+    check("angmom present", "angmom" in t)
+    check("angmom <= 0 and >= -cap", -env.cfg.penalty_term_cap <= t["angmom"] <= 0.0,
+          str(t["angmom"]))
+    check("angmom ~0 from near-rest first step", abs(t["angmom"]) < 0.2, str(t["angmom"]))
+    # a spinning body pays; and w_angmom=0 => exactly 0
+    for _ in range(20):
+        env.step(rng.uniform(-1, 1, env.action_dim).astype(np.float32))
+    env_off = DashEnv(replace(get_config("m3_speed"), w_angmom=0.0))
+    env_off.reset(seed=0)
+    _, _, _, _, info_off = env_off.step(np.zeros(env_off.action_dim, np.float32))
+    check("angmom exactly 0 when w_angmom=0", info_off["reward_terms"]["angmom"] == 0.0)
+    # m3+ presets enable it, m1/m2 leave it off
+    check("m3_speed preset enables angmom", get_config("m3_speed").w_angmom == 0.2)
+    check("m2_speed preset leaves angmom off", get_config("m2_speed").w_angmom == 0.0)
+
+
+def test_rejuvenate_obs_rms():
+    print("VecNormalize warm-start rejuvenation:")
+    from train import rejuvenate_obs_rms
+    from stable_baselines3.common.running_mean_std import RunningMeanStd
+
+    class Dummy:
+        pass
+    d = Dummy()
+    d.obs_rms = RunningMeanStd(shape=(275,))
+    d.obs_rms.count = 1.8e8
+    d.obs_rms.var[:] = 1.0
+    d.obs_rms.var[18] = 1e-12                 # a rail-locked (pitch) dim
+    d.obs_rms.mean[18] = 0.123
+    d.ret_rms = None
+    rejuvenate_obs_rms(d, 5e4, 1e-2)
+    check("count capped", d.obs_rms.count == 5e4, str(d.obs_rms.count))
+    check("tiny var floored", d.obs_rms.var[18] == 1e-2, str(d.obs_rms.var[18]))
+    check("healthy var untouched", d.obs_rms.var[0] == 1.0)
+    check("mean untouched", d.obs_rms.mean[18] == 0.123)
+
+
 def test_curriculum_setters():
     print("curriculum setters:")
     env = DashEnv(get_config("m2_sprint"))
@@ -229,6 +341,10 @@ if __name__ == "__main__":
     test_env_basic()
     test_sprint_finish()
     test_residual_and_gate()
+    test_pitch_reflex()
+    test_pitch_reflex_plant()
+    test_angmom_term()
+    test_rejuvenate_obs_rms()
     test_curriculum_setters()
     test_m1_rail()
     print(f"\n{'ALL OK' if FAIL == 0 else f'{FAIL} FAILURES'}")

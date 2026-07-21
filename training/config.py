@@ -90,6 +90,23 @@ class Config:
     reflex_kp_scale: float = 0.5        # abduction reflex: hip_roll += kp*roll (rad per rad)
     reflex_kd_scale: float = 0.1        #                 + kd*roll_rate (rad per rad/s)
     reflex_bias_scale: float = 0.2      #                 + bias (rad, lateral stance offset)
+    # FIXED pitch-stabilizing reflex (fourier_gait.assemble): a symmetric fore-aft foot shift
+    # thigh_L += u, thigh_R -= u with u = -clip(kp*grav_x + kd*pitch_rate + bias, +-clip). grav_x
+    # ~ sin(pitch), + = nose-down; -sign moves both feet toward the fall to catch the CoM (capture-
+    # point / CoP matching: kp~=h_CoM/leg~=1, kd~=sqrt(h/g)~=0.3). ALWAYS active + pure numpy, so it
+    # also stabilizes the real robot from the IMU. Inert on m1/m2 (pitch railed -> grav_x~=0), so
+    # obs/action dims are unchanged and those checkpoints still load. clip=0 disables it entirely.
+    # gains tuned 2026-07-21 (gain grid on the m3 plant + m2 policy): kd>=0.3 oscillates through
+    # the 1-step delay + EMA filter; clip>0.35 fights the gait. kp=2/kd=0.2/clip=0.25 arrests a
+    # pitch kick ~2.5-7x better than no reflex (both directions) without exciting oscillation.
+    # The reflex is a stabilizing PRIOR, not a standalone controller — the plant needs an active
+    # gait for height too, so it can't stand passively; it takes early-retrain episodes from
+    # ~18 to ~80 steps of survival, giving the policy signal to learn a pitch-neutral gait.
+    pitch_kp: float = 2.0               # rad thigh offset per unit grav_x (~sin pitch)
+    pitch_kd: float = 0.2               # rad thigh offset per rad/s pitch rate (gyro y)
+    pitch_clip: float = 0.25            # authority cap (rad); 0 = reflex off
+    pitch_bias: float = 0.0             # static fore-aft trim added inside the clip (rad)
+    pitch_cam_gain: float = 0.0         # reserved: cam coupling of the pitch reflex (keep 0)
     residual_scale: float = 0.08        # rad of per-step correction authority on each PD target
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
@@ -155,6 +172,14 @@ class Config:
     w_vz: float = 0.5
     w_lat_vel: float = 1.0              # body-frame lateral velocity (go straight)
     w_angvel_xy: float = 0.05
+    # centroidal angular-momentum regulation (the "impulses average out" idea = capture-point /
+    # MPC-style momentum control): penalize whole-robot angular momentum about the CoM
+    # (mj_subtreeVel -> subtree_angmom), pitch component only while yaw/roll are locked (m3..m5).
+    # Sim-only reward (no hardware estimator needed). I_pitch(CoM) ~ 0.62 kg m^2: a 2 rad/s nose-
+    # dive is L_y ~ 1.3 (costs ~0.34 at w=0.2), healthy leg-swing residual ~0.5-1.0 stays < 0.2.
+    # It also prices cyclic swing momentum, so if plots show it fighting air_time, halve it.
+    # 0 = off (m1/m2 pay nothing and skip the mj_subtreeVel call); m3..m6 presets set 0.2.
+    w_angmom: float = 0.0
     w_no_cross: float = 50.0            # one-sided stance-width penalty (legs must not scissor)
     stance_min_sep: float = 0.25        # m; nominal stance is ~0.40
     w_hip_roll: float = 3.0             # keep abduction near neutral
@@ -193,6 +218,16 @@ class Config:
     seed: int = 0
     policy_hidden: List[int] = field(default_factory=lambda: [256, 256])
 
+    # ----- warm-start VecNormalize rejuvenation (milestone hops only; see train.py) -----
+    # A milestone that frees a base DOF makes a previously-CONSTANT obs dim start varying. The
+    # warm-started VecNormalize carries near-zero variance on that dim (var ~ 1e-8) and a giant
+    # running count (~ source total_steps), so the new signal normalizes to O(1e3), clips at +-10
+    # (binarized), and the stats adapt only glacially. On --warm-start we therefore cap the count
+    # (fresh data reaches equal weight within ~count_cap samples) and floor the variance (a rail-
+    # locked dim becomes readable from batch one: pitch 0.2 rad -> normalized 2.0, not clipped 10).
+    warmstart_obs_count_cap: float = 50_000.0   # 0 = leave obs_rms.count untouched
+    warmstart_var_floor: float = 1.0e-2         # 0 = leave obs_rms.var untouched
+
 
 # ----- presets ---------------------------------------------------------------------------
 def _sprint(**kw) -> Config:
@@ -219,16 +254,25 @@ LOCKS = {                       # [X, Y, Z, roll, pitch, yaw], 1 = locked
 }
 
 
+def _extras(m):
+    """Per-milestone extra kwargs on top of the base_lock: m1 rails Z at a random ride height;
+    milestones with pitch FREE (m3..m6, lock[4]==0) turn on the angular-momentum regulation term."""
+    kw = {}
+    if m == "m1":
+        kw["z_rail_randomize"] = True
+    if LOCKS[m][4] == 0:                 # pitch free -> regulate centroidal angular momentum
+        kw["w_angmom"] = 0.2
+    return kw
+
+
 def _mk_sprint(m):
     lock = LOCKS[m]
-    rail = dict(z_rail_randomize=True) if m == "m1" else {}
-    return lambda: _sprint(base_lock=lock, **rail)
+    return lambda: _sprint(base_lock=lock, **_extras(m))
 
 
 def _mk_speed(m):
     lock = LOCKS[m]
-    rail = dict(z_rail_randomize=True) if m == "m1" else {}
-    return lambda: _speed(base_lock=lock, **rail)
+    return lambda: _speed(base_lock=lock, **_extras(m))
 
 
 PRESETS = {**{f"{m}_sprint": _mk_sprint(m) for m in LOCKS},

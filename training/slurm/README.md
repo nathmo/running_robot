@@ -12,7 +12,8 @@ account** (your supervisor submits the student-account form), from the EPFL netw
 ## 1. One-time setup (login node)
 
 ```bash
-ssh <gaspar>@izar.hpc.epfl.ch
+ssh ncmorand@izar.hpc.epfl.ch
+(public key added for passwordless access)
 
 # get the code onto the cluster (either clone, or rsync from the laptop):
 git clone <your-repo-url> ~/running_robot

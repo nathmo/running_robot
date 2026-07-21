@@ -12,6 +12,10 @@ that the env adds on top of the reconstruction:
     weighting biased everything toward near-sinusoidal walking).
   - hip_roll (abduction, lateral balance): a learned LINEAR REFLEX on roll / roll-rate evaluated at
     50 Hz (feedback, not a function of phi). Inert while roll is locked (M1-M3 rails).
+  - pitch reflex (sagittal balance): a FIXED (hand-tuned, not learned) PD from base pitch /
+    pitch-rate onto a SYMMETRIC fore-aft thigh offset (both feet shift together toward a fall to
+    catch the CoM — capture-point control). Always active, evaluated at 50 Hz; inert while pitch is
+    locked (M1-M2). Config gains cfg.pitch_k*; assemble() reads pitch/pitch_rate kwargs.
   - residual (6): per-step joint-target corrections added AFTER reconstruction — the fast feedback
     channel the literature says running requires (one-off stumble corrections don't have to rewrite
     the whole gait spec through the coef_rate penalty). Scaled by cfg.residual_scale in the env.
@@ -86,12 +90,16 @@ def _series(coeffs, phi, weights, n_harmonics):
     return val
 
 
-def assemble(cam_coeffs, thigh_coeffs, reflex, phi, roll, roll_rate, nominal, cfg):
+def assemble(cam_coeffs, thigh_coeffs, reflex, phi, roll, roll_rate, nominal, cfg,
+             pitch=0.0, pitch_rate=0.0):
     """Return the 6 PD motor targets (rad) at gait phase phi (residuals are added by the env).
 
-    nominal        : 6-vector stance ctrl = the per-episode centers (mirrored L/R already).
-    roll,roll_rate : current base roll and roll-rate (for the abduction reflex).
-    cfg            : Config (reads n_harmonics, cam_amp, thigh_amp, reflex_*_scale).
+    nominal          : 6-vector stance ctrl = the per-episode centers (mirrored L/R already).
+    roll,roll_rate   : current base roll and roll-rate (for the learned abduction reflex).
+    pitch,pitch_rate : current base pitch (grav_x ~ sin(pitch), + = nose-down) and pitch rate,
+                       for the FIXED pitch-stabilizing reflex. Default 0 keeps every legacy caller
+                       (and the m1/m2 rail, where pitch is locked) byte-identical.
+    cfg              : Config (n_harmonics, cam_amp, thigh_amp, reflex_*_scale, pitch_k*).
     """
     N = cfg.n_harmonics
     w = _weights(N)
@@ -109,6 +117,16 @@ def assemble(cam_coeffs, thigh_coeffs, reflex, phi, roll, roll_rate, nominal, cf
     thigh_L = nominal[THIGH_L] + d_thigh
     cam_R = nominal[CAM_R] - d_cam_a
     thigh_R = nominal[THIGH_R] - d_thigh_a
+    # --- FIXED pitch reflex: symmetric fore-aft foot shift on both thighs (added AFTER the +-amp
+    # clip so a large gait swing can't eat the reflex authority right when push-off needs it). The
+    # thigh axes are MIRRORED (L: +Y, R: -Y), so thigh_L += u_p, thigh_R -= u_p moves BOTH feet the
+    # same physical direction. u_p = -clip(kp*pitch + kd*pitch_rate + bias): when nose-down
+    # (pitch > 0) u_p < 0 -> feet move forward under the falling CoM (capture point). The env's
+    # ctrl-range clip is the final guard. clip=0 disables the reflex.
+    u_p = -np.clip(cfg.pitch_kp * pitch + cfg.pitch_kd * pitch_rate + cfg.pitch_bias,
+                   -cfg.pitch_clip, cfg.pitch_clip)
+    thigh_L += u_p
+    thigh_R -= u_p
     # --- hip_roll: learned linear balance reflex (feedback on roll / roll-rate); sign is learned ---
     u = (cfg.reflex_kp_scale * reflex[0] * roll
          + cfg.reflex_kd_scale * reflex[1] * roll_rate

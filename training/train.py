@@ -22,6 +22,7 @@ PKG_DIR = Path(__file__).resolve().parent
 if str(PKG_DIR) not in sys.path:
     sys.path.insert(0, str(PKG_DIR))
 
+import numpy as np
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
@@ -210,6 +211,24 @@ def matching_vecnormalize(ckpt: Path):
     return ckpt.parent / f"ppo_vecnormalize_{ckpt.stem[4:]}.pkl"
 
 
+def rejuvenate_obs_rms(venv, count_cap, var_floor):
+    """Warm-start fix: after VecNormalize.load, keep the prior mean/var but (a) cap the running
+    count so newly-freed obs dims re-adapt within ~count_cap fresh samples instead of glacially
+    (the source run carries count ~ its total_steps, weighting the stale prior far too heavily),
+    and (b) floor the variance so a dim that was rail-locked in the source stage (var ~ 0 ->
+    normalized = raw / sqrt(var) ~ raw*1e4, clipped to +-10 = binarized) is readable from the
+    first batch. Both are one-directional (min for count, max for var); mean is untouched.
+    Operates on obs_rms (and ret_rms for hygiene, though norm_reward is off)."""
+    rms = venv.obs_rms
+    if count_cap > 0:
+        rms.count = min(float(rms.count), float(count_cap))
+    if var_floor > 0:
+        np.maximum(rms.var, float(var_floor), out=rms.var)
+    ret = getattr(venv, "ret_rms", None)
+    if ret is not None and count_cap > 0:
+        ret.count = min(float(ret.count), float(count_cap))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="m2_sprint", choices=sorted(PRESETS))
@@ -323,6 +342,13 @@ def main():
                 venv.training = True
                 venv.norm_reward = False
                 print(f"[train] warm-start VecNormalize stats <- {vn}")
+                # a milestone hop frees a base DOF -> a formerly-constant obs dim starts varying,
+                # but the loaded stats carry ~zero variance + a huge count on it (glacial adapt,
+                # signal clipped at +-10). Rejuvenate so it's readable and adapts fast.
+                if cfg.warmstart_obs_count_cap > 0 or cfg.warmstart_var_floor > 0:
+                    rejuvenate_obs_rms(venv, cfg.warmstart_obs_count_cap, cfg.warmstart_var_floor)
+                    print(f"[train] rejuvenated obs_rms: count<= {cfg.warmstart_obs_count_cap:g}, "
+                          f"var>= {cfg.warmstart_var_floor:g}")
             else:
                 venv = fresh_vecnorm()
             # PPO.load keeps the checkpoint's OWN hyperparameters (gamma, schedules); milestones
