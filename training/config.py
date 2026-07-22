@@ -387,6 +387,43 @@ PRESETS.update({
         gait_curriculum_steps=40_000_000, efficiency_ramp_steps=40_000_000),
 })
 
+# ----- round 3 (2026-07-23): round-2 assist FAILED via crutch-dependence. assist=0 eval of the
+# m3_assist* runs gave ep_len 39-50 (WORSE than the 67 plateau) with NEGATIVE mean vx -- the
+# in-training ep_len ~100+ was entirely the wheel. Mechanism: SPEED mode pays a per-step `alive`
+# bonus (0.5) with NO penalty for standing still, so once the assist removes the fall risk, "stand
+# still and bank alive" is optimal -> the policy learned neither balance nor locomotion. (m2 worked
+# because SPRINT's clock cost makes standing strictly negative.) Fix: close the stand-still
+# loophole so the assist help goes toward balancing WHILE MOVING, plus a slower/weaker assist so it
+# can't be a full crutch. All warm-start from m2_sprint/ppo_180000000_steps.zip.
+def _m3_sprint(**kw):
+    """m3 SPRINT variant (the clock cost forbids standing still) + the standard m3 extras."""
+    base = dict(base_lock=LOCKS["m3"])
+    base.update(_extras("m3"))
+    base.update(kw)
+    return _sprint(**base)
+
+
+PRESETS.update({
+    # PRIMARY: sprint (forward pressure via the clock cost) + a MODERATE, slower-fading assist
+    # (kp 100 vs 150, fade 60M vs 40M) so balance help is spent while RUNNING, not while idling,
+    # and the policy must supply more of the balance itself. Warm from m2_sprint (objective matches).
+    "m3_assist_sprint": lambda: _m3_sprint(
+        pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
+        stance_ratio_final=0.55, residual_scale=0.14, pitch_clip=0.35, w_residual=0.05),
+    # CONTROL: sprint + competence-gated curriculum, NO assist — isolates whether the SPRINT
+    # objective's forward pressure alone (vs the speed-mode plateau) helps m3 balance.
+    "m3_sprint_gated": lambda: _m3_sprint(
+        curriculum_gate_ep_len=300.0, stance_ratio_start=0.65, stance_ratio_final=0.42,
+        gait_curriculum_steps=40_000_000, efficiency_ramp_steps=40_000_000,
+        residual_scale=0.14, pitch_clip=0.35, w_residual=0.05),
+    # HEDGE: speed mode but with the alive bonus REMOVED (w_alive=0) so standing still is no longer
+    # rewarded, + a weak assist (kp 70) that only softens falls. Tests the stand-still fix in the
+    # simpler endless-speed setting.
+    "m3_assist_move": lambda: _m3_speed(
+        w_alive=0.0, pitch_assist_kp=70.0, pitch_assist_kd=7.0, pitch_assist_ramp_steps=60_000_000,
+        stance_ratio_final=0.55, v_ceiling=1.5, residual_scale=0.14, pitch_clip=0.35, w_residual=0.05),
+})
+
 
 def get_config(name: str = "default") -> Config:
     return PRESETS[name]()
