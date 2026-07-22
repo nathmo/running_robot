@@ -153,14 +153,21 @@ class EntropyCallback(BaseCallback):
         self._air_sum, self._air_n = 0.0, 0
         if self._anneal_from is None:
             self._streak = self._streak + 1 if air > self.cfg.ent_gate_air_time else 0
-            if self._streak >= self.patience:
+            gate_open = self._streak >= self.patience
+            # hard fallback: if the competence gate never opens (air_time stuck below the gate
+            # keeps std pinned at max_log_std forever — the m3_speed_v2 deadlock), start the anneal
+            # anyway once ent_anneal_deadline_steps is reached, so exploration can finally collapse.
+            deadline = self.cfg.ent_anneal_deadline_steps
+            deadline_hit = deadline > 0 and self.num_timesteps >= deadline
+            if gate_open or deadline_hit:
                 self._anneal_from = self.num_timesteps
                 self._anneal_base = float(self.model.ent_coef)
                 if self.run_dir:
                     _persist_curriculum(self.run_dir, "ent_anneal_from", self._anneal_from)
                     _persist_curriculum(self.run_dir, "ent_anneal_base", self._anneal_base)
-                print(f"[train] competence gate open (air_time={air:.3f}) at "
-                      f"{self.num_timesteps} steps -> annealing ent_coef "
+                reason = "competence gate" if gate_open else "hard deadline"
+                print(f"[train] entropy anneal opened via {reason} (air_time={air:.3f}) at "
+                      f"{self.num_timesteps} steps -> ent_coef "
                       f"{self._anneal_base} -> {self.cfg.ent_final}")
         if self._anneal_from is not None and self._anneal_base > self.cfg.ent_final:
             frac = min(1.0, (self.num_timesteps - self._anneal_from)

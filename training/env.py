@@ -436,7 +436,15 @@ class DashEnv(gym.Env):
         if run_phase:
             # SYMMETRIC clip: backward motion pays negative income (a one-sided clip makes
             # shuttling in front of the line strictly out-value crossing it — see config.py)
-            t["fwd_speed"] = c.w_fwd_speed * float(np.clip(vx, -c.v_ceiling, c.v_ceiling))
+            speed_income = c.w_fwd_speed * float(np.clip(vx, -c.v_ceiling, c.v_ceiling))
+            if c.speed_upright_gate and speed_income > 0.0:
+                # gate ONLY forward income by uprightness: a toppling robot must not bank speed
+                # reward on the way down. -grav[2] is 1 upright, falling toward c0 (=-term_gravity_z)
+                # at the ~60 deg tip-over termination, so income fades smoothly to 0 as it tips.
+                # Backward income is left fully negative (gating it would shrink a topple's penalty).
+                u = np.clip((-grav[2] - c.speed_upright_c0) / (1.0 - c.speed_upright_c0), 0.0, 1.0)
+                speed_income *= float(u) ** c.speed_upright_k
+            t["fwd_speed"] = speed_income
             t["stop"] = 0.0
             t["overrun"] = 0.0
             progress_frac = float(np.clip(vx / c.v_ceiling, 0.0, 1.0))

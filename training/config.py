@@ -42,6 +42,12 @@ class Config:
     # in front of the line forever (forward legs earn, backward legs only pay the clock) and that
     # strictly out-values ever crossing (verified exploit, review 2026-07-17).
     w_fwd_speed: float = 2.0
+    # anti-lunge: multiply POSITIVE fwd_speed income by an uprightness factor so a toppling robot
+    # cannot bank speed reward while falling (the m3_speed_v2 exploit). Inert on m1/m2 (pitch+roll
+    # railed -> grav_z~=-1 -> factor 1). Pitch-free presets (m3..m6) set the flag via _extras.
+    speed_upright_gate: bool = False
+    speed_upright_c0: float = 0.5       # -grav_z at/below which income is fully killed (=-term_gravity_z)
+    speed_upright_k: float = 1.0        # exponent on the uprightness factor (>1 = sharper gate)
     w_alive: float = 0.0                # MUST stay 0 in sprint (paying per second rewards dawdling);
     #                                     the speed presets set 0.5 (no clock exists there)
     sprint_dist_m: float = 100.0        # the finish line (meters of base X from the reset pose)
@@ -214,6 +220,10 @@ class Config:
     ent_final: float = 0.002
     ent_anneal_steps: int = 20_000_000
     ent_gate_air_time: float = 0.02
+    ent_anneal_deadline_steps: int = 0  # hard fallback: begin the ent_coef anneal by this many env
+    #                                     steps even if the air_time competence gate never opens
+    #                                     (num_timesteps-based; 0 = disabled, gate-only). Without it
+    #                                     a stuck gate pins std at max_log_std forever (m3 deadlock).
     max_log_std: float = 0.0            # std <= 1.0: beyond the clipped range is pure farming
     seed: int = 0
     policy_hidden: List[int] = field(default_factory=lambda: [256, 256])
@@ -260,8 +270,10 @@ def _extras(m):
     kw = {}
     if m == "m1":
         kw["z_rail_randomize"] = True
-    if LOCKS[m][4] == 0:                 # pitch free -> regulate centroidal angular momentum
-        kw["w_angmom"] = 0.2
+    if LOCKS[m][4] == 0:                 # pitch free (m3..m6): angmom + anti-topple/anti-deadlock
+        kw["w_angmom"] = 0.2             # regulate centroidal angular momentum
+        kw["ent_anneal_deadline_steps"] = 25_000_000   # break the entropy-gate deadlock (2026-07-22)
+        kw["speed_upright_gate"] = True                # kill the lunge-for-speed exploit
     return kw
 
 
