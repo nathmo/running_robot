@@ -353,6 +353,111 @@
     </div>
   </section>
 
+  <!-- ============================ dynamic identification (system-ID) ============================ -->
+  <section class="panel" id="panel-measure">
+    <h2>Dynamic identification — measurement
+      <span class="hint">excite ONE leg with position chirps, log torque at 200 Hz → derive Kt,
+        reflected inertia &amp; friction. The base is fixed; the leg moves freely in the workspace.</span></h2>
+
+    <div class="row" style="margin-top:2px">
+      <span class="hint">measure leg:</span>
+      <div class="tabs" id="meas-tabs" style="margin-bottom:0">
+        <button class="tab active" data-leg="right">right leg</button>
+        <button class="tab" data-leg="left">left leg</button>
+      </div>
+      <span class="spacer"></span>
+      <span class="hint">profile:</span>
+      <button id="meas-prof-static" class="btn small">quasi-static (gravity/Kt)</button>
+      <button id="meas-prof-dyn" class="btn small primary">dynamic (chirp)</button>
+    </div>
+
+    <div class="step">
+      <div class="step-h"><span class="step-n">1</span> Excitation
+        <span class="hint">— per-joint amplitude &amp; frequency sweep; the whole path is
+          workspace-checked before it can start</span></div>
+      <table class="meas-grid">
+        <thead><tr><th>joint</th><th>amplitude °</th><th>start Hz</th><th>end Hz (chirp)</th></tr></thead>
+        <tbody id="meas-joint-rows"></tbody>
+      </table>
+      <div class="row small">
+        duration <input type="number" id="meas-duration" class="num small" value="20" step="1"> s
+        ramp <input type="number" id="meas-ramp" class="num small" value="2" step="0.5"> s
+        <label title="hold the other leg at its pose (else limp)"><input type="checkbox" id="meas-holdother" checked> hold other leg</label>
+        <label class="override"><input type="checkbox" id="meas-override"> ⚠ override workspace</label>
+      </div>
+      <div class="row">
+        <button id="btn-meas-start" class="btn primary">▶ Run measurement</button>
+        <button id="btn-meas-stop" class="btn">■ Stop</button>
+        <div class="phasebar"><div id="meas-phase" class="phasefill"></div></div>
+        <span id="meas-status" class="hint"></span>
+      </div>
+      <div class="row small">
+        <span class="hint">live current (excited leg):</span>
+        <canvas id="meas-chart" width="620" height="70"></canvas>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-h"><span class="step-n">2</span> Save &amp; captured runs</div>
+      <div class="row">
+        <input type="text" id="meas-name" class="txt" value="measure_right_dyn" placeholder="run name">
+        <button id="btn-meas-finish" class="btn small primary">💾 Save this run</button>
+        <span class="hint">capture a slow (quasi-static) run <b>and</b> a fast (dynamic) run per leg
+          for the best fit.</span>
+      </div>
+      <div id="meas-runs" class="meas-runs"></div>
+    </div>
+
+    <div class="step">
+      <div class="step-h"><span class="step-n">3</span> Drive PID gains
+        <span class="hint">— the position-loop gains your controller actually uses (stored with each
+          run, used to match the model)</span></div>
+      <table class="meas-grid"><thead><tr><th>motor</th><th>kp</th><th>ki</th><th>kd</th></tr></thead>
+        <tbody id="meas-pid-rows"></tbody></table>
+    </div>
+
+    <div class="step">
+      <div class="step-h"><span class="step-n">4</span> Run identification</div>
+      <p class="step-note">Fits Kt, reflected rotor inertia and viscous/Coulomb friction from the
+        saved runs (needs mujoco + scipy on this host). If unavailable, export the runs and run
+        <code>python -m identification.run</code> on the dev machine, then import the JSON below.</p>
+      <div class="row">
+        <button id="btn-identify-run" class="btn primary">⚙ Identify from saved runs</button>
+        <label class="btn small file-btn">⬆ Import identified_params.json<input type="file" id="identify-import" accept=".json" hidden></label>
+        <span id="identify-status" class="hint"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ limbs & inertia ============================ -->
+  <section class="panel" id="panel-limbs">
+    <h2>Limbs &amp; inertia
+      <span class="hint">enter each weighed limb mass; compare the CAD inertia tensor with the
+        identified one — eigenvalues are frame-invariant, so this tells wrong-values from wrong-frame</span></h2>
+    <div class="limbs-wrap">
+      <div class="limbs-list" id="limbs-list"></div>
+      <div class="limbs-detail">
+        <canvas id="limb-canvas" width="420" height="380"></canvas>
+        <div class="row small">
+          <label><input type="checkbox" id="limb-align"> align CAD → identified frame</label>
+          <label><input type="checkbox" id="limb-showmesh" checked> show mesh</label>
+          <span class="spacer"></span>
+          <span class="hint">🟦 CAD  🟧 identified</span>
+        </div>
+        <div id="limb-readout" class="limb-readout"></div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-h">Actuator parameters <span class="hint">(from identification)</span></div>
+      <table class="meas-grid" id="actuator-table">
+        <thead><tr><th>motor</th><th>Kt (Nm/A)</th><th>rotor inertia (kg·m²)</th>
+          <th>viscous (Nm·s)</th><th>Coulomb (Nm)</th><th>fit resid (Nm)</th></tr></thead>
+        <tbody id="actuator-rows"></tbody>
+      </table>
+      <div id="identify-summary" class="hint"></div>
+    </div>
+  </section>
+
   <!-- ============================ manage / delete files ============================ -->
   <section class="panel" id="panel-files">
     <h2>Manage files
@@ -387,5 +492,7 @@
 </main>
 
 <script src="/static/app.js"></script>
+<script src="/static/inertia3d.js"></script>
+<script src="/static/sysid.js"></script>
 </body>
 </html>

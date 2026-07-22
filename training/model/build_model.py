@@ -121,6 +121,33 @@ def f3(v):
     return " ".join(f"{x:.6g}" for x in v)
 
 
+def apply_identified_params(model_out):
+    """If measured dynamic parameters are available, patch them into the generated model. The file
+    is looked up at $IDENTIFIED_PARAMS, else `identified_params.json` next to this script. No-op (with
+    a note) when absent, so the CAD build is unaffected. Uses robot/identification/apply_identified."""
+    import json
+    import os
+    import sys
+    path = os.environ.get("IDENTIFIED_PARAMS",
+                          os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "identified_params.json"))
+    if not os.path.exists(path):
+        print(f"(no measured params at {path} — model uses CAD/placeholder dynamics; run the "
+              f"system-ID web UI + robot/identification to generate them)")
+        return
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(repo, "robot"))
+    try:
+        from identification.apply_identified import apply
+        with open(path, "r", encoding="utf-8-sig") as f:
+            params = json.load(f)
+        changed = apply(model_out, params)
+        print(f"applied measured params from {path}: {len(changed['bodies'])} bodies, "
+              f"{len(changed['armature'])} armatures, {len(changed['damping'])} dampings")
+    except Exception as e:                              # never let write-back break a CAD regen
+        print(f"(could not apply identified params: {e})")
+
+
 def add_motor_masses(root):
     """Weld each motor's mass onto its STATOR body (the joint's parent) at the joint anchor.
     The anchor comes from the compiled model's world-frame xanchor mapped into the parent frame
@@ -317,6 +344,10 @@ def build():
     ET.indent(tree, space="  ")
     tree.write(OUT, encoding="unicode", xml_declaration=False)
     print(f"wrote {OUT}")
+
+    # close the sim-to-real loop: if measured dynamic parameters exist, patch them into the freshly
+    # generated model (armature/damping/link-inertials/masses). CAD values above are the fallback.
+    apply_identified_params(OUT)
 
     # the keyframe edit only changes key_qpos, not masses/sizes — reuse the compiled model for
     # the summary and just verify the final file parses

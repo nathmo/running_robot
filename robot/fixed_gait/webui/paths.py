@@ -9,20 +9,38 @@ import sys
 
 WEBUI = os.path.dirname(os.path.abspath(__file__))
 FIXED_GAIT = os.path.dirname(WEBUI)
-REPO = os.path.dirname(FIXED_GAIT)
+REPO = os.path.dirname(FIXED_GAIT)                 # the robot/ dir (holds identification/, model/)
 
-for p in (FIXED_GAIT, WEBUI):
+# REPO is added so the offline identification package (robot/identification/) is importable from
+# the webui when its deps (mujoco/scipy) happen to be present; the pure-numpy frames helper is used
+# by the inertia-comparison endpoint even on the Pi.
+for p in (FIXED_GAIT, WEBUI, REPO):
     if p not in sys.path:
         sys.path.insert(0, p)
 
 DATA = os.path.join(WEBUI, "data")
 TRAJ_DIR = os.path.join(DATA, "trajectories")
 WORKSPACE_DIR = os.path.join(DATA, "workspaces")
+MEASURE_DIR = os.path.join(DATA, "measurements")      # high-rate system-ID capture runs (.npz+.json)
+IDENT_DIR = os.path.join(DATA, "identification")       # estimator outputs (identified_params.json)
 CALIB_FILE = os.path.join(DATA, "session_calibration.json")
 MODEL_MAP_FILE = os.path.join(DATA, "model_map.json")
+DYN_CONFIG_FILE = os.path.join(DATA, "dynamics_config.json")   # weighed masses, drive PID gains, Kt
 FK_LUT_FILE = os.path.join(WEBUI, "fk_lut.npz")
 
-for d in (DATA, TRAJ_DIR, WORKSPACE_DIR):
+# the MuJoCo model whose inertials are the CAD "given" values compared in the Limbs & Inertia panel
+MODEL_XML = os.path.join(REPO, "model", "dash01.xml")
+
+# STL meshes for the 3D limb viewer (robot/model/dash01.xml points its meshdir at the CAD export).
+_MESH_CANDIDATES = [
+    os.path.join(REPO, "robotCADdescription", "MJCF_OPEN_MUJOCO_B", "dash01", "meshes"),
+    os.path.join(REPO, "model", "meshes"),
+    os.path.join(os.path.dirname(REPO), "training", "model", "meshes"),
+]
+MESH_DIR = next((d for d in _MESH_CANDIDATES if os.path.isdir(d)), _MESH_CANDIDATES[0])
+MESH_SCALE = 0.001                      # STLs are in mm; the model scales them by 0.001
+
+for d in (DATA, TRAJ_DIR, WORKSPACE_DIR, MEASURE_DIR, IDENT_DIR):
     os.makedirs(d, exist_ok=True)
 
 # ---- global motor naming / ordering (matches telemetry columns everywhere) ----

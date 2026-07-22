@@ -109,6 +109,7 @@ function applyState(st) {
   $("panel-mock").classList.toggle("hidden", !st.mock);
   $("btn-estop").textContent = (st.estop && st.estop.latched) ? "CLEAR E-STOP" : "E-STOP";
   if (cal.stage === "complete" && !S.sineDefFetched) { S.sineDefFetched = true; fetchSineDefaults(); }
+  if (window.onSysidState) window.onSysidState(st);      // system-ID panels (sysid.js)
 }
 
 /* homing banner + keep the override checkbox in sync with the daemon */
@@ -157,7 +158,8 @@ function updateWizard(st) {
   // gate every actionable panel until calibrated (telemetry + mock stay usable — the wizard
   // itself needs live values and mock dragging)
   document.querySelectorAll("#main > .panel").forEach((p) => {
-    if (!["panel-calib", "panel-telemetry", "panel-mock", "panel-files"].includes(p.id))
+    // panel-limbs is pure inspection (mass entry + inertia comparison) — usable before calibration
+    if (!["panel-calib", "panel-telemetry", "panel-mock", "panel-files", "panel-limbs"].includes(p.id))
       p.classList.toggle("locked", !complete);
   });
   if (complete) {

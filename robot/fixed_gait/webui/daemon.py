@@ -29,7 +29,7 @@ import ringbuffer
 import play_trajectory as pt              # fixed_gait/ — Motor, drain, reconstruct-side helpers
 import trajectory as traj                 # fixed_gait/
 
-MODES = ("LIMP", "MANUAL", "RECORD_GAIT", "RECORD_WS", "PLAYBACK", "ESTOPPED")
+MODES = ("LIMP", "MANUAL", "RECORD_GAIT", "RECORD_WS", "PLAYBACK", "MEASURE", "ESTOPPED")
 TICK_HZ = 200.0
 TELEMETRY_DIV = 10                        # ring/snapshot update every Nth tick (=> 20 Hz)
 MAX_TEMP_C = 80                           # run_hardware.py:102
@@ -46,6 +46,22 @@ HARD_WIDEN_DEG = 10.0
 PLAYBACK_DEFAULTS = dict(period=8.0, mode="position", current_limit=3.0, kp=0.8, ki=0.4, kd=0.02,
                          ramp=3.0, max_track_err=30.0, speed_limit=9000.0, max_speed=16000.0,
                          left_phase=None, legs="both", abd_right=None, abd_left=None)
+
+# System-ID excitation (position mode: stream SET_POS chirps, the drive tracks, we log the current).
+# One leg at a time; per-role amplitude + a linear frequency chirp f0->f1 (f0==f1 => pure sine) with
+# a per-role phase so the joints decorrelate. 'quasi_static' is the SAME machinery run very slowly
+# (velocity ~ 0 -> every sample is a gravity measurement, for Kt/CoM/Coulomb); 'dynamic' chirps
+# faster to excite inertia + viscous friction. The WHOLE planned trajectory is workspace-validated
+# up front (envelope pre-check) so the run cannot start into unsafe space. See the plan.
+MEASURE_DEFAULTS = dict(
+    leg="right", profile="dynamic", duration=20.0, ramp=2.0, max_track_err=30.0,
+    hold_other=True, override=False,
+    amp=dict(abd=8.0, cam=12.0, thigh=12.0),
+    f0=dict(abd=0.05, cam=0.05, thigh=0.05),
+    f1=dict(abd=0.40, cam=0.50, thigh=0.50),
+    phase=dict(abd=0.0, cam=1.5708, thigh=3.1416),
+)
+MEASURE_ENVELOPE_SAMPLES = 480          # trajectory samples validated before a run may start
 
 
 class RobotDaemon(threading.Thread):
@@ -74,6 +90,8 @@ class RobotDaemon(threading.Thread):
         self._playback_req = None          # dict: params + 'data'
         self._playback_patch = None
         self._record_cmds = []             # (cmd, leg) tuples
+        self._measure_req = None           # dict: excitation spec (MEASURE_DEFAULTS merged)
+        self._measure_stop = False         # request to end the active excitation (keep the log)
 
         # -------- daemon-internal state --------
         self.mode = "LIMP"
@@ -87,6 +105,7 @@ class RobotDaemon(threading.Thread):
         self._held = {}                    # name -> commanded normalized target (MANUAL)
         self._last_cmd_raw = {}            # name -> last raw SET_POS (tracking-error guard)
         self._pb = None                    # playback state dict
+        self._meas = None                  # MEASURE excitation + high-rate log buffers
         self._rec = dict(kind=None, active=False, leg=None, buf_t=[], buf_p=[], t0=0.0,
                          takes={"right": [], "left": []}, segments={"right": [], "left": []},
                          centers={"right": None, "left": None}, outside=False)
@@ -329,6 +348,108 @@ class RobotDaemon(threading.Thread):
                         segments={s: list(r["segments"][s]) for s in ("right", "left")},
                         centers=dict(r["centers"]))
 
+    # ---------------------------------------------------------------- system-ID (MEASURE)
+    @staticmethod
+    def _merge_measure_spec(spec):
+        """Merge a web spec over MEASURE_DEFAULTS and clamp every field to a sane/safe range."""
+        m = {k: (dict(v) if isinstance(v, dict) else v) for k, v in MEASURE_DEFAULTS.items()}
+        for k, v in (spec or {}).items():
+            if k in ("amp", "f0", "f1", "phase") and isinstance(v, dict):
+                m[k].update({r: float(v[r]) for r in paths.ROLES if v.get(r) is not None})
+            elif k in m and k not in ("amp", "f0", "f1", "phase"):
+                m[k] = v
+        m["leg"] = str(m["leg"])
+        m["profile"] = str(m["profile"])
+        m["duration"] = float(np.clip(m["duration"], 1.0, 600.0))
+        m["ramp"] = float(np.clip(m["ramp"], 0.0, m["duration"] / 2.0))
+        m["max_track_err"] = float(np.clip(m["max_track_err"], 5.0, 60.0))
+        m["hold_other"] = bool(m["hold_other"])
+        m["override"] = bool(m["override"])
+        for r in paths.ROLES:
+            m["amp"][r] = float(np.clip(m["amp"][r], 0.0, 60.0))
+            m["f0"][r] = float(np.clip(m["f0"][r], 0.0, 3.0))
+            m["f1"][r] = float(np.clip(m["f1"][r], 0.0, 3.0))
+            m["phase"][r] = float(m["phase"][r])
+        return m
+
+    @staticmethod
+    def _measure_ramp(t, T, ramp):
+        """Amplitude envelope: ease in over `ramp` s and ease back out near the end (clean stop)."""
+        if ramp <= 0:
+            return 1.0
+        return float(np.clip(min(t / ramp, (T - t) / ramp), 0.0, 1.0))
+
+    @staticmethod
+    def _measure_phase(meas, role, t):
+        """Instantaneous chirp phase: 2*pi*integral(f) with f linear f0->f1 over the run."""
+        T = max(meas["duration"], 1e-6)
+        f0, f1 = meas["f0"][role], meas["f1"][role]
+        return 2.0 * np.pi * (f0 * t + (f1 - f0) * t * t / (2.0 * T)) + meas["phase"][role]
+
+    def _measure_pose(self, meas, t):
+        """Full 6-name normalized pose at time t: the selected leg tracks its per-role chirp about
+        the captured base pose; the other leg stays at base."""
+        pose = dict(meas["base"])
+        leg = meas["leg"]
+        a = self._measure_ramp(t, meas["duration"], meas["ramp"])
+        for role in paths.ROLES:
+            n = f"{leg}.{role}"
+            pose[n] = meas["base"][n] + a * meas["amp"][role] * np.sin(
+                self._measure_phase(meas, role, t))
+        return pose
+
+    def measure_start(self, spec):
+        """Validate the FULL excitation envelope against the safe workspace, then arm a MEASURE run.
+        Returns (ok, reason). Refuses if any point of the planned trajectory (or the current pose)
+        leaves the safe set — the run can never start into unsafe space (mirrors sine_update's
+        both-endpoints pre-check, extended to the whole chirp)."""
+        ok, why = self._motion_allowed()
+        if not ok:
+            return False, why
+        if not self.by_name or any(m.pos is None for m in self.motors):
+            return False, "not all motors are reporting yet"
+        meas = self._merge_measure_spec(spec)
+        if meas["leg"] not in paths.SIDES:
+            return False, f"leg must be right|left (got {meas['leg']})"
+        meas["base"] = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items()}
+        T = meas["duration"]
+        for k in range(MEASURE_ENVELOPE_SAMPLES):
+            t = T * k / (MEASURE_ENVELOPE_SAMPLES - 1)
+            ok, reason = self._validate_pose(self._measure_pose(meas, t), meas["override"])
+            if not ok:
+                return False, (f"excitation would leave the safe workspace at t={t:.1f}s "
+                               f"({reason}) — reduce amplitude, re-center the leg first, "
+                               f"or enable override")
+        with self.lock:
+            self._measure_req = meas
+        return True, ""
+
+    def measure_stop(self):
+        with self.lock:
+            self._measure_stop = True
+
+    def get_measurement(self):
+        """Copy of the high-rate log + run metadata for the finish/export endpoints (or None)."""
+        with self.lock:
+            m = self._meas
+            if m is None:
+                return None
+            n = len(m["buf_t"])
+
+            def arr(key):
+                return (np.array(m[key], float) if n else
+                        np.zeros((0, paths.N_MOTORS), float))
+            run = dict(t=np.array(m["buf_t"], float), cmd_norm=arr("buf_cmd"),
+                       pos_norm=arr("buf_posn"), pos_raw=arr("buf_posr"),
+                       spd=arr("buf_spd"), cur=arr("buf_cur"))
+            meta = dict(leg=m["leg"], profile=m["profile"], duration=m["duration"],
+                        ramp=m["ramp"], amp=dict(m["amp"]), f0=dict(m["f0"]), f1=dict(m["f1"]),
+                        phase=dict(m["phase"]), hold_other=m["hold_other"],
+                        override=m["override"], base=dict(m["base"]),
+                        running=m["running"], done=m.get("done", False),
+                        started=m.get("started"))
+        return run, meta
+
     def latest_raw_positions(self):
         return {n: (self.by_name[n].pos if self.by_name else None) for n in paths.MOTOR_NAMES}
 
@@ -409,6 +530,8 @@ class RobotDaemon(threading.Thread):
             if self.estop_event.is_set() and self.mode != "ESTOPPED":
                 self.mode = "ESTOPPED"
                 self._pb = None
+                if self._meas:
+                    self._meas["running"] = False       # keep the partial log; stop exciting
                 with self.lock:
                     self._manual_targets = {}
                     self._manual_override = False
@@ -428,6 +551,8 @@ class RobotDaemon(threading.Thread):
                 self._tick_manual(now, dt)
             elif self.mode == "PLAYBACK":
                 self._tick_playback(now, dt)
+            elif self.mode == "MEASURE":
+                self._tick_measure(now, dt)
 
             # 5) safety sweep (err flag / temp in every mode; run_hardware.safety_check semantics)
             for m in self.motors:
@@ -484,6 +609,10 @@ class RobotDaemon(threading.Thread):
             self._playback_patch = None
             rec_cmds = self._record_cmds
             self._record_cmds = []
+            meas_req = self._measure_req
+            self._measure_req = None
+            meas_stop = self._measure_stop
+            self._measure_stop = False
 
         if clear and self.mode == "ESTOPPED":
             self.estop_event.clear()
@@ -506,10 +635,20 @@ class RobotDaemon(threading.Thread):
         if pb_patch is not None and self._pb is not None:
             self._apply_playback_patch(pb_patch, now)
 
+        if meas_stop and self._meas is not None:
+            self._meas["running"] = False               # user-ended; keep the log for saving
+        if meas_req is not None:
+            ok, why = self._motion_allowed()
+            if ok:
+                self._start_measure(meas_req, now)
+            else:
+                self._last_reject = why
+
         if req_mode and req_mode != self.mode:
             if req_mode == "LIMP":
                 self.mode = "LIMP"
                 self._pb = None
+                self._meas = None                          # finished/aborted run is cleared here
                 self._end_active_record()
                 with self.lock:
                     self._manual_targets = {}
@@ -685,6 +824,98 @@ class RobotDaemon(threading.Thread):
                     self._trip(f"{n} runaway {m.spd:.0f} ERPM (> {pb['max_speed']:.0f})")
                     return
 
+    # ----------------------------------------------------------------- MEASURE (system-ID)
+    def _start_measure(self, meas, now):
+        meas["t0"] = now
+        meas["running"] = True
+        meas["done"] = False
+        meas["started"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        for k in ("buf_t", "buf_cmd", "buf_posn", "buf_posr", "buf_spd", "buf_cur"):
+            meas[k] = []
+        self._meas = meas
+        self._last_reject = ""
+        self.mode = "MEASURE"
+
+    def _tick_measure(self, now, dt):
+        meas = self._meas
+        if meas is None:
+            self.mode = "LIMP"
+            return
+        if not meas["running"]:
+            self._stream_limp()                     # completed/stopped: hold limp until saved+cleared
+            return
+        ok, why = self._motion_allowed()
+        if not ok:
+            self._trip(why)
+            return
+        t = now - meas["t0"]
+        if t >= meas["duration"]:
+            meas["running"] = False
+            meas["done"] = True
+            self._stream_limp()
+            return
+
+        leg = meas["leg"]
+        pose = self._measure_pose(meas, t)
+        for n in paths.MOTOR_NAMES:                  # never-exceed hard clamp
+            side, role = paths.split_name(n)
+            lo, hi = self._hard_bounds(side, role)
+            pose[n] = float(np.clip(pose[n], lo, hi))
+        # live workspace net (the envelope was already validated at start; this catches drift)
+        if not meas["override"]:
+            limits = self.wstore.limits if self.wstore else None
+            tgt_by_motor = {self.by_name[n]: pose[n] for n in paths.MOTOR_NAMES}
+            ok, reason = pt.check_workspace(self.side_groups, tgt_by_motor, limits)
+            if not ok:
+                self._trip(f"measure workspace: {reason}")
+                return
+        elif self.fklut is not None and self.fklut.available:
+            for side in paths.SIDES:
+                ok, reason = self.fklut.feasible_check(side, pose[f"{side}.cam"],
+                                                       pose[f"{side}.thigh"])
+                if not ok:
+                    self._trip(f"measure feasibility: {reason}")
+                    return
+        self._last_reject = ""
+
+        cmd_row = [np.nan] * paths.N_MOTORS
+        for i, n in enumerate(paths.MOTOR_NAMES):
+            side, _ = paths.split_name(n)
+            m = self.by_name[n]
+            if side == leg or meas["hold_other"]:       # excited leg tracks; other leg holds or limps
+                raw = self.calib.raw(n, pose[n])
+                canio.set_pos(m.bus, m.cid, raw)
+                self._last_cmd_raw[n] = raw
+                cmd_row[i] = pose[n]
+                if m.pos is not None and abs(m.pos - raw) > meas["max_track_err"]:
+                    self._trip(f"{n} tracking error {m.pos - raw:+.1f} deg "
+                               f"(> {meas['max_track_err']:.0f}) — hitting a stop?")
+                    return
+            else:
+                canio.set_current(m.bus, m.cid, 0.0)
+        self._measure_log(t, cmd_row)
+
+    def _measure_log(self, t, cmd_row):
+        """Append one high-rate (200 Hz) row: t + per-motor commanded/measured pos, speed, current."""
+        meas = self._meas
+        posn = [np.nan] * paths.N_MOTORS
+        posr = [np.nan] * paths.N_MOTORS
+        spd = [np.nan] * paths.N_MOTORS
+        cur = [np.nan] * paths.N_MOTORS
+        for i, n in enumerate(paths.MOTOR_NAMES):
+            m = self.by_name[n]
+            if m.pos is not None:
+                posr[i] = m.pos
+                posn[i] = self.calib.norm(n, m.pos)
+                spd[i] = m.spd
+                cur[i] = m.cur
+        meas["buf_t"].append(t)
+        meas["buf_cmd"].append(cmd_row)
+        meas["buf_posn"].append(posn)
+        meas["buf_posr"].append(posr)
+        meas["buf_spd"].append(spd)
+        meas["buf_cur"].append(cur)
+
     # ----------------------------------------------------------------- RECORDING
     def _handle_record_cmd(self, cmd, leg, kind, now):
         r = self._rec
@@ -785,6 +1016,13 @@ class RobotDaemon(threading.Thread):
                     running=self.mode == "PLAYBACK", phase=round(self._pb.get("phase", 0.0), 3),
                     period=self._pb["period"], mode=self._pb["mode"], sides=self._pb["sides"],
                     current_limit=self._pb["current_limit"])),
+                measure=(None if self._meas is None else dict(
+                    running=self._meas["running"], done=self._meas.get("done", False),
+                    leg=self._meas["leg"], profile=self._meas["profile"],
+                    duration=self._meas["duration"],
+                    elapsed=round(float(np.clip(now - self._meas.get("t0", now),
+                                                0.0, self._meas["duration"])), 2),
+                    n_samples=len(self._meas["buf_t"]))),
                 recording=dict(kind=r["kind"], active=r["active"], leg=r["leg"],
                                outside_workspace=r["outside"],
                                n_samples=len(r["buf_p"]),

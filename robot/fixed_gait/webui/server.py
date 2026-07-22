@@ -15,7 +15,10 @@ import argparse
 import atexit
 import io
 import json
+import os
 import secrets
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -25,9 +28,18 @@ import paths
 import calibration
 import canio
 import daemon as daemon_mod
+import dynstore
 import fklut
 import gaitstore
+import measurestore
 import workspace
+
+# pure-numpy identification helpers (safe to import on the Pi; the heavy estimator is imported
+# lazily inside /api/identify/run only when its mujoco/scipy deps are actually present)
+from identification import frames, model_inertials, paramio
+
+IDENT_PARAMS_FILE = os.path.join(paths.IDENT_DIR, "identified_params.json")
+MESH_DIR = paths.MESH_DIR
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
@@ -36,6 +48,7 @@ STATE = {
     "calib": None,           # calibration.Calibration
     "wstore": None,          # workspace.WorkspaceStore
     "fk": None,              # fklut.FkLut
+    "dyn": None,             # dynstore.DynConfig (weighed masses, drive PID, Kt)
     "interface": "socketcan",
     "mock": False,
     "ctl": {"token": None, "ts": 0.0},
@@ -115,6 +128,9 @@ def api_state():
                          "source": STATE["wstore"].source,
                          "files": STATE["wstore"].list_files()}
     snap["trajectories"] = gaitstore.list_files()
+    snap["measurements"] = measurestore.list_summaries()
+    snap["dynamics"] = STATE["dyn"].snapshot()
+    snap["identified"] = os.path.exists(IDENT_PARAMS_FILE)
     snap["fk"] = {"available": fk.available,
                   "verified": dict(fk.model_map["verified"]) if fk.available else {},
                   "model_map": {s: fk.model_map[s] for s in paths.SIDES} if fk.available else {}}
@@ -587,6 +603,192 @@ def api_playback_stop():
     return _ok()
 
 
+# ===================================================================== system-ID: MEASURE capture
+@app.post("/api/measure/start")
+def api_measure_start():
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    ok, why = _dm().measure_start(b.get("spec") or b)
+    time.sleep(0.05)
+    return _ok(token=token) if ok else _err(why)
+
+
+@app.post("/api/measure/stop")
+def api_measure_stop():
+    _dm().measure_stop()
+    time.sleep(0.02)
+    return _ok()
+
+
+@app.post("/api/measure/finish")
+def api_measure_finish():
+    """Save the accumulated high-rate log as a run (npz + json), embedding the calibration + the
+    weighed masses / drive PID / Kt in effect, so the run is self-describing for the estimator."""
+    b = request.get_json(force=True, silent=True) or {}
+    got = _dm().get_measurement()
+    if got is None:
+        return _err("no measurement in progress — start one first", 404)
+    run, meta = got
+    if len(run["t"]) < 5:
+        _dm().request_mode("LIMP")
+        return _err("measurement captured too few samples to save")
+    meta = dict(meta,
+                calibration=STATE["calib"].snapshot(),
+                dynamics=STATE["dyn"].as_dict(),
+                model_map={s: STATE["fk"].model_map[s] for s in paths.SIDES}
+                          if STATE["fk"].available else None)
+    try:
+        saved = measurestore.save(b.get("name", "measure"), run, meta)
+    except ValueError as e:
+        return _err(e)
+    _dm().request_mode("LIMP")                       # clears the run buffer in the daemon
+    time.sleep(0.02)
+    return _ok(saved=saved, measurements=measurestore.list_summaries())
+
+
+@app.get("/api/measure/export")
+def api_measure_export():
+    try:
+        blob, fname = measurestore.export_bytes(request.args.get("name", ""))
+    except (FileNotFoundError, OSError) as e:
+        return _err(e, 404)
+    return send_file(io.BytesIO(blob), download_name=fname, as_attachment=True,
+                     mimetype="application/octet-stream")
+
+
+@app.post("/api/measure/delete")
+def api_measure_delete():
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        removed = measurestore.delete(b.get("name", ""))
+    except FileNotFoundError as e:
+        return _err(e, 404)
+    return _ok(deleted=removed, measurements=measurestore.list_summaries())
+
+
+# ===================================================================== dynamics config (mass/PID)
+@app.post("/api/dynamics/mass")
+def api_dynamics_mass():
+    b = request.get_json(force=True, silent=True) or {}
+    ok, why = STATE["dyn"].set_mass(b.get("body", ""), b.get("mass"))
+    return _ok(dynamics=STATE["dyn"].snapshot()) if ok else _err(why)
+
+
+@app.post("/api/dynamics/pid")
+def api_dynamics_pid():
+    b = request.get_json(force=True, silent=True) or {}
+    ok, why = STATE["dyn"].set_pid(b.get("motor", ""), kp=b.get("kp"), ki=b.get("ki"),
+                                   kd=b.get("kd"))
+    return _ok(dynamics=STATE["dyn"].snapshot()) if ok else _err(why)
+
+
+# ===================================================================== inertia inspect / compare
+def _model_inertia_payload():
+    """Per-body CAD (model) inertials + identified inertials (if present) + the frames.compare()
+    verdict/rotation for each. Drives the Limbs & Inertia panel."""
+    try:
+        cad = model_inertials.read_bodies(paths.MODEL_XML)
+    except (OSError, ValueError) as e:
+        return {"error": f"could not read model inertials from {paths.MODEL_XML}: {e}", "bodies": {}}
+    params = paramio.load_or_none(IDENT_PARAMS_FILE) or {}
+    idb = params.get("bodies", {})
+    weighed = STATE["dyn"].as_dict().get("masses", {})
+    bodies = {}
+    for name, c in cad.items():
+        ident = idb.get(name)
+        bodies[name] = {"comparison": frames.compare(c, ident),
+                        "weighed_mass": weighed.get(name)}
+    return {"bodies": bodies, "has_identified": bool(idb),
+            "kt": params.get("kt", {}), "friction": params.get("friction", {}),
+            "rotor_armature": params.get("rotor_armature", {}),
+            "validation": params.get("validation", {}),
+            "created": params.get("created"), "sources": params.get("sources", [])}
+
+
+@app.get("/api/model/inertia")
+def api_model_inertia():
+    return jsonify(_model_inertia_payload())
+
+
+@app.post("/api/inertia/compare")
+def api_inertia_compare():
+    """Ad-hoc: compare two supplied {mass, com, inertia} bodies (e.g. a pasted alternate CAD tensor
+    against the identified one) — same maths as the panel, no persistence."""
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(frames.compare(b.get("cad"), b.get("identified")))
+    except (KeyError, ValueError, TypeError) as e:
+        return _err(f"bad tensor payload: {e}")
+
+
+@app.get("/api/mesh/<name>")
+def api_mesh(name):
+    """Serve a link STL for the 3D viewer (sanitized; must be a known model mesh)."""
+    safe = os.path.basename(name)
+    if not safe.endswith(".stl") or not os.path.exists(os.path.join(MESH_DIR, safe)):
+        return _err(f"mesh '{name}' not found", 404)
+    return send_from_directory(MESH_DIR, safe, mimetype="model/stl")
+
+
+# ===================================================================== identification estimator
+@app.get("/api/identify")
+def api_identify_get():
+    params = paramio.load_or_none(IDENT_PARAMS_FILE)
+    return jsonify({"available": params is not None, "params": params})
+
+
+@app.post("/api/identify/import")
+def api_identify_import():
+    """Upload an identified_params.json produced offline on the dev machine (the estimator host)."""
+    f = request.files.get("file")
+    if f is None:
+        return _err("multipart 'file' missing")
+    try:
+        params = json.loads(f.read().decode("utf-8-sig"))
+    except (ValueError, UnicodeDecodeError) as e:
+        return _err(f"not valid JSON: {e}")
+    if "bodies" not in params and "kt" not in params:
+        return _err("that JSON has no 'bodies' or 'kt' — is it an identified_params file?")
+    paramio.save(params, IDENT_PARAMS_FILE)
+    return _ok(imported=True)
+
+
+@app.post("/api/identify/run")
+def api_identify_run():
+    """Run the offline estimator in-process host if mujoco+scipy are available here; otherwise 501
+    with the exact CLI to run on the dev/training machine. Estimation is CPU-heavy but bounded."""
+    b = request.get_json(force=True, silent=True) or {}
+    measures = b.get("measurements") or [m["name"] for m in measurestore.list_summaries()]
+    if not measures:
+        return _err("no measurement runs to identify from — capture some first")
+    cmd = [sys.executable, "-m", "identification.run",
+           "--model", paths.MODEL_XML, "--out", IDENT_PARAMS_FILE,
+           "--config", paths.DYN_CONFIG_FILE, "--measure-dir", paths.MEASURE_DIR,
+           "--measures", *measures]
+    try:
+        import mujoco  # noqa: F401
+        import scipy    # noqa: F401
+    except ImportError:
+        return jsonify({"ok": False, "code": "no_estimator_deps",
+                        "error": "this host has no mujoco/scipy — run the estimator on the dev "
+                                 "machine, then upload identified_params.json here",
+                        "cli": " ".join(f'"{c}"' if " " in c else c for c in cmd),
+                        "cwd": paths.REPO, "state": _dm().get_snapshot()}), 501
+    try:
+        r = subprocess.run(cmd, cwd=paths.REPO, capture_output=True, text=True, timeout=1800)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return _err(f"estimator failed to launch/finish: {e}", 500)
+    if r.returncode != 0:
+        return _err(f"estimator exited {r.returncode}: {r.stderr[-1500:] or r.stdout[-1500:]}", 500)
+    params = paramio.load_or_none(IDENT_PARAMS_FILE)
+    return _ok(ran=True, log=r.stdout[-4000:], available=params is not None)
+
+
 # ===================================================================== FK / misc
 @app.post("/api/fk/verify")
 def api_fk_verify():
@@ -666,6 +868,7 @@ def main():
     STATE["calib"] = calibration.Calibration.load_or_new()
     STATE["wstore"] = workspace.WorkspaceStore()
     STATE["fk"] = fklut.FkLut()
+    STATE["dyn"] = dynstore.DynConfig.load_or_new()
     d = daemon_mod.RobotDaemon(interface=args.interface, mock=args.mock,
                                calib=STATE["calib"], wstore=STATE["wstore"], fklut=STATE["fk"])
     STATE["daemon"] = d

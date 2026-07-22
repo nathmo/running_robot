@@ -164,6 +164,42 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 .phasefill { height: 100%; width: 0%; background: var(--accent); transition: width .1s linear; }
 input[type=range] { accent-color: var(--accent); }
 
+/* ---------------- system-ID: measurement + limbs & inertia ---------------- */
+.meas-grid { width: 100%; border-collapse: collapse; font-size: 12px; margin: 4px 0; }
+.meas-grid th { text-align: left; color: var(--dim); font-weight: 500; padding: 2px 6px;
+  border-bottom: 1px solid var(--line); }
+.meas-grid td { padding: 3px 6px; }
+.meas-grid .num { width: 68px; }
+.meas-runs { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.meas-run { display: flex; align-items: center; gap: 8px; background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 12px; }
+.meas-run b { font-family: ui-monospace, monospace; }
+#meas-chart { background: #10141a; border: 1px solid var(--line); border-radius: 4px; }
+
+.limbs-wrap { display: grid; grid-template-columns: 260px 1fr; gap: 12px; align-items: start; }
+.limbs-list { display: flex; flex-direction: column; gap: 3px; max-height: 420px; overflow-y: auto; }
+.limb-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px;
+  border: 1px solid transparent; }
+.limb-row:hover { background: var(--panel2); }
+.limb-row.sel { background: var(--panel2); border-color: var(--accent); }
+.limb-name { flex: 1; cursor: pointer; font-size: 12px; }
+.limb-mass { width: 62px !important; }
+.verdict { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line);
+  white-space: nowrap; }
+.verdict.v-ok { color: var(--good); border-color: var(--good); }
+.verdict.v-warn { color: var(--warn); border-color: var(--warn); }
+.verdict.v-bad { color: var(--bad); border-color: var(--bad); }
+.verdict.v-none { color: var(--dim); }
+.limbs-detail { min-width: 0; }
+#limb-canvas { width: 100%; max-width: 420px; height: 360px; background: #0e141b;
+  border: 1px solid var(--line); border-radius: 8px; touch-action: none; cursor: grab; }
+.limb-readout { font-size: 12px; margin-top: 6px; }
+.verdict-text { color: var(--fg); margin: 4px 0; }
+.ro-grid { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 12px; }
+.ro-grid > div:nth-child(odd) { color: var(--dim); }
+.ro-grid > div:nth-child(even) { font-family: ui-monospace, monospace; }
+
 @media (max-width: 700px) {
   #main { grid-template-columns: 1fr; padding: 8px; }
+  .limbs-wrap { grid-template-columns: 1fr; }
 }
