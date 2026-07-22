@@ -157,6 +157,16 @@ class Config:
     stance_ratio_start: float = 0.65    # walking duty factor (curriculum start)
     stance_ratio_final: float = 0.42    # running duty factor (< 0.5 = flight window exists)
     gait_curriculum_steps: int = 60_000_000   # env steps to ramp stance_ratio over; 0 = hold start
+    # COMPETENCE-GATED curriculum (2026-07-22): the stance_ratio + efficiency ramps are otherwise
+    # CLOCK-driven from step 0 — they harden toward flight-phase running + full efficiency whether
+    # or not the robot ever learned to balance the freed pitch DOF, so an m3 policy that can't yet
+    # hold height is perpetually asked to run and collapses at the passive-fall time (~60 steps).
+    # Same failure class as the entropy-gate deadlock. With this > 0, BOTH ramps HOLD at their easy
+    # start (stance_ratio_start, eff_scale 0) until rollout ep_len_mean exceeds it for `patience`
+    # rollouts, THEN ramp to target over gait_curriculum_steps / efficiency_ramp_steps from the
+    # open step. 0 = the old clock-driven behavior. A gate that never opens = easy regime forever
+    # (the correct failure mode: keep it upright rather than force it to run and fall).
+    curriculum_gate_ep_len: float = 0.0
 
     # ----- reward: efficiency (Cassie-100m recipe; annealed IN over efficiency_ramp_steps) -----
     # Weighted to comparable magnitudes at running speed so the optimizer trades them off, which
@@ -290,6 +300,60 @@ def _mk_speed(m):
 PRESETS = {**{f"{m}_sprint": _mk_sprint(m) for m in LOCKS},
            **{f"{m}_speed": _mk_speed(m) for m in LOCKS},
            "default": Config}
+
+
+# ----- m3 anti-topple sweep (2026-07-22) -------------------------------------------------
+# m3 (X+Z+pitch free) keeps collapsing at the passive-fall time (ep_len ~60 = 1.2 s) with a hard
+# forward lunge (peak vx ~3.7 m/s): the moment pitch is freed the robot must learn active balance,
+# but the clock-driven curricula simultaneously demand a flight-phase running gait (stance_ratio
+# 0.42) + full efficiency + high speed, all of which fight "extend legs, hold height, don't tip".
+# m2 (same plant, pitch LOCKED) trains fine — so the fix is: establish a height-holding, pitch-
+# balanced gait in an EASY regime first, then harden. Each preset below attacks one lever; all
+# warm-start from m2_sprint/ppo_180000000_steps.zip (dims are identical across milestones).
+def _m3_speed(**kw):
+    """m3 endless-speed variant: m3 lock + the standard m3 extras (angmom, ent deadline, upright
+    gate), then the sweep overrides on top."""
+    base = dict(base_lock=LOCKS["m3"])
+    base.update(_extras("m3"))
+    base.update(kw)
+    return _speed(**base)
+
+
+PRESETS.update({
+    # R1 — balance-first WALKING: never demand a flight phase (stance >= 0.5), modest top speed so
+    # it can't lunge, efficiency held near 0 the whole run. The cleanest "just walk and stay up".
+    "m3_walk": lambda: _m3_speed(
+        stance_ratio_start=0.65, stance_ratio_final=0.60, gait_curriculum_steps=40_000_000,
+        v_ceiling=1.2, efficiency_ramp_steps=250_000_000),
+    # R2 — competence-GATED curriculum toward the full running target: hold easy until it survives,
+    # then harden. The principled, scalable fix (reused for m4+ if it works).
+    "m3_gated": lambda: _m3_speed(
+        curriculum_gate_ep_len=400.0, v_ceiling=2.0,
+        stance_ratio_start=0.65, stance_ratio_final=0.42, gait_curriculum_steps=40_000_000,
+        efficiency_ramp_steps=40_000_000),
+    # R3 — kill the LUNGE only, keep the running/flight demand: low speed cap + sharp uprightness
+    # gate. Isolates whether the forward lunge (not the gait demand) is the killer.
+    "m3_slow": lambda: _m3_speed(
+        v_ceiling=1.0, w_fwd_speed=1.5, speed_upright_k=3.0, speed_upright_c0=0.7),
+    # R4 — more corrective AUTHORITY: 2x residual fast-feedback + stronger/roomier pitch reflex,
+    # cheaper residuals, mild easing so the authority can show.
+    "m3_authority": lambda: _m3_speed(
+        residual_scale=0.16, pitch_clip=0.40, pitch_kp=2.5, w_residual=0.05,
+        stance_ratio_final=0.50, efficiency_ramp_steps=150_000_000),
+    # R5 — remove the EFFICIENCY tax + the flight demand entirely (ablation): does the energy/torque
+    # penalty smother the leg work that holds height?
+    "m3_noeff": lambda: _m3_speed(
+        stance_ratio_final=0.50, w_torque=0.0, w_motor_vel=0.0, w_energy=0.0),
+    # R6 — emphasize STAYING UP: stronger height/vz/upright shaping + modest speed + walking duty.
+    "m3_height": lambda: _m3_speed(
+        w_height=6.0, w_vz=1.5, w_upright=8.0, v_ceiling=1.5, stance_ratio_final=0.55),
+    # R7 — COMBO of the most promising levers: gated hardening + low speed + more authority +
+    # gentle final gait. Best single shot at a working policy overnight.
+    "m3_combo": lambda: _m3_speed(
+        curriculum_gate_ep_len=300.0, v_ceiling=1.5, residual_scale=0.14, pitch_clip=0.35,
+        w_residual=0.05, stance_ratio_start=0.65, stance_ratio_final=0.50,
+        gait_curriculum_steps=40_000_000, efficiency_ramp_steps=40_000_000),
+})
 
 
 def get_config(name: str = "default") -> Config:

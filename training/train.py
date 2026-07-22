@@ -29,6 +29,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNorm
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList, BaseCallback
 from stable_baselines3.common.logger import configure
+from stable_baselines3.common.utils import safe_mean
 
 from config import Config, config_from_dict, config_to_dict, get_config, PRESETS
 from env import DashEnv
@@ -95,6 +96,59 @@ class RampCallback(BaseCallback):
         self._last = val
         self.training_env.env_method(self.method, val)
         _persist_curriculum(self.run_dir, self.key, val)
+
+    def _on_step(self) -> bool:
+        return True
+
+
+class GatedRampCallback(BaseCallback):
+    """Competence-gated linear ramp: HOLD `start` until rollout ep_len_mean exceeds `gate_len` for
+    `patience` consecutive rollouts, THEN ramp start -> target over `warmup` timesteps from the
+    open step. Combines RampCallback's broadcast + curriculum.json persistence with EntropyCallback's
+    gate/persist pattern. Fixes the clock-driven-curriculum failure: an m3 policy that can't yet
+    balance the freed pitch DOF is never hardened toward flight-phase running until it can actually
+    survive. A gate that never opens holds `start` (the easy regime) forever — the correct failure
+    mode. num_timesteps-based, so gate + ramp both continue across --resume."""
+    def __init__(self, key, method, start, target, warmup, run_dir, gate_len, patience=5):
+        super().__init__()
+        self.key, self.method = key, method
+        self.start, self.target, self.warmup = float(start), float(target), int(warmup)
+        self.run_dir, self.gate_len, self.patience = run_dir, float(gate_len), int(patience)
+        self._streak = 0
+        self._open_from = None
+        self._last = None
+
+    def _on_training_start(self) -> None:
+        # requeue persistence: restore the gate-open step so a resumed job continues the ramp
+        p = Path(self.run_dir) / "curriculum.json"
+        if p.exists():
+            d = json.loads(p.read_text())
+            if f"{self.key}_gate_from" in d:
+                self._open_from = int(d[f"{self.key}_gate_from"])
+                print(f"[train] restored curriculum gate '{self.key}' (open from step "
+                      f"{self._open_from})")
+
+    def _on_rollout_start(self) -> None:
+        if self._open_from is None:
+            ep_len = (safe_mean([ep["l"] for ep in self.model.ep_info_buffer])
+                      if len(self.model.ep_info_buffer) > 0 else 0.0)
+            self._streak = self._streak + 1 if ep_len > self.gate_len else 0
+            if self._streak >= self.patience:
+                self._open_from = self.num_timesteps
+                _persist_curriculum(self.run_dir, f"{self.key}_gate_from", self._open_from)
+                print(f"[train] curriculum gate '{self.key}' opened at {self.num_timesteps} "
+                      f"steps (ep_len_mean={ep_len:.0f} > {self.gate_len:.0f})")
+        if self._open_from is None:
+            val = self.start
+        else:
+            frac = 1.0 if self.warmup <= 0 else \
+                min(1.0, (self.num_timesteps - self._open_from) / self.warmup)
+            val = self.start + frac * (self.target - self.start)
+        self.logger.record(f"curriculum/{self.key}", val)
+        if val != self._last:
+            self._last = val
+            self.training_env.env_method(self.method, val)
+            _persist_curriculum(self.run_dir, self.key, val)
 
     def _on_step(self) -> bool:
         return True
@@ -392,13 +446,23 @@ def main():
         cb_list.append(RampCallback("sprint_dist_m", "set_sprint_dist",
                                     cfg.sprint_dist_start_m, cfg.sprint_dist_m,
                                     cfg.sprint_curriculum_steps, run))
+    gate = cfg.curriculum_gate_ep_len
     if cfg.gait_curriculum_steps > 0 and cfg.w_phase_contact > 0:
-        cb_list.append(RampCallback("stance_ratio", "set_stance_ratio",
-                                    cfg.stance_ratio_start, cfg.stance_ratio_final,
-                                    cfg.gait_curriculum_steps, run))
+        if gate > 0:
+            cb_list.append(GatedRampCallback("stance_ratio", "set_stance_ratio",
+                                             cfg.stance_ratio_start, cfg.stance_ratio_final,
+                                             cfg.gait_curriculum_steps, run, gate))
+        else:
+            cb_list.append(RampCallback("stance_ratio", "set_stance_ratio",
+                                        cfg.stance_ratio_start, cfg.stance_ratio_final,
+                                        cfg.gait_curriculum_steps, run))
     if cfg.efficiency_ramp_steps > 0:
-        cb_list.append(RampCallback("eff_scale", "set_efficiency_scale",
-                                    0.0, 1.0, cfg.efficiency_ramp_steps, run))
+        if gate > 0:
+            cb_list.append(GatedRampCallback("eff_scale", "set_efficiency_scale",
+                                             0.0, 1.0, cfg.efficiency_ramp_steps, run, gate))
+        else:
+            cb_list.append(RampCallback("eff_scale", "set_efficiency_scale",
+                                        0.0, 1.0, cfg.efficiency_ramp_steps, run))
     callbacks = CallbackList(cb_list)
 
     # SB3 semantics: with reset_num_timesteps=False, learn() ADDS its total_timesteps argument
