@@ -76,6 +76,9 @@ class DashEnv(gym.Env):
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "base_x")])
         self._base_y_dadr = int(self.model.jnt_dofadr[
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "base_y")])
+        _pitch_jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "base_pitch")
+        self._base_pitch_qadr = int(self.model.jnt_qposadr[_pitch_jid])
+        self._base_pitch_dadr = int(self.model.jnt_dofadr[_pitch_jid])
         # ride-height -> leg-posture table for m1's per-episode random rail height
         self._lut = None
         if self.cfg.z_rail_randomize:
@@ -149,6 +152,9 @@ class DashEnv(gym.Env):
         # values from its curriculum.json).
         self._stance_ratio = float(self.cfg.stance_ratio_final)
         self._eff_scale = 1.0
+        # pitch-assist scale: 0 = final/hardest (no training-wheel). The RampCallback drives it
+        # 1 -> 0 during training when the preset enables it; eval/standalone leaves it at 0.
+        self._pitch_assist = 0.0
         # optional zero-arg hook fired once per control step (frame capture / metrics / pacing)
         self.on_control_step = None
 
@@ -165,6 +171,11 @@ class DashEnv(gym.Env):
     def set_efficiency_scale(self, s):
         """Set the 0..1 multiplier on the efficiency terms (torque/motor_vel/energy)."""
         self._eff_scale = float(np.clip(s, 0.0, 1.0))
+
+    def set_pitch_assist(self, s):
+        """Set the 0..1 scale on the decaying pitch-assist training-wheel (1 = full help at the
+        start of the m2->m3 bridge, 0 = off / self-sufficient). Takes effect immediately."""
+        self._pitch_assist = float(np.clip(s, 0.0, 1.0))
 
     # ---------- helpers ----------
     def _sensor_adr(self, name):
@@ -386,6 +397,16 @@ class DashEnv(gym.Env):
             if not self.base_lock[1]:
                 self.data.qvel[self._base_y_dadr] += c.push_dv * np.sin(ang)
             self._push_countdown = self._next_push_in()
+
+        # decaying pitch-assist (m2->m3 bridge): external spring-damper torque on the base pitch
+        # joint toward level, scaled by the curriculum (1 -> 0 over training). Written EVERY step
+        # (0 when faded/disabled) so a stale qfrc_applied can never linger; held across the physics
+        # substeps. Sim-only helper -> the final assist=0 policy is hardware-valid.
+        if c.pitch_assist_kp > 0.0:
+            pq = float(self.data.qpos[self._base_pitch_qadr])
+            pqd = float(self.data.qvel[self._base_pitch_dadr])
+            self.data.qfrc_applied[self._base_pitch_dadr] = \
+                -self._pitch_assist * (c.pitch_assist_kp * pq + c.pitch_assist_kd * pqd)
 
         contact_acc = self._run_physics(target6)
         self._elapsed_t += self.control_dt

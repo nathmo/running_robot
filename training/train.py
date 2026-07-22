@@ -463,6 +463,11 @@ def main():
         else:
             cb_list.append(RampCallback("eff_scale", "set_efficiency_scale",
                                         0.0, 1.0, cfg.efficiency_ramp_steps, run))
+    # decaying pitch-assist training-wheel (m2->m3 bridge): fade the SCALE 1 -> 0 (clock-driven so
+    # the help always retreats and the policy must take over pitch balance; never competence-gated).
+    if cfg.pitch_assist_ramp_steps > 0 and cfg.pitch_assist_kp > 0:
+        cb_list.append(RampCallback("pitch_assist", "set_pitch_assist",
+                                    1.0, 0.0, cfg.pitch_assist_ramp_steps, run))
     callbacks = CallbackList(cb_list)
 
     # SB3 semantics: with reset_num_timesteps=False, learn() ADDS its total_timesteps argument

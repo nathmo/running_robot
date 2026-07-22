@@ -118,6 +118,20 @@ class Config:
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
     action_delay_steps: int = 1         # fixed actuation delay in control steps (Pi+CAN plant truth)
 
+    # ----- pitch-assist curriculum (m2->m3 bridge, 2026-07-22) -----
+    # The balance-first easing sweep plateaued at ep_len ~67 (the passive-collapse time): even with
+    # NO flight demand + efficiency OFF, the m3 policy can't discover a pitch-stable height-holding
+    # gait from the m2 (pitch-LOCKED) warm-start. This is a soft, DECAYING training-wheel: an
+    # external PD torque on the base pitch JOINT (spring-damper toward level, applied to
+    # qfrc_applied) holds the body near upright early — like m2's lock but compliant — so the robot
+    # can keep/relearn the height-holding gait, then the SCALE fades 1->0 over pitch_assist_ramp_steps
+    # so the final policy balances pitch itself (assist=0 => hardware-valid; the assist is sim-only).
+    # Only meaningful when pitch is FREE. kp=0 (default) disables it entirely -> every other preset
+    # and eval is byte-identical.
+    pitch_assist_kp: float = 0.0        # N*m per rad of base pitch angle (restoring toward level)
+    pitch_assist_kd: float = 0.0        # N*m per rad/s of base pitch rate (damping)
+    pitch_assist_ramp_steps: int = 0    # env steps to linearly fade the assist SCALE 1 -> 0; 0 = off
+
     # ----- reward: caps & terminal -----
     # Two-level suicide-proofing (reward normalization is OFF — raw scales reach PPO directly):
     # each penalty term is floored at -penalty_term_cap (keeps per-term gradients), AND the
@@ -352,6 +366,24 @@ PRESETS.update({
     "m3_combo": lambda: _m3_speed(
         curriculum_gate_ep_len=300.0, v_ceiling=1.5, residual_scale=0.14, pitch_clip=0.35,
         w_residual=0.05, stance_ratio_start=0.65, stance_ratio_final=0.50,
+        gait_curriculum_steps=40_000_000, efficiency_ramp_steps=40_000_000),
+})
+
+# ----- round 2 (2026-07-22, ~23M): the easing sweep plateaued at ep_len ~67; add the pitch-assist
+# m2->m3 bridge (decaying training-wheel on base pitch) so the robot keeps m2's height-holding gait
+# while it learns to balance pitch, then the assist fades to 0. m3_cold (= m3_walk preset launched
+# WITHOUT --warm-start) is the orthogonal control for "is the m2 lunge prior the trap?".
+PRESETS.update({
+    # pitch-assist + gentle gait: bridge the height-holding gait across the pitch release.
+    "m3_assist": lambda: _m3_speed(
+        pitch_assist_kp=150.0, pitch_assist_kd=15.0, pitch_assist_ramp_steps=40_000_000,
+        stance_ratio_final=0.55, v_ceiling=1.5, efficiency_ramp_steps=150_000_000),
+    # pitch-assist + competence-gated hardening to full running: assist bootstraps balance, the gate
+    # only hardens the gait once it can actually survive. Best single shot at a running policy.
+    "m3_assist_gated": lambda: _m3_speed(
+        pitch_assist_kp=150.0, pitch_assist_kd=15.0, pitch_assist_ramp_steps=40_000_000,
+        curriculum_gate_ep_len=300.0, v_ceiling=1.5, residual_scale=0.14, pitch_clip=0.35,
+        w_residual=0.05, stance_ratio_start=0.65, stance_ratio_final=0.42,
         gait_curriculum_steps=40_000_000, efficiency_ramp_steps=40_000_000),
 })
 

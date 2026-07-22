@@ -266,6 +266,41 @@ def test_pitch_reflex_plant():
               on < 0.6 * off, f"on={on:.3f} off={off:.3f}")
 
 
+def test_pitch_assist():
+    """The decaying pitch-assist training-wheel must RESTORE toward level (right sign) and be inert
+    when disabled (kp=0) — a wrong-sign assist would drive the body over instead of catching it."""
+    print("pitch-assist training-wheel (m2->m3 bridge):")
+    from dataclasses import replace
+    zero = np.zeros(24, np.float32)
+
+    def end_pitch(scale, kick, horizon=40):
+        cfg = replace(get_config("m3_speed"), pitch_assist_kp=150.0, pitch_assist_kd=15.0,
+                      reset_joint_noise=0.0, push_interval_s=0.0)
+        env = DashEnv(cfg)
+        env.reset(seed=0)
+        env.set_pitch_assist(scale)
+        env.data.qvel[env._base_pitch_dadr] = kick     # nose-up/down pitch rate
+        for _ in range(horizon):
+            env.step(zero)
+        return abs(float(env.data.qpos[env._base_pitch_qadr]))
+
+    for kick in (+1.2, -1.2):        # both directions (on top of the fixed reflex, which is shared)
+        off = end_pitch(0.0, kick)
+        on = end_pitch(1.0, kick)
+        check(f"assist arrests pitch kick {kick:+.1f} (on {on:.3f} < 0.6*off {off:.3f})",
+              on < 0.6 * off, f"on={on:.3f} off={off:.3f}")
+    # a preset with kp=0 (every non-assist preset) must NEVER write the pitch dof's qfrc_applied
+    env = DashEnv(get_config("m3_speed"))
+    env.reset(seed=0)
+    env.set_pitch_assist(1.0)        # scale set, but kp=0 => still inert
+    env.step(zero)
+    check("kp=0 preset leaves pitch qfrc_applied at 0",
+          env.data.qfrc_applied[env._base_pitch_dadr] == 0.0,
+          str(env.data.qfrc_applied[env._base_pitch_dadr]))
+    check("m3_assist preset enables assist", get_config("m3_assist").pitch_assist_kp == 150.0)
+    check("m3_speed preset leaves assist off", get_config("m3_speed").pitch_assist_kp == 0.0)
+
+
 def test_angmom_term():
     print("angular-momentum reward term:")
     from dataclasses import replace
@@ -343,6 +378,7 @@ if __name__ == "__main__":
     test_residual_and_gate()
     test_pitch_reflex()
     test_pitch_reflex_plant()
+    test_pitch_assist()
     test_angmom_term()
     test_rejuvenate_obs_rms()
     test_curriculum_setters()
