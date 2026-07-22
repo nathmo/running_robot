@@ -86,19 +86,40 @@ requeued/chained job of the same stage resumes its own newest checkpoint instead
 
 ```bash
 squeue -u $USER                     # queue state (also: Squeue, Sjob <id>)
+squeue -j <jobid> -o "%.10i %.9P %.12j %.8T %.10M %.10l %R"   # one job: state / time / reason
+sacct -j <jobid> --format=JobID,State,Elapsed,MaxRSS         # after it ends
 tail -f dash-sprint-<jobid>.out     # live training log
-# training_plots.png regenerates in the run dir every 500k steps:
-scp <gaspar>@izar.hpc.epfl.ch:running_robot/training/runs/m2_sprint/training_plots.png .
 # TensorBoard from the laptop:
 ssh -L 6006:localhost:6006 <gaspar>@izar.hpc.epfl.ch \
     'source ~/venvs/dash/bin/activate && tensorboard --logdir ~/running_robot/training/runs'
 # then open http://localhost:6006
-# fetch everything (checkpoints are ~10 MB each):
-rsync -av <gaspar>@izar.hpc.epfl.ch:running_robot/training/runs/ ./training/runs/
 ```
 
-Videos: render locally after rsync (`python training/evaluate.py --run training/runs/m2_sprint
---video dash.mp4`), or on a debug GPU node with headless EGL:
+### Pull results back to the laptop
+
+**Windows** has `ssh`/`scp` (Git Bash / OpenSSH) but **no `rsync`** — use `scp`. To render a video or
+plot you only need a few small files, not the ~1 GB of checkpoints:
+
+```bash
+RUN=m3_speed_v3
+mkdir -p training/runs/$RUN
+for f in final_model.zip vecnormalize.pkl resolved_config.json curriculum.json progress.csv training_plots.png; do
+  scp ncmorand@izar.hpc.epfl.ch:running_robot/training/runs/$RUN/$f training/runs/$RUN/ ; done
+
+# just the latest training plot:
+scp ncmorand@izar.hpc.epfl.ch:running_robot/training/runs/$RUN/training_plots.png training/runs/$RUN/
+# the whole run dir incl. every checkpoint (~1 GB): scp -r
+scp -r ncmorand@izar.hpc.epfl.ch:running_robot/training/runs/$RUN ./training/runs/
+```
+
+**macOS / Linux** (rsync available, transfers only what changed):
+
+```bash
+rsync -av ncmorand@izar.hpc.epfl.ch:running_robot/training/runs/ ./training/runs/
+```
+
+Videos: render locally after pulling the files above (`python training/evaluate.py
+--run training/runs/m3_speed_v3 --video dash.mp4`), or on a debug GPU node with headless EGL:
 `MUJOCO_GL=egl python training/evaluate.py ... --video dash.mp4` (fallback: `MUJOCO_GL=osmesa`).
 
 Notes:
@@ -121,3 +142,10 @@ the env count on the sbatch command line (CLI flags override the script's `#SBAT
 ```bash
 sbatch --cpus-per-task=40 --mem=128G --export=ALL,NENVS=36 training/slurm/izar_train.sbatch
 ```
+
+**Keep the GPU** (`--gres=gpu:1`). Physics is CPU MuJoCo and the MLP is tiny (2x256), so the GPU
+isn't doing heavy compute — but a same-node benchmark (m3_speed, 18 envs, V100 i03) measured
+**2867 env-steps/s on GPU vs 1530 on CPU (~1.9x)**. The win is core contention, not matmul:
+torch-on-CPU steals cores from the 18 physics workers on a 20-core node, while `device=cuda`
+offloads the net and leaves all cores for MuJoCo. Izar has no CPU-only partition anyway. A CPU
+run would only pay off on a many-core CPU cluster (Jed, 64+ cores) — benchmark before assuming it.
