@@ -301,6 +301,43 @@ def test_pitch_assist():
     check("m3_speed preset leaves assist off", get_config("m3_speed").pitch_assist_kp == 0.0)
 
 
+def test_ankle_reflex():
+    """The ankle-torque reflex (emulated actuated ankle) must RESTORE pitch (right sign) and be
+    inert when disabled. Ankle joints resolved by spring stiffness; torque is stance-gated."""
+    print("ankle-torque reflex (actuated-ankle emulation):")
+    import mujoco
+    from dataclasses import replace
+    zero = np.zeros(24, np.float32)
+
+    def end_pitch(kp, kd, clip, kick, horizon=45):
+        cfg = replace(get_config("m3_reactive"), ankle_kp=kp, ankle_kd=kd, ankle_clip=clip,
+                      reset_joint_noise=0.0, push_interval_s=0.0)
+        env = DashEnv(cfg)
+        env.reset(seed=0)
+        jid = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "base_pitch")
+        env.data.qvel[int(env.model.jnt_dofadr[jid])] = kick
+        for _ in range(horizon):
+            env.step(zero)
+        return abs(float(env._gravity_body()[0]))
+
+    a = get_config("m3_ankle")
+    on_tot = off_tot = 0.0
+    for kick in (+2.0, -2.0):        # nose-down and nose-up kicks
+        off_tot += end_pitch(0.0, 0.0, 0.0, kick)
+        on_tot += end_pitch(a.ankle_kp, a.ankle_kd, a.ankle_clip, kick)
+    # a fixed reflex on this asymmetric stance-gated plant won't be perfect both ways, but must be
+    # NET pitch-stabilizing (total end-|pitch| lower). Training is the real test of ankle authority.
+    check(f"ankle reflex is net pitch-stabilizing (on {on_tot:.3f} < off {off_tot:.3f})",
+          on_tot < off_tot, f"on={on_tot:.3f} off={off_tot:.3f}")
+    env = DashEnv(get_config("m3_reactive"))      # ankle_kp=0 preset -> never writes ankle qfrc
+    env.reset(seed=0)
+    env.step(zero)
+    check("ankle_kp=0 leaves ankle qfrc at 0",
+          env.data.qfrc_applied[env._ankle_dadr[0]] == 0.0
+          and env.data.qfrc_applied[env._ankle_dadr[1]] == 0.0)
+    check("m3_ankle preset enables the ankle reflex", get_config("m3_ankle").ankle_kp > 0)
+
+
 def test_hz200_timing():
     """200 Hz reactive stack: decimation/gamma/dt, rate-invariant reward scaling, and the sim2real
     timing randomization (jitter substeps + dropped-action hold) stay finite. 50 Hz is a no-op."""
@@ -419,6 +456,7 @@ if __name__ == "__main__":
     test_pitch_reflex()
     test_pitch_reflex_plant()
     test_pitch_assist()
+    test_ankle_reflex()
     test_hz200_timing()
     test_angmom_term()
     test_rejuvenate_obs_rms()

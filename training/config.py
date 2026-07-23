@@ -113,6 +113,15 @@ class Config:
     pitch_clip: float = 0.25            # authority cap (rad); 0 = reflex off
     pitch_bias: float = 0.0             # static fore-aft trim added inside the clip (rad)
     pitch_cam_gain: float = 0.0         # reserved: cam coupling of the pitch reflex (keep 0)
+    # ANKLE-TORQUE reflex (2026-07-23): the sagittal-balance experiment. The robot's ankle (foot)
+    # joints are PASSIVE SPRINGS (no actuator) -> no ankle pitch torque -> foot-placement is the only
+    # balance channel, and it plateaus at ~1 s (see hz200-reactive-stack). This is a FIXED PD that
+    # applies a pitch-restoring TORQUE at the ankle joints (only while the foot is GROUNDED = ankle
+    # strategy), driven by base pitch/pitch-rate -- i.e. it emulates an ACTUATED ankle. Pure numpy
+    # (ships to a Pi with a real ankle motor). Mirrored L/R axes -> +u on L, -u on R. kp=0 = off.
+    ankle_kp: float = 0.0               # N*m ankle torque per rad of base pitch (grav_x)
+    ankle_kd: float = 0.0               # N*m per rad/s of base pitch rate
+    ankle_clip: float = 0.0             # N*m authority cap per ankle (plausible motor limit)
     residual_scale: float = 0.08        # rad of per-step correction authority on each PD target
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
@@ -541,6 +550,15 @@ PRESETS.update({
     "m3_reactive_x": lambda: _sprint200(
         "m3", ent_anneal_deadline_steps=100_000_000,
         residual_scale=0.40, action_filter=0.10, thigh_amp=0.60, pitch_clip=0.45,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    # ALL foot-placement authority (residual 0.2/0.3/0.4) plateaued ~1 s -> the plant lacks ANKLE
+    # pitch torque (passive-spring feet). This adds a fixed ankle-torque reflex (emulated actuated
+    # ankle, stance-gated) on top of the base reactive stack. If m3 now BALANCES (ep_len climbs),
+    # it validates the actuated-ankle hardware recommendation. Warm-startable from m2 (dims same).
+    "m3_ankle": lambda: _sprint200(
+        "m3", ent_anneal_deadline_steps=100_000_000,
+        ankle_kp=300.0, ankle_kd=50.0, ankle_clip=40.0,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
         jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
 })

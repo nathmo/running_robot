@@ -84,6 +84,11 @@ class DashEnv(gym.Env):
         _pitch_jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "base_pitch")
         self._base_pitch_qadr = int(self.model.jnt_qposadr[_pitch_jid])
         self._base_pitch_dadr = int(self.model.jnt_dofadr[_pitch_jid])
+        # ankle (foot) joints = the only ones with a spring (passive ankle); dof addr for the L/R
+        # ankle-torque reflex. Sorted by qpos addr so [0]=Left, [1]=Right (L body precedes R).
+        _ankle_j = sorted((j for j in range(self.model.njnt) if self.model.jnt_stiffness[j] > 0),
+                          key=lambda j: self.model.jnt_qposadr[j])
+        self._ankle_dadr = [int(self.model.jnt_dofadr[j]) for j in _ankle_j]
         # ride-height -> leg-posture table for m1's per-episode random rail height
         self._lut = None
         if self.cfg.z_rail_randomize:
@@ -449,6 +454,16 @@ class DashEnv(gym.Env):
             self._assist_torque = -self._pitch_assist * (c.pitch_assist_kp * pq
                                                          + c.pitch_assist_kd * pqd)
             self.data.qfrc_applied[self._base_pitch_dadr] = self._assist_torque
+
+        # ankle-torque reflex (emulates an ACTUATED ankle): a pitch-restoring torque at the ankle
+        # joints, applied only to a GROUNDED foot (ankle strategy works only in stance). Mirrored
+        # L/R axes -> +u on L, -u on R. Written every step (0 when off/airborne) so no stale torque.
+        if c.ankle_kp > 0.0:
+            u_ank = -float(np.clip(c.ankle_kp * pitch + c.ankle_kd * pitch_rate,
+                                   -c.ankle_clip, c.ankle_clip))
+            gnd = self._foot_contacts()
+            self.data.qfrc_applied[self._ankle_dadr[0]] = u_ank if gnd[0] else 0.0
+            self.data.qfrc_applied[self._ankle_dadr[1]] = -u_ank if gnd[1] else 0.0
 
         contact_acc = self._run_physics(target6)
         self._elapsed_t += self.control_dt
