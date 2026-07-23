@@ -535,6 +535,14 @@ PRESETS.update({
         residual_scale=0.30, action_filter=0.25, thigh_amp=0.55, pitch_clip=0.40,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
         jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    # hi (residual 0.3) also plateaued ~196 -> a bigger jump: 2x residual authority + near-raw targets
+    # (action_filter 0.10 = maximal reactivity) + bigger swings + roomier reflex. Last authority lever
+    # before concluding the reactive/software route can't fix free-pitch m3 (see m3-antitopple-sweep).
+    "m3_reactive_x": lambda: _sprint200(
+        "m3", ent_anneal_deadline_steps=100_000_000,
+        residual_scale=0.40, action_filter=0.10, thigh_amp=0.60, pitch_clip=0.45,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
 })
 
 
