@@ -138,6 +138,15 @@ class Config:
     # torque) and pay. Decouples the dense fall-catching safety net from a reward for SELF-balance,
     # so the policy learns pitch control WHILE the net is still there. Squared, _pen-capped. 0 = off.
     w_assist_penalty: float = 0.0       # reward penalty per (N*m)^2 of assist torque the policy causes
+    # pitch SLOW-MOTION curriculum (round 5, 2026-07-23): every assist above HOLDS the body up ->
+    # crutch (rounds 2-4 all collapsed at assist=0). This instead adds extra ARMATURE (rotor inertia)
+    # to the base pitch DOF: the fall becomes sluggish (longer time constant) so the 50 Hz policy has
+    # time to learn foot-placement balance, then the extra inertia fades to 0 (real dynamics). It
+    # NEVER holds position -> NO crutch: the robot balances itself throughout, so the in-training
+    # ep_len is already the honest unaided survival. Ramp fades the extra armature 1 -> 0. kp... = 0
+    # off. Base pitch inertia ~0.62 kg m^2, so pitch_armature ~2-3 roughly halves the fall rate.
+    pitch_armature: float = 0.0         # extra kg*m^2 on the base pitch DOF at scale 1
+    pitch_armature_ramp_steps: int = 0  # env steps to fade the extra armature 1 -> 0; 0 = off
 
     # ----- reward: caps & terminal -----
     # Two-level suicide-proofing (reward normalization is OFF — raw scales reach PPO directly):
@@ -444,6 +453,24 @@ PRESETS.update({
     "m3_assist_pen_hi": lambda: _m3_sprint(
         pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
         w_assist_penalty=0.02, stance_ratio_final=0.55, residual_scale=0.14, pitch_clip=0.35,
+        w_residual=0.05),
+})
+
+# ----- round 5 (2026-07-23): the assist family (rounds 2-4) is exhausted -- every position-holding
+# assist bred crutch-dependence (assist=0 eval 20-34, no better than the no-assist control). Try a
+# NON-holding idea: pitch slow-motion via extra base-pitch armature that fades to 0. No crutch, so
+# the in-training ep_len is already the honest survival -- WIN = it climbs well past ~67 and HOLDS
+# as the armature fades. Warm from m2_sprint; more residual/reflex authority to exploit the slow fall.
+PRESETS.update({
+    # moderate slow-mo (~1.8x slower fall): the robot still visibly falls, must balance itself.
+    "m3_slowmo": lambda: _m3_sprint(
+        pitch_armature=1.5, pitch_armature_ramp_steps=20_000_000,
+        stance_ratio_final=0.55, residual_scale=0.16, pitch_clip=0.40, pitch_kp=2.5,
+        w_residual=0.05),
+    # strong slow-mo (~2.6x): easier early learning, more risk it doesn't transfer as inertia fades.
+    "m3_slowmo_hi": lambda: _m3_sprint(
+        pitch_armature=4.0, pitch_armature_ramp_steps=20_000_000,
+        stance_ratio_final=0.55, residual_scale=0.16, pitch_clip=0.40, pitch_kp=2.5,
         w_residual=0.05),
 })
 

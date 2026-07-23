@@ -468,6 +468,10 @@ def main():
     if cfg.pitch_assist_ramp_steps > 0 and cfg.pitch_assist_kp > 0:
         cb_list.append(RampCallback("pitch_assist", "set_pitch_assist",
                                     1.0, 0.0, cfg.pitch_assist_ramp_steps, run))
+    # pitch slow-motion: fade the extra base-pitch armature 1 -> 0 (clock-driven, like the assist).
+    if cfg.pitch_armature_ramp_steps > 0 and cfg.pitch_armature > 0:
+        cb_list.append(RampCallback("pitch_armature", "set_pitch_armature",
+                                    1.0, 0.0, cfg.pitch_armature_ramp_steps, run))
     callbacks = CallbackList(cb_list)
 
     # SB3 semantics: with reset_num_timesteps=False, learn() ADDS its total_timesteps argument

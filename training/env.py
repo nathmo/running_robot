@@ -156,6 +156,10 @@ class DashEnv(gym.Env):
         # 1 -> 0 during training when the preset enables it; eval/standalone leaves it at 0.
         self._pitch_assist = 0.0
         self._assist_torque = 0.0        # the N*m the assist applied this step (for w_assist_penalty)
+        # pitch slow-motion: extra armature on the base pitch DOF, faded 1 -> 0 by the curriculum.
+        # 0 = final/hardest (real dynamics); the RampCallback drives the scale during training.
+        self._base_pitch_armature = float(self.model.dof_armature[self._base_pitch_dadr])
+        self._armature_scale = 0.0
         # optional zero-arg hook fired once per control step (frame capture / metrics / pacing)
         self.on_control_step = None
 
@@ -177,6 +181,14 @@ class DashEnv(gym.Env):
         """Set the 0..1 scale on the decaying pitch-assist training-wheel (1 = full help at the
         start of the m2->m3 bridge, 0 = off / self-sufficient). Takes effect immediately."""
         self._pitch_assist = float(np.clip(s, 0.0, 1.0))
+
+    def set_pitch_armature(self, s):
+        """Set the 0..1 scale on the extra base-pitch armature (slow-motion curriculum): 1 = full
+        extra rotor inertia (sluggish fall), 0 = real dynamics. Writes model.dof_armature so the
+        next mj_step's mass matrix picks it up. NOT a crutch (adds inertia, never holds position)."""
+        self._armature_scale = float(np.clip(s, 0.0, 1.0))
+        self.model.dof_armature[self._base_pitch_dadr] = \
+            self._base_pitch_armature + self._armature_scale * self.cfg.pitch_armature
 
     # ---------- helpers ----------
     def _sensor_adr(self, name):
