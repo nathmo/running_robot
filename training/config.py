@@ -122,6 +122,11 @@ class Config:
     ankle_kp: float = 0.0               # N*m ankle torque per rad of base pitch (grav_x)
     ankle_kd: float = 0.0               # N*m per rad/s of base pitch rate
     ankle_clip: float = 0.0             # N*m authority cap per ankle (plausible motor limit)
+    # lower-CoM experiment (2026-07-23): the CHEAPEST candidate hardware fix for the m3 pitch-balance
+    # failure (vs adding ankle motors). Shifts the base body's inertial CoM down by this many metres
+    # at model load (bottom-heavy -> longer fall time-constant -> foot placement can balance it).
+    # 0 = unchanged. Tests, in sim, how much CoM-lowering the current-actuator plant needs to balance.
+    com_lower: float = 0.0              # metres to lower the base-body CoM (body_ipos z)
     residual_scale: float = 0.08        # rad of per-step correction authority on each PD target
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
@@ -559,6 +564,16 @@ PRESETS.update({
     "m3_ankle": lambda: _sprint200(
         "m3", ent_anneal_deadline_steps=100_000_000,
         ankle_kp=100.0, ankle_kd=20.0, ankle_clip=12.0,   # gentle: 40 N*m destabilized the gait (ep_len 28)
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    # lower-CoM: the cheapest candidate hardware fix. Bottom-heavy plant -> slower pitch fall ->
+    # the EXISTING actuators (foot placement) may finally balance it. Warm-startable from m2.
+    "m3_lowcom": lambda: _sprint200(
+        "m3", ent_anneal_deadline_steps=100_000_000, com_lower=0.15,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    "m3_lowcom_hi": lambda: _sprint200(
+        "m3", ent_anneal_deadline_steps=100_000_000, com_lower=0.30,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
         jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
 })
