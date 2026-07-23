@@ -301,6 +301,46 @@ def test_pitch_assist():
     check("m3_speed preset leaves assist off", get_config("m3_speed").pitch_assist_kp == 0.0)
 
 
+def test_hz200_timing():
+    """200 Hz reactive stack: decimation/gamma/dt, rate-invariant reward scaling, and the sim2real
+    timing randomization (jitter substeps + dropped-action hold) stay finite. 50 Hz is a no-op."""
+    print("200 Hz reactive stack + sim2real timing:")
+    for n in ("m2_reactive", "m3_reactive"):
+        check(f"{n} builds", isinstance(get_config(n), Config))
+    c = get_config("m3_reactive")
+    check("control_decimation 5", c.control_decimation == 5)
+    check("gamma 0.9975", abs(c.gamma - 0.9975) < 1e-9)
+    check("gait_freq ceiling 50 Hz", c.gait_freq_hz == (0.5, 50.0))
+    env = DashEnv(c)
+    check("control_dt = 5 ms (200 Hz)", abs(env.control_dt - 0.005) < 1e-9, str(env.control_dt))
+    check("reward_dt_scale = 0.25", abs(env._reward_dt_scale - 0.25) < 1e-9, str(env._reward_dt_scale))
+    check("max_steps 12000 (60 s @ 200 Hz)", env.max_steps == 12000, str(env.max_steps))
+    env.reset(seed=0)
+    _, r, term, _, info = env.step(np.zeros(env.action_dim, np.float32))
+    t = info["reward_terms"]
+    expect = max(sum(t.values()) * env._reward_dt_scale,
+                 -env.cfg.step_reward_floor * env._reward_dt_scale)
+    if not term:
+        check("reward = dt-scaled sum of terms (floored)", abs(r - expect) < 1e-5,
+              f"r={r:.4f} expect={expect:.4f}")
+    env.set_ctrl_jitter(4)
+    env.set_ctrl_drop(0.5)
+    check("jitter substeps set", env._ctrl_jitter_substeps == 4)
+    check("drop prob set", env._ctrl_drop_prob == 0.5)
+    rng = np.random.default_rng(0)
+    finite = True
+    for _ in range(200):
+        o, rr, te, tr, _ = env.step(rng.uniform(-1, 1, env.action_dim).astype(np.float32))
+        if not (np.all(np.isfinite(o)) and np.isfinite(rr)):
+            finite = False
+            break
+        if te or tr:
+            env.reset()
+    check("jitter+drop rollout finite", finite)
+    check("50 Hz preset reward_dt_scale == 1 (no-op)",
+          abs(DashEnv(get_config("m2_sprint"))._reward_dt_scale - 1.0) < 1e-9)
+
+
 def test_angmom_term():
     print("angular-momentum reward term:")
     from dataclasses import replace
@@ -379,6 +419,7 @@ if __name__ == "__main__":
     test_pitch_reflex()
     test_pitch_reflex_plant()
     test_pitch_assist()
+    test_hz200_timing()
     test_angmom_term()
     test_rejuvenate_obs_rms()
     test_curriculum_setters()

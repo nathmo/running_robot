@@ -118,6 +118,18 @@ class Config:
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
     action_delay_steps: int = 1         # fixed actuation delay in control steps (Pi+CAN plant truth)
 
+    # ----- sim2real control-timing randomization (2026-07-23; models the Pi inference loop) -----
+    # The real Pi control loop has ms-scale timing jitter and occasionally MISSES an inference
+    # deadline (the moteus then holds the last command). We randomize both in sim so the policy is
+    # robust to them. Curriculum: HOLD at 0 until the gait is competent (GatedRampCallback on
+    # ep_len), THEN ramp jitter/drop in. sim_dt = 1 ms, so jitter_ms == jitter in sim substeps.
+    ctrl_jitter_ms: float = 0.0         # current +-uniform jitter (ms) on the substeps/control step
+    ctrl_drop_prob: float = 0.0         # current prob a control step is DROPPED (hold last action)
+    ctrl_jitter_ms_final: float = 0.0   # ramp target for the jitter (0 = off)
+    ctrl_drop_prob_final: float = 0.0   # ramp target for the drop prob (0 = off)
+    jitter_curriculum_gate_ep_len: float = 0.0   # ep_len that opens the jitter/drop ramp
+    jitter_curriculum_steps: int = 0    # env steps to ramp jitter/drop 0 -> final after the gate
+
     # ----- pitch-assist curriculum (m2->m3 bridge, 2026-07-22) -----
     # The balance-first easing sweep plateaued at ep_len ~67 (the passive-collapse time): even with
     # NO flight demand + efficiency OFF, the m3 policy can't discover a pitch-stable height-holding
@@ -472,6 +484,49 @@ PRESETS.update({
         pitch_armature=4.0, pitch_armature_ramp_steps=20_000_000,
         stance_ratio_final=0.55, residual_scale=0.16, pitch_clip=0.40, pitch_kp=2.5,
         w_residual=0.05),
+})
+
+# ----- 200 Hz reactive-stepping stack (2026-07-23) --------------------------------------------
+# Move the control loop 50 -> 200 Hz (physics sim stays 1 kHz, decimation 20 -> 5) so the policy can
+# do FAST reactive foot-placement stepping -- the balance channel the passive-ankle plant depends on.
+# Because the control RATE changed, several 50 Hz-tuned constants are rescaled here (the reward is
+# made rate-invariant IN THE ENV by scaling the per-step sum by control_dt/0.02, a no-op at 50 Hz):
+#   gamma 0.99 -> 0.9975 (= 0.99^(1/4): same ~2 s horizon); action_delay 1 -> 4 steps (same ~20 ms
+#   Pi+CAN latency); action_filter 0.2 -> 0.4 (less smoothing = reactive, still sim2real-safe);
+#   ent_gate_air_time 0.02 -> 0.005 (per-step-mean of an event term scales with dt); every *_steps
+#   curriculum/anneal count x4 (an episode is 4x more env steps, so schedules must x4 for equal
+#   robot-time). gait_freq ceiling -> 50 Hz (from the 210 RPM motor + partial-arc moves; effectively
+#   non-binding). residual_scale 0.08 -> 0.20 + w_residual 0.1 -> 0.02 (reactive-stepping authority).
+_HZ200 = dict(
+    control_decimation=5, gamma=0.9975, action_delay_steps=4, action_filter=0.4,
+    gait_freq_hz=(0.5, 50.0), residual_scale=0.20, w_residual=0.02, ent_gate_air_time=0.005,
+    total_steps=800_000_000, gait_curriculum_steps=240_000_000, efficiency_ramp_steps=240_000_000,
+    sprint_curriculum_steps=120_000_000, ent_anneal_steps=80_000_000,
+    warmstart_obs_count_cap=200_000.0,
+)
+
+
+def _sprint200(m, **kw):
+    """A 200 Hz sprint preset for milestone m: base_lock + m-extras + the _HZ200 rate rescalings,
+    then per-preset overrides. Obs/action DIMS are unchanged vs 50 Hz, so m2->m3 warm-start works."""
+    base = dict(base_lock=LOCKS[m])
+    base.update(_extras(m))          # m3+: w_angmom, ent_anneal_deadline_steps, speed_upright_gate
+    base.update(_HZ200)
+    base.update(kw)
+    return _sprint(**base)
+
+
+PRESETS.update({
+    # 200 Hz PRIOR: m2 (X+Z free, pitch LOCKED) trained FROM SCRATCH at the new control rate so its
+    # gait is expressed in the 200 Hz action semantics m3 will inherit. No jitter (clean fast prior).
+    "m2_reactive": lambda: _sprint200("m2"),
+    # 200 Hz TARGET: m3 (pitch FREE), warm-started from m2_reactive. The reactive authority (via
+    # _HZ200) + fast control give the policy a real foot-placement balance channel; the sim2real
+    # timing curriculum (jitter +-4 ms, drop 5%, competence-gated) hardens it once it can survive.
+    "m3_reactive": lambda: _sprint200(
+        "m3", ent_anneal_deadline_steps=100_000_000,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
 })
 
 

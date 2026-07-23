@@ -44,6 +44,11 @@ class DashEnv(gym.Env):
         self.sim_dt = float(self.model.opt.timestep)
         self.control_dt = self.sim_dt * self.cfg.control_decimation
         self.max_steps = int(round(self.cfg.episode_s / self.control_dt))
+        # rate-invariance: the reward is hand-balanced in raw PER-STEP units at 50 Hz (0.02 s) with
+        # normalization OFF, while the fall/finish bonuses are per-EVENT. Scaling the summed per-step
+        # reward by control_dt/0.02 makes the per-SECOND reward invariant to the control rate, so the
+        # suicide-proofing / stop-farm balance holds at any Hz. Exactly 1.0 at 50 Hz (a no-op).
+        self._reward_dt_scale = self.control_dt / 0.02
 
         # actuator -> joint qpos/dof addresses (actuator order = ctrl/action order)
         self.nu = self.model.nu
@@ -160,6 +165,10 @@ class DashEnv(gym.Env):
         # 0 = final/hardest (real dynamics); the RampCallback drives the scale during training.
         self._base_pitch_armature = float(self.model.dof_armature[self._base_pitch_dadr])
         self._armature_scale = 0.0
+        # sim2real control-timing randomization (curriculum-driven; 0 = off). jitter is in sim
+        # substeps (sim_dt = 1 ms, so substeps == ms); drop is the per-step hold-last-action prob.
+        self._ctrl_jitter_substeps = 0
+        self._ctrl_drop_prob = 0.0
         # optional zero-arg hook fired once per control step (frame capture / metrics / pacing)
         self.on_control_step = None
 
@@ -189,6 +198,14 @@ class DashEnv(gym.Env):
         self._armature_scale = float(np.clip(s, 0.0, 1.0))
         self.model.dof_armature[self._base_pitch_dadr] = \
             self._base_pitch_armature + self._armature_scale * self.cfg.pitch_armature
+
+    def set_ctrl_jitter(self, ms):
+        """Set the +- control-timing jitter (ms; sim_dt=1 ms so this is +- substeps per control step)."""
+        self._ctrl_jitter_substeps = int(round(max(0.0, float(ms))))
+
+    def set_ctrl_drop(self, p):
+        """Set the per-control-step probability of a DROPPED inference (hold the last action)."""
+        self._ctrl_drop_prob = float(np.clip(p, 0.0, 1.0))
 
     # ---------- helpers ----------
     def _sensor_adr(self, name):
@@ -365,8 +382,15 @@ class DashEnv(gym.Env):
         c = self.cfg
         self._filt_target = c.action_filter * self._filt_target + (1 - c.action_filter) * target6
         self.data.ctrl[:] = np.clip(self._filt_target, self.ctrl_lo, self.ctrl_hi)
+        # sim2real timing jitter: vary the substep count (control period) by +-jitter ms. The gait
+        # phase clock still advances by the NOMINAL control_dt in step() -> models the real mismatch
+        # between the Pi's fixed-rate gait clock and its jittery actual loop timing.
+        n = c.control_decimation
+        if self._ctrl_jitter_substeps > 0:
+            n = max(1, n + int(self.np_random.integers(
+                -self._ctrl_jitter_substeps, self._ctrl_jitter_substeps + 1)))
         contact_acc = np.zeros(2, bool)
-        for _ in range(c.control_decimation):
+        for _ in range(n):
             mujoco.mj_step(self.model, self.data)
             if not contact_acc.all():
                 contact_acc |= self._foot_contacts()
@@ -375,6 +399,10 @@ class DashEnv(gym.Env):
     def step(self, action):
         c = self.cfg
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        # dropped inference (sim2real): with prob ctrl_drop_prob the Pi missed its deadline this
+        # step, so no new command is produced -> hold the last policy output (moteus keeps its target).
+        if self._ctrl_drop_prob > 0.0 and self.np_random.random() < self._ctrl_drop_prob:
+            action = self._prev_action.copy()
         # fixed actuation delay (plant truth: Pi inference + moteus/CAN is ~one 50 Hz step)
         self._delay_buf.append(action)
         applied = self._delay_buf.pop(0)
@@ -432,10 +460,14 @@ class DashEnv(gym.Env):
         self._update_task()
         self._push_frame(self._proprio())
         reward, terms = self._reward(motor_cmd, contact_acc)
+        # rate-invariance: scale the summed per-step reward by control_dt/0.02 so the per-SECOND
+        # income/penalty is the same at any control rate, while the fall/finish EVENTS below stay
+        # fixed. No-op at 50 Hz. (The individual `terms` stay raw per-step for the gate/plot logic.)
+        reward *= self._reward_dt_scale
         # global per-step floor (2nd level of suicide-proofing, see config.py): per-term caps
         # bound each term but not the SUM — unfloored, a standing pre-locomotion policy's ~-2.2/step
-        # made diving value-optimal. Applied BEFORE the terminal bonus/penalty.
-        reward = max(reward, -c.step_reward_floor)
+        # made diving value-optimal. Applied BEFORE the terminal bonus/penalty (also dt-scaled).
+        reward = max(reward, -c.step_reward_floor * self._reward_dt_scale)
         terminated = self._fallen()
         if terminated:
             reward -= c.fall_penalty

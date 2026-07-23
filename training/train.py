@@ -472,6 +472,18 @@ def main():
     if cfg.pitch_armature_ramp_steps > 0 and cfg.pitch_armature > 0:
         cb_list.append(RampCallback("pitch_armature", "set_pitch_armature",
                                     1.0, 0.0, cfg.pitch_armature_ramp_steps, run))
+    # sim2real timing curriculum: hold jitter/drop at 0 until the gait is competent (ep_len gate),
+    # then ramp each to its target. Gated so it never hinders learning the gait first.
+    if cfg.jitter_curriculum_steps > 0:
+        jgate = cfg.jitter_curriculum_gate_ep_len
+        if cfg.ctrl_jitter_ms_final > 0:
+            cb_list.append(GatedRampCallback("ctrl_jitter_ms", "set_ctrl_jitter",
+                                             0.0, cfg.ctrl_jitter_ms_final,
+                                             cfg.jitter_curriculum_steps, run, jgate))
+        if cfg.ctrl_drop_prob_final > 0:
+            cb_list.append(GatedRampCallback("ctrl_drop_prob", "set_ctrl_drop",
+                                             0.0, cfg.ctrl_drop_prob_final,
+                                             cfg.jitter_curriculum_steps, run, jgate))
     callbacks = CallbackList(cb_list)
 
     # SB3 semantics: with reset_num_timesteps=False, learn() ADDS its total_timesteps argument
