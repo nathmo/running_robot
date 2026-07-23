@@ -61,10 +61,11 @@ class DashEnv(gym.Env):
         self.act_dadr = np.array(self.act_dadr)
 
         self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")
-        # lower-CoM experiment: shift the base body's inertial CoM down (bottom-heavy = easier to
-        # balance). Done once at load, before any mj_forward, so the mass matrix uses it throughout.
+        # lower-CoM experiment: shift EVERY body's inertial CoM down by com_lower (the base alone is
+        # only ~14% of mass, so shifting just it barely moves the real CoM). Moving all mass down
+        # com_lower in-frame lowers the whole-robot CoM by ~com_lower. Done once at load, pre-forward.
         if self.cfg.com_lower != 0.0:
-            self.model.body_ipos[self.base_id][2] -= float(self.cfg.com_lower)
+            self.model.body_ipos[1:, 2] -= float(self.cfg.com_lower)
         self._gyro_adr = self._sensor_adr("imu_gyro")
 
         # base-DOF locks: 6 <equality><joint> constraints lock_{x,y,z,roll,pitch,yaw}, inactive by
