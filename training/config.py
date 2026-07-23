@@ -131,6 +131,13 @@ class Config:
     pitch_assist_kp: float = 0.0        # N*m per rad of base pitch angle (restoring toward level)
     pitch_assist_kd: float = 0.0        # N*m per rad/s of base pitch rate (damping)
     pitch_assist_ramp_steps: int = 0    # env steps to linearly fade the assist SCALE 1 -> 0; 0 = off
+    # anti-crutch (round 4, 2026-07-23): a decaying assist ALONE breeds crutch-dependence — the
+    # policy maxes out the wheel at every fade level (assist=0 eval collapsed to ep_len 14-50) since
+    # nothing rewards NOT needing it. This penalizes the assist torque the policy provokes: balance
+    # well (pitch ~ 0 -> assist exerts ~0 N*m) and pay nothing; lean on the wheel (large restoring
+    # torque) and pay. Decouples the dense fall-catching safety net from a reward for SELF-balance,
+    # so the policy learns pitch control WHILE the net is still there. Squared, _pen-capped. 0 = off.
+    w_assist_penalty: float = 0.0       # reward penalty per (N*m)^2 of assist torque the policy causes
 
     # ----- reward: caps & terminal -----
     # Two-level suicide-proofing (reward normalization is OFF — raw scales reach PPO directly):
@@ -422,6 +429,22 @@ PRESETS.update({
     "m3_assist_move": lambda: _m3_speed(
         w_alive=0.0, pitch_assist_kp=70.0, pitch_assist_kd=7.0, pitch_assist_ramp_steps=60_000_000,
         stance_ratio_final=0.55, v_ceiling=1.5, residual_scale=0.14, pitch_clip=0.35, w_residual=0.05),
+})
+
+# ----- round 4 (2026-07-23): anti-crutch. Round-3 assist=0 eval at 16.6M collapsed to ep_len 14
+# (0 m travelled) -- the decaying assist alone still bred full crutch-dependence. Add w_assist_penalty
+# so the policy PAYS for the assist torque it provokes: it must keep its own pitch near level (assist
+# ~0 N*m) to avoid the penalty, while the assist still catches real falls (dense safety net). Same
+# sprint + fade-60M base as m3_assist_sprint; two penalty strengths. Warm from m2_sprint.
+PRESETS.update({
+    "m3_assist_pen": lambda: _m3_sprint(
+        pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
+        w_assist_penalty=0.005, stance_ratio_final=0.55, residual_scale=0.14, pitch_clip=0.35,
+        w_residual=0.05),
+    "m3_assist_pen_hi": lambda: _m3_sprint(
+        pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
+        w_assist_penalty=0.02, stance_ratio_final=0.55, residual_scale=0.14, pitch_clip=0.35,
+        w_residual=0.05),
 })
 
 

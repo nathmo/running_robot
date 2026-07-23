@@ -155,6 +155,7 @@ class DashEnv(gym.Env):
         # pitch-assist scale: 0 = final/hardest (no training-wheel). The RampCallback drives it
         # 1 -> 0 during training when the preset enables it; eval/standalone leaves it at 0.
         self._pitch_assist = 0.0
+        self._assist_torque = 0.0        # the N*m the assist applied this step (for w_assist_penalty)
         # optional zero-arg hook fired once per control step (frame capture / metrics / pacing)
         self.on_control_step = None
 
@@ -405,8 +406,9 @@ class DashEnv(gym.Env):
         if c.pitch_assist_kp > 0.0:
             pq = float(self.data.qpos[self._base_pitch_qadr])
             pqd = float(self.data.qvel[self._base_pitch_dadr])
-            self.data.qfrc_applied[self._base_pitch_dadr] = \
-                -self._pitch_assist * (c.pitch_assist_kp * pq + c.pitch_assist_kd * pqd)
+            self._assist_torque = -self._pitch_assist * (c.pitch_assist_kp * pq
+                                                         + c.pitch_assist_kd * pqd)
+            self.data.qfrc_applied[self._base_pitch_dadr] = self._assist_torque
 
         contact_acc = self._run_physics(target6)
         self._elapsed_t += self.control_dt
@@ -559,6 +561,9 @@ class DashEnv(gym.Env):
                                      * float(np.sum((motor_cmd - self._prev_motor_cmd) ** 2)))
         t["coef_rate"] = self._pen(-c.w_coef_rate * self._coef_rate_gated)
         t["residual"] = self._pen(-c.w_residual * self._residual_sq)
+        # anti-crutch: pay for the assist torque the policy provokes (0 when it balances itself, so
+        # the assist becomes a safety net the policy is pushed to stop relying on). 0 when disabled.
+        t["assist_pen"] = self._pen(-c.w_assist_penalty * self._assist_torque ** 2)
 
         # ----- posture -----
         t["upright"] = self._pen(-c.w_upright * (grav[0] ** 2 + grav[1] ** 2))
