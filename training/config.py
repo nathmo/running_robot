@@ -527,6 +527,14 @@ PRESETS.update({
         "m3", ent_anneal_deadline_steps=100_000_000,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
         jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    # m3_reactive base (residual 0.2) plateaued at ep_len ~206 (~1 s, passive fall) by 13M -> more
+    # reactive AUTHORITY: 1.5x residual, much less target smoothing (action_filter 0.4->0.25 =
+    # crisper fast corrections), longer thigh swings (0.55) + roomier pitch reflex clip (0.40).
+    "m3_reactive_hi": lambda: _sprint200(
+        "m3", ent_anneal_deadline_steps=100_000_000,
+        residual_scale=0.30, action_filter=0.25, thigh_amp=0.55, pitch_clip=0.40,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
 })
 
 
