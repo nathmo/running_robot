@@ -558,7 +558,7 @@ PRESETS.update({
     # it validates the actuated-ankle hardware recommendation. Warm-startable from m2 (dims same).
     "m3_ankle": lambda: _sprint200(
         "m3", ent_anneal_deadline_steps=100_000_000,
-        ankle_kp=300.0, ankle_kd=50.0, ankle_clip=40.0,
+        ankle_kp=100.0, ankle_kd=20.0, ankle_clip=12.0,   # gentle: 40 N*m destabilized the gait (ep_len 28)
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
         jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
 })
