@@ -665,6 +665,11 @@ PRESETS.update({
     # CONTROL: motor limits ONLY (no cadence penalty) -- isolates whether the limits alone slow the
     # 11 Hz pattering, or whether the explicit penalty is needed.
     "m3_cad_limonly": lambda: _m3_cad(motor_vel_limit=22.0, motor_accel_limit=300.0, w_contact_switch=0.0),
+    # HEDGE (2026-07-24): m3_cad* stalled at ep_len ~80 (12M, no recovery) -- the accel=300 cap
+    # blocks the reactive foot-placement balance needs. Near-unlimited accel (~torque-limited) +
+    # only the velocity cap + cadence penalty: does loosening accel let it re-balance while the
+    # penalty still slows the cadence?
+    "m3_cad_a1000":  lambda: _m3_cad(motor_vel_limit=22.0, motor_accel_limit=1000.0, w_contact_switch=0.15),
 })
 
 
