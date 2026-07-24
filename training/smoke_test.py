@@ -406,6 +406,55 @@ def test_foot_ahead():
     check("m3_ahead enables foot-ahead", get_config("m3_ahead").w_foot_ahead == 3.0)
 
 
+def test_motor_limits():
+    """The velocity/accel limiter caps the COMMANDED joint velocity (|d ctrl|/dt) and its rate; a
+    preset without limits leaves the plant unclamped (byte-identical)."""
+    print("motor velocity/acceleration limits:")
+    c = get_config("m3_cad")
+    check("m3_cad sets vel=22 accel=300", c.motor_vel_limit == 22.0 and c.motor_accel_limit == 300.0)
+    env = DashEnv(c)
+    check("limiter armed", env._vel_accel_limited)
+    env.reset(seed=0)
+    rng = np.random.default_rng(0)
+    dt = env.control_dt
+    prev, prev_v = env.data.ctrl.copy(), np.zeros(env.nu)
+    vmax = amax = 0.0
+    for _ in range(400):
+        _, _, term, trunc, _ = env.step(rng.uniform(-1, 1, env.action_dim).astype(np.float32))
+        v = (env.data.ctrl - prev) / dt
+        a = (v - prev_v) / dt
+        vmax = max(vmax, float(np.max(np.abs(v))))
+        amax = max(amax, float(np.max(np.abs(a))))
+        prev, prev_v = env.data.ctrl.copy(), v
+        if term or trunc:                       # reset resets the commanded state; skip the delta
+            env.reset()
+            prev, prev_v = env.data.ctrl.copy(), np.zeros(env.nu)
+    check("commanded joint velocity <= 22 rad/s", vmax <= 22.0 + 1e-6, f"max {vmax:.2f}")
+    check("commanded joint accel <= 300 rad/s^2", amax <= 300.0 + 1e-6, f"max {amax:.2f}")
+    check("m3_reactive limiter off (unclamped)", not DashEnv(get_config("m3_reactive"))._vel_accel_limited)
+
+
+def test_contact_switch():
+    """The cadence penalty fires per foot that flips grounded<->airborne this step; 0 when disabled."""
+    print("contact-switch cadence penalty:")
+    env = DashEnv(get_config("m3_cad"))          # w_contact_switch=0.15
+    env.reset(seed=0)
+    env.step(np.zeros(env.action_dim, np.float32))
+    env._grounded_prev = np.array([False, False])
+    _, t = env._reward(np.zeros(6, np.float32), np.array([True, True]))     # both feet flip
+    check("2 flips penalized (-0.30)", abs(t["step_rate"] - (-0.30)) < 1e-6, str(t["step_rate"]))
+    env._grounded_prev = np.array([True, True])
+    _, t2 = env._reward(np.zeros(6, np.float32), np.array([True, True]))    # no flip
+    check("no flip -> 0", t2["step_rate"] == 0.0, str(t2["step_rate"]))
+    env2 = DashEnv(get_config("m3_reactive"))     # disabled (w_contact_switch=0)
+    env2.reset(seed=0)
+    env2.step(np.zeros(env2.action_dim, np.float32))
+    env2._grounded_prev = np.array([False, False])
+    _, t3 = env2._reward(np.zeros(6, np.float32), np.array([True, True]))
+    check("step_rate present + 0 when disabled", t3.get("step_rate") == 0.0, str(t3.get("step_rate")))
+    check("m3_cad enables cadence penalty", get_config("m3_cad").w_contact_switch == 0.15)
+
+
 def test_hz200_timing():
     """200 Hz reactive stack: decimation/gamma/dt, rate-invariant reward scaling, and the sim2real
     timing randomization (jitter substeps + dropped-action hold) stay finite. 50 Hz is a no-op."""
@@ -527,6 +576,8 @@ if __name__ == "__main__":
     test_ankle_reflex()
     test_ankle_stiffness()
     test_foot_ahead()
+    test_motor_limits()
+    test_contact_switch()
     test_hz200_timing()
     test_angmom_term()
     test_rejuvenate_obs_rms()

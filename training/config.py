@@ -142,6 +142,17 @@ class Config:
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
     action_delay_steps: int = 1         # fixed actuation delay in control steps (Pi+CAN plant truth)
+    # ----- motor velocity / acceleration limits (2026-07-24; sim2real + cadence) -----
+    # The position servos have NO velocity or acceleration cap in the model (only kv damping + a
+    # SOFT w_motor_vel reward), so the 200 Hz policy can crank the legs arbitrarily fast -> the k350
+    # winner balanced m3 by pattering ONE foot at ~11 Hz (peak thigh 23 rad/s, at the 210 RPM motor
+    # ceiling). These slew-limit the COMMANDED target so joint velocity <= motor_vel_limit and its
+    # rate of change <= motor_accel_limit -- a velocity/accel-bounded position servo, exactly the
+    # real moteus position-mode limits. 0 = off (plant byte-identical to before). NOTE 22 rad/s is
+    # the MOTOR ceiling; the cam/thigh see it through the linkage reduction, so this is a loose upper
+    # bound (only trims the worst spikes) -- the accel limit + cadence penalty do the real slowing.
+    motor_vel_limit: float = 0.0        # rad/s cap on commanded joint velocity (210 RPM motor=22)
+    motor_accel_limit: float = 0.0      # rad/s^2 cap on commanded joint acceleration (0 = off)
 
     # ----- sim2real control-timing randomization (2026-07-23; models the Pi inference loop) -----
     # The real Pi control loop has ms-scale timing jitter and occasionally MISSES an inference
@@ -221,6 +232,11 @@ class Config:
     # Logged as reward_terms/foot_ahead so the plots show whether the policy actually uses it. 0 = off.
     w_foot_ahead: float = 0.0           # reward per metre the touchdown foot lands ahead of the CoM
     foot_ahead_cap_m: float = 0.20      # cap on the rewarded forward offset (m)
+    # cadence / anti-chatter (2026-07-24): penalize foot contact-state CHANGES per control step ->
+    # fewer, longer steps (minimise stepping frequency). Balanced against phase_contact (which
+    # DEMANDS swing) so it slows cadence without collapsing to a skate. Logged as reward_terms/
+    # step_rate. 0 = off.
+    w_contact_switch: float = 0.0       # penalty per foot that flips grounded<->airborne this step
 
     # ----- reward: phase-gated contact schedule (Siekmann-style; NEW) -----
     # The gait clock the ACTION uses is also the reward's contact schedule: each foot pays for
@@ -627,6 +643,28 @@ PRESETS.update({
     "m3_ahead":       lambda: _m3_react(w_foot_ahead=3.0),
     # COMBO: stiffer ankle + capture-step reward -- the best single shot at a balancing m3.
     "m3_stiff_ahead": lambda: _m3_react(ankle_stiffness=200.0, ankle_damping=1.2, w_foot_ahead=3.0),
+})
+
+
+# ----- cadence / motor-limit experiment (2026-07-24) --------------------------------------------
+# The k350 winner (m3_stiff_hi) balances m3 but via a degenerate gait: it patters ONE foot at ~11 Hz
+# (peak joint vel 23 rad/s, at the 210 RPM motor ceiling) while holding the other leg up -- exploiting
+# the fact that the plant has NO velocity/acceleration cap (only torque + range are limited). Add the
+# missing motor limits (vel 22 rad/s = 210 RPM as-is; accel) + a contact-switch penalty to force a
+# slower, realistic, two-legged gait ("minimise stepping frequency"). Warm-started from stiff_hi (it
+# already balances), same k350 ankle so only the limits + cadence penalty change.
+def _m3_cad(**kw):
+    return _m3_react(ankle_stiffness=350.0, ankle_damping=1.6, **kw)
+
+
+PRESETS.update({
+    # limits + moderate cadence penalty (the recommended combo).
+    "m3_cad":        lambda: _m3_cad(motor_vel_limit=22.0, motor_accel_limit=300.0, w_contact_switch=0.15),
+    # stronger: tighter accel + heavier cadence penalty (push cadence down harder).
+    "m3_cad_hi":     lambda: _m3_cad(motor_vel_limit=22.0, motor_accel_limit=200.0, w_contact_switch=0.30),
+    # CONTROL: motor limits ONLY (no cadence penalty) -- isolates whether the limits alone slow the
+    # 11 Hz pattering, or whether the explicit penalty is needed.
+    "m3_cad_limonly": lambda: _m3_cad(motor_vel_limit=22.0, motor_accel_limit=300.0, w_contact_switch=0.0),
 })
 
 

@@ -175,6 +175,12 @@ class DashEnv(gym.Env):
         self._history = np.zeros((self.cfg.history_len, self.frame_dim), np.float32)
 
         self._filt_target = self.nominal_ctrl.copy()
+        # motor velocity/accel limiter state: the slew limiter in _run_physics tracks the previously
+        # COMMANDED target position + velocity so it can cap joint velocity/acceleration.
+        self._vel_accel_limited = (self.cfg.motor_vel_limit > 0.0
+                                   or self.cfg.motor_accel_limit > 0.0)
+        self._prev_cmd_pos = self.nominal_ctrl.copy()
+        self._prev_cmd_vel = np.zeros(self.nu)
         self._delay_buf = [np.zeros(self.action_dim, np.float32)
                            for _ in range(self.cfg.action_delay_steps)]
         self._step_n = 0
@@ -359,6 +365,8 @@ class DashEnv(gym.Env):
         self._phase_reward = 0.0
         self._elapsed_t = 0.0
         self._filt_target[:] = self.nominal_ctrl
+        self._prev_cmd_pos[:] = self.nominal_ctrl
+        self._prev_cmd_vel[:] = 0.0
         self._delay_buf = [np.zeros(self.action_dim, np.float32)
                            for _ in range(self.cfg.action_delay_steps)]
         self._air_time[:] = 0.0
@@ -409,7 +417,23 @@ class DashEnv(gym.Env):
         pass as continuous flight/contact at the 50 Hz boundary)."""
         c = self.cfg
         self._filt_target = c.action_filter * self._filt_target + (1 - c.action_filter) * target6
-        self.data.ctrl[:] = np.clip(self._filt_target, self.ctrl_lo, self.ctrl_hi)
+        tgt = np.clip(self._filt_target, self.ctrl_lo, self.ctrl_hi)
+        # motor velocity + acceleration limits: slew-limit the commanded target so joint velocity
+        # <= motor_vel_limit and its rate of change <= motor_accel_limit (a velocity/accel-bounded
+        # position servo = the real moteus limits). Trapezoidal profile via the previous commanded
+        # velocity; result stays inside ctrlrange (it interpolates between two in-range targets).
+        if self._vel_accel_limited:
+            dt = self.control_dt
+            v_des = (tgt - self._prev_cmd_pos) / dt
+            if c.motor_accel_limit > 0.0:
+                dv = c.motor_accel_limit * dt
+                v_des = np.clip(v_des, self._prev_cmd_vel - dv, self._prev_cmd_vel + dv)
+            if c.motor_vel_limit > 0.0:
+                np.clip(v_des, -c.motor_vel_limit, c.motor_vel_limit, out=v_des)
+            tgt = self._prev_cmd_pos + v_des * dt
+            self._prev_cmd_vel = v_des
+            self._prev_cmd_pos = tgt.copy()
+        self.data.ctrl[:] = tgt
         # sim2real timing jitter: vary the substep count (control period) by +-jitter ms. The gait
         # phase clock still advances by the NOMINAL control_dt in step() -> models the real mismatch
         # between the Pi's fixed-rate gait clock and its jittery actual loop timing.
@@ -641,6 +665,15 @@ class DashEnv(gym.Env):
             t["foot_ahead"] = c.w_foot_ahead * ahead
         else:
             t["foot_ahead"] = 0.0
+
+        # cadence / anti-chatter: penalize each foot that flips grounded<->airborne this control
+        # step -> fewer, longer steps (minimise stepping frequency). phase_contact still demands
+        # swing, so the equilibrium is a slower gait, not a skate.
+        if c.w_contact_switch > 0.0:
+            t["step_rate"] = self._pen(-c.w_contact_switch
+                                       * float(np.sum(grounded != self._grounded_prev)))
+        else:
+            t["step_rate"] = 0.0
 
         self._grounded_prev = grounded
         self._prev_toe_xy = toe_pos[:, 0:2]
