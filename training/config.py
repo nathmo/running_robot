@@ -619,6 +619,10 @@ PRESETS.update({
     "m3_stiff_lo":    lambda: _m3_react(ankle_stiffness=90.0,  ankle_damping=0.8),   # ~3x
     "m3_stiff":       lambda: _m3_react(ankle_stiffness=200.0, ankle_damping=1.2),   # ~7x
     "m3_stiff_hi":    lambda: _m3_react(ankle_stiffness=350.0, ankle_damping=1.6),   # ~12x
+    # follow-up (2026-07-24): the sweep showed a clean monotonic gain with stiffness (stiff_hi/k350
+    # climbing past 330 while lo/mid flatten ~245) -> chase the gradient with two stiffer points.
+    "m3_stiff_xhi":   lambda: _m3_react(ankle_stiffness=550.0, ankle_damping=2.2),   # ~19x
+    "m3_stiff_xxhi":  lambda: _m3_react(ankle_stiffness=750.0, ankle_damping=2.8),   # ~26x
     # foot-ahead reward (default ankle): isolate the capture-step reward.
     "m3_ahead":       lambda: _m3_react(w_foot_ahead=3.0),
     # COMBO: stiffer ankle + capture-step reward -- the best single shot at a balancing m3.
