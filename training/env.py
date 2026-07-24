@@ -127,6 +127,24 @@ class DashEnv(gym.Env):
         self.ctrl_lo = self.model.actuator_ctrlrange[:, 0].copy()
         self.ctrl_hi = self.model.actuator_ctrlrange[:, 1].copy()
         self.height_target = float(self.default_qpos[2])
+        # optional STIFFER passive ankle spring (m3 sagittal-balance experiment): a firmer foot
+        # lever = more passive pitch-restoring torque in stance. The standing ankle sits well off
+        # the spring's rest angle (loaded ~12.8 N*m), so raising k alone would balloon that preload
+        # and topple the robot -> also shift springref (model.qpos_spring) to PRESERVE the standing
+        # preload k*(q_stand - ref), leaving posture unchanged while only the restoring gain rises.
+        # Applied before _stand_torque below so the holding-torque baseline reflects the new spring.
+        if self.cfg.ankle_stiffness > 0.0:
+            k_new = float(self.cfg.ankle_stiffness)
+            for j in _ankle_j:
+                qadr = int(self.model.jnt_qposadr[j])
+                k_old = float(self.model.jnt_stiffness[j])
+                ref_old = float(self.model.qpos_spring[qadr])
+                q_stand = float(self.default_qpos[qadr])
+                self.model.qpos_spring[qadr] = q_stand - (k_old / k_new) * (q_stand - ref_old)
+                self.model.jnt_stiffness[j] = k_new
+        if self.cfg.ankle_damping > 0.0:
+            for j in _ankle_j:
+                self.model.dof_damping[int(self.model.jnt_dofadr[j])] = float(self.cfg.ankle_damping)
         # standing-baseline holding torque: the torque penalty prices torque ABOVE this, so
         # single-support stance isn't taxed into being strictly worse than double-support skating.
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.key_id)
@@ -607,6 +625,22 @@ class DashEnv(gym.Env):
             t["phase_contact"] = -min(c.w_phase_contact * pen, c.penalty_term_cap)
         else:
             t["phase_contact"] = 0.0
+
+        # foot-placement ahead of CoM (capture step): credit a foot that LANDS ahead of the whole-
+        # robot CoM in the heading direction (world +x; yaw is locked m3..m5). Touchdown-only (fresh
+        # air->ground, grounded & ~grounded_prev) so it rewards actively stepping the foot out to
+        # catch the CoM, not a static forward-foot lean (which a held reward would breed). CoM from
+        # subtree_com[0] (whole model, valid after the physics step). Off (0) for m1/m2 by default.
+        if c.w_foot_ahead > 0.0:
+            com_x = float(self.data.subtree_com[0][0])
+            td = grounded & (~self._grounded_prev)
+            ahead = 0.0
+            for i in range(2):
+                if td[i]:
+                    ahead += min(max(float(toe_pos[i, 0] - com_x), 0.0), c.foot_ahead_cap_m)
+            t["foot_ahead"] = c.w_foot_ahead * ahead
+        else:
+            t["foot_ahead"] = 0.0
 
         self._grounded_prev = grounded
         self._prev_toe_xy = toe_pos[:, 0:2]

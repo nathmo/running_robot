@@ -338,6 +338,74 @@ def test_ankle_reflex():
     check("m3_ankle preset enables the ankle reflex", get_config("m3_ankle").ankle_kp > 0)
 
 
+def test_ankle_stiffness():
+    """Stiffer passive ankle spring must (a) set jnt_stiffness, (b) PRESERVE the standing preload
+    torque k*(q_stand - springref) via a springref shift (so posture is unchanged, not slammed to
+    the rest angle -> the robot would flip), and (c) keep a zero-action settle upright + finite."""
+    print("ankle-spring stiffening (preload-preserving):")
+    env = DashEnv(get_config("m3_stiff"))          # ankle_stiffness=200, ankle_damping=1.2
+    aj = [j for j in range(env.model.njnt) if env.model.jnt_stiffness[j] > 0]
+    check("stiffness applied (200)",
+          all(abs(env.model.jnt_stiffness[j] - 200.0) < 1e-6 for j in aj))
+    base = DashEnv(get_config("m3_reactive"))      # default ankle (k=28.65, ref +-0.7)
+    ok_preload = True
+    for j in aj:
+        qadr = int(env.model.jnt_qposadr[j])
+        q = float(env.default_qpos[qadr])
+        pre_new = env.model.jnt_stiffness[j] * (q - env.model.qpos_spring[qadr])
+        pre_old = base.model.jnt_stiffness[j] * (q - base.model.qpos_spring[qadr])
+        if abs(pre_new - pre_old) > 1e-4:
+            ok_preload = False
+    check("standing preload preserved (springref shifted)", ok_preload)
+    check("damping raised to 1.2",
+          all(abs(env.model.dof_damping[int(env.model.jnt_dofadr[j])] - 1.2) < 1e-9 for j in aj))
+    env.reset(seed=0)
+    zero = np.zeros(env.action_dim, np.float32)
+    ok = True
+    for _ in range(100):
+        o, r, te, tr, _ = env.step(zero)
+        if not (np.all(np.isfinite(o)) and np.isfinite(r)):
+            ok = False
+            break
+    check("stiff-ankle zero-action rollout finite", ok)
+    check("stiff-ankle stays upright (no flip)", float(env._gravity_body()[2]) < -0.3,
+          str(env._gravity_body()[2]))
+    check("m3_stiff enables stiffness", get_config("m3_stiff").ankle_stiffness == 200.0)
+    check("m3_reactive keeps default ankle", get_config("m3_reactive").ankle_stiffness == 0.0)
+
+
+def test_foot_ahead():
+    """foot-ahead-of-CoM reward: credited ONLY on a fresh touchdown, equal to w * sum over just-
+    landed feet of clip(toe_x - com_x, 0, cap); exactly 0 when disabled or with no fresh touchdown."""
+    print("foot-ahead-of-CoM reward (capture step):")
+    env = DashEnv(get_config("m3_ahead"))          # w_foot_ahead=3.0
+    env.reset(seed=0)
+    for _ in range(5):
+        env.step(np.zeros(env.action_dim, np.float32))
+    c = env.cfg
+    com_x = float(env.data.subtree_com[0][0])
+    toe_x = env.data.geom_xpos[env.foot_gids_arr, 0]
+    env._grounded_prev = np.array([False, False])  # force a fresh double touchdown
+    _, terms = env._reward(np.zeros(6, np.float32), np.array([True, True]))
+    expect = c.w_foot_ahead * sum(min(max(float(toe_x[i] - com_x), 0.0), c.foot_ahead_cap_m)
+                                  for i in range(2))
+    check("touchdown credit matches spec", abs(terms["foot_ahead"] - expect) < 1e-6,
+          f"got {terms['foot_ahead']:.4f} expect {expect:.4f}")
+    check("credit within [0, 2*w*cap]",
+          0.0 <= terms["foot_ahead"] <= c.w_foot_ahead * c.foot_ahead_cap_m * 2 + 1e-9)
+    env._grounded_prev = np.array([True, True])     # already grounded -> no fresh touchdown
+    _, terms2 = env._reward(np.zeros(6, np.float32), np.array([True, True]))
+    check("no credit without a fresh touchdown", terms2["foot_ahead"] == 0.0, str(terms2["foot_ahead"]))
+    env2 = DashEnv(get_config("m3_reactive"))       # disabled (w_foot_ahead=0)
+    env2.reset(seed=0)
+    env2.step(np.zeros(env2.action_dim, np.float32))  # init per-step state (_residual_sq etc.)
+    env2._grounded_prev = np.array([False, False])
+    _, terms3 = env2._reward(np.zeros(6, np.float32), np.array([True, True]))
+    check("foot_ahead present + exactly 0 when disabled", terms3.get("foot_ahead") == 0.0,
+          str(terms3.get("foot_ahead")))
+    check("m3_ahead enables foot-ahead", get_config("m3_ahead").w_foot_ahead == 3.0)
+
+
 def test_hz200_timing():
     """200 Hz reactive stack: decimation/gamma/dt, rate-invariant reward scaling, and the sim2real
     timing randomization (jitter substeps + dropped-action hold) stay finite. 50 Hz is a no-op."""
@@ -457,6 +525,8 @@ if __name__ == "__main__":
     test_pitch_reflex_plant()
     test_pitch_assist()
     test_ankle_reflex()
+    test_ankle_stiffness()
+    test_foot_ahead()
     test_hz200_timing()
     test_angmom_term()
     test_rejuvenate_obs_rms()

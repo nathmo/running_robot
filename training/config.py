@@ -127,6 +127,17 @@ class Config:
     # at model load (bottom-heavy -> longer fall time-constant -> foot placement can balance it).
     # 0 = unchanged. Tests, in sim, how much CoM-lowering the current-actuator plant needs to balance.
     com_lower: float = 0.0              # metres to lower the base-body CoM (body_ipos z)
+    # ankle-spring STIFFNESS experiment (2026-07-24): the ankle (foot) joints are passive springs
+    # (k=28.65 N*m/rad) and provide almost no stance pitch-restoring torque -> all foot-placement
+    # authority plateaued m3 at ~1 s. A STIFFER spring resists ankle deflection harder = more
+    # passive pitch-restoring moment in stance (the balance channel the plant lacks). CRUCIAL: the
+    # standing ankle sits at +-0.25 rad but springref is +-0.7, so the spring is PRELOADED ~12.8 N*m
+    # at stance; naively raising k balloons that preload (-> foot slams to springref, robot topples,
+    # verified). So env.py ALSO shifts springref to PRESERVE the standing preload -> only the
+    # restoring GAIN (stiffness) rises, posture unchanged. 0 = keep the model's 28.65.
+    ankle_stiffness: float = 0.0        # N*m/rad on the passive ankle springs (0 = keep model 28.65)
+    ankle_damping: float = 0.0          # N*m*s/rad ankle joint damping (0 = keep model 0.3); raise
+    #                                     with stiffness to keep the stiffer spring ~critically damped
     residual_scale: float = 0.08        # rad of per-step correction authority on each PD target
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
@@ -202,6 +213,14 @@ class Config:
     foot_air_time_min: float = 0.25
     air_credit_cap_s: float = 0.45
     grounded_h: float = 0.005           # sphere-bottom height that still counts as grounded
+    # foot-placement-ahead-of-CoM reward (2026-07-24): reward planting the stance foot AHEAD of the
+    # whole-robot CoM (in the +x heading; yaw is locked m3..m5) at TOUCHDOWN -- the capture step
+    # that catches a forward fall and the natural running footfall. Credited ONLY on the air->ground
+    # transition (a transient EVENT, not a held pose) so it can't be farmed by standing with both
+    # feet forward (which would breed a backward lean). Forward offset capped at foot_ahead_cap_m.
+    # Logged as reward_terms/foot_ahead so the plots show whether the policy actually uses it. 0 = off.
+    w_foot_ahead: float = 0.0           # reward per metre the touchdown foot lands ahead of the CoM
+    foot_ahead_cap_m: float = 0.20      # cap on the rewarded forward offset (m)
 
     # ----- reward: phase-gated contact schedule (Siekmann-style; NEW) -----
     # The gait clock the ACTION uses is also the reward's contact schedule: each foot pays for
@@ -576,6 +595,34 @@ PRESETS.update({
         "m3", ent_anneal_deadline_steps=100_000_000, com_lower=0.30,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
         jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+})
+
+
+# ----- ankle-stiffness + foot-ahead experiment (2026-07-24) -------------------------------------
+# Two cheap levers the reactive/software route hadn't tried, both warm-started from m2_reactive
+# (WARM=training/runs/m2_reactive/ppo_33999660_steps.zip at launch): (a) a STIFFER, preload-
+# preserving passive ankle spring = a firmer foot lever, more passive pitch-restoring torque in
+# stance; (b) a foot-placement-ahead-of-CoM reward = the capture step to catch a forward fall (the
+# user's read of the failure videos: the policy never tried stepping ahead of the CoM). Same 200 Hz
+# reactive stack as m3_reactive (residual 0.20, jitter/drop curriculum) so ankle_stiffness /
+# w_foot_ahead is the only changed variable vs the known ep_len~206 plateau.
+def _m3_react(**kw):
+    return _sprint200(
+        "m3", ent_anneal_deadline_steps=100_000_000,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000, **kw)
+
+
+PRESETS.update({
+    # ankle-stiffness sweep (foot-ahead OFF): isolate the stiffer-spring plant change. Preload is
+    # preserved in env.py so the standing posture is unchanged; only the restoring gain rises.
+    "m3_stiff_lo":    lambda: _m3_react(ankle_stiffness=90.0,  ankle_damping=0.8),   # ~3x
+    "m3_stiff":       lambda: _m3_react(ankle_stiffness=200.0, ankle_damping=1.2),   # ~7x
+    "m3_stiff_hi":    lambda: _m3_react(ankle_stiffness=350.0, ankle_damping=1.6),   # ~12x
+    # foot-ahead reward (default ankle): isolate the capture-step reward.
+    "m3_ahead":       lambda: _m3_react(w_foot_ahead=3.0),
+    # COMBO: stiffer ankle + capture-step reward -- the best single shot at a balancing m3.
+    "m3_stiff_ahead": lambda: _m3_react(ankle_stiffness=200.0, ankle_damping=1.2, w_foot_ahead=3.0),
 })
 
 
