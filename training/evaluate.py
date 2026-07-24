@@ -79,6 +79,12 @@ def build(run: Path, preset, checkpoint):
             raw.set_stance_ratio(d["stance_ratio"])
         if "eff_scale" in d:
             raw.set_efficiency_scale(d["eff_scale"])
+        # a mid-training checkpoint was trained with the sprint line at its CURRICULUM distance,
+        # not the final 100 m — restore it too, else the dist-to-go task obs is out of distribution
+        # (evaluated at 100 m, an m2 policy trained at ~47 m reverses and collapses; at its true
+        # distance it runs forward and balances ~20 s). Applies from the next reset.
+        if "sprint_dist_m" in d:
+            raw.set_sprint_dist(d["sprint_dist_m"])
     venv = DummyVecEnv([lambda: raw])
     model_path = pick_model(run, checkpoint)
     vn = pick_vecnormalize(run, model_path)
