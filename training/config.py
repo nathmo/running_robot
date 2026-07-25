@@ -673,6 +673,27 @@ PRESETS.update({
 })
 
 
+# ----- milestone advance with the stiff ankle (2026-07-25, weekend) ----------------------------
+# m3 is SOLVED by the k350 preload-preserving stiff ankle (m3_stiff_hi: ep_len 1720, rew +725 at
+# 80M, and the least-extreme / most hardware-realistic of the winners). Advance the base-DOF ladder
+# with the SAME recipe, each warm-started from the m3 winner: m4 frees Y (lateral; w_lat_vel keeps
+# it straight), m5 also frees roll (the abduction reflex becomes the lateral balancer), m6 is fully
+# free (+yaw). Same 200 Hz reactive stack + jitter/drop curriculum as the m3 runs; _extras(m) turns
+# on angmom / ent-deadline / upright-gate for every pitch-free milestone. NO cadence limits (those
+# collapsed training; the chatter is a separate axis to fix later via a ramp curriculum).
+def _react(m, **kw):
+    return _sprint200(m, ent_anneal_deadline_steps=100_000_000,
+                      ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+                      jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000, **kw)
+
+
+PRESETS.update({
+    "m4_stiff": lambda: _react("m4", ankle_stiffness=350.0, ankle_damping=1.6),
+    "m5_stiff": lambda: _react("m5", ankle_stiffness=350.0, ankle_damping=1.6),
+    "m6_stiff": lambda: _react("m6", ankle_stiffness=350.0, ankle_damping=1.6),
+})
+
+
 def get_config(name: str = "default") -> Config:
     return PRESETS[name]()
 
