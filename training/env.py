@@ -126,6 +126,10 @@ class DashEnv(gym.Env):
         self.default_motor_pos = self.default_qpos[self.act_qadr]
         self.ctrl_lo = self.model.actuator_ctrlrange[:, 0].copy()
         self.ctrl_hi = self.model.actuator_ctrlrange[:, 1].copy()
+        # torque-budget curriculum: keep the model's ORIGINAL forcerange so the callback can scale
+        # it down (and restore) via set_torque_limit. 1.0 = full torque.
+        self._orig_forcerange = self.model.actuator_forcerange.copy()
+        self._torque_scale = 1.0
         self.height_target = float(self.default_qpos[2])
         # optional STIFFER passive ankle spring (m3 sagittal-balance experiment): a firmer foot
         # lever = more passive pitch-restoring torque in stance. The standing ankle sits well off
@@ -232,6 +236,14 @@ class DashEnv(gym.Env):
         self._armature_scale = float(np.clip(s, 0.0, 1.0))
         self.model.dof_armature[self._base_pitch_dadr] = \
             self._base_pitch_armature + self._armature_scale * self.cfg.pitch_armature
+
+    def set_torque_limit(self, scale):
+        """Scale the actuator torque budget (forcerange) to `scale` x the model's original limits
+        (clamped to [torque_limit_floor, 1]). 1.0 = full torque; <1 = tighter budget (the torque-
+        efficiency curriculum). A reduced budget is a real motor constraint — MuJoCo clips the
+        actuator force to the new range from the next mj_step."""
+        self._torque_scale = float(np.clip(scale, self.cfg.torque_limit_floor, 1.0))
+        self.model.actuator_forcerange[:] = self._orig_forcerange * self._torque_scale
 
     def set_ctrl_jitter(self, ms):
         """Set the +- control-timing jitter (ms; sim_dt=1 ms so this is +- substeps per control step)."""
@@ -542,6 +554,10 @@ class DashEnv(gym.Env):
         if self.on_control_step is not None:
             self.on_control_step()
         info = {"reward_terms": terms}
+        # mean actuator torque utilization |tau|/limit (for the torque-budget curriculum callback)
+        _lim = self.model.actuator_forcerange[:self.nu, 1]
+        info["torque_util"] = float(np.mean(
+            np.abs(self.data.actuator_force[:self.nu]) / np.maximum(_lim, 1e-6)))
         if c.objective == "sprint":
             info["sprint"] = self._sprint_info(finished)
         return self._obs(), float(reward), bool(terminated), bool(truncated), info

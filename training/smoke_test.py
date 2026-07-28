@@ -455,6 +455,33 @@ def test_contact_switch():
     check("m3_cad enables cadence penalty", get_config("m3_cad").w_contact_switch == 0.15)
 
 
+def test_torque_curriculum():
+    """m7 torque-budget curriculum: freq remap, set_torque_limit scales forcerange (floor-clamped),
+    torque_util reported in info; m7_freq isolates the freq fix (no curriculum)."""
+    print("torque-budget curriculum + freq remap (m7):")
+    c = get_config("m7")
+    check("m7 gait_freq remapped to (0.5,4)", c.gait_freq_hz == (0.5, 4.0), str(c.gait_freq_hz))
+    check("m7 torque_util_target 0.70", c.torque_util_target == 0.70)
+    env = DashEnv(c)
+    orig = env._orig_forcerange.copy()
+    env.set_torque_limit(0.5)
+    check("forcerange scaled to 0.5x", np.allclose(env.model.actuator_forcerange, orig * 0.5))
+    check("scale stored", abs(env._torque_scale - 0.5) < 1e-9)
+    env.set_torque_limit(0.01)                      # below floor
+    check("floor clamps scale", env._torque_scale == c.torque_limit_floor)
+    env.set_torque_limit(1.0)
+    check("restore full torque", np.allclose(env.model.actuator_forcerange, orig))
+    env.reset(seed=0)
+    _, _, _, _, info = env.step(np.zeros(env.action_dim, np.float32))
+    check("torque_util in info, >=0", info.get("torque_util", -1) >= 0.0, str(info.get("torque_util")))
+    check("m7_freq freq remapped", get_config("m7_freq").gait_freq_hz == (0.5, 4.0))
+    check("m7_freq no torque curriculum", get_config("m7_freq").torque_util_target == 0.0)
+    # neutral action (freq_raw=0) must now map to ~2 Hz, not ~25 Hz (the bug)
+    import fourier_gait
+    f_neutral = fourier_gait.frequency(0.0, c.gait_freq_hz)
+    check("neutral action -> ~2 Hz cadence", 1.5 < f_neutral < 3.0, f"{f_neutral:.2f} Hz")
+
+
 def test_hz200_timing():
     """200 Hz reactive stack: decimation/gamma/dt, rate-invariant reward scaling, and the sim2real
     timing randomization (jitter substeps + dropped-action hold) stay finite. 50 Hz is a no-op."""
@@ -578,6 +605,7 @@ if __name__ == "__main__":
     test_foot_ahead()
     test_motor_limits()
     test_contact_switch()
+    test_torque_curriculum()
     test_hz200_timing()
     test_angmom_term()
     test_rejuvenate_obs_rms()

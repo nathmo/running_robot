@@ -154,6 +154,66 @@ class GatedRampCallback(BaseCallback):
         return True
 
 
+class TorqueCurriculumCallback(BaseCallback):
+    """Shrink the actuator torque budget while the policy stays competent, until it is WELL
+    SATURATED (rollout-mean |tau|/limit >= torque_util_target), then STOP training. Forces a
+    torque-efficient (smoother, lower-cadence) gait: the m3 controller wastes ~82% of its torque
+    headroom on high-frequency foot dither. Competence-GATED (only tightens while ep_len >= gate)
+    so it never collapses the policy; a cooldown between tightens lets the lagging ep_len_mean
+    reflect the last change before the next. Scale persists to curriculum.json for --resume."""
+    def __init__(self, cfg, run_dir, patience=5, cooldown=4):
+        super().__init__()
+        self.cfg = cfg
+        self.run_dir = str(run_dir)
+        self.patience, self.cooldown = patience, cooldown
+        self._scale = 1.0
+        self._util_sum, self._util_n = 0.0, 0
+        self._sat_streak, self._cool, self._stop = 0, 0, False
+
+    def _on_training_start(self) -> None:
+        p = Path(self.run_dir) / "curriculum.json"
+        if p.exists():
+            d = json.loads(p.read_text())
+            if "torque_scale" in d:
+                self._scale = float(d["torque_scale"])
+        self.training_env.env_method("set_torque_limit", self._scale)
+        print(f"[train] torque-budget curriculum: start scale={self._scale:.2f}, target util "
+              f"{self.cfg.torque_util_target}, gate ep_len {self.cfg.torque_limit_gate_ep_len:.0f}")
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            if "torque_util" in info:
+                self._util_sum += float(info["torque_util"])
+                self._util_n += 1
+        return not self._stop
+
+    def _on_rollout_end(self) -> None:
+        util = self._util_sum / max(self._util_n, 1)
+        self._util_sum, self._util_n = 0.0, 0
+        ep_len = (safe_mean([ep["l"] for ep in self.model.ep_info_buffer])
+                  if len(self.model.ep_info_buffer) > 0 else 0.0)
+        self.logger.record("curriculum/torque_scale", self._scale)
+        self.logger.record("curriculum/torque_util", util)
+        tgt, gate = self.cfg.torque_util_target, self.cfg.torque_limit_gate_ep_len
+        # well-saturated + still competent -> stop after `patience` consecutive rollouts
+        if util >= tgt and ep_len >= gate:
+            self._sat_streak += 1
+            if self._sat_streak >= self.patience:
+                self._stop = True
+                _persist_curriculum(self.run_dir, "torque_scale", self._scale)
+                print(f"[train] torque WELL SATURATED (util {util:.2f} >= {tgt} at scale "
+                      f"{self._scale:.2f}, ep_len {ep_len:.0f}) -> stopping training")
+            return
+        self._sat_streak = 0
+        self._cool -= 1
+        # tighten only while competent and below target, paced by the cooldown
+        if ep_len >= gate and util < tgt - 0.05 and self._cool <= 0:
+            self._scale = max(self.cfg.torque_limit_floor, self._scale - self.cfg.torque_limit_step)
+            self.training_env.env_method("set_torque_limit", self._scale)
+            _persist_curriculum(self.run_dir, "torque_scale", self._scale)
+            self._cool = self.cooldown
+
+
 class EntropyCallback(BaseCallback):
     """Two jobs, both per rollout:
     1. Clamp log_std at cfg.max_log_std — the entropy bonus of a CLIPPED Gaussian keeps paying as
@@ -484,6 +544,10 @@ def main():
             cb_list.append(GatedRampCallback("ctrl_drop_prob", "set_ctrl_drop",
                                              0.0, cfg.ctrl_drop_prob_final,
                                              cfg.jitter_curriculum_steps, run, jgate))
+    # torque-budget curriculum (cadence fix): shrink the actuator torque budget while competent,
+    # stop when well-saturated. Persists its scale + can auto-terminate the run.
+    if cfg.torque_util_target > 0:
+        cb_list.append(TorqueCurriculumCallback(cfg, run))
     callbacks = CallbackList(cb_list)
 
     # SB3 semantics: with reset_num_timesteps=False, learn() ADDS its total_timesteps argument

@@ -268,6 +268,19 @@ class Config:
     w_energy: float = 2.0e-4            # sum positive mechanical power |tau*qvel|_+ (CoT proxy)
     efficiency_ramp_steps: int = 60_000_000   # linear 0 -> 1 multiplier on the three terms above
 
+    # ----- torque-budget curriculum (2026-07-28; cadence fix, take 2) -----
+    # The m3 controller uses only ~18% of the available actuator torque on average, so it has huge
+    # headroom to waste on high-frequency foot dither. This curriculum SHRINKS the torque budget
+    # (scales the actuator forcerange down) while the policy stays competent (ep_len gate), forcing
+    # a torque-efficient = smoother, lower-cadence gait. It STOPS training when the actuators are
+    # WELL SATURATED (mean |tau|/limit >= torque_util_target) -- once the budget is the binding
+    # constraint there is no point tightening further. Torque is a SOFTER, physically-grounded lever
+    # than the velocity/accel HARD caps (m3_cad*) that collapsed the warm-started policy. 0 = off.
+    torque_util_target: float = 0.0     # target/stop mean torque utilization (0 = off; 0.70 = the ask)
+    torque_limit_gate_ep_len: float = 0.0   # only tighten the budget while rollout ep_len >= this
+    torque_limit_step: float = 0.01     # forcerange-scale decrement per tighten (cooldown-paced)
+    torque_limit_floor: float = 0.15    # minimum torque scale (safety floor)
+
     # ----- reward: smoothness & posture -----
     w_action_rate: float = 0.1          # on the reconstructed normalized motor targets
     w_coef_rate: float = 0.5            # phase-gated gait-SPEC change penalty: billed *sin^2(phi/2),
@@ -691,6 +704,27 @@ PRESETS.update({
     "m4_stiff": lambda: _react("m4", ankle_stiffness=350.0, ankle_damping=1.6),
     "m5_stiff": lambda: _react("m5", ankle_stiffness=350.0, ankle_damping=1.6),
     "m6_stiff": lambda: _react("m6", ankle_stiffness=350.0, ankle_damping=1.6),
+})
+
+
+# ----- m7: cadence fix, take 2 (2026-07-28) -----------------------------------------------------
+# NOT a new DOF -- the run name for the take-2 cadence work on the solved m3 base. Root cause found
+# by instrumenting the m6 policy (channel_authority.py): the 200 Hz rescale widened gait_freq_hz to
+# (0.5, 50) but the freq_raw->Hz map is linear, so a NEUTRAL action (~0) maps to ~25 Hz -- the
+# policy left that output near zero and inherited a ~24 Hz gait clock (the CPG thigh output flips
+# sign 35x/s = dither, ±0.45 rad through a ~31 Hz-cutoff EMA -> would destroy the real motors). The
+# external velocity/accel/torque limits all failed because they fought this broken INTERNAL default.
+# Fix: remap gait_freq_hz -> (0.5, 4.0) so neutral ~= 2 Hz. m7 adds the requested torque-budget
+# curriculum ON TOP (now that the default cadence is sane, torque efficiency can refine it); m7_freq
+# isolates the freq fix alone (the analysis predicts "this alone may fix the chatter"). Both warm-
+# start from m3_stiff_hi (the 7806-ep_len winner); k350 ankle; residual re-bill + pitch-reflex
+# headroom deliberately deferred until we re-measure after the freq fix.
+PRESETS.update({
+    "m7": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
+                         gait_freq_hz=(0.5, 4.0),
+                         torque_util_target=0.70, torque_limit_gate_ep_len=1500.0),
+    "m7_freq": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
+                             gait_freq_hz=(0.5, 4.0)),
 })
 
 
