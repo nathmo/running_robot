@@ -167,6 +167,8 @@ class DashEnv(gym.Env):
         self._prev_action = np.zeros(self.action_dim, np.float32)   # policy output (obs)
         self._prev_applied = np.zeros(self.action_dim, np.float32)  # post-delay, for coef_rate
         self._prev_motor_cmd = np.zeros(self.nu, np.float32)        # normalized targets, action_rate
+        self._prev_residual = np.zeros(self.nu, np.float32)         # for the residual-rate penalty
+        self._residual_rate_sq = 0.0
         self._coef_rate_gated = 0.0
         self._phase = 0.0                # gait phase, continuous, kept in [0, 2*pi)
         self._phase_reward = 0.0         # the phase the current step's targets were assembled at
@@ -372,6 +374,7 @@ class DashEnv(gym.Env):
         self._prev_action[:] = 0.0
         self._prev_applied[:] = 0.0
         self._prev_motor_cmd[:] = 0.0
+        self._prev_residual[:] = 0.0
         self._coef_rate_gated = 0.0
         self._phase = 0.0
         self._phase_reward = 0.0
@@ -492,6 +495,9 @@ class DashEnv(gym.Env):
         target6 = target6 + c.residual_scale * residual  # the per-step fast-feedback channel
         motor_cmd = ((target6 - self.nominal_ctrl) / c.action_scale).astype(np.float32)
         self._residual_sq = float(np.sum(residual ** 2))
+        # per-step residual CHANGE (for the residual-rate penalty that suppresses fast chatter)
+        self._residual_rate_sq = float(np.sum((residual - self._prev_residual) ** 2))
+        self._prev_residual = residual.copy()
 
         # gentle random shove BEFORE the physics runs (free translational axes only)
         self._push_countdown -= 1
@@ -708,6 +714,7 @@ class DashEnv(gym.Env):
                                      * float(np.sum((motor_cmd - self._prev_motor_cmd) ** 2)))
         t["coef_rate"] = self._pen(-c.w_coef_rate * self._coef_rate_gated)
         t["residual"] = self._pen(-c.w_residual * self._residual_sq)
+        t["residual_rate"] = self._pen(-c.w_residual_rate * self._residual_rate_sq)
         # anti-crutch: pay for the assist torque the policy provokes (0 when it balances itself, so
         # the assist becomes a safety net the policy is pushed to stop relying on). 0 when disabled.
         t["assist_pen"] = self._pen(-c.w_assist_penalty * self._assist_torque ** 2)

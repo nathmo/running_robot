@@ -287,6 +287,12 @@ class Config:
     #                                     free at the cycle boundary (spec dims only, not residuals)
     w_residual: float = 0.1             # keep the Fourier prior dominant: residuals are for
     #                                     corrections, not for becoming the controller
+    # residual RATE penalty (2026-07-29): the freq fix slowed the CPG clock to ~1 Hz but the FOOT-
+    # FALL stayed ~6 Hz -- the policy steps through the fast residual channel (thigh residual flips
+    # sign ~8 Hz), not the clock. Penalize the per-step residual CHANGE (Delta-residual^2) so a
+    # high-frequency residual oscillation is expensive while a one-off correction stays cheap. This
+    # is the "re-bill the residual as a rate" fix, targeted at the chatter the freq fix left behind.
+    w_residual_rate: float = 0.0        # penalty per sum((residual - prev_residual)^2); 0 = off
     w_upright: float = 5.0
     w_height: float = 2.5               # only when Z is free (neutralized on the rail)
     w_vz: float = 0.5
@@ -725,6 +731,14 @@ PRESETS.update({
                          torque_util_target=0.70, torque_limit_gate_ep_len=1500.0),
     "m7_freq": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
                              gait_freq_hz=(0.5, 4.0)),
+    # 2026-07-29: re-measured m7_freq @48M -> gait clock fell to 1 Hz but FOOTFALL stayed ~6 Hz:
+    # the policy steps through the fast residual channel, not the CPG clock. Add the residual-rate
+    # penalty (the analysis's deferred fix) to make that chatter expensive. Warm-start from the
+    # freq-adapted m7_freq checkpoint (only needs to unlearn the residual chatter). Two strengths.
+    "m7_res":    lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
+                               gait_freq_hz=(0.5, 4.0), w_residual_rate=5.0),
+    "m7_res_hi": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
+                               gait_freq_hz=(0.5, 4.0), w_residual_rate=15.0),
 })
 
 
