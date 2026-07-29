@@ -214,6 +214,105 @@ class TorqueCurriculumCallback(BaseCallback):
             self._cool = self.cooldown
 
 
+class CommandCurriculumCallback(BaseCallback):
+    """Expand the joystick command BOX only while the policy can actually track the top of it.
+
+    This is the fix for the scaling trap. Mapping full stick to a speed the robot cannot reach
+    makes most of the command range a dead zone: the Gaussian tracking reward is ~0 there whatever
+    the policy does, so those samples carry no gradient while still paying every penalty, the value
+    function learns 'high command = bad', and the policy stops attending to the command channel at
+    all. Mapping full stick to a speed it can trivially reach caps the robot below its capability
+    forever. Neither is fixed by choosing a better constant — the reachable set is not known in
+    advance and it moves as the policy improves, so the range has to be discovered.
+
+    So: grade competence at the TOP of the current box only (commands in the top `top_frac` of the
+    range — tracking easy slow commands well says nothing about whether the box should widen), and
+    widen only on a streak of rollouts under the error threshold. Shrink on a streak over it, so a
+    box that turns out to be too wide (or a policy that regresses when jitter/DR ramps in) walks
+    back down instead of deadlocking. A gate that never opens leaves the start box, which is the
+    correct failure mode: a robot that only does 0.6 m/s cleanly still demos.
+
+    The scale is persisted to curriculum.json, so evaluate.py / teleop.py can map the joystick onto
+    exactly the range the policy was trained for — the deployment half of the same fix.
+    """
+    def __init__(self, cfg, run_dir, patience=4, cooldown=3):
+        super().__init__()
+        self.cfg = cfg
+        self.run_dir = str(run_dir)
+        self.patience, self.cooldown = patience, cooldown
+        self._scale = 0.0
+        self._err_sum, self._err_n = 0.0, 0
+        self._good, self._bad, self._cool = 0, 0, 0
+
+    def _on_training_start(self) -> None:
+        p = Path(self.run_dir) / "curriculum.json"
+        if p.exists():
+            d = json.loads(p.read_text())
+            if "cmd_scale" in d:
+                self._scale = float(d["cmd_scale"])
+                print(f"[train] restored command-range scale {self._scale:.2f}")
+        self.training_env.env_method("set_cmd_scale", self._scale)
+        self._persist()
+
+    def _persist(self):
+        """Record the scale AND the resolved physical box — teleop/eval need the m/s, not the
+        dimensionless scale, to map a [-1,1] stick onto the trained range."""
+        c, s = self.cfg, self._scale
+        _persist_curriculum(self.run_dir, "cmd_scale", s)
+        _persist_curriculum(self.run_dir, "cmd_v_fwd", c.cmd_v_fwd_start
+                            + s * (c.cmd_v_fwd_max - c.cmd_v_fwd_start))
+        _persist_curriculum(self.run_dir, "cmd_v_back", c.cmd_v_back_start
+                            + s * (c.cmd_v_back_max - c.cmd_v_back_start))
+        _persist_curriculum(self.run_dir, "cmd_yaw", c.cmd_yaw_start
+                            + s * (c.cmd_yaw_max - c.cmd_yaw_start))
+
+    def _on_step(self) -> bool:
+        c = self.cfg
+        v_fwd = c.cmd_v_fwd_start + self._scale * (c.cmd_v_fwd_max - c.cmd_v_fwd_start)
+        thresh = c.cmd_curriculum_top_frac * v_fwd
+        for info in self.locals.get("infos", []):
+            if "track_err" in info and abs(info.get("cmd_v", 0.0)) >= thresh:
+                self._err_sum += float(info["track_err"])
+                self._err_n += 1
+        return True
+
+    def _on_rollout_end(self) -> None:
+        c = self.cfg
+        ep_len = (safe_mean([ep["l"] for ep in self.model.ep_info_buffer])
+                  if len(self.model.ep_info_buffer) > 0 else 0.0)
+        self.logger.record("curriculum/cmd_scale", self._scale)
+        if self._err_n < c.cmd_curriculum_min_samples:
+            self._err_sum, self._err_n = 0.0, 0
+            return
+        err = self._err_sum / self._err_n
+        self._err_sum, self._err_n = 0.0, 0
+        self.logger.record("curriculum/cmd_track_err", err)
+        self._cool -= 1
+        # must be ALIVE as well as accurate: perfect tracking over 30-step episodes is not
+        # competence, and widening the box on it would compound the failure
+        alive = ep_len >= c.cmd_curriculum_gate_ep_len
+        if err <= c.cmd_curriculum_err_open and alive:
+            self._good, self._bad = self._good + 1, 0
+        elif err >= c.cmd_curriculum_err_close or not alive:
+            self._bad, self._good = self._bad + 1, 0
+        else:
+            self._good = self._bad = 0
+        if self._good >= self.patience and self._cool <= 0 and self._scale < 1.0:
+            self._scale = min(1.0, self._scale + c.cmd_curriculum_step)
+            self._good, self._cool = 0, self.cooldown
+            self.training_env.env_method("set_cmd_scale", self._scale)
+            self._persist()
+            print(f"[train] command box widened -> scale {self._scale:.2f} "
+                  f"(top-range err {err:.3f} m/s, ep_len {ep_len:.0f})")
+        elif self._bad >= self.patience and self._cool <= 0 and self._scale > 0.0:
+            self._scale = max(0.0, self._scale - c.cmd_curriculum_step)
+            self._bad, self._cool = 0, self.cooldown
+            self.training_env.env_method("set_cmd_scale", self._scale)
+            self._persist()
+            print(f"[train] command box narrowed -> scale {self._scale:.2f} "
+                  f"(top-range err {err:.3f} m/s, ep_len {ep_len:.0f})")
+
+
 class EntropyCallback(BaseCallback):
     """Two jobs, both per rollout:
     1. Clamp log_std at cfg.max_log_std — the entropy bonus of a CLIPPED Gaussian keeps paying as
@@ -548,6 +647,10 @@ def main():
     # stop when well-saturated. Persists its scale + can auto-terminate the run.
     if cfg.torque_util_target > 0:
         cb_list.append(TorqueCurriculumCallback(cfg, run))
+    # joystick command-range curriculum: widen the commandable box only while the policy tracks
+    # the top of it. Persists the resolved m/s box for teleop/eval to map the stick onto.
+    if cfg.objective == "command":
+        cb_list.append(CommandCurriculumCallback(cfg, run))
     callbacks = CallbackList(cb_list)
 
     # SB3 semantics: with reset_num_timesteps=False, learn() ADDS its total_timesteps argument

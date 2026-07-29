@@ -38,6 +38,16 @@ def test_fourier_gait():
     print("fourier_gait:")
     N = 3
     check("dims", fourier_gait.action_dim(N) == 24 and fourier_gait.spec_dim(N) == 18)
+    # steering is opt-in: 2 extra SPEC dims, and a bare call must still give the legacy 24
+    check("dims (steer)", fourier_gait.action_dim(N, 2) == 26
+          and fourier_gait.spec_dim(N, 2) == 20)
+    # a zero steer command must reproduce the mirror-symmetric gait exactly
+    cfg0 = Config()
+    z6, zc = np.zeros(6), np.random.default_rng(0).uniform(-1, 1, 7)
+    sym = fourier_gait.assemble(zc, zc, np.zeros(3), 0.9, 0.0, 0.0, z6, cfg0)
+    zero_steer = fourier_gait.assemble(zc, zc, np.zeros(3), 0.9, 0.0, 0.0, z6, cfg0,
+                                       steer=np.zeros(2))
+    check("steer=0 == no steer", np.allclose(sym, zero_steer))
     # stance indicator: bounded, ~1 mid-stance, ~0 mid-swing, continuous at the phase wrap
     sr = 0.6
     I = lambda p: fourier_gait.stance_indicator(p, sr)

@@ -1,1 +1,1 @@
-{"sprint_dist_m": 100.0, "stance_ratio": 0.444408704, "eff_scale": 0.8938752, "ctrl_jitter_ms": 4.0, "ctrl_drop_prob": 0.05, "ctrl_jitter_ms_gate_from": 1658880, "ctrl_drop_prob_gate_from": 1658880, "ent_anneal_from": 100012032, "ent_anneal_base": 0.01}
+{"sprint_dist_m": 100.0, "stance_ratio": 0.42, "eff_scale": 1.0, "ctrl_jitter_ms": 4.0, "ctrl_drop_prob": 0.05, "ctrl_jitter_ms_gate_from": 1658880, "ctrl_drop_prob_gate_from": 1658880, "ent_anneal_from": 100012032, "ent_anneal_base": 0.01}

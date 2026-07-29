@@ -87,6 +87,11 @@ def build(run: Path, preset, checkpoint):
             raw.set_sprint_dist(d["sprint_dist_m"])
         if "torque_scale" in d:                 # the torque-budget curriculum's tightened limit
             raw.set_torque_limit(d["torque_scale"])
+        # same class of bug as sprint_dist_m above, third instance: a command policy evaluated at
+        # cmd_scale 1.0 when it was only ever trained to 0.4 is being handed commands from outside
+        # its training distribution, and will look far worse than it is.
+        if "cmd_scale" in d:
+            raw.set_cmd_scale(d["cmd_scale"])
     venv = DummyVecEnv([lambda: raw])
     model_path = pick_model(run, checkpoint)
     vn = pick_vecnormalize(run, model_path)

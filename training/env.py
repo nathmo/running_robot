@@ -1,11 +1,26 @@
-"""DashEnv — Gymnasium environment for the DASH-01 100 m sprint (and max-speed debug) task.
+"""DashEnv — Gymnasium environment for DASH-01.
 
-One env.step == one 50 Hz control step. The action is the per-step Fourier gait spec + residuals
-(see fourier_gait.py): the policy re-parameterizes a phase-driven gait generator every step
-(CPG-RL-style) and adds small direct target corrections (PMTG-style). The observation is
-proprioception the real robot can measure (motor pos/vel/torque, IMU gravity + gyro) PLUS
-privileged sim state that the reward is built on (base velocity; sprint distance-to-go) — those
-two need estimators on hardware and are the documented sim2real debt.
+Three objectives share one plant:
+  "sprint"  — the 100 m dash (stand, run the line, stop past it). The original task.
+  "speed"   — endless max-forward-speed (gait-shaping / debug).
+  "command" — JOYSTICK teleoperation: track a commanded forward speed and yaw rate, and stand
+              still (stepping in place is allowed) when the stick is centred. This is the mode
+              built for hardware demos, and it is the only one that is sim2real-honest:
+              privileged observations are off, the plant is randomized every episode and the
+              proprioception is corrupted by a measurement model (see domain_rand.py).
+
+One env.step == one control step. The action is the per-step Fourier gait spec + steering
+asymmetry + residuals (see fourier_gait.py): the policy re-parameterizes a phase-driven gait
+generator every step (CPG-RL-style) and adds small direct target corrections (PMTG-style).
+
+Observation. In command mode the frame is proprioception the real robot can actually measure —
+motor pos/vel/torque, IMU gravity + gyro — plus the gait phase (computed onboard, not measured),
+the command, and the previous action. Base linear velocity, which every earlier milestone fed the
+policy as privileged sim state, is REMOVED: it is not measurable without an estimator, and a
+policy that has only ever seen ground truth has never seen the signal it will be given. What
+replaces it is a longer strided history (cfg.history_len x cfg.history_stride), from which the
+velocity is observable in principle. Set cfg.obs_base_vel=True to put the oracle back for an
+ablation baseline.
 
 The base can be partially railed (cfg.base_lock) for the m1..m6 milestone curriculum; the model's
 <equality> joint locks are activated at reset. m1 rails Z at a per-episode random ride height,
@@ -20,6 +35,7 @@ import mujoco
 
 from config import Config
 import fourier_gait
+from domain_rand import PlantRandomizer, SensorNoise
 
 PKG_DIR = Path(__file__).resolve().parent
 
@@ -161,8 +177,11 @@ class DashEnv(gym.Env):
              .startswith("hip_roll")], dtype=int)
 
         # ----- action / observation spaces -----
-        self.action_dim = fourier_gait.action_dim(self.cfg.n_harmonics)
-        self.spec_dim = fourier_gait.spec_dim(self.cfg.n_harmonics)
+        # Steering is OPT-IN: with steer_enable False the action has no steering dims at all, so
+        # every pre-steering preset keeps its 24-dim action and its checkpoints keep loading.
+        self.n_steer = fourier_gait.N_STEER if self.cfg.steer_enable else 0
+        self.action_dim = fourier_gait.action_dim(self.cfg.n_harmonics, self.n_steer)
+        self.spec_dim = fourier_gait.spec_dim(self.cfg.n_harmonics, self.n_steer)
         self.action_space = spaces.Box(-1.0, 1.0, (self.action_dim,), np.float32)
         self._prev_action = np.zeros(self.action_dim, np.float32)   # policy output (obs)
         self._prev_applied = np.zeros(self.action_dim, np.float32)  # post-delay, for coef_rate
@@ -173,13 +192,47 @@ class DashEnv(gym.Env):
         self._coef_rate_gated = 0.0
         self._phase = 0.0                # gait phase, continuous, kept in [0, 2*pi)
         self._phase_reward = 0.0         # the phase the current step's targets were assembled at
-        self._task = np.zeros(2, np.float32)   # [run_flag, dist_to_go/100]
+        # ----- task / command channel -----
+        # sprint+speed: [run_flag, dist_to_go/100]   command: [v_cmd/norm, yaw_cmd/norm, stand_flag]
+        self.command_mode = (self.cfg.objective == "command")
+        self.task_dim = 3 if self.command_mode else 2
+        self._task = np.zeros(self.task_dim, np.float32)
+        self._v_cmd = 0.0                # commanded forward speed, m/s (body x)
+        self._yaw_cmd = 0.0              # commanded yaw rate, rad/s (body z)
+        self._standing = False           # command is centred -> hold position
+        self._stand_anchor = np.zeros(2)  # base xy latched when the stand command began
+        self._cmd_countdown = 10 ** 9
+        self._cmd_scale = 1.0            # 0..1 command-RANGE curriculum (set by the callback)
+        self._track_err_sum, self._track_err_n = 0.0, 0
 
-        # frame: pos6 vel6 trq6 grav3 gyro3 vbody3 phase2 task2 prev_action
-        self.frame_dim = 6 + 6 + 6 + 3 + 3 + 3 + 2 + 2 + self.action_dim
+        # frame: pos6 vel6 trq6 grav3 gyro3 [vbody3] phase2 task prev_action
+        self.obs_base_vel = bool(self.cfg.obs_base_vel)
+        self.frame_dim = (6 + 6 + 6 + 3 + 3 + (3 if self.obs_base_vel else 0)
+                          + 2 + self.task_dim + self.action_dim)
         obs_dim = self.frame_dim * self.cfg.history_len
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
-        self._history = np.zeros((self.cfg.history_len, self.frame_dim), np.float32)
+        # strided history: keep (history_len-1)*stride+1 raw frames but expose only every stride-th,
+        # so a fixed obs width can span a much longer window. At 200 Hz, len=10 x stride=4 = 200 ms,
+        # which is what makes base velocity inferable once the privileged channel is removed.
+        self._hist_stride = max(1, int(self.cfg.history_stride))
+        self._hist_raw_len = (self.cfg.history_len - 1) * self._hist_stride + 1
+        self._history = np.zeros((self._hist_raw_len, self.frame_dim), np.float32)
+        self._hist_idx = ((self._hist_raw_len - 1)
+                          - (np.arange(self.cfg.history_len) * self._hist_stride)[::-1])
+        # measurement chain + per-episode plant draw (both inert unless enabled in the config)
+        self._noise = SensorNoise(self.cfg, self.nu)
+        _leg_dofs = [int(self.model.jnt_dofadr[j]) for j in range(self.model.njnt)
+                     if self.model.jnt_bodyid[j] != self.base_id]
+        self._dr = PlantRandomizer(self.model, self.cfg, _ankle_j, _leg_dofs)
+        self._dr.stand_qpos = self.default_qpos
+        self._dr_torque_scale = 1.0
+        self._prev_vel_body = np.zeros(3)   # for the accelerometer-leak noise model
+        self._obs_delay_buf = []
+        self._ep_delay_steps = int(self.cfg.action_delay_steps)
+        self._trip_left, self._trip_body, self._trip_force = 0, 0, 0.0
+        self._fixed_base_h = None       # set by set_fixed_base() for the in-air test rig
+        # foot BODY ids, for the trip disturbance (a toe catching an unseen obstacle)
+        self._foot_bids = [int(self.model.geom_bodyid[g]) for g in self.foot_gids]
 
         self._filt_target = self.nominal_ctrl.copy()
         # motor velocity/accel limiter state: the slew limiter in _run_physics tracks the previously
@@ -246,7 +299,62 @@ class DashEnv(gym.Env):
         efficiency curriculum). A reduced budget is a real motor constraint — MuJoCo clips the
         actuator force to the new range from the next mj_step."""
         self._torque_scale = float(np.clip(scale, self.cfg.torque_limit_floor, 1.0))
-        self.model.actuator_forcerange[:] = self._orig_forcerange * self._torque_scale
+        self._apply_torque_limit()
+
+    def _apply_torque_limit(self):
+        """forcerange = original x curriculum scale x this episode's domain-randomization draw.
+        Both factors go through here so neither can clobber the other (the curriculum writes
+        between resets, the DR draw writes at reset)."""
+        self.model.actuator_forcerange[:] = (self._orig_forcerange * self._torque_scale
+                                             * self._dr_torque_scale)
+
+    def set_cmd_scale(self, s):
+        """0..1 command-RANGE curriculum: interpolates the sampled command box from
+        (cmd_v_fwd_start, cmd_v_back_start, cmd_yaw_start) at 0 to the full
+        (cmd_v_fwd_max, cmd_v_back_max, cmd_yaw_max) at 1.
+
+        The policy observes the command in PHYSICAL UNITS scaled by a FIXED constant (cmd_v_norm /
+        cmd_yaw_norm), never by this curriculum value — if the normalizer moved with the curriculum
+        then 'obs = 1.0' would mean 0.5 m/s early and 1.8 m/s late, the same input would mean
+        different things at different times, and nothing learned early would still be true. Only
+        the SAMPLING DISTRIBUTION widens here; the command's meaning never changes."""
+        self._cmd_scale = float(np.clip(s, 0.0, 1.0))
+
+    def _cmd_box(self):
+        """(v_fwd_max, v_back_max, yaw_max) at the current curriculum scale."""
+        c, s = self.cfg, self._cmd_scale
+        return (c.cmd_v_fwd_start + s * (c.cmd_v_fwd_max - c.cmd_v_fwd_start),
+                c.cmd_v_back_start + s * (c.cmd_v_back_max - c.cmd_v_back_start),
+                c.cmd_yaw_start + s * (c.cmd_yaw_max - c.cmd_yaw_start))
+
+    def set_fixed_base(self, clearance=0.25):
+        """Clamp ALL six base DOFs and hang the robot `clearance` metres higher than its stance
+        height — the test-rig configuration: bolted to a stand, legs cycling in the air.
+
+        This is deliberately a runtime override rather than a preset, because it is not a training
+        condition: it is how the FIRST hardware bring-up will be run, and the point is to preview
+        in sim exactly what that rig will show before committing to it. Note what it does to the
+        policy's inputs — with the base clamped upright, gravity really is constant and the gyro
+        really is zero, so those two observations are CORRECT rather than out-of-distribution.
+        What is missing is ground contact, so nothing the legs do feeds back. Expect the nominal
+        gait for the commanded speed and no closed-loop balance behaviour; that is the honest
+        limit of what an in-air test can tell you. Applies from the next reset."""
+        self.base_lock[:] = 1
+        self.z_locked = True
+        self._lut = None                      # the m1 ride-height LUT seats feet ON the floor
+        self._fixed_base_h = float(self.height_target) + float(clearance)
+
+    def set_command(self, v_cmd, yaw_cmd=0.0):
+        """Drive the robot directly (teleop / evaluation). Suspends the automatic resampling —
+        once something outside is holding the stick, nothing inside should be moving it."""
+        self._v_cmd = float(v_cmd)
+        self._yaw_cmd = float(yaw_cmd)
+        self._cmd_countdown = 10 ** 9
+        was = self._standing
+        self._standing = (abs(self._v_cmd) < 1e-6 and abs(self._yaw_cmd) < 1e-6)
+        if self._standing and not was:
+            self._stand_anchor[:] = self.data.qpos[0:2]
+        self._update_task()
 
     def set_ctrl_jitter(self, ms):
         """Set the +- control-timing jitter (ms; sim_dt=1 ms so this is +- substeps per control step)."""
@@ -312,29 +420,60 @@ class DashEnv(gym.Env):
 
     # ---------- observation ----------
     def _proprio(self):
+        """One RAW measurement frame, then corrupted by the sensor model. Everything in here is a
+        quantity the hardware can actually produce (encoder, motor current, IMU) except the gait
+        phase, which is computed onboard, and the optional privileged base velocity."""
         s = self.cfg.obs_scales
-        motor_pos = (self.data.qpos[self.act_qadr] - self.default_motor_pos) * s["motor_pos"]
-        motor_vel = self.data.qvel[self.act_dadr] * s["motor_vel"]
-        motor_trq = self.data.actuator_force[:self.nu] * s["motor_torque"]
-        grav = self._gravity_body() * s["gravity"]
-        angv = self._ang_vel_body() * s["ang_vel"]
-        vbody = self._vel_body() * s["base_vel"]
-        phase = np.array([np.sin(self._phase), np.cos(self._phase)])
-        return np.concatenate([motor_pos, motor_vel, motor_trq, grav, angv, vbody,
-                               phase, self._task, self._prev_action]).astype(np.float32)
+        motor_pos = self.data.qpos[self.act_qadr] - self.default_motor_pos
+        motor_vel = self.data.qvel[self.act_dadr].copy()
+        motor_trq = self.data.actuator_force[:self.nu].copy()
+        grav = self._gravity_body()
+        angv = self._ang_vel_body()
+        # body-frame linear acceleration, for the accelerometer-leak term of the gravity model
+        v_now = self._vel_body()
+        accel_body = (v_now - self._prev_vel_body) / self.control_dt
+        self._prev_vel_body = v_now
+        if self._noise.enabled:
+            self._noise.step_bias(self.np_random)
+            motor_pos, motor_vel, motor_trq, grav, angv = self._noise.apply(
+                self.np_random, motor_pos, motor_vel, motor_trq, grav, angv, accel_body)
+        parts = [motor_pos * s["motor_pos"], motor_vel * s["motor_vel"],
+                 motor_trq * s["motor_torque"], grav * s["gravity"], angv * s["ang_vel"]]
+        if self.obs_base_vel:                       # privileged; off in command mode
+            parts.append(v_now * s["base_vel"])
+        parts += [np.array([np.sin(self._phase), np.cos(self._phase)]),
+                  self._task, self._prev_action]
+        return np.concatenate(parts).astype(np.float32)
 
     def _obs(self):
-        return self._history.reshape(-1).astype(np.float32)
+        return self._history[self._hist_idx].reshape(-1).astype(np.float32)
 
     def _push_frame(self, frame):
+        """Append a measurement to the history, optionally after a fixed sensor delay (staleness
+        of the CAN read, on top of the action delay that models inference + actuation)."""
+        if self.cfg.obs_delay_steps > 0:
+            self._obs_delay_buf.append(frame)
+            frame = self._obs_delay_buf.pop(0)
         self._history[:-1] = self._history[1:]
         self._history[-1] = frame
 
     def _update_task(self):
-        """Refresh the 2-dim task channel: [run_flag, dist_to_go/100]. The run->stop flip at the
-        line is the policy's stop signal; dist_to_go lets it SEE the line coming (plan braking)
-        and gives the value function the state its return actually depends on."""
-        if self.cfg.objective == "sprint":
+        """Refresh the task channel.
+
+        sprint : [run_flag, dist_to_go/100]. The run->stop flip at the line is the policy's stop
+                 signal; dist_to_go lets it SEE the line coming (plan braking) and gives the value
+                 function the state its return actually depends on.
+        command: [v_cmd/cmd_v_norm, yaw_cmd/cmd_yaw_norm, stand_flag]. FIXED normalizers — see
+                 set_cmd_scale for why they must never track the curriculum. The explicit
+                 stand_flag makes 'hold position' a distinct mode rather than something the policy
+                 has to infer from two near-zero floats.
+        """
+        c = self.cfg
+        if self.command_mode:
+            self._task[0] = self._v_cmd / c.cmd_v_norm
+            self._task[1] = self._yaw_cmd / c.cmd_yaw_norm
+            self._task[2] = 1.0 if self._standing else 0.0
+        elif c.objective == "sprint":
             if self._sprint_crossed:
                 self._task[:] = 0.0
             else:
@@ -343,9 +482,44 @@ class DashEnv(gym.Env):
         else:                       # speed: run forever
             self._task[:] = 1.0
 
+    # ---------- joystick command ----------
+    def _sample_command(self):
+        """Draw a new command from the current curriculum box. A fixed fraction of draws are
+        EXACTLY zero (stand still) rather than merely small: standing is a mode the demo needs to
+        do well and cleanly, and it will not be learned from the tail of a uniform distribution.
+        Small non-zero draws are snapped to zero by the deadband for the same reason — a real
+        joystick has one too, and a command the robot cannot resolve is a command it should not
+        be graded on."""
+        rng, c = self.np_random, self.cfg
+        v_fwd, v_back, yaw = self._cmd_box()
+        if rng.random() < c.cmd_zero_prob:
+            self._v_cmd, self._yaw_cmd = 0.0, 0.0
+        else:
+            self._v_cmd = float(rng.uniform(-v_back, v_fwd))
+            self._yaw_cmd = float(rng.uniform(-yaw, yaw))
+            if abs(self._v_cmd) < c.cmd_deadband:
+                self._v_cmd = 0.0
+            if abs(self._yaw_cmd) < c.cmd_yaw_deadband:
+                self._yaw_cmd = 0.0
+        was = self._standing
+        self._standing = (self._v_cmd == 0.0 and self._yaw_cmd == 0.0)
+        if self._standing and not was:
+            self._stand_anchor[:] = self.data.qpos[0:2]
+        # resample on a randomized interval: the policy must handle the stick MOVING, which is the
+        # whole point of teleop, and a fixed interval is something it can learn to anticipate.
+        s = c.cmd_resample_s * rng.uniform(0.7, 1.3)
+        self._cmd_countdown = max(1, int(round(s / self.control_dt)))
+
     # ---------- gym API ----------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
+        # per-episode plant + measurement draw, BEFORE mj_forward so the new masses/inertias are
+        # in this episode's mass matrix and the standing-torque baseline below reflects them.
+        ep = self._dr.resample(self.model, self.np_random)
+        self._dr_torque_scale = ep["torque_scale"]
+        self._apply_torque_limit()
+        self._ep_delay_steps = int(ep["action_delay_steps"])
+        self._noise.reset(self.np_random)
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.key_id)
         # activate this milestone's base-DOF locks (loop-closure equalities stay untouched)
         self.data.eq_active[self.lock_eq_ids] = self.base_lock
@@ -359,6 +533,8 @@ class DashEnv(gym.Env):
                 self.nominal_ctrl = self._lut["ctrl"][k].astype(np.float64).copy()
             else:
                 H = float(self.height_target)
+            if self._fixed_base_h is not None:      # in-air test rig (set_fixed_base)
+                H = self._fixed_base_h
             self.model.eq_data[self.lock_z_eq_id, 0] = H
             self.data.qpos[2] = H
         # per-EPISODE standing-torque baseline (captured on the CLEAN stance, before reset noise):
@@ -385,13 +561,17 @@ class DashEnv(gym.Env):
         self._prev_cmd_pos[:] = self.nominal_ctrl
         self._prev_cmd_vel[:] = 0.0
         self._delay_buf = [np.zeros(self.action_dim, np.float32)
-                           for _ in range(self.cfg.action_delay_steps)]
+                           for _ in range(self._ep_delay_steps)]
+        self._obs_delay_buf = [np.zeros(self.frame_dim, np.float32)
+                               for _ in range(self.cfg.obs_delay_steps)]
         self._air_time[:] = 0.0
         self._contact_time[:] = 0.0
         self._grounded_prev = self._foot_contacts() | (self._toe_heights() < self.cfg.grounded_h)
         self._prev_toe_xy = self.data.geom_xpos[self.foot_gids_arr, 0:2].copy()
         self._push_countdown = self._next_push_in()
         self._step_n = 0
+        self._prev_vel_body[:] = 0.0
+        self._track_err_sum, self._track_err_n = 0.0, 0
         # sprint state: the finish line is frozen per episode (curriculum moves it between dashes)
         self._x0 = float(self.data.qpos[0])
         self._sprint_D = float(self.cfg.sprint_dist_m)
@@ -399,6 +579,10 @@ class DashEnv(gym.Env):
         self._sprint_t_line = None
         self._sprint_d = 0.0
         self._stop_hold = 0.0
+        # joystick command: draw the first one (also latches the stand anchor)
+        if self.command_mode:
+            self._standing = False
+            self._sample_command()
         self._update_task()
         frame = self._proprio()
         self._history[:] = frame
@@ -427,6 +611,54 @@ class DashEnv(gym.Env):
             else:
                 self._stop_hold = 0.0
         return False
+
+    def _command_income(self, t, vx, v_body, angv, grav):
+        """Joystick objective: track the commanded forward speed and yaw rate, or hold position.
+        Fills the income terms in `t` and returns (cmd_speed, progress_frac) for the gait shaping.
+
+        Tracking uses a Gaussian kernel with a RELATIVE tolerance. With a fixed sigma, holding
+        1.8 m/s to +-0.15 is far harder than holding 0.5 m/s to +-0.15, so a fixed-sigma reward is
+        quietly a bribe to stay slow — the policy maximizes it by living at the bottom of the
+        command range. sigma = max(sigma_min, sigma_rel*|cmd|) grades every speed on equal terms.
+        """
+        c = self.cfg
+        yaw_rate = float(angv[2])
+        # --- linear speed tracking ---
+        sig = max(c.track_sigma_min, c.track_sigma_rel * abs(self._v_cmd))
+        e_lin = (float(vx) - self._v_cmd) / sig
+        lin = c.w_track_lin * float(np.exp(-e_lin * e_lin))
+        # uprightness gate, same argument as the sprint speed gate: a toppling robot must not be
+        # able to bank tracking reward on the way down (it can hit any velocity while falling).
+        if c.speed_upright_gate:
+            u = np.clip((-grav[2] - c.speed_upright_c0) / (1.0 - c.speed_upright_c0), 0.0, 1.0)
+            lin *= float(u) ** c.speed_upright_k
+        t["track_lin"] = lin
+        # --- yaw rate tracking (gyro z: measurable on hardware, unlike a curvature radius) ---
+        sigw = max(c.track_yaw_sigma_min, c.track_sigma_rel * abs(self._yaw_cmd))
+        e_yaw = (yaw_rate - self._yaw_cmd) / sigw
+        t["track_yaw"] = c.w_track_yaw * float(np.exp(-e_yaw * e_yaw))
+        # --- stand still ---
+        # Stepping in place is explicitly allowed (the plant cannot stand passively — it needs an
+        # active gait for height), so this grades the BASE, not the feet: near-zero body velocity
+        # plus a penalty on drifting away from where the stand command was given. Without the
+        # anchor term a slow constant creep costs almost nothing per step and the robot walks off.
+        if self._standing:
+            vmag = float(np.linalg.norm(v_body[0:2]))
+            t["stand"] = c.w_stand * float(np.exp(-((vmag / c.stand_sigma) ** 2)))
+            drift = float(np.linalg.norm(self.data.qpos[0:2] - self._stand_anchor))
+            t["stand_drift"] = self._pen(-c.w_stand_drift * max(0.0, drift - c.stand_drift_free_m) ** 2)
+        else:
+            t["stand"] = 0.0
+            t["stand_drift"] = 0.0
+        t["fwd_speed"] = 0.0
+        t["stop"] = 0.0
+        t["overrun"] = 0.0
+        # tracking error, for the command-range curriculum callback (top-of-range competence)
+        self._track_err_sum += abs(float(vx) - self._v_cmd)
+        self._track_err_n += 1
+        cmd_speed = abs(self._v_cmd)
+        progress_frac = float(np.clip(cmd_speed / max(c.cmd_v_fwd_max, 1e-6), 0.0, 1.0))
+        return cmd_speed, progress_frac
 
     def _run_physics(self, target6):
         """One control step of plant: EMA-filter the target, clip to ctrlrange, run
@@ -475,7 +707,8 @@ class DashEnv(gym.Env):
         # fixed actuation delay (plant truth: Pi inference + moteus/CAN is ~one 50 Hz step)
         self._delay_buf.append(action)
         applied = self._delay_buf.pop(0)
-        cam_c, thigh_c, freq_raw, reflex, residual = fourier_gait.decode(applied, c.n_harmonics)
+        cam_c, thigh_c, freq_raw, reflex, steer, residual = fourier_gait.decode(
+            applied, c.n_harmonics, self.n_steer)
         f = fourier_gait.frequency(freq_raw, c.gait_freq_hz)
         phase_used = self._phase
         self._phase_reward = phase_used
@@ -498,7 +731,7 @@ class DashEnv(gym.Env):
             pitch_rate = self._reflex_prate_filt
         target6 = fourier_gait.assemble(cam_c, thigh_c, reflex, phase_used,
                                         roll, roll_rate, self.nominal_ctrl, c,
-                                        pitch=pitch, pitch_rate=pitch_rate)
+                                        pitch=pitch, pitch_rate=pitch_rate, steer=steer)
         target6 = target6 + c.residual_scale * residual  # the per-step fast-feedback channel
         motor_cmd = ((target6 - self.nominal_ctrl) / c.action_scale).astype(np.float32)
         self._residual_sq = float(np.sum(residual ** 2))
@@ -515,6 +748,29 @@ class DashEnv(gym.Env):
             if not self.base_lock[1]:
                 self.data.qvel[self._base_y_dadr] += c.push_dv * np.sin(ang)
             self._push_countdown = self._next_push_in()
+
+        # TRIP: a swinging toe catches something that isn't in the map. Modelled as a brief force
+        # opposing the swing rather than as terrain geometry, because the point is not to teach
+        # the policy one particular obstacle — it is to make "my foot stopped moving and my torso
+        # is rotating over it" a state the policy has recovered from thousands of times. That is
+        # the RL-native version of a hand-written raise-the-foot reflex, and unlike a detector it
+        # cannot fail to fire.
+        self.data.xfrc_applied[:] = 0.0
+        if self._trip_left > 0:
+            self.data.xfrc_applied[self._trip_body, 0] = self._trip_force
+            self._trip_left -= 1
+        elif c.trip_prob > 0.0 and self.np_random.random() < c.trip_prob:
+            air = ~(self._foot_contacts() | (self._toe_heights() < c.grounded_h))
+            cand = np.flatnonzero(air)
+            if cand.size:
+                i = int(self.np_random.choice(cand))
+                self._trip_body = self._foot_bids[i]
+                # opposes travel, so a forward-running robot gets caught forward-on (the case that
+                # actually matters); sign taken from base velocity, +x when standing still
+                vx_now = float(self._vel_body()[0])
+                self._trip_force = -(1.0 if vx_now >= 0.0 else -1.0) * float(
+                    self.np_random.uniform(*c.trip_force_range))
+                self._trip_left = max(1, int(round(c.trip_duration_s / self.control_dt)))
 
         # decaying pitch-assist (m2->m3 bridge): external spring-damper torque on the base pitch
         # joint toward level, scaled by the curriculum (1 -> 0 over training). Written EVERY step
@@ -544,9 +800,16 @@ class DashEnv(gym.Env):
         self._phase = (self._phase + 2.0 * np.pi * f * self.control_dt) % (2.0 * np.pi)
 
         self._step_n += 1
+        reward, terms = self._reward(motor_cmd, contact_acc)
+        # joystick: age the command and redraw when it expires — AFTER the reward, so this step is
+        # always graded against the command that actually produced it, and BEFORE the obs frame, so
+        # the policy sees the new command on the same step the grading switches to it.
+        if self.command_mode:
+            self._cmd_countdown -= 1
+            if self._cmd_countdown <= 0:
+                self._sample_command()
         self._update_task()
         self._push_frame(self._proprio())
-        reward, terms = self._reward(motor_cmd, contact_acc)
         # rate-invariance: scale the summed per-step reward by control_dt/0.02 so the per-SECOND
         # income/penalty is the same at any control rate, while the fall/finish EVENTS below stay
         # fixed. No-op at 50 Hz. (The individual `terms` stay raw per-step for the gate/plot logic.)
@@ -567,6 +830,14 @@ class DashEnv(gym.Env):
         if self.on_control_step is not None:
             self.on_control_step()
         info = {"reward_terms": terms}
+        if self.command_mode:
+            # the command-range curriculum grades competence at the TOP of the current box, so it
+            # needs both the error and the command that produced it, not a rollout-wide average
+            info["cmd_v"] = self._v_cmd
+            info["cmd_yaw"] = self._yaw_cmd
+            info["track_err"] = abs(float(self._vel_body()[0]) - self._v_cmd)
+            info["track_yaw_err"] = abs(float(self._ang_vel_body()[2]) - self._yaw_cmd)
+            info["cmd_scale"] = self._cmd_scale
         # mean actuator torque utilization |tau|/limit (for the torque-budget curriculum callback)
         _lim = self.model.actuator_forcerange[:self.nu, 1]
         info["torque_util"] = float(np.mean(
@@ -591,7 +862,9 @@ class DashEnv(gym.Env):
         t = {}
 
         # ----- objective income -----
-        if run_phase:
+        if self.command_mode:
+            cmd_speed, progress_frac = self._command_income(t, vx, v_body, angv, grav)
+        elif run_phase:
             # SYMMETRIC clip: backward motion pays negative income (a one-sided clip makes
             # shuttling in front of the line strictly out-value crossing it — see config.py)
             speed_income = c.w_fwd_speed * float(np.clip(vx, -c.v_ceiling, c.v_ceiling))
@@ -618,7 +891,11 @@ class DashEnv(gym.Env):
         t["alive"] = c.w_alive
 
         # ----- gait shaping (anti-skate + phase schedule) -----
-        cmd_speed = c.v_ceiling if run_phase else 0.0
+        # In command mode the gait terms key off the COMMANDED speed, not a constant: with the old
+        # `cmd_speed = v_ceiling` a walk command would still be graded under running rules (stance
+        # caps, flight-phase demand), which is exactly backwards.
+        if not self.command_mode:
+            cmd_speed = c.v_ceiling if run_phase else 0.0
         gait_on = cmd_speed >= c.gait_cmd_gate
         dt = self.control_dt
         toe_pos = self.data.geom_xpos[self.foot_gids_arr].copy()

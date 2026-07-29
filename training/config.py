@@ -70,14 +70,133 @@ class Config:
     stop_hold_s: float = 1.0            # must stay stopped this long -> success termination
     finish_bonus: float = 100.0         # terminal success bonus (mirror of fall_penalty)
 
+    # ----- joystick command objective ("command") ---------------------------------------------
+    # Speed caps come from the hardware feasibility oracle (memory/hardware-speed-ceiling.md), not
+    # from what the sim will tolerate: ~3.7 m/s at a credible cadence is BURST capability, and the
+    # continuous-torque (thermal) ceiling is 1.8 m/s. Since this is a demo the robot must be able
+    # to hold indefinitely without cooking a motor, the commandable maximum IS the thermal number.
+    # Everything the joystick can ask for is therefore thermally sustainable by construction.
+    cmd_v_fwd_max: float = 1.8          # m/s forward at full stick (= the continuous-torque ceiling)
+    cmd_v_back_max: float = 0.6         # m/s backward (backing up is a manoeuvre, not a gait)
+    cmd_yaw_max: float = 1.0            # rad/s yaw at full stick (~57 deg/s; 3 m radius at 1.8 m/s)
+    # curriculum START box: wide enough to be a real task, narrow enough that every command in it
+    # is achievable from the warm-start policy on day one. set_cmd_scale interpolates start->max.
+    cmd_v_fwd_start: float = 0.6
+    cmd_v_back_start: float = 0.2
+    cmd_yaw_start: float = 0.3
+    # FIXED observation normalizers. These must NEVER track the curriculum — see env.set_cmd_scale.
+    cmd_v_norm: float = 2.0             # obs = v_cmd / this (so full stick reads ~0.9, not 1.0)
+    cmd_yaw_norm: float = 1.5
+    cmd_zero_prob: float = 0.25         # fraction of draws that are EXACTLY stand-still
+    cmd_deadband: float = 0.12          # |v_cmd| below this snaps to 0 (a real stick has one too)
+    cmd_yaw_deadband: float = 0.10
+    cmd_resample_s: float = 4.0         # mean seconds between command changes (x U(0.7,1.3))
+    # command-RANGE curriculum (train.CommandCurriculumCallback): widen the box only while the
+    # policy tracks the TOP of it. Bidirectional — a box that proves too wide walks back down.
+    cmd_curriculum_step: float = 0.1    # scale increment per widen/narrow
+    cmd_curriculum_err_open: float = 0.22    # m/s mean top-of-range error that widens the box
+    cmd_curriculum_err_close: float = 0.40   # m/s that narrows it (hysteresis: must exceed _open)
+    cmd_curriculum_top_frac: float = 0.7     # "top of range" = |cmd| >= this x current max
+    cmd_curriculum_gate_ep_len: float = 1200.0   # must also be surviving this long
+    cmd_curriculum_min_samples: int = 200        # per-rollout top-range samples before judging
+    # tracking reward. sigma is RELATIVE (see env._command_income): a fixed sigma systematically
+    # under-rewards high-speed commands and the policy learns to prefer the slow end of the range.
+    w_track_lin: float = 4.0
+    w_track_yaw: float = 2.0
+    track_sigma_rel: float = 0.25       # sigma = max(sigma_min, this * |cmd|)
+    track_sigma_min: float = 0.20       # m/s floor (also the sigma used at cmd = 0)
+    track_yaw_sigma_min: float = 0.25   # rad/s floor
+    w_stand: float = 3.0                # stand-still income when the stick is centred
+    stand_sigma: float = 0.15           # m/s width of the 'stationary' kernel
+    w_stand_drift: float = 2.0          # penalty per m^2 of drift from where the stand began
+    stand_drift_free_m: float = 0.10    # free drift radius (stepping in place moves the base a bit)
+
+    # ----- steering (the L/R asymmetry channel; see fourier_gait.assemble) -----------------------
+    # A mirror-symmetric gait can only run straight, so turning needs the mirror broken. Two knobs,
+    # both part of the gait SPEC (a turn is a gait change, so coef_rate should bill it).
+    # OPT-IN: enabling this adds 2 action dims (24 -> 26), so every checkpoint trained without it
+    # is incompatible. Off by default, on in the teleop presets — the m1..m7 lineage is untouched.
+    steer_enable: bool = False
+    steer_stride_scale: float = 0.35    # +-fraction of differential stride amplitude at full steer
+    steer_width_scale: float = 0.12     # rad of differential stance width at full steer
+
     # ----- observation -----
     # per-frame: motor pos/vel/torque (6+6+6) + gravity (3) + gyro (3) + base velocity (3,
     # PRIVILEGED sim state — the quantity the reward maximizes must be observable; needs a
     # velocity estimator for hardware later) + [sin, cos] gait phase (2) + task channel (2:
     # [run_flag, dist_to_go/100]) + prev action (24) = 55. Stacked over history_len frames.
     history_len: int = 5
+    # PRIVILEGED base linear velocity in the obs. True for every sprint/speed milestone (that is
+    # how they were trained); the command presets set False, because on hardware this number does
+    # not exist without a state estimator, and a policy that has only ever seen ground truth has
+    # never seen the signal it will actually be handed. With it off, velocity has to be inferred
+    # from the strided history below — which is why that history gets longer at the same time.
+    obs_base_vel: bool = True
+    # History STRIDE: expose every k-th of the last (history_len-1)*k+1 frames. At 200 Hz a
+    # contiguous 5-frame history spans 25 ms, far too short to infer body velocity from leg
+    # kinematics; len=10 x stride=4 spans 200 ms for the same obs width. 1 = contiguous (legacy).
+    history_stride: int = 1
+    obs_delay_steps: int = 0            # extra staleness on the MEASUREMENT (0 = off; the action
+    #                                     delay already models inference+CAN, so this would
+    #                                     double-count unless action_delay_steps is reduced to match)
     obs_scales: dict = field(default_factory=lambda: dict(
         motor_pos=1.0, motor_vel=0.1, motor_torque=0.01, gravity=1.0, ang_vel=0.25, base_vel=1.0))
+
+    # ----- domain randomization (per episode; see domain_rand.PlantRandomizer) -------------------
+    # All ranges are RELATIVE (+-fraction of nominal) so 0 disables an axis exactly and the model
+    # stays byte-identical. dr_enable=False makes the whole module inert -> every pre-existing
+    # preset trains exactly as before.
+    dr_enable: bool = False
+    dr_mass_global: float = 0.12        # whole-robot mass scale (build + payload tolerance)
+    dr_mass_body: float = 0.15          # per-link mass jitter (CAD vs as-built)
+    dr_inertia: float = 0.25            # per-link inertia jitter ON TOP of the mass scaling. Wide
+    #                                     on purpose: the CAD link inertials are still placeholders,
+    #                                     and the speed oracle says this is the axis the answer is
+    #                                     most sensitive to. Narrow it once measured values land.
+    dr_com_offset: float = 0.02         # m, uniform per-body CoM offset (assembly + harness)
+    dr_friction: float = 1.0            # >0 enables the friction draw (the range below)
+    dr_friction_range: tuple = (0.5, 1.3)   # absolute sliding friction (nominal model value is 1.0)
+    dr_kp: float = 0.20                 # servo position-gain scale (moteus tuning + temperature)
+    dr_kv: float = 0.25                 # servo damping-gain scale
+    dr_torque: float = 0.12             # torque headroom scale (bus voltage sag, thermal derate)
+    dr_joint_damping: float = 0.30      # leg joint damping/friction (grease, wear, temperature)
+    dr_ankle_k: float = 0.20            # PASSIVE ANKLE SPRING stiffness scale. The single highest-
+    #                                     value axis here: the whole m3 balance result hinges on
+    #                                     k=350, and a physical spring will not be built to spec.
+    dr_ankle_damping: float = 0.35
+    dr_gravity_tilt: float = 3.0        # deg; rotating gravity == tilting the world (slope proxy),
+    #                                     and also absorbs IMU mount misalignment
+    dr_delay_steps_range: tuple = (3, 6)    # per-episode action delay, in control steps
+
+    # ----- sensor noise (see domain_rand.SensorNoise) --------------------------------------------
+    # Per-episode CONSTANTS (calibration you get wrong once and live with) + per-step white noise.
+    obs_noise_enable: bool = False
+    noise_encoder: float = 0.003        # rad, per-step encoder noise
+    noise_encoder_offset: float = 0.01  # rad, per-episode zero offset per joint
+    noise_motor_vel: float = 0.15       # rad/s, per-step (velocity is differentiated -> noisy)
+    noise_motor_vel_bias: float = 0.05
+    noise_torque: float = 1.5           # N*m, per-step (torque is estimated from phase current)
+    noise_torque_bias: float = 1.0
+    noise_torque_gain: float = 0.08     # multiplicative Kt error
+    noise_grav: float = 0.02            # per-step noise on the unit gravity vector
+    noise_grav_bias: float = 0.02       # per-episode IMU mount misalignment (~1.1 deg)
+    noise_gyro: float = 0.02            # rad/s per-step
+    noise_gyro_bias: float = 0.02       # rad/s per-episode
+    noise_gyro_walk: float = 0.0002     # rad/s per step of bias random walk
+    # Accelerometer leak into the gravity estimate — the one that matters most for this robot. On
+    # hardware "down" comes from an attitude filter whose accelerometer cannot distinguish gravity
+    # from body acceleration, so during push-off the measured gravity swings by several degrees
+    # with no actual rotation. The FIXED pitch reflex reads grav_x directly, so a policy trained on
+    # exact gravity has been trained on a signal the robot cannot produce. Drawn per episode in
+    # [0, this] as a fraction of a/g.
+    noise_accel_leak: float = 0.15
+
+    # ----- trip / unseen-obstacle disturbance ----------------------------------------------------
+    # A brief force opposing a SWING foot: "my toe caught on something". Trains recovery as a
+    # behaviour rather than relying on a hand-written detector that has to fire correctly.
+    trip_prob: float = 0.0              # per control step (0 = off); ~0.001 at 200 Hz = one per 5 s
+    trip_force_range: tuple = (30.0, 90.0)  # N opposing travel
+    trip_duration_s: float = 0.05
 
     # ----- action: per-step Fourier gait spec + residuals (see fourier_gait.py) -----
     # The policy re-emits the whole gait spec (cam+thigh Fourier coeffs + frequency + abduction
@@ -762,6 +881,103 @@ PRESETS.update({
                                 gait_freq_hz=(0.5, 4.0)),   # ~55% critical
     "m7_damp_hi": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=18.0,
                                 gait_freq_hz=(0.5, 4.0)),   # ~critical
+})
+
+
+# ----- teleop: joystick command + the full sim2real package (2026-07-29) ------------------------
+# The demo target: a robot you can DRIVE — stand still on a centred stick (stepping in place is
+# fine, the plant cannot stand passively), walk and slow-run forward, back up, and steer left/right
+# — that survives contact with a real floor. Not a speed record; the commandable maximum is the
+# oracle's CONTINUOUS-torque ceiling (1.8 m/s) so nothing the joystick can ask for will cook a
+# motor during a long demo.
+#
+# This is a FROM-SCRATCH lineage, not another milestone hop: the action gained 2 steering dims
+# (24 -> 26), the observation lost the privileged base velocity and gained the command channel and
+# a strided history, so no m1..m7 checkpoint can be loaded into it. What carries over is the plant
+# knowledge, and all of it is baked into the defaults below:
+#   * k=350 ankle spring          — the m3 balance result (m3-ankle-stiffness-foot-ahead)
+#   * ankle_damping=10.0          — the m7 root cause: at 1.6 the k=350 spring is ~9% of critical
+#                                   and RINGS at 6.3 Hz on every contact, which is what every
+#                                   cadence lever failed to fix because it was never a control
+#                                   problem (commit 0f22b8d)
+#   * gait_freq_hz=(0.5, 4.0)     — the m7 freq-map fix; at (0.5, 50) a neutral action meant 25 Hz
+#   * the 200 Hz reactive stack + the jitter/drop timing curriculum
+#
+# Stage it: teleop_easy (does the command/steering machinery learn at all?) -> teleop (the real
+# thing). Do not debug a failure to turn and a failure to survive domain randomization at once.
+_TELEOP_PLANT = dict(
+    ankle_stiffness=350.0, ankle_damping=10.0, gait_freq_hz=(0.5, 4.0),
+)
+
+
+def _teleop(**kw):
+    """A joystick-command preset on the fully-free base (m6): yaw MUST be free to turn."""
+    base = dict(objective="command", base_lock=LOCKS["m6"])
+    base.update(_extras("m6"))          # w_angmom, ent deadline, speed_upright_gate
+    base.update(_HZ200)
+    base.update(_TELEOP_PLANT)
+    base.update(dict(
+        # no clock in this objective, so survival has to be paid for directly
+        w_alive=0.5, w_time=0.0,
+        steer_enable=True,              # the L/R asymmetry channel; without it it cannot turn
+        # walking / slow running, not sprinting: keep a little double support at the top of the
+        # range instead of demanding a flight phase the demo does not need
+        stance_ratio_start=0.70, stance_ratio_final=0.50,
+        # the command curriculum replaces the sprint-distance one
+        sprint_curriculum_steps=0,
+        # observation: privileged velocity OFF, longer strided history to make it inferable
+        obs_base_vel=False, history_len=10, history_stride=4,
+        # sim2real package
+        dr_enable=True, obs_noise_enable=True,
+        push_interval_s=6.0, push_dv=0.35,
+        trip_prob=0.0008,               # ~one trip per 6 s at 200 Hz
+        ent_anneal_deadline_steps=100_000_000,
+        # competence gates: everything hard waits until the robot can survive ~8 s
+        curriculum_gate_ep_len=1600.0,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+    ))
+    base.update(kw)
+    return Config(**base)
+
+
+# The ladder below is deliberately WARM-STARTABLE end to end: teleop_easy -> teleop_nodist ->
+# teleop all share obs and action dims, so each stage loads the previous one's checkpoint and only
+# has to absorb the new adversity instead of relearning to walk. That is why teleop_easy does NOT
+# turn the privileged velocity back on, tempting as it is — doing so changes the obs width and
+# breaks the chain. The privileged variant is teleop_oracle, a diagnostic, not a rung.
+PRESETS.update({
+    # THE TARGET.
+    "teleop": lambda: _teleop(),
+    # Rung 1: same task and same tensor shapes, no adversity. Plant fixed, sensors clean, no
+    # pushes/trips/jitter. If standing and steering do not emerge HERE, the problem is the command
+    # design, not the randomization — debug it here where the signal is clean and it trains fast.
+    "teleop_easy": lambda: _teleop(
+        dr_enable=False, obs_noise_enable=False,
+        push_interval_s=0.0, trip_prob=0.0,
+        ctrl_jitter_ms_final=0.0, ctrl_drop_prob_final=0.0),
+    # Rung 2: full observation/plant realism, but no external disturbances. Isolates "can it track
+    # commands through sensor noise and a randomized plant" from "can it take a shove".
+    "teleop_nodist": lambda: _teleop(push_interval_s=0.0, trip_prob=0.0),
+    # DIAGNOSTIC, not a rung: the privileged base velocity back in the observation. Its obs is 3
+    # dims wider, so it does not warm-start into anything above. Run it only to answer one
+    # question — if teleop_easy stalls, does it stall because velocity is unobservable (this one
+    # trains fine) or because the task/reward is wrong (this one stalls too)?
+    "teleop_oracle": lambda: _teleop(
+        obs_base_vel=True, dr_enable=False, obs_noise_enable=False,
+        push_interval_s=0.0, trip_prob=0.0,
+        ctrl_jitter_ms_final=0.0, ctrl_drop_prob_final=0.0),
+    # Conservative demo variant: half the command box (0.9 m/s / 0.5 rad/s). Use for the first
+    # tethered hardware runs — same policy interface, smaller envelope.
+    "teleop_slow": lambda: _teleop(
+        cmd_v_fwd_max=0.9, cmd_v_back_max=0.35, cmd_yaw_max=0.5,
+        stance_ratio_final=0.60),
+    # Wider randomization, for the robustness-vs-performance ablation the eval grid scores.
+    "teleop_hard": lambda: _teleop(
+        dr_mass_global=0.20, dr_mass_body=0.25, dr_inertia=0.40, dr_com_offset=0.03,
+        dr_friction_range=(0.35, 1.5), dr_kp=0.30, dr_kv=0.35, dr_torque=0.20,
+        dr_ankle_k=0.35, dr_gravity_tilt=5.0, dr_delay_steps_range=(2, 8),
+        trip_prob=0.0015, push_dv=0.5),
 })
 
 
