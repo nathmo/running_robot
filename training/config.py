@@ -753,6 +753,15 @@ PRESETS.update({
                                   gait_freq_hz=(0.5, 4.0), pitch_reflex_rate_lp=0.9),  # ~3.5Hz cutoff
     "m7_reflex_kd": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
                                   gait_freq_hz=(0.5, 4.0), pitch_kd=0.05),             # D-term 4x lower
+    # 2026-07-29 (ROOT CAUSE): the 6.3 Hz footfall lives in the ANKLE JOINT, not any control channel
+    # -- the k=350 spring is ~9% of critical damping for the leg/body rocking mode (c_crit~18, set to
+    # 1.6), so it RINGS at 6.3 Hz on every contact. No reward/reflex/torque lever touched it because
+    # it's the spring ringing. Fix = damp the ankle: raise ankle_damping toward critical. Warm from
+    # m7_freq. (Keeps the k=350 stiffness that solved m3 balance; only adds damping.)
+    "m7_damp":    lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=10.0,
+                                gait_freq_hz=(0.5, 4.0)),   # ~55% critical
+    "m7_damp_hi": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=18.0,
+                                gait_freq_hz=(0.5, 4.0)),   # ~critical
 })
 
 
