@@ -169,6 +169,7 @@ class DashEnv(gym.Env):
         self._prev_motor_cmd = np.zeros(self.nu, np.float32)        # normalized targets, action_rate
         self._prev_residual = np.zeros(self.nu, np.float32)         # for the residual-rate penalty
         self._residual_rate_sq = 0.0
+        self._reflex_prate_filt = 0.0                               # pitch-reflex rate low-pass state
         self._coef_rate_gated = 0.0
         self._phase = 0.0                # gait phase, continuous, kept in [0, 2*pi)
         self._phase_reward = 0.0         # the phase the current step's targets were assembled at
@@ -375,6 +376,7 @@ class DashEnv(gym.Env):
         self._prev_applied[:] = 0.0
         self._prev_motor_cmd[:] = 0.0
         self._prev_residual[:] = 0.0
+        self._reflex_prate_filt = 0.0
         self._coef_rate_gated = 0.0
         self._phase = 0.0
         self._phase_reward = 0.0
@@ -489,6 +491,11 @@ class DashEnv(gym.Env):
         roll_rate = float(angv[0])       # roll rate (gyro x)
         pitch = float(grav[0])           # ~pitch angle (grav_x ~ sin(pitch), + = nose-down)
         pitch_rate = float(angv[1])      # pitch rate (gyro y)
+        if c.pitch_reflex_rate_lp > 0.0:  # low-pass the rate the reflex sees: keep the slow real-
+            # tilt response, drop the fast gait-bob the D-term was rectifying into ~6 Hz chatter
+            self._reflex_prate_filt = (c.pitch_reflex_rate_lp * self._reflex_prate_filt
+                                       + (1.0 - c.pitch_reflex_rate_lp) * pitch_rate)
+            pitch_rate = self._reflex_prate_filt
         target6 = fourier_gait.assemble(cam_c, thigh_c, reflex, phase_used,
                                         roll, roll_rate, self.nominal_ctrl, c,
                                         pitch=pitch, pitch_rate=pitch_rate)

@@ -113,6 +113,13 @@ class Config:
     pitch_clip: float = 0.25            # authority cap (rad); 0 = reflex off
     pitch_bias: float = 0.0             # static fore-aft trim added inside the clip (rad)
     pitch_cam_gain: float = 0.0         # reserved: cam coupling of the pitch reflex (keep 0)
+    # pitch-reflex rate low-pass (2026-07-29): measured on m7_freq, the reflex D-term (kd*pitch_rate)
+    # DOMINATES the P-term 2.2x and saturates the reflex 81% of the time, flipping at 6.4 Hz = the
+    # footfall. The body barely tilts (7.6 deg) but wobbles fast (pitch_rate rms 2.87) and the D-term
+    # rectifies that gait-bob into a 6 Hz foot oscillation (a limit cycle no reward/torque lever
+    # touches). EMA-filter the pitch_rate the reflex uses so it keeps its slow real-tilt damping but
+    # stops responding to the fast bob. 0 = raw (off). alpha 0.9 @200Hz ~= 3.5 Hz cutoff.
+    pitch_reflex_rate_lp: float = 0.0   # EMA alpha on the pitch_rate feeding the reflex (0 = off)
     # ANKLE-TORQUE reflex (2026-07-23): the sagittal-balance experiment. The robot's ankle (foot)
     # joints are PASSIVE SPRINGS (no actuator) -> no ankle pitch torque -> foot-placement is the only
     # balance channel, and it plateaus at ~1 s (see hz200-reactive-stack). This is a FIXED PD that
@@ -739,6 +746,13 @@ PRESETS.update({
                                gait_freq_hz=(0.5, 4.0), w_residual_rate=5.0),
     "m7_res_hi": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
                                gait_freq_hz=(0.5, 4.0), w_residual_rate=15.0),
+    # 2026-07-29 (2nd re-measure): residual-rate + torque did NOT drop the footfall (stuck ~5.5 Hz).
+    # Confirmed driver = the fixed pitch reflex: u_p saturated 81%, flips at 6.4 Hz, D-term (kd*rate)
+    # DOMINATES P-term 2.2x. Two fixes for the D-term rectifying the 6 Hz gait-bob, warm from m7_freq:
+    "m7_reflex_lp": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
+                                  gait_freq_hz=(0.5, 4.0), pitch_reflex_rate_lp=0.9),  # ~3.5Hz cutoff
+    "m7_reflex_kd": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=1.6,
+                                  gait_freq_hz=(0.5, 4.0), pitch_kd=0.05),             # D-term 4x lower
 })
 
 
