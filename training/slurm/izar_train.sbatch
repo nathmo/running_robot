@@ -39,7 +39,12 @@ cd "$REPO"
 # chain safely: a stage stopped by its time limit never writes final_model.zip, so the next stage
 # resolves the directory to whatever checkpoint the previous one actually reached.
 if [ -n "$WARM" ] && [ -d "$WARM" ]; then
-    RESOLVED=$(ls -1t "$WARM"/final_model.zip "$WARM"/ppo_*_steps.zip 2>/dev/null | head -1)
+    # `|| true` is load-bearing: a stage stopped by its wall clock has NO final_model.zip, `ls` then
+    # exits 2 for the missing operand, and `set -o pipefail` propagates that through `head` so
+    # `set -e` kills the job before it prints anything (this is exactly how ab_cpg_wide_m3warm_s0
+    # died in 2 s). Listing both patterns is still right — final_model.zip must win when it exists.
+    RESOLVED=$({ ls -1t "$WARM"/final_model.zip "$WARM"/ppo_*_steps.zip 2>/dev/null || true; } \
+               | head -1)
     if [ -z "$RESOLVED" ]; then
         echo "[sbatch] FATAL: WARM=$WARM is a directory with no checkpoint in it" >&2
         exit 1
