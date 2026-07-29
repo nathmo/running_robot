@@ -31,7 +31,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 STEPS = "time/total_timesteps"
-ARM_COLORS = {"fourier": "#1f77b4", "cpg": "#d62728", "cpg_nr": "#2ca02c"}
+ARM_COLORS = {"fourier": "#1f77b4", "cpg": "#d62728", "cpg_nr": "#2ca02c",
+              "cpg_wide": "#ff7f0e"}
 
 
 def read_progress(run_dir):
@@ -55,10 +56,11 @@ def read_progress(run_dir):
 def parse_name(name):
     """ab_<arm>_<lineage>_s<seed>  ->  (arm, lineage, seed). Arm names contain underscores
     (cpg_nr), so match the known arms explicitly rather than splitting on '_'."""
-    m = re.match(r"^ab_(cpg_nr|cpg|f)_(cold|m2|m3warm)_s(\d+)$", name)
+    m = re.match(r"^ab_(cpg_nr|cpg_wide|cpg|f)_(cold|m2|m3warm)_s(\d+)$", name)
     if not m:
         return None
-    arm = {"f": "fourier", "cpg": "cpg", "cpg_nr": "cpg_nr"}[m.group(1)]
+    arm = {"f": "fourier", "cpg": "cpg", "cpg_nr": "cpg_nr",
+           "cpg_wide": "cpg_wide"}[m.group(1)]
     return arm, m.group(2), int(m.group(3))
 
 
