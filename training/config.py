@@ -264,6 +264,27 @@ class Config:
     ankle_stiffness: float = 0.0        # N*m/rad on the passive ankle springs (0 = keep model 28.65)
     ankle_damping: float = 0.0          # N*m*s/rad ankle joint damping (0 = keep model 0.3); raise
     #                                     with stiffness to keep the stiffer spring ~critically damped
+    # ----- action mode: which gait generator turns the action into PD targets ---------------
+    # "fourier" = fourier_gait.py (the m1..m7 lineage). "cpg" = cpg_gait.py, the Ijspeert-school
+    # alternative: two coupled amplitude-controlled phase oscillators whose parameters (amplitude,
+    # frequency, inter-leg phase bias) are what the policy emits, with a FIXED measured foot-IK
+    # mapping from oscillator to joints. The two modes have different action AND obs widths, so
+    # checkpoints never cross between them — every comparison is same-generator warm-start only.
+    action_mode: str = "fourier"        # "fourier" | "cpg"
+    cpg_a: float = 50.0                 # amplitude convergence rate (r -> mu, critically damped).
+    #                                     ~5x the fastest gait frequency: fast enough to change
+    #                                     stride within a step, slow enough to filter action chatter
+    cpg_coupling: float = 8.0           # inter-leg phase coupling weight (rad/s per unit amplitude)
+    cpg_psi_range: float = 0.6          # rad the policy may shift the antiphase target by
+    cpg_mu_min: float = 0.0             # amplitude setpoint range; r=0 is a valid "stand still"
+    cpg_mu_max: float = 1.0
+    cpg_stride: float = 0.28            # m of fore-aft foot travel at r=1 (LUT box is +-0.30)
+    # m of swing-phase foot lift at r=1. Bounded by the MEASURED workspace, not by taste: the
+    # standing leg is near-straight, so at mid-stride (dx ~ 0, where the swing bump peaks) only
+    # ~0.083 m of lift exists at all. 0.06 keeps the whole trajectory inside the reachable shell.
+    cpg_clearance: float = 0.06
+    cpg_substeps: int = 4               # oscillator integration substeps per control step
+    cpg_residual: bool = True           # False = the no-residual ablation arm (pure CPG output)
     residual_scale: float = 0.08        # rad of per-step correction authority on each PD target
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
@@ -881,6 +902,52 @@ PRESETS.update({
                                 gait_freq_hz=(0.5, 4.0)),   # ~55% critical
     "m7_damp_hi": lambda: _react("m3", ankle_stiffness=350.0, ankle_damping=18.0,
                                 gait_freq_hz=(0.5, 4.0)),   # ~critical
+})
+
+
+# ----- CPG vs Fourier: the Ijspeert-school A/B (2026-07-29) -------------------------------------
+# Question: is a central pattern generator — coupled amplitude-controlled phase oscillators whose
+# parameters the policy tunes (Bellegarda & Ijspeert 2022) — better or worse on this robot than the
+# per-step Fourier gait spec the whole m1..m7 lineage uses? See cpg_gait.py for the formulation.
+#
+# What makes this an experiment and not two unrelated runs: every arm below shares ONE plant and
+# ONE reward. Same k=350/damping 10 ankle (the m7 root-cause fix), same (0.5, 4.0) frequency map
+# (the m7 freq-map bug fix), same 200 Hz reactive stack, same jitter/drop sim2real curriculum, same
+# pitch reflex, same abduction reflex, same residual authority. Only the generator differs.
+#
+# The lineages are trained the way the Fourier one actually was — cold at m2 (pitch locked), then
+# warm-started into m3 (pitch free) — because comparing a cold CPG against the 162 M-step warm
+# m7_freq checkpoint would measure warm-start budget, not the generator. `_cpgN_` presets are the
+# cold m2 stage; `_cpg3_` are the m3 stage that warm-starts from it. The `_fN_`/`_f3_` pair is the
+# identical schedule for the Fourier arm, so the baseline is built under the same budget.
+#
+# ARMS
+#   cpg      : CPG + the 6-dim PMTG residual channel  (matched to the Fourier arm's authority)
+#   cpg_nr   : CPG with NO residual channel — the pure oscillator. Tests Ijspeert's claim that the
+#              limit-cycle dynamics alone give a stable gait, and probes the m7 6 Hz footfall
+#              directly: the residual channel is the only fast open path from action to target.
+#   fourier  : the m1..m7 generator, same schedule and budget = the honest baseline.
+def _ab(action_mode="fourier", milestone="m2", **kw):
+    """One arm of the CPG-vs-Fourier A/B: the m7 plant + the 200 Hz reactive stack at a milestone,
+    with only the generator swapped. Kept separate from _react so tuning the A/B can never
+    retroactively change the m1..m7 presets."""
+    return _sprint200(
+        milestone, ent_anneal_deadline_steps=100_000_000,
+        ankle_stiffness=350.0, ankle_damping=10.0, gait_freq_hz=(0.5, 4.0),
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000,
+        action_mode=action_mode, **kw)
+
+
+PRESETS.update({
+    # stage 1 — cold at m2 (X+Z free, pitch LOCKED)
+    "ab_f_m2":       lambda: _ab("fourier", "m2"),
+    "ab_cpg_m2":     lambda: _ab("cpg", "m2"),
+    "ab_cpg_nr_m2":  lambda: _ab("cpg", "m2", cpg_residual=False),
+    # stage 2 — m3 (pitch FREE), warm-started from the matching stage-1 run
+    "ab_f_m3":       lambda: _ab("fourier", "m3"),
+    "ab_cpg_m3":     lambda: _ab("cpg", "m3"),
+    "ab_cpg_nr_m3":  lambda: _ab("cpg", "m3", cpg_residual=False),
 })
 
 

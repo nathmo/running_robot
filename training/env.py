@@ -35,6 +35,7 @@ import mujoco
 
 from config import Config
 import fourier_gait
+import cpg_gait
 from domain_rand import PlantRandomizer, SensorNoise
 
 PKG_DIR = Path(__file__).resolve().parent
@@ -179,9 +180,24 @@ class DashEnv(gym.Env):
         # ----- action / observation spaces -----
         # Steering is OPT-IN: with steer_enable False the action has no steering dims at all, so
         # every pre-steering preset keeps its 24-dim action and its checkpoints keep loading.
-        self.n_steer = fourier_gait.N_STEER if self.cfg.steer_enable else 0
-        self.action_dim = fourier_gait.action_dim(self.cfg.n_harmonics, self.n_steer)
-        self.spec_dim = fourier_gait.spec_dim(self.cfg.n_harmonics, self.n_steer)
+        # Two gait generators, selected by cfg.action_mode. They have different action widths (and,
+        # via prev_action + the phase channel, different obs widths), so a checkpoint never crosses
+        # between them — a CPG run only ever warm-starts from a CPG run.
+        self.cpg_mode = (self.cfg.action_mode == "cpg")
+        if self.cpg_mode:
+            self.n_steer = cpg_gait.N_STEER if self.cfg.steer_enable else 0
+            self.action_dim = cpg_gait.action_dim(self.n_steer, self.cfg.cpg_residual)
+            self.spec_dim = cpg_gait.spec_dim(self.n_steer)
+            self._cpg_lut = cpg_gait.load_lut()
+            # the oscillator IS observable state (it lives in the controller, not the plant), so the
+            # policy sees both leg phases and both amplitudes rather than one global clock
+            self.phase_obs_dim = 6
+        else:
+            self.n_steer = fourier_gait.N_STEER if self.cfg.steer_enable else 0
+            self.action_dim = fourier_gait.action_dim(self.cfg.n_harmonics, self.n_steer)
+            self.spec_dim = fourier_gait.spec_dim(self.cfg.n_harmonics, self.n_steer)
+            self._cpg_lut = None
+            self.phase_obs_dim = 2
         self.action_space = spaces.Box(-1.0, 1.0, (self.action_dim,), np.float32)
         self._prev_action = np.zeros(self.action_dim, np.float32)   # policy output (obs)
         self._prev_applied = np.zeros(self.action_dim, np.float32)  # post-delay, for coef_rate
@@ -190,8 +206,14 @@ class DashEnv(gym.Env):
         self._residual_rate_sq = 0.0
         self._reflex_prate_filt = 0.0                               # pitch-reflex rate low-pass state
         self._coef_rate_gated = 0.0
-        self._phase = 0.0                # gait phase, continuous, kept in [0, 2*pi)
+        self._phase = 0.0                # fourier: the single global gait clock, kept in [0, 2*pi)
         self._phase_reward = 0.0         # the phase the current step's targets were assembled at
+        # per-leg phases the reward's contact schedule is graded against. Fourier hard-codes the
+        # right leg at +pi; the CPG carries two independent phases held near antiphase by coupling,
+        # which is precisely the freedom being tested, so the reward must read them separately.
+        self._phase_reward_R = np.pi
+        # CPG oscillator state (r, rdot, theta), each [left, right]; unused in fourier mode
+        self._cpg = (np.zeros(2), np.zeros(2), np.array([0.0, np.pi]))
         # ----- task / command channel -----
         # sprint+speed: [run_flag, dist_to_go/100]   command: [v_cmd/norm, yaw_cmd/norm, stand_flag]
         self.command_mode = (self.cfg.objective == "command")
@@ -208,7 +230,7 @@ class DashEnv(gym.Env):
         # frame: pos6 vel6 trq6 grav3 gyro3 [vbody3] phase2 task prev_action
         self.obs_base_vel = bool(self.cfg.obs_base_vel)
         self.frame_dim = (6 + 6 + 6 + 3 + 3 + (3 if self.obs_base_vel else 0)
-                          + 2 + self.task_dim + self.action_dim)
+                          + self.phase_obs_dim + self.task_dim + self.action_dim)
         obs_dim = self.frame_dim * self.cfg.history_len
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
         # strided history: keep (history_len-1)*stride+1 raw frames but expose only every stride-th,
@@ -441,8 +463,13 @@ class DashEnv(gym.Env):
                  motor_trq * s["motor_torque"], grav * s["gravity"], angv * s["ang_vel"]]
         if self.obs_base_vel:                       # privileged; off in command mode
             parts.append(v_now * s["base_vel"])
-        parts += [np.array([np.sin(self._phase), np.cos(self._phase)]),
-                  self._task, self._prev_action]
+        if self.cpg_mode:
+            r, _, th = self._cpg
+            phase_ch = np.array([np.sin(th[0]), np.cos(th[0]),
+                                 np.sin(th[1]), np.cos(th[1]), r[0], r[1]])
+        else:
+            phase_ch = np.array([np.sin(self._phase), np.cos(self._phase)])
+        parts += [phase_ch, self._task, self._prev_action]
         return np.concatenate(parts).astype(np.float32)
 
     def _obs(self):
@@ -556,6 +583,10 @@ class DashEnv(gym.Env):
         self._coef_rate_gated = 0.0
         self._phase = 0.0
         self._phase_reward = 0.0
+        self._phase_reward_R = np.pi
+        # start the oscillators at rest, already in antiphase: r = 0 is a standing robot, so the
+        # gait has to be started by the policy raising mu rather than being handed a running start
+        self._cpg = (np.zeros(2), np.zeros(2), np.array([0.0, np.pi]))
         self._elapsed_t = 0.0
         self._filt_target[:] = self.nominal_ctrl
         self._prev_cmd_pos[:] = self.nominal_ctrl
@@ -707,11 +738,25 @@ class DashEnv(gym.Env):
         # fixed actuation delay (plant truth: Pi inference + moteus/CAN is ~one 50 Hz step)
         self._delay_buf.append(action)
         applied = self._delay_buf.pop(0)
-        cam_c, thigh_c, freq_raw, reflex, steer, residual = fourier_gait.decode(
-            applied, c.n_harmonics, self.n_steer)
-        f = fourier_gait.frequency(freq_raw, c.gait_freq_hz)
-        phase_used = self._phase
-        self._phase_reward = phase_used
+        if self.cpg_mode:
+            mu_raw, freq_raw, psi_raw, reflex, steer, residual = cpg_gait.decode(
+                applied, self.n_steer, c.cpg_residual)
+            cam_c = thigh_c = None
+            cpg_mu = cpg_gait.amplitude_setpoint(mu_raw, c)
+            f = cpg_gait.frequency(freq_raw, c.gait_freq_hz)     # per-leg, 2-vector
+            cpg_psi = c.cpg_psi_range * float(np.clip(psi_raw, -1.0, 1.0))
+            # the left oscillator plays the role the global clock plays in fourier mode: it gates
+            # the spec-change penalty and anchors the phase the reward's contact schedule reads
+            phase_used = float(self._cpg[2][0])
+            self._phase_reward = phase_used
+            self._phase_reward_R = float(self._cpg[2][1])
+        else:
+            cam_c, thigh_c, freq_raw, reflex, steer, residual = fourier_gait.decode(
+                applied, c.n_harmonics, self.n_steer)
+            f = fourier_gait.frequency(freq_raw, c.gait_freq_hz)
+            phase_used = self._phase
+            self._phase_reward = phase_used
+            self._phase_reward_R = phase_used + np.pi
         # phase-gated gait-SPEC change penalty state: rewriting the spec exactly at the cycle
         # boundary (phase ~ 0 == 2pi) is FREE; mid-cycle rewrites pay. Residual dims are per-step
         # by design and NOT billed here.
@@ -729,9 +774,15 @@ class DashEnv(gym.Env):
             self._reflex_prate_filt = (c.pitch_reflex_rate_lp * self._reflex_prate_filt
                                        + (1.0 - c.pitch_reflex_rate_lp) * pitch_rate)
             pitch_rate = self._reflex_prate_filt
-        target6 = fourier_gait.assemble(cam_c, thigh_c, reflex, phase_used,
-                                        roll, roll_rate, self.nominal_ctrl, c,
-                                        pitch=pitch, pitch_rate=pitch_rate, steer=steer)
+        if self.cpg_mode:
+            target6 = cpg_gait.assemble(self._cpg, reflex, roll, roll_rate, self.nominal_ctrl, c,
+                                        stance_ratio=self._stance_ratio,
+                                        pitch=pitch, pitch_rate=pitch_rate, steer=steer,
+                                        lut=self._cpg_lut)
+        else:
+            target6 = fourier_gait.assemble(cam_c, thigh_c, reflex, phase_used,
+                                            roll, roll_rate, self.nominal_ctrl, c,
+                                            pitch=pitch, pitch_rate=pitch_rate, steer=steer)
         target6 = target6 + c.residual_scale * residual  # the per-step fast-feedback channel
         motor_cmd = ((target6 - self.nominal_ctrl) / c.action_scale).astype(np.float32)
         self._residual_sq = float(np.sum(residual ** 2))
@@ -797,7 +848,10 @@ class DashEnv(gym.Env):
         self._elapsed_t += self.control_dt
         finished = c.objective == "sprint" and self._update_sprint()
         # advance the gait phase AFTER assembly (the obs frame carries the NEXT step's phase)
-        self._phase = (self._phase + 2.0 * np.pi * f * self.control_dt) % (2.0 * np.pi)
+        if self.cpg_mode:
+            self._cpg = cpg_gait.integrate(self._cpg, cpg_mu, f, cpg_psi, self.control_dt, c)
+        else:
+            self._phase = (self._phase + 2.0 * np.pi * f * self.control_dt) % (2.0 * np.pi)
 
         self._step_n += 1
         reward, terms = self._reward(motor_cmd, contact_acc)
@@ -950,7 +1004,7 @@ class DashEnv(gym.Env):
         if gait_on and c.w_phase_contact > 0.0:
             sr = self._stance_ratio
             sw_L = 1.0 - fourier_gait.stance_indicator(self._phase_reward, sr)
-            sw_R = 1.0 - fourier_gait.stance_indicator(self._phase_reward + np.pi, sr)
+            sw_R = 1.0 - fourier_gait.stance_indicator(self._phase_reward_R, sr)
             pen = sw_L * float(grounded[0]) + sw_R * float(grounded[1])
             t["phase_contact"] = -min(c.w_phase_contact * pen, c.penalty_term_cap)
         else:

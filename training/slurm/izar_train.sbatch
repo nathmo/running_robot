@@ -31,8 +31,22 @@ NENVS="${NENVS:-18}"          # leave ~2 of the 20 cores for the learner + OS
 NAME="${NAME:-$PRESET}"
 WARM="${WARM:-}"              # optional: checkpoint to warm-start a NEW milestone stage from,
                               # e.g. WARM=training/runs/m1_sprint/final_model.zip
+SEED="${SEED:-}"              # optional: override cfg.seed (seed replicates of an A/B arm)
 
 cd "$REPO"
+
+# WARM may name a run DIRECTORY instead of a .zip. That is what makes a wall-clock-bounded stage
+# chain safely: a stage stopped by its time limit never writes final_model.zip, so the next stage
+# resolves the directory to whatever checkpoint the previous one actually reached.
+if [ -n "$WARM" ] && [ -d "$WARM" ]; then
+    RESOLVED=$(ls -1t "$WARM"/final_model.zip "$WARM"/ppo_*_steps.zip 2>/dev/null | head -1)
+    if [ -z "$RESOLVED" ]; then
+        echo "[sbatch] FATAL: WARM=$WARM is a directory with no checkpoint in it" >&2
+        exit 1
+    fi
+    echo "[sbatch] WARM directory $WARM -> $RESOLVED"
+    WARM="$RESOLVED"
+fi
 python training/smoke_test.py                     # fail fast before burning GPU hours
 
 # --resume auto: starts fresh if no checkpoint exists, else continues — the SAME command is
@@ -42,4 +56,4 @@ python training/smoke_test.py                     # fail fast before burning GPU
 # does not inherit --cpus-per-task, which can silently confine the workers to 1 core)
 python training/train.py --preset "$PRESET" --steps "$STEPS" --n-envs "$NENVS" \
      --subproc --resume auto --no-progress --name "$NAME" \
-     ${WARM:+--warm-start "$WARM"}
+     ${WARM:+--warm-start "$WARM"} ${SEED:+--seed "$SEED"}

@@ -467,6 +467,8 @@ def main():
                          "fresh step counter + ramps, weights and obs-normalization carried over")
     ap.add_argument("--description", default=None, help="free-text note stored in the run dir")
     ap.add_argument("--no-progress", action="store_true", help="disable the progress bar (logs)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="override cfg.seed (for seed-replicate arms of an A/B)")
     args = ap.parse_args()
 
     if args.config:
@@ -484,6 +486,8 @@ def main():
         n_envs = args.n_envs or cfg.n_envs
         total = args.steps or cfg.total_steps
         default_name = args.preset
+    if args.seed is not None:
+        cfg.seed = int(args.seed)
     name = args.name or default_name
     run = PKG_DIR / "runs" / name
     run.mkdir(parents=True, exist_ok=True)

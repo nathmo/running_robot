@@ -601,8 +601,99 @@ def test_m1_rail():
     check("ride height randomized", len(heights) > 1, str(heights))
 
 
+def test_cpg_gait():
+    """The CPG arm of the generator A/B (cpg_gait.py): oscillator dynamics, the measured foot-IK
+    table, and the env plumbing that swaps generators."""
+    print("cpg_gait:")
+    import cpg_gait
+    check("dims", cpg_gait.action_dim() == 14 and cpg_gait.spec_dim() == 8
+          and cpg_gait.action_dim(residual=False) == 8 and cpg_gait.action_dim(2) == 16)
+
+    cfg = get_config("ab_cpg_m2")
+    # --- amplitude dynamics: r converges to mu, monotonically (critically damped, no overshoot)
+    st = (np.zeros(2), np.zeros(2), np.array([0.0, np.pi]))
+    mu = cpg_gait.amplitude_setpoint(np.array([0.5, 0.5]), cfg)
+    f = cpg_gait.frequency(np.array([0.0, 0.0]), cfg.gait_freq_hz)
+    rs = []
+    for _ in range(400):
+        st = cpg_gait.integrate(st, mu, f, 0.0, 0.005, cfg)
+        rs.append(st[0][0])
+    check("r converges to mu", abs(rs[-1] - mu[0]) < 1e-3, f"{rs[-1]:.4f} vs {mu[0]:.4f}")
+    check("r does not overshoot", max(rs) <= mu[0] + 1e-6, f"max {max(rs):.4f}")
+    check("r never negative", min(rs) >= 0.0)
+
+    # --- phase coupling: legs pulled to antiphase from a BAD initial phase, and psi shifts it
+    st = (np.full(2, 0.5), np.zeros(2), np.array([0.0, 0.3]))    # nearly in phase = wrong
+    for _ in range(2000):
+        st = cpg_gait.integrate(st, mu, f, 0.0, 0.005, cfg)
+    d = float(np.mod(st[2][1] - st[2][0], 2 * np.pi))
+    check("coupling restores antiphase", abs(d - np.pi) < 0.05, f"{d:.3f}")
+    st = (np.full(2, 0.5), np.zeros(2), np.array([0.0, np.pi]))
+    for _ in range(2000):
+        st = cpg_gait.integrate(st, mu, f, 0.4, 0.005, cfg)
+    d2 = float(np.mod(st[2][1] - st[2][0], 2 * np.pi))
+    check("psi shifts the phase target", abs(d2 - (np.pi + 0.4)) < 0.05, f"{d2:.3f}")
+
+    # --- swing bump agrees with the reward's stance window: no lift during expected stance
+    for sr in (0.42, 0.5, 0.65):
+        ph = np.linspace(0, 2 * np.pi, 400)
+        lift = cpg_gait.swing_bump(ph, sr)
+        stance = np.array([fourier_gait.stance_indicator(p, sr) for p in ph])
+        check(f"no foot lift inside stance (sr={sr})", float(np.max(lift[stance > 0.9])) < 1e-9)
+        mid = 2 * np.pi * sr + 0.5 * (2 * np.pi - 2 * np.pi * sr)      # analytic mid-swing
+        check(f"lift peaks at 1 mid-swing (sr={sr})",
+              abs(float(cpg_gait.swing_bump(mid, sr)) - 1.0) < 1e-9
+              and float(lift.max()) <= 1.0 + 1e-9,
+              f"peak {float(cpg_gait.swing_bump(mid, sr)):.6f}")
+
+    # --- foot IK: the table is loadable, bounded, and (the bug that bit) CONTINUOUS along a stride
+    lut = cpg_gait.load_lut()
+    J = np.array([cpg_gait.foot_ik(cfg.cpg_stride * np.cos(t),
+                                   cfg.cpg_clearance * cpg_gait.swing_bump(t, 0.5), lut)
+                  for t in np.linspace(0, 2 * np.pi, 401)])
+    check("IK output finite", bool(np.all(np.isfinite(J))))
+    jump = float(np.abs(np.diff(J, axis=0)).max())
+    # the 4-bar is redundant, so a per-cell inversion flips solution branches; the build's flood
+    # fill must keep one branch. A branch flip showed up as a ~0.8 rad step in one sample.
+    check("IK continuous along a stride", jump < 0.06, f"max step {jump:.4f} rad")
+    check("IK stays inside the amp band", float(np.abs(J).max()) <= max(cfg.cam_amp, cfg.thigh_amp),
+          f"max |joint| {float(np.abs(J).max()):.3f}")
+    far = cpg_gait.foot_ik(99.0, 99.0, lut)     # saturates instead of extrapolating
+    check("IK saturates out of box", bool(np.all(np.isfinite(far))))
+
+    # --- env plumbing: widths differ per arm, obs matches, and the oscillator holds antiphase
+    dims = {}
+    for p in ("ab_f_m2", "ab_cpg_m2", "ab_cpg_nr_m2"):
+        e = DashEnv(get_config(p))
+        o, _ = e.reset(seed=0)
+        dims[p] = (e.action_dim, e.observation_space.shape[0])
+        check(f"{p} obs width matches space", o.shape[0] == e.observation_space.shape[0])
+    check("cpg action is narrower than fourier", dims["ab_cpg_m2"][0] < dims["ab_f_m2"][0],
+          str(dims))
+    check("no-residual arm drops exactly 6 dims",
+          dims["ab_cpg_m2"][0] - dims["ab_cpg_nr_m2"][0] == 6, str(dims))
+
+    e = DashEnv(get_config("ab_cpg_m2"))
+    e.reset(seed=0)
+    rng = np.random.default_rng(0)
+    for _ in range(300):
+        _, _, term, trunc, _ = e.step(rng.uniform(-1, 1, e.action_dim))
+        if term or trunc:
+            break
+    r_, _, th = e._cpg
+    d = float(np.mod(th[1] - th[0], 2 * np.pi))
+    check("oscillator stays antiphase under random actions", abs(d - np.pi) < 0.5, f"{d:.3f}")
+    check("oscillator state finite", bool(np.all(np.isfinite(r_)) and np.all(np.isfinite(th))))
+    # the no-residual arm must not be able to move the targets off the reconstruction
+    e2 = DashEnv(get_config("ab_cpg_nr_m2"))
+    e2.reset(seed=0)
+    check("no-residual arm has no residual dims",
+          e2.action_dim == cpg_gait.spec_dim(0), f"{e2.action_dim}")
+
+
 if __name__ == "__main__":
     test_fourier_gait()
+    test_cpg_gait()
     test_presets()
     test_env_basic()
     test_sprint_finish()
