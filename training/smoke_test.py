@@ -661,6 +661,25 @@ def test_cpg_gait():
     far = cpg_gait.foot_ik(99.0, 99.0, lut)     # saturates instead of extrapolating
     check("IK saturates out of box", bool(np.all(np.isfinite(far))))
 
+    # every shipped IK table must be continuous and stay inside the joint clip at ITS arm's stride
+    for preset in ("ab_cpg_m2", "ab_cpg_wide_m2"):
+        c2 = get_config(preset)
+        l2 = cpg_gait.load_lut(c2.cpg_lut)
+        J2 = np.array([cpg_gait.foot_ik(c2.cpg_stride * np.cos(t),
+                                        c2.cpg_clearance * cpg_gait.swing_bump(t, 0.5), l2)
+                       for t in np.linspace(0, 2 * np.pi, 401)])
+        j2 = float(np.abs(np.diff(J2, axis=0)).max())
+        check(f"{preset} ({c2.cpg_lut}) IK continuous", j2 < 0.08, f"max step {j2:.4f} rad")
+        # the point of the wide arm: saturate the SAME +-0.45 clip the fourier arm is free to use
+        check(f"{preset} stride fits the joint envelope",
+              float(np.abs(J2).max()) <= max(c2.cam_amp, c2.thigh_amp) + 1e-9,
+              f"max |joint| {float(np.abs(J2).max()):.3f} vs {max(c2.cam_amp, c2.thigh_amp)}")
+    check("wide arm uses more of the envelope than the default arm",
+          float(np.abs(np.array([cpg_gait.foot_ik(0.315 * np.cos(t), 0.0,
+                                                  cpg_gait.load_lut("cpg_foot_lut_wide.npz"))
+                                 for t in np.linspace(0, 2 * np.pi, 200)])).max())
+          > float(np.abs(J).max()))
+
     # --- env plumbing: widths differ per arm, obs matches, and the oscillator holds antiphase
     dims = {}
     for p in ("ab_f_m2", "ab_cpg_m2", "ab_cpg_nr_m2"):

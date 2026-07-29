@@ -188,7 +188,7 @@ class DashEnv(gym.Env):
             self.n_steer = cpg_gait.N_STEER if self.cfg.steer_enable else 0
             self.action_dim = cpg_gait.action_dim(self.n_steer, self.cfg.cpg_residual)
             self.spec_dim = cpg_gait.spec_dim(self.n_steer)
-            self._cpg_lut = cpg_gait.load_lut()
+            self._cpg_lut = cpg_gait.load_lut(self.cfg.cpg_lut)
             # the oscillator IS observable state (it lives in the controller, not the plant), so the
             # policy sees both leg phases and both amplitudes rather than one global clock
             self.phase_obs_dim = 6

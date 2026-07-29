@@ -63,21 +63,27 @@ N_REFLEX = 3      # kp, kd, bias — identical to fourier_gait
 N_STEER = 2
 N_RESIDUAL = 6
 
-_LUT = None
+_LUT = {}
 
 
-def _lut_path():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "model", "cpg_foot_lut.npz")
+def _lut_path(name="cpg_foot_lut.npz"):
+    if os.path.isabs(name):
+        return name
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "model", name)
 
 
-def load_lut(path=None):
-    """Load (and cache) the measured foot-IK table built by build_cpg_lut.py."""
-    global _LUT
-    if _LUT is None:
-        z = np.load(path or _lut_path(), allow_pickle=True)
-        _LUT = dict(dx_grid=z["dx_grid"], dz_grid=z["dz_grid"], inv=z["inv"],
-                    nominal_toe=z["nominal_toe"])
-    return _LUT
+def load_lut(name="cpg_foot_lut.npz"):
+    """Load (and cache) a measured foot-IK table built by build_cpg_lut.py.
+
+    Cached PER PATH, so several tables can coexist in one process and, more importantly, so a run
+    is pinned to the table its config names — adding a new table for a new arm can never silently
+    change the mapping under an arm that is already training."""
+    key = _lut_path(name)
+    if key not in _LUT:
+        z = np.load(key, allow_pickle=True)
+        _LUT[key] = dict(dx_grid=z["dx_grid"], dz_grid=z["dz_grid"], inv=z["inv"],
+                         nominal_toe=z["nominal_toe"])
+    return _LUT[key]
 
 
 def spec_dim(n_steer=0):
@@ -191,7 +197,7 @@ def assemble(state, reflex, roll, roll_rate, nominal, cfg, stance_ratio=0.5,
 
     state : (r, rdot, th) from integrate(); only r and th are used here.
     """
-    lut = lut or load_lut()
+    lut = lut if lut is not None else load_lut(getattr(cfg, 'cpg_lut', 'cpg_foot_lut.npz'))
     r, _, th = state
     if steer is None:
         s_stride = s_width = 0.0

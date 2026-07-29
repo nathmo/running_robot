@@ -284,6 +284,9 @@ class Config:
     # ~0.083 m of lift exists at all. 0.06 keeps the whole trajectory inside the reachable shell.
     cpg_clearance: float = 0.06
     cpg_substeps: int = 4               # oscillator integration substeps per control step
+    # which measured foot-IK table (training/model/) the mapping uses. Per-preset so a new arm can
+    # ship a wider-stride table without changing the mapping under an arm already training.
+    cpg_lut: str = "cpg_foot_lut.npz"
     cpg_residual: bool = True           # False = the no-residual ablation arm (pure CPG output)
     residual_scale: float = 0.08        # rad of per-step correction authority on each PD target
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
@@ -948,6 +951,21 @@ PRESETS.update({
     "ab_f_m3":       lambda: _ab("fourier", "m3"),
     "ab_cpg_m3":     lambda: _ab("cpg", "m3"),
     "ab_cpg_nr_m3":  lambda: _ab("cpg", "m3", cpg_residual=False),
+})
+
+# STRIDE-ENVELOPE CONTROL (added 2026-07-29 after the first 9 M steps). The Fourier arm was running
+# ~5 m/s while the CPG lagged, and part of that gap is an artefact of MY parameter choice, not of
+# the generator: cpg_stride 0.28 m only used |joint| <= 0.371, while the Fourier arm is free to use
+# the full +-0.45 cam/thigh clip, which measurably reaches dx -0.457..+0.592 m. Since the reward is
+# speed-dominated, that is a real handicap on the metric that decides the verdict.
+#
+# So this arm matches the two generators on the constraint the Fourier arm actually feels — the
+# JOINT amplitude envelope, not a foot-space number. Measured: with the wider IK table, stride 0.315
+# puts max |joint| at 0.449, i.e. exactly saturating the same +-0.45 clip. A separate LUT file keeps
+# this out of the way of the arms already training.
+PRESETS.update({
+    "ab_cpg_wide_m2": lambda: _ab("cpg", "m2", cpg_lut="cpg_foot_lut_wide.npz", cpg_stride=0.315),
+    "ab_cpg_wide_m3": lambda: _ab("cpg", "m3", cpg_lut="cpg_foot_lut_wide.npz", cpg_stride=0.315),
 })
 
 
