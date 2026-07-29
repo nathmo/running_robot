@@ -85,6 +85,8 @@ def build(run: Path, preset, checkpoint):
         # distance it runs forward and balances ~20 s). Applies from the next reset.
         if "sprint_dist_m" in d:
             raw.set_sprint_dist(d["sprint_dist_m"])
+        if "torque_scale" in d:                 # the torque-budget curriculum's tightened limit
+            raw.set_torque_limit(d["torque_scale"])
     venv = DummyVecEnv([lambda: raw])
     model_path = pick_model(run, checkpoint)
     vn = pick_vecnormalize(run, model_path)
