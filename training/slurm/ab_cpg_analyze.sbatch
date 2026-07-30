@@ -31,12 +31,20 @@ for lin in cold m2 m3warm; do
         && echo "[analyze] wrote training/runs/ab_compare_$lin.png"
 done
 
+shopt -s nullglob
 for run in training/runs/ab_*; do
-    [ -d "$run" ] || continue
+    [ -d "$run" ] || continue      # ab_compare*.png also matches the glob
     name=$(basename "$run")
-    # a run killed by its wall clock has no final_model.zip; evaluate.py falls back to the newest
-    # checkpoint, but skip directories that never wrote one at all
-    ls "$run"/final_model.zip "$run"/ppo_*_steps.zip >/dev/null 2>&1 || {
+    # Every job here was stopped by its wall clock, so NONE of them wrote final_model.zip and
+    # evaluate.py falls back to the newest ppo_*_steps.zip. Test with a nullglob array, NOT with
+    # `ls a b`: ls exits 2 on the missing final_model.zip operand and that made the previous run of
+    # this script report "NO CHECKPOINT" for all 16 runs that in fact had ~70 checkpoints each.
+    # NOTE: only the ppo_* entry may be globbed in. nullglob strips non-matching patterns only if
+    # they contain a wildcard, so listing the literal final_model.zip here would keep the array
+    # non-empty even when nothing exists, and the guard would never fire.
+    ckpts=("$run"/ppo_*_steps.zip)
+    [ -f "$run/final_model.zip" ] && ckpts+=("$run/final_model.zip")
+    [ ${#ckpts[@]} -gt 0 ] || {
         echo "########## $name: NO CHECKPOINT, skipped ##########"; continue; }
     echo
     echo "########## $name ##########"
