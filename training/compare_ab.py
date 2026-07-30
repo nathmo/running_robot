@@ -101,17 +101,35 @@ def main():
         raise SystemExit("[compare] no runs matched")
 
     reached = {n: float(d[STEPS].max()) for n, (_, d) in runs.items()}
-    step = args.at if args.at is not None else min(reached.values())
-    print(f"\ncomparison step = {step/1e6:.1f} M "
-          f"(each arm's own max: {', '.join(f'{n}={v/1e6:.0f}M' for n, v in sorted(reached.items()))})\n")
 
     by_lineage = {}
     for name, (meta, d) in runs.items():
         by_lineage.setdefault(meta[1], []).append((meta[0], meta[2], name, d))
 
+    # The comparison step is PER LINEAGE, not global. Each lineage is its own experiment, and they
+    # do not start together (the m3warm stage only begins when its m2 stage ends), so a global
+    # min() over every run collapses the whole table to the youngest run's step count and reads the
+    # mature arms at ~0 progress. --at still forces one step for every lineage when that is wanted.
+    lineage_step = {lin: (args.at if args.at is not None
+                          else min(reached[n] for _, _, n, _ in rows))
+                    for lin, rows in by_lineage.items()}
+    print()
+    for lin in sorted(by_lineage):
+        # built with an explicit loop, not a nested f-string: the cluster venv is Python 3.9 and
+        # reusing the same quote character inside an f-string expression is 3.12+ syntax
+        parts = []
+        for _, _, n, _ in sorted(by_lineage[lin]):
+            short = n.replace("ab_", "")
+            parts.append("{}={:.0f}M".format(short, reached[n] / 1e6))
+        print("{:8s} comparison step = {:6.1f} M   (reached: {})".format(
+            lin, lineage_step[lin] / 1e6, ", ".join(parts)))
+    print()
+
     hdr = f"{'lineage':8s} {'arm':8s} {'seed':>4s} {'ep_len':>9s} {'ep_rew':>10s} " \
           f"{'fwd_speed':>10s} {'cadence':>8s} {'reached':>9s}"
     for lin in sorted(by_lineage):
+        step = lineage_step[lin]
+        print(f"=== {lin}  @ {step/1e6:.1f} M steps ===")
         print(hdr)
         print("-" * len(hdr))
         agg = {}
@@ -146,7 +164,7 @@ def main():
                                     label=f"{arm} s{seed}")
         for i, lab in enumerate(("ep_len_mean (steps survived)", "ep_rew_mean")):
             ax = axes[i][j]
-            ax.axvline(step / 1e6, color="k", lw=0.8, alpha=0.4)
+            ax.axvline(lineage_step[lin] / 1e6, color="k", lw=0.8, alpha=0.4)
             ax.set_xlabel("env steps (M)")
             ax.set_ylabel(lab)
             ax.set_title(f"{lin} — {lab.split(' ')[0]}")
