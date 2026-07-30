@@ -1,0 +1,487 @@
+########## common-step comparison ##########
+
+cold     comparison step =  133.1 M   (reached: cpg_cold_s0=155M, cpg_nr_cold_s0=153M, cpg_wide_cold_s0=133M, f_cold_s0=161M)
+m2       comparison step =   60.8 M   (reached: cpg_m2_s0=75M, cpg_m2_s1=74M, cpg_nr_m2_s0=75M, cpg_wide_m2_s0=61M, f_m2_s0=77M, f_m2_s1=78M)
+m3warm   comparison step =   69.8 M   (reached: cpg_m3warm_s0=70M, cpg_m3warm_s1=72M, cpg_nr_m3warm_s0=72M, cpg_wide_m3warm_s0=71M, f_m3warm_s0=73M, f_m3warm_s1=77M)
+
+=== cold  @ 133.1 M steps ===
+lineage  arm      seed    ep_len     ep_rew  fwd_speed  cadence   reached
+-------------------------------------------------------------------------
+cold     cpg         0     407.6        4.0      2.884    0.000      155M
+cold     cpg_nr      0     277.4     -168.3     -1.397    0.000      153M
+cold     cpg_wide    0     256.9      -99.2      1.254    0.000      133M
+cold     fourier     0     236.8      -88.5      1.359    0.000      161M
+
+  cpg      n=1  ep_len    407.6   ep_rew       4.0
+  cpg_nr   n=1  ep_len    277.4   ep_rew    -168.3
+  cpg_wide n=1  ep_len    256.9   ep_rew     -99.2
+  fourier  n=1  ep_len    236.8   ep_rew     -88.5
+
+=== m2  @ 60.8 M steps ===
+lineage  arm      seed    ep_len     ep_rew  fwd_speed  cadence   reached
+-------------------------------------------------------------------------
+m2       cpg         0    4471.3     4876.1      5.124    0.000       75M
+m2       cpg         1    5456.6      789.2      2.056    0.000       74M
+m2       cpg_nr      0    8995.3    -1638.2      0.436    0.000       75M
+m2       cpg_wide    0    4207.8     4871.2      5.718    0.000       61M
+m2       fourier     0    3799.7     3592.3      5.102    0.000       77M
+m2       fourier     1    4061.0     4550.8      5.693    0.000       78M
+
+  cpg      n=2  ep_len   4963.9 (range 4471..5457)   ep_rew    2832.7 (range 789..4876)
+  cpg_nr   n=1  ep_len   8995.3   ep_rew   -1638.2
+  cpg_wide n=1  ep_len   4207.8   ep_rew    4871.2
+  fourier  n=2  ep_len   3930.3 (range 3800..4061)   ep_rew    4071.5 (range 3592..4551)
+
+=== m3warm  @ 69.8 M steps ===
+lineage  arm      seed    ep_len     ep_rew  fwd_speed  cadence   reached
+-------------------------------------------------------------------------
+m3warm   cpg         0    2482.6     1676.5      4.581    0.000       70M
+m3warm   cpg         1     263.5      -81.7      1.708    0.000       72M
+m3warm   cpg_nr      0     241.4     -148.5     -0.028    0.000       72M
+m3warm   cpg_wide    0     253.9     -101.3      1.316    0.000       71M
+m3warm   fourier     0    2688.5     1553.8      4.969    0.000       73M
+m3warm   fourier     1     195.9      -39.2      3.183    0.000       77M
+
+  cpg      n=2  ep_len   1373.0 (range 264..2483)   ep_rew     797.4 (range -82..1676)
+  cpg_nr   n=1  ep_len    241.4   ep_rew    -148.5
+  cpg_wide n=1  ep_len    253.9   ep_rew    -101.3
+  fourier  n=2  ep_len   1442.2 (range 196..2688)   ep_rew     757.3 (range -39..1554)
+
+[compare] wrote /home/ncmorand/running_robot/training/runs/ab_compare.png
+[analyze] wrote training/runs/ab_compare_cold.png
+[analyze] wrote training/runs/ab_compare_m2.png
+[analyze] wrote training/runs/ab_compare_m3warm.png
+
+########## ab_cpg_cold_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_154998450_steps + ppo_vecnormalize_154998450_steps.pkl
+episodes=5  ep_len 422+/-2 control steps (max 12000)  mean_return 14.2  mean vx 1.58 m/s  peak vx 3.85 m/s
+  dash ep0:    3.2 m of 100 m   line    DNF   never stopped   avg 1.56 m/s
+  dash ep1:    3.3 m of 100 m   line    DNF   never stopped   avg 1.55 m/s
+  dash ep2:    3.2 m of 100 m   line    DNF   never stopped   avg 1.52 m/s
+  dash ep3:    3.2 m of 100 m   line    DNF   never stopped   avg 1.51 m/s
+  dash ep4:    3.2 m of 100 m   line    DNF   never stopped   avg 1.51 m/s
+  warnings.warn(
+[eval] using ppo_154998450_steps + ppo_vecnormalize_154998450_steps.pkl
+
+=== cadence / gait: ab_cpg_cold_s0 ===
+episodes 4  mean ep_len 420  (8.4 s total)
+stepping freq: L 7.37 Hz (duty 55%)  R 0.59 Hz (duty 3%)  -> avg 3.98 Hz/foot
+L/R asymmetry index: 0.90  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     7.4    3.4     0.0           65/72    0.0
+cam_L          9.6    7.8     0.0          139/170    0.0
+thigh_L       18.9   12.8     0.0          125/170    0.0
+hip_roll_R    13.4    9.9     0.0           72/72    2.3
+cam_R         11.9    6.5     0.0           77/170    0.0
+thigh_R       10.4    5.9     0.0           97/170    0.0
+wrote training/runs/ab_cpg_cold_s0/cadence_diag.png
+
+########## ab_cpg_m2_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_74999250_steps + ppo_vecnormalize_74999250_steps.pkl
+episodes=5  ep_len 5066+/-52 control steps (max 12000)  mean_return 5848.9  mean vx 2.90 m/s  peak vx 3.48 m/s
+  dash ep0:   73.5 m of 72 m   line  23.22 s   stopped at 25.20 s   avg 2.92 m/s
+  dash ep1:   73.5 m of 72 m   line  23.22 s   stopped at 25.01 s   avg 2.94 m/s
+  dash ep2:   73.5 m of 72 m   line  23.20 s   stopped at 25.48 s   avg 2.89 m/s
+  dash ep3:   73.6 m of 72 m   line  23.18 s   stopped at 25.75 s   avg 2.86 m/s
+  dash ep4:   73.4 m of 72 m   line  23.24 s   stopped at 25.20 s   avg 2.91 m/s
+  warnings.warn(
+[eval] using ppo_74999250_steps + ppo_vecnormalize_74999250_steps.pkl
+
+=== cadence / gait: ab_cpg_m2_s0 ===
+episodes 4  mean ep_len 5053  (101.1 s total)
+stepping freq: L 4.03 Hz (duty 39%)  R 4.01 Hz (duty 33%)  -> avg 4.02 Hz/foot
+L/R asymmetry index: 0.08  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     6.4    5.3     0.0           50/72    0.0
+cam_L         17.3   15.5     0.0          137/170    0.0
+thigh_L       20.1   16.3     0.0           73/170    0.0
+hip_roll_R     7.7    5.0     0.0           46/72    0.0
+cam_R         14.1   11.1     0.0           83/170    0.0
+thigh_R       12.0    9.7     0.0           50/170    0.0
+wrote training/runs/ab_cpg_m2_s0/cadence_diag.png
+
+########## ab_cpg_m2_s1 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_72999270_steps + ppo_vecnormalize_72999270_steps.pkl
+episodes=5  ep_len 12000+/-0 control steps (max 12000)  mean_return 2282.3  mean vx 1.14 m/s  peak vx 2.18 m/s
+  dash ep0:   68.2 m of 71 m   line    DNF   never stopped   avg 1.14 m/s
+  dash ep1:   68.2 m of 71 m   line    DNF   never stopped   avg 1.14 m/s
+  dash ep2:   68.2 m of 71 m   line    DNF   never stopped   avg 1.14 m/s
+  dash ep3:   68.2 m of 71 m   line    DNF   never stopped   avg 1.14 m/s
+  dash ep4:   68.1 m of 71 m   line    DNF   never stopped   avg 1.14 m/s
+  warnings.warn(
+[eval] using ppo_72999270_steps + ppo_vecnormalize_72999270_steps.pkl
+
+=== cadence / gait: ab_cpg_m2_s1 ===
+episodes 4  mean ep_len 12000  (240.0 s total)
+stepping freq: L 6.61 Hz (duty 66%)  R 2.05 Hz (duty 15%)  -> avg 4.33 Hz/foot
+L/R asymmetry index: 0.63  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     8.4    6.6     0.0           72/72    0.0
+cam_L          6.0    4.2     0.0           75/170    0.0
+thigh_L        6.9    4.1     0.0           55/170    0.0
+hip_roll_R     7.9    6.9     0.0           59/72    0.0
+cam_R          7.7    6.0     0.0           89/170    0.0
+thigh_R        7.3    5.0     0.0           76/170    0.0
+wrote training/runs/ab_cpg_m2_s1/cadence_diag.png
+
+########## ab_cpg_m3warm_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_68999310_steps + ppo_vecnormalize_68999310_steps.pkl
+episodes=5  ep_len 3592+/-2725 control steps (max 12000)  mean_return 2589.8  mean vx 2.30 m/s  peak vx 3.39 m/s
+  dash ep0:   -0.8 m of 69 m   line    DNF   never stopped   avg -0.63 m/s
+  dash ep1:   69.7 m of 69 m   line  28.77 s   never stopped   avg 2.39 m/s
+  dash ep2:    0.8 m of 69 m   line    DNF   never stopped   avg 0.59 m/s
+  dash ep3:   69.7 m of 69 m   line  28.58 s   never stopped   avg 2.41 m/s
+  dash ep4:   69.8 m of 69 m   line  28.68 s   never stopped   avg 2.40 m/s
+  warnings.warn(
+[eval] using ppo_68999310_steps + ppo_vecnormalize_68999310_steps.pkl
+
+=== cadence / gait: ab_cpg_m3warm_s0 ===
+episodes 4  mean ep_len 4428  (88.6 s total)
+stepping freq: L 5.34 Hz (duty 47%)  R 4.72 Hz (duty 28%)  -> avg 5.03 Hz/foot
+L/R asymmetry index: 0.25  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     9.6    3.8     0.0           71/72    0.0
+cam_L         14.9   12.3     0.0          138/170    0.0
+thigh_L       25.9   22.4     5.4          118/170    0.0
+hip_roll_R    13.8    2.1     0.0           66/72    0.0
+cam_R         17.4   10.0     0.0           93/170    0.0
+thigh_R       25.3   19.0     0.1          117/170    0.0
+wrote training/runs/ab_cpg_m3warm_s0/cadence_diag.png
+
+########## ab_cpg_m3warm_s1 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_71999280_steps + ppo_vecnormalize_71999280_steps.pkl
+episodes=5  ep_len 261+/-6 control steps (max 12000)  mean_return -79.2  mean vx 1.04 m/s  peak vx 3.17 m/s
+  dash ep0:    1.2 m of 70 m   line    DNF   never stopped   avg 0.95 m/s
+  dash ep1:    1.2 m of 70 m   line    DNF   never stopped   avg 0.94 m/s
+  dash ep2:    1.2 m of 70 m   line    DNF   never stopped   avg 0.90 m/s
+  dash ep3:    1.2 m of 70 m   line    DNF   never stopped   avg 0.94 m/s
+  dash ep4:    1.2 m of 70 m   line    DNF   never stopped   avg 0.98 m/s
+  warnings.warn(
+[eval] using ppo_71999280_steps + ppo_vecnormalize_71999280_steps.pkl
+
+=== cadence / gait: ab_cpg_m3warm_s1 ===
+episodes 4  mean ep_len 271  (5.4 s total)
+stepping freq: L 2.95 Hz (duty 78%)  R 0.37 Hz (duty 2%)  -> avg 1.66 Hz/foot
+L/R asymmetry index: 0.95  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     6.1    3.1     0.0           65/72    0.0
+cam_L          9.7    5.1     0.0          153/170    0.0
+thigh_L       11.7    9.1     0.0          112/170    0.0
+hip_roll_R     8.3    5.2     0.0           72/72    2.2
+cam_R          9.4    5.7     0.0           64/170    0.0
+thigh_R       14.6    8.8     0.0           85/170    0.0
+wrote training/runs/ab_cpg_m3warm_s1/cadence_diag.png
+
+########## ab_cpg_nr_cold_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_151998480_steps + ppo_vecnormalize_151998480_steps.pkl
+episodes=5  ep_len 368+/-89 control steps (max 12000)  mean_return -190.7  mean vx -0.73 m/s  peak vx 0.52 m/s
+  dash ep0:   -1.2 m of 100 m   line    DNF   never stopped   avg -0.88 m/s
+  dash ep1:   -1.4 m of 100 m   line    DNF   never stopped   avg -0.53 m/s
+  dash ep2:   -1.1 m of 100 m   line    DNF   never stopped   avg -0.54 m/s
+  dash ep3:   -1.3 m of 100 m   line    DNF   never stopped   avg -0.84 m/s
+  dash ep4:   -1.2 m of 100 m   line    DNF   never stopped   avg -0.77 m/s
+  warnings.warn(
+[eval] using ppo_151998480_steps + ppo_vecnormalize_151998480_steps.pkl
+
+=== cadence / gait: ab_cpg_nr_cold_s0 ===
+episodes 4  mean ep_len 246  (4.9 s total)
+stepping freq: L 4.88 Hz (duty 60%)  R 4.68 Hz (duty 17%)  -> avg 4.78 Hz/foot
+L/R asymmetry index: 0.55  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     6.3    3.7     0.0           51/72    0.0
+cam_L          7.5    4.0     0.0           54/170    0.0
+thigh_L        7.5    6.2     0.0           80/170    0.0
+hip_roll_R     7.7    3.6     0.0           49/72    0.0
+cam_R          6.5    5.2     0.0           53/170    0.0
+thigh_R       10.3    6.8     0.0           59/170    0.0
+wrote training/runs/ab_cpg_nr_cold_s0/cadence_diag.png
+
+########## ab_cpg_nr_m2_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_74999250_steps + ppo_vecnormalize_74999250_steps.pkl
+episodes=5  ep_len 9685+/-4630 control steps (max 12000)  mean_return -1720.9  mean vx 0.24 m/s  peak vx 0.52 m/s
+  dash ep0:   -1.1 m of 72 m   line    DNF   never stopped   avg -0.52 m/s
+  dash ep1:   15.0 m of 72 m   line    DNF   never stopped   avg 0.25 m/s
+  dash ep2:   15.1 m of 72 m   line    DNF   never stopped   avg 0.25 m/s
+  dash ep3:   15.1 m of 72 m   line    DNF   never stopped   avg 0.25 m/s
+  dash ep4:   15.1 m of 72 m   line    DNF   never stopped   avg 0.25 m/s
+  warnings.warn(
+[eval] using ppo_74999250_steps + ppo_vecnormalize_74999250_steps.pkl
+
+=== cadence / gait: ab_cpg_nr_m2_s0 ===
+episodes 4  mean ep_len 9078  (181.6 s total)
+stepping freq: L 9.42 Hz (duty 93%)  R 7.06 Hz (duty 55%)  -> avg 8.24 Hz/foot
+L/R asymmetry index: 0.25  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     6.8    0.3     0.0           59/72    0.0
+cam_L          6.9    3.5     0.0           86/170    0.0
+thigh_L       12.6    6.6     0.0           46/170    0.0
+hip_roll_R     6.3    0.7     0.0           54/72    0.0
+cam_R          7.8    6.1     0.0           86/170    0.0
+thigh_R       13.6    9.6     0.0           47/170    0.0
+wrote training/runs/ab_cpg_nr_m2_s0/cadence_diag.png
+
+########## ab_cpg_nr_m3warm_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_70999290_steps + ppo_vecnormalize_70999290_steps.pkl
+episodes=5  ep_len 210+/-49 control steps (max 12000)  mean_return -145.5  mean vx -0.06 m/s  peak vx 3.05 m/s
+  dash ep0:   -0.3 m of 70 m   line    DNF   never stopped   avg -0.28 m/s
+  dash ep1:   -0.4 m of 70 m   line    DNF   never stopped   avg -0.41 m/s
+  dash ep2:   -0.2 m of 70 m   line    DNF   never stopped   avg -0.18 m/s
+  dash ep3:   -0.3 m of 70 m   line    DNF   never stopped   avg -0.34 m/s
+  dash ep4:    0.6 m of 70 m   line    DNF   never stopped   avg 0.38 m/s
+  warnings.warn(
+[eval] using ppo_70999290_steps + ppo_vecnormalize_70999290_steps.pkl
+
+=== cadence / gait: ab_cpg_nr_m3warm_s0 ===
+episodes 4  mean ep_len 257  (5.1 s total)
+stepping freq: L 7.97 Hz (duty 60%)  R 3.50 Hz (duty 16%)  -> avg 5.73 Hz/foot
+L/R asymmetry index: 0.59  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     8.7    2.7     0.0           52/72    0.0
+cam_L          9.6    6.3     0.0           90/170    0.0
+thigh_L       13.3    8.3     0.0           84/170    0.0
+hip_roll_R     7.5    4.2     0.0           46/72    0.0
+cam_R         12.0    5.6     0.0           53/170    0.0
+thigh_R       20.8    8.3     0.0           74/170    0.0
+wrote training/runs/ab_cpg_nr_m3warm_s0/cadence_diag.png
+
+########## ab_cpg_wide_cold_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_132998670_steps + ppo_vecnormalize_132998670_steps.pkl
+episodes=5  ep_len 254+/-5 control steps (max 12000)  mean_return -97.5  mean vx 0.76 m/s  peak vx 3.00 m/s
+  dash ep0:    0.8 m of 100 m   line    DNF   never stopped   avg 0.64 m/s
+  dash ep1:    0.8 m of 100 m   line    DNF   never stopped   avg 0.67 m/s
+  dash ep2:    0.8 m of 100 m   line    DNF   never stopped   avg 0.63 m/s
+  dash ep3:    0.8 m of 100 m   line    DNF   never stopped   avg 0.66 m/s
+  dash ep4:    0.8 m of 100 m   line    DNF   never stopped   avg 0.66 m/s
+  warnings.warn(
+[eval] using ppo_132998670_steps + ppo_vecnormalize_132998670_steps.pkl
+
+=== cadence / gait: ab_cpg_wide_cold_s0 ===
+episodes 4  mean ep_len 260  (5.2 s total)
+stepping freq: L 3.46 Hz (duty 91%)  R 0.38 Hz (duty 5%)  -> avg 1.92 Hz/foot
+L/R asymmetry index: 0.89  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     3.9    0.9     0.0           57/72    0.0
+cam_L          6.0    3.6     0.0          112/170    0.0
+thigh_L        8.6    4.5     0.0           65/170    0.0
+hip_roll_R    11.0    4.9     0.0           62/72    0.0
+cam_R          7.8    5.5     0.0           69/170    0.0
+thigh_R       17.8    7.7     0.0           78/170    0.0
+wrote training/runs/ab_cpg_wide_cold_s0/cadence_diag.png
+
+########## ab_cpg_wide_m2_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_59999400_steps + ppo_vecnormalize_59999400_steps.pkl
+episodes=5  ep_len 4243+/-107 control steps (max 12000)  mean_return 5053.0  mean vx 3.01 m/s  peak vx 3.57 m/s
+  dash ep0:   64.2 m of 63 m   line  20.54 s   never stopped   avg 3.07 m/s
+  dash ep1:   62.5 m of 63 m   line  20.53 s   never stopped   avg 2.80 m/s
+  dash ep2:   64.3 m of 63 m   line  20.51 s   never stopped   avg 3.07 m/s
+  dash ep3:   64.3 m of 63 m   line  20.48 s   never stopped   avg 3.07 m/s
+  dash ep4:   64.3 m of 63 m   line  20.49 s   never stopped   avg 3.07 m/s
+  warnings.warn(
+[eval] using ppo_59999400_steps + ppo_vecnormalize_59999400_steps.pkl
+
+=== cadence / gait: ab_cpg_wide_m2_s0 ===
+episodes 4  mean ep_len 4187  (83.7 s total)
+stepping freq: L 4.06 Hz (duty 40%)  R 6.35 Hz (duty 17%)  -> avg 5.21 Hz/foot
+L/R asymmetry index: 0.40  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     8.1    6.5     0.0           71/72    0.0
+cam_L         16.2   13.8     0.0          111/170    0.0
+thigh_L       12.5    9.1     0.0           83/170    0.0
+hip_roll_R     2.0    0.7     0.0           52/72    0.0
+cam_R         11.8    7.6     0.0          128/170    0.0
+thigh_R       13.2   10.8     0.0           79/170    0.0
+wrote training/runs/ab_cpg_wide_m2_s0/cadence_diag.png
+
+########## ab_cpg_wide_m3warm_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_70999290_steps + ppo_vecnormalize_70999290_steps.pkl
+episodes=5  ep_len 253+/-5 control steps (max 12000)  mean_return -99.8  mean vx 0.77 m/s  peak vx 3.05 m/s
+  dash ep0:    0.8 m of 70 m   line    DNF   never stopped   avg 0.63 m/s
+  dash ep1:    0.8 m of 70 m   line    DNF   never stopped   avg 0.67 m/s
+  dash ep2:    0.8 m of 70 m   line    DNF   never stopped   avg 0.66 m/s
+  dash ep3:    0.9 m of 70 m   line    DNF   never stopped   avg 0.68 m/s
+  dash ep4:    0.9 m of 70 m   line    DNF   never stopped   avg 0.71 m/s
+  warnings.warn(
+[eval] using ppo_70999290_steps + ppo_vecnormalize_70999290_steps.pkl
+
+=== cadence / gait: ab_cpg_wide_m3warm_s0 ===
+episodes 4  mean ep_len 250  (5.0 s total)
+stepping freq: L 7.20 Hz (duty 84%)  R 2.40 Hz (duty 12%)  -> avg 4.80 Hz/foot
+L/R asymmetry index: 0.75  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     4.5    2.4     0.0           70/72    1.0
+cam_L          6.6    4.9     0.0           78/170    0.0
+thigh_L       12.6    7.1     0.0           77/170    0.0
+hip_roll_R     5.5    3.0     0.0           72/72    0.7
+cam_R         11.4    6.6     0.0           74/170    0.0
+thigh_R       19.1    8.5     0.0           71/170    0.0
+wrote training/runs/ab_cpg_wide_m3warm_s0/cadence_diag.png
+
+########## ab_f_cold_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_160998390_steps + ppo_vecnormalize_160998390_steps.pkl
+episodes=5  ep_len 237+/-3 control steps (max 12000)  mean_return -89.5  mean vx 0.81 m/s  peak vx 3.09 m/s
+  dash ep0:    0.8 m of 100 m   line    DNF   never stopped   avg 0.70 m/s
+  dash ep1:    0.8 m of 100 m   line    DNF   never stopped   avg 0.72 m/s
+  dash ep2:    0.8 m of 100 m   line    DNF   never stopped   avg 0.70 m/s
+  dash ep3:    0.8 m of 100 m   line    DNF   never stopped   avg 0.71 m/s
+  dash ep4:    0.8 m of 100 m   line    DNF   never stopped   avg 0.70 m/s
+  warnings.warn(
+[eval] using ppo_160998390_steps + ppo_vecnormalize_160998390_steps.pkl
+
+=== cadence / gait: ab_f_cold_s0 ===
+episodes 4  mean ep_len 237  (4.7 s total)
+stepping freq: L 2.11 Hz (duty 7%)  R 4.65 Hz (duty 89%)  -> avg 3.38 Hz/foot
+L/R asymmetry index: 0.86  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     5.5    3.5     0.0           72/72    1.7
+cam_L         16.8    7.9     0.0          170/170    0.4
+thigh_L       24.0   11.0     0.8           65/170    0.0
+hip_roll_R     1.1    0.1     0.0           46/72    0.0
+cam_R          9.2    4.0     0.0          154/170    0.0
+thigh_R       19.6    8.1     0.0           87/170    0.0
+wrote training/runs/ab_f_cold_s0/cadence_diag.png
+
+########## ab_f_m2_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_76999230_steps + ppo_vecnormalize_76999230_steps.pkl
+episodes=5  ep_len 4793+/-728 control steps (max 12000)  mean_return 5177.4  mean vx 2.89 m/s  peak vx 3.52 m/s
+  dash ep0:   73.5 m of 73 m   line  24.82 s   never stopped   avg 2.95 m/s
+  dash ep1:   50.8 m of 73 m   line    DNF   never stopped   avg 3.00 m/s
+  dash ep2:   74.2 m of 73 m   line  24.91 s   never stopped   avg 2.93 m/s
+  dash ep3:   73.5 m of 73 m   line  24.96 s   never stopped   avg 2.93 m/s
+  dash ep4:   74.0 m of 73 m   line  24.89 s   never stopped   avg 2.69 m/s
+  warnings.warn(
+[eval] using ppo_76999230_steps + ppo_vecnormalize_76999230_steps.pkl
+
+=== cadence / gait: ab_f_m2_s0 ===
+episodes 4  mean ep_len 4690  (93.8 s total)
+stepping freq: L 1.49 Hz (duty 5%)  R 9.28 Hz (duty 51%)  -> avg 5.38 Hz/foot
+L/R asymmetry index: 0.84  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L    10.4    6.0     0.0           65/72    0.0
+cam_L         17.0    6.5     0.0          155/170    0.0
+thigh_L       15.8    9.0     0.0           99/170    0.0
+hip_roll_R     4.0    2.0     0.0           68/72    0.0
+cam_R         17.1   13.0     0.0          144/170    0.0
+thigh_R       23.6   13.6     0.0          116/170    0.0
+wrote training/runs/ab_f_m2_s0/cadence_diag.png
+
+########## ab_f_m2_s1 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_76999230_steps + ppo_vecnormalize_76999230_steps.pkl
+episodes=5  ep_len 4603+/-173 control steps (max 12000)  mean_return 5275.6  mean vx 3.21 m/s  peak vx 3.68 m/s
+  dash ep0:   74.5 m of 73 m   line  22.13 s   never stopped   avg 3.31 m/s
+  dash ep1:   74.6 m of 73 m   line  22.20 s   never stopped   avg 3.30 m/s
+  dash ep2:   74.5 m of 73 m   line  22.17 s   never stopped   avg 3.30 m/s
+  dash ep3:   74.6 m of 73 m   line  22.22 s   never stopped   avg 3.29 m/s
+  dash ep4:   71.3 m of 73 m   line  22.19 s   never stopped   avg 2.88 m/s
+  warnings.warn(
+[eval] using ppo_76999230_steps + ppo_vecnormalize_76999230_steps.pkl
+
+=== cadence / gait: ab_f_m2_s1 ===
+episodes 4  mean ep_len 4658  (93.2 s total)
+stepping freq: L 3.86 Hz (duty 25%)  R 4.82 Hz (duty 33%)  -> avg 4.34 Hz/foot
+L/R asymmetry index: 0.15  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     7.1    5.6     0.0           52/72    0.0
+cam_L         10.7    8.0     0.0          102/170    0.0
+thigh_L       12.6   10.2     0.0          107/170    0.0
+hip_roll_R     2.4    0.6     0.0           47/72    0.0
+cam_R         16.9   14.7     0.0          170/170    0.0
+thigh_R       17.3    9.6     0.0          168/170    0.0
+wrote training/runs/ab_f_m2_s1/cadence_diag.png
+
+########## ab_f_m3warm_s0 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_71999280_steps + ppo_vecnormalize_71999280_steps.pkl
+episodes=5  ep_len 5797+/-22 control steps (max 12000)  mean_return 3531.1  mean vx 2.44 m/s  peak vx 2.93 m/s
+  dash ep0:   71.3 m of 70 m   line  28.66 s   never stopped   avg 2.46 m/s
+  dash ep1:   70.7 m of 70 m   line  28.72 s   never stopped   avg 2.45 m/s
+  dash ep2:   71.2 m of 70 m   line  28.69 s   never stopped   avg 2.46 m/s
+  dash ep3:   71.2 m of 70 m   line  28.69 s   never stopped   avg 2.46 m/s
+  dash ep4:   71.0 m of 70 m   line  28.95 s   never stopped   avg 2.43 m/s
+  warnings.warn(
+[eval] using ppo_71999280_steps + ppo_vecnormalize_71999280_steps.pkl
+
+=== cadence / gait: ab_f_m3warm_s0 ===
+episodes 4  mean ep_len 5775  (115.5 s total)
+stepping freq: L 2.65 Hz (duty 14%)  R 11.13 Hz (duty 52%)  -> avg 6.89 Hz/foot
+L/R asymmetry index: 0.57  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     6.9    5.0     0.0           72/72    0.1
+cam_L         18.4   10.7     0.0          104/170    0.0
+thigh_L       17.8   12.9     0.0           89/170    0.0
+hip_roll_R     5.0    1.5     0.0           58/72    0.0
+cam_R         20.6   15.8     0.0          154/170    0.0
+thigh_R       26.8   20.8     3.7          135/170    0.0
+wrote training/runs/ab_f_m3warm_s0/cadence_diag.png
+
+########## ab_f_m3warm_s1 ##########
+/home/ncmorand/venvs/dash/lib/python3.9/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+  warnings.warn(
+[eval] using ppo_75999240_steps + ppo_vecnormalize_75999240_steps.pkl
+episodes=5  ep_len 196+/-1 control steps (max 12000)  mean_return -35.6  mean vx 1.64 m/s  peak vx 3.12 m/s
+  dash ep0:    1.5 m of 73 m   line    DNF   never stopped   avg 1.57 m/s
+  dash ep1:    1.5 m of 73 m   line    DNF   never stopped   avg 1.56 m/s
+  dash ep2:    1.5 m of 73 m   line    DNF   never stopped   avg 1.56 m/s
+  dash ep3:    1.5 m of 73 m   line    DNF   never stopped   avg 1.57 m/s
+  dash ep4:    1.5 m of 73 m   line    DNF   never stopped   avg 1.57 m/s
+  warnings.warn(
+[eval] using ppo_75999240_steps + ppo_vecnormalize_75999240_steps.pkl
+
+=== cadence / gait: ab_f_m3warm_s1 ===
+episodes 4  mean ep_len 196  (3.9 s total)
+stepping freq: L 4.34 Hz (duty 35%)  R 0.00 Hz (duty 3%)  -> avg 2.17 Hz/foot
+L/R asymmetry index: 0.82  (0=even two-legged, 1=one-legged)  *** ONE-LEGGED/CHATTER ***
+
+joint       peak|v| 95pct  over-22rad/s%%   peak|trq|/lim  sat%%
+hip_roll_L     5.9    4.8     0.0           72/72    9.3
+cam_L         15.0   11.6     0.0          170/170    5.0
+thigh_L       21.8   15.4     0.0          170/170    4.1
+hip_roll_R     9.8    6.5     0.0           58/72    0.0
+cam_R         20.7   10.4     0.0          133/170    0.0
+thigh_R       19.4   11.0     0.0          150/170    0.0
+wrote training/runs/ab_f_m3warm_s1/cadence_diag.png
+
+########## done ##########
