@@ -117,8 +117,26 @@ class Config:
     # OPT-IN: enabling this adds 2 action dims (24 -> 26), so every checkpoint trained without it
     # is incompatible. Off by default, on in the teleop presets — the m1..m7 lineage is untouched.
     steer_enable: bool = False
-    steer_stride_scale: float = 0.35    # +-fraction of differential stride amplitude at full steer
-    steer_width_scale: float = 0.12     # rad of differential stance width at full steer
+    # MEASURED authority (open-loop, hand-built gait, roll+pitch railed, 2026-07-30):
+    #   stride channel at scale 0.35 -> only 0.26 rad/s of yaw range, and NON-MONOTONIC
+    #   width  channel at scale 0.12 -> 1.70 rad/s of yaw range
+    # i.e. the hip-roll (width) channel is ~6.6x stronger per unit scale, and my original 0.35/0.12
+    # split had it backwards. It also explains the trained policy's inability to turn right: the
+    # stride channel's TOTAL authority (0.26) was smaller than the plant's intrinsic yaw bias
+    # (~0.4 rad/s, see dr_loop_site), so the strong channel was throttled and the weak one could not
+    # even cancel the bias. Physically the width channel wins because differential hip roll changes
+    # the lateral moment arm of the ground reaction about the vertical axis, which is a direct yaw
+    # couple, whereas differential stride mostly changes fore-aft foot placement.
+    # NOTE the hip_roll joint axes are NOT mirrored L/R in this model (both +X), so in JOINT space
+    # +u/-u = opposite physical rotations and +w/+w = the same physical rotation. See assemble().
+    # Tuned so a full-scale (1.0 rad/s) yaw command needs ~half deflection: enough headroom to
+    # cancel the intrinsic bias and still command a turn, without the whole range living in the
+    # first 30% of the stick (which would make yaw twitchy and hard to hold).
+    #   width 0.15 -> +-1.1 rad/s (92% deflection, no headroom)
+    #   width 0.18 -> +-2.1 rad/s (47% deflection)  <- chosen
+    #   width 0.22 -> +-3.3 rad/s (30% deflection, twitchy)
+    steer_stride_scale: float = 0.20    # +-fraction of differential stride amplitude at full steer
+    steer_width_scale: float = 0.18     # rad of differential hip roll at full steer
 
     # ----- observation -----
     # per-frame: motor pos/vel/torque (6+6+6) + gravity (3) + gyro (3) + base velocity (3,
@@ -167,6 +185,13 @@ class Config:
     dr_gravity_tilt: float = 3.0        # deg; rotating gravity == tilting the world (slope proxy),
     #                                     and also absorbs IMU mount misalignment
     dr_delay_steps_range: tuple = (3, 6)    # per-episode action delay, in control steps
+    # metres of per-episode jitter on the 4-bar loop-closure sites. The as-exported model has
+    # leg_anchor_L/R differing by ~1 mm in x and z (should be identical; only y mirrors), which
+    # makes the two linkages geometrically different and produces a measured ~0.4 rad/s INTRINSIC
+    # yaw bias under a perfectly symmetric gait. Randomizing it (rather than symmetrizing the model,
+    # which the real robot will not be either) turns the bias into something the policy must cancel
+    # from the yaw-rate error every episode instead of a constant it can bake in. 0 = off.
+    dr_loop_site: float = 0.0015        # +-1.5 mm, ~the size of the as-built asymmetry
 
     # ----- sensor noise (see domain_rand.SensorNoise) --------------------------------------------
     # Per-episode CONSTANTS (calibration you get wrong once and live with) + per-step white noise.
@@ -1057,6 +1082,15 @@ PRESETS.update({
     "teleop_slow": lambda: _teleop(
         cmd_v_fwd_max=0.9, cmd_v_back_max=0.35, cmd_yaw_max=0.5,
         stance_ratio_final=0.60),
+    # v2 (2026-07-30): the 175M-step teleop policy could not turn RIGHT AT ALL — measured yaw
+    # response slope 0.19 with a +0.31 rad/s intercept, i.e. it turned left whatever you asked.
+    # Diagnosed to two causes, both fixed in the defaults above and both carried by this preset:
+    #   (a) the model's L/R four-bar linkages differ by ~1 mm -> a ~0.4 rad/s INTRINSIC yaw bias
+    #       under a symmetric gait. Now randomized per episode (dr_loop_site) so cancelling it is a
+    #       learned feedback behaviour rather than a constant.
+    #   (b) the two steering channels were scaled inversely to their measured authority. Corrected.
+    # Warm-startable from the v1 teleop run: dims are unchanged, only scales and DR.
+    "teleop_v2": lambda: _teleop(dr_loop_site=0.0015),
     # Wider randomization, for the robustness-vs-performance ablation the eval grid scores.
     "teleop_hard": lambda: _teleop(
         dr_mass_global=0.20, dr_mass_body=0.25, dr_inertia=0.40, dr_com_offset=0.03,
@@ -1064,6 +1098,44 @@ PRESETS.update({
         dr_ankle_k=0.35, dr_gravity_tilt=5.0, dr_delay_steps_range=(2, 8),
         trip_prob=0.0015, push_dv=0.5),
 })
+
+
+# ----- mX_slow_gait: retrain the WHOLE m1..m6 curriculum with the cadence fixes baked in ---------
+# Every prior milestone lineage (m2_reactive, m3_stiff, m4/m5/m6_stiff, m7*) carried at least one of
+# the two cadence root causes, discovered only after they had trained:
+#   (1) the gait_freq_hz MAP BUG — the 200 Hz rescale set the range to (0.5, 50) Hz, but the
+#       freq_raw->Hz map is LINEAR, so a neutral action (~0) inherited a ~25 Hz gait clock. Fixed by
+#       remapping to (0.5, 4.0) so neutral ~= 2 Hz (see m7-cadence-freq-bug).
+#   (2) the ANKLE-SPRING RING — the k=350 spring that SOLVES m3 pitch balance is only ~9% of critical
+#       damping at the shipped ankle_damping (1.6), so it rings at 6.3 Hz on every contact. NO reward
+#       /reflex/torque lever touched it because it was never a control problem; ankle_damping=10.0
+#       (~55% critical) is the fix, now the standing plant for the teleop / CPG-A/B lineages too.
+# Warm-starting a fast-stepping policy CANNOT unlearn the chatter (every m7 warm variant stayed
+# trapped in the fast basin), so the only real fix is to retrain from step 0 with the corrected plant
+# — which is what the user asked for. This lineage bakes BOTH fixes into ONE identical plant across
+# the entire base-DOF ladder (so each warm-start transfers cleanly), plus a GENTLE contact-switch
+# penalty as a from-scratch nudge toward fewer, longer steps:
+#   * gait_freq_hz=(0.5, 4.0)   — neutral ~2 Hz, not 25 Hz
+#   * ankle_stiffness=350.0     — the preload-preserving stiff spring that solved m3 balance
+#   * ankle_damping=10.0        — ~55% critical; kills the 6.3 Hz contact ring
+#   * w_contact_switch=0.05     — mild, well below the 0.15/0.30 that collapsed the warm m3_cad runs
+#                                 (those also fought the 24 Hz internal clock; from scratch at ~2 Hz
+#                                 with a damped ankle the equilibrium is already slow, so this only
+#                                 biases it, it doesn't have to force it)
+# Chain: m1 COLD, then m2<-m1, m3<-m2 (the pitch release), m4<-m3, m5<-m4, m6<-m5 (afterok SLURM).
+# Same obs/action dims at every rung (fourier generator, no steering, privileged vel on) so the whole
+# ladder warm-starts end to end. _extras(m) still adds z-rail (m1) + angmom/upright-gate (m3..m6).
+_SLOW_PLANT = dict(
+    ankle_stiffness=350.0, ankle_damping=10.0, gait_freq_hz=(0.5, 4.0),
+    w_contact_switch=0.05,
+)
+
+
+def _mk_slow(m):
+    return lambda: _react(m, **_SLOW_PLANT)
+
+
+PRESETS.update({f"{m}_slow_gait": _mk_slow(m) for m in LOCKS})
 
 
 def get_config(name: str = "default") -> Config:
