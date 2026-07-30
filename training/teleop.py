@@ -206,7 +206,9 @@ def main():
     if args.keys:
         from mujoco import viewer as mjviewer
         viewer = mjviewer.launch_passive(raw.model, raw.data, key_callback=stick.key)
-        print("[teleop] W/S speed  A/D turn  SPACE stop  R reset")
+        print("[teleop] keys:  W/UP faster   S/DOWN slower   A/LEFT & D/RIGHT turn"
+              "   SPACE centre   R reset   Q quit\n"
+              "         (click the viewer window first so it has keyboard focus)")
 
     t_next = time.perf_counter()
     for n in range(max_steps):
