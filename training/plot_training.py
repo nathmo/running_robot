@@ -10,6 +10,7 @@ import argparse
 import csv
 import math
 from pathlib import Path
+from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")            # headless: render to file, never open a window
@@ -66,7 +67,10 @@ def _plot_panel(ax, series, keys, title):
         ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
 
 
-def plot_run(run_dir) -> str | None:
+def plot_run(run_dir) -> Optional[str]:      # NOT `str | None`: PEP 604 in an evaluated annotation
+    # is a TypeError on Python 3.9, and the Izar venv is 3.9. Because train.py's PlotCallback wraps
+    # plotting in a bare `except Exception` that only reports when verbose, that raised at IMPORT
+    # time and silently produced NO training_plots.png for every cluster run ever done.
     """Render <run_dir>/training_plots.png from progress.csv. Returns the path, or None."""
     run_dir = Path(run_dir)
     series = _read_progress(run_dir)

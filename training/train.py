@@ -395,14 +395,19 @@ class PlotCallback(BaseCallback):
     def __init__(self, run_dir, every_steps=500_000):
         super().__init__()
         self.run_dir, self.every, self._last = str(run_dir), every_steps, 0
+        self._warned = False
 
     def _plot(self):
         try:
             from plot_training import plot_run
             plot_run(self.run_dir)
         except Exception as e:               # plotting must never crash a training run
-            if self.verbose:
-                print(f"[plot] skipped: {e}")
+            # ALWAYS report, and only once: gating this on self.verbose meant a plot_training
+            # import error (PEP 604 annotation vs the cluster's Python 3.9) silently produced no
+            # training_plots.png for entire multi-hour runs with nothing in the log to show why.
+            if not self._warned:
+                self._warned = True
+                print(f"[plot] FAILED, no training_plots.png will be written: {e!r}", flush=True)
 
     def _on_step(self) -> bool:
         if self.num_timesteps - self._last >= self.every:
