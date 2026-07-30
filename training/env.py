@@ -245,7 +245,10 @@ class DashEnv(gym.Env):
         self._noise = SensorNoise(self.cfg, self.nu)
         _leg_dofs = [int(self.model.jnt_dofadr[j]) for j in range(self.model.njnt)
                      if self.model.jnt_bodyid[j] != self.base_id]
-        self._dr = PlantRandomizer(self.model, self.cfg, _ankle_j, _leg_dofs)
+        _loop_sites = [s for s in (mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, n)
+                                   for n in ("pushrod_tip_L", "leg_anchor_L",
+                                             "pushrod_tip_R", "leg_anchor_R")) if s >= 0]
+        self._dr = PlantRandomizer(self.model, self.cfg, _ankle_j, _leg_dofs, _loop_sites)
         self._dr.stand_qpos = self.default_qpos
         self._dr_torque_scale = 1.0
         self._prev_vel_body = np.zeros(3)   # for the accelerometer-leak noise model

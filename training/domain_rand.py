@@ -50,11 +50,13 @@ class PlantRandomizer:
     """Per-episode MuJoCo model randomization. Construct AFTER env.__init__ has finished editing
     the model, so the captured nominals include com_lower / ankle_stiffness / ankle_damping."""
 
-    def __init__(self, model, cfg, ankle_jnt_ids, leg_dof_ids):
+    def __init__(self, model, cfg, ankle_jnt_ids, leg_dof_ids, loop_site_ids=()):
         self.cfg = cfg
         self.enabled = bool(cfg.dr_enable)
         self._ankle_j = list(ankle_jnt_ids)
         self._leg_dofs = np.asarray(leg_dof_ids, dtype=int)
+        self._loop_sites = np.asarray(loop_site_ids, dtype=int)
+        self.n_site_pos = model.site_pos.copy()
         # nominal snapshots — every draw is relative to these, never to the last episode's values
         self.n_mass = model.body_mass.copy()
         self.n_inertia = model.body_inertia.copy()
@@ -146,6 +148,24 @@ class PlantRandomizer:
                 model.dof_damping[dadr] = self.n_dof_damping[dadr] * kd
             d["ankle_k_scale"] = float(ks)
 
+        # ---- L/R linkage asymmetry = the intrinsic yaw bias -----------------------------------
+        # The as-exported model is NOT left/right symmetric: leg_anchor_L and leg_anchor_R differ by
+        # ~1 mm in x AND z, coordinates that should be identical (only y mirrors). The two four-bar
+        # linkages are therefore geometrically different, so an exactly mirror-symmetric joint
+        # command produces asymmetric foot motion and a persistent yaw moment — measured at
+        # ~0.4 rad/s, which is LARGER than the stride-steer channel's whole authority.
+        #
+        # The fix is not to symmetrize the model. A real robot will be asymmetric too, and a policy
+        # trained on a perfectly symmetric plant would have no reason to learn the correction. So we
+        # randomize the asymmetry instead: the yaw bias becomes a different value every episode, and
+        # cancelling it becomes something the policy must actively do from the yaw-rate error rather
+        # than a constant it can bake in. That is the version that transfers.
+        if c.dr_loop_site > 0 and self._loop_sites.size:
+            for sid in self._loop_sites:
+                model.site_pos[sid] = self.n_site_pos[sid] + rng.uniform(
+                    -c.dr_loop_site, c.dr_loop_site, 3)
+            d["loop_site_jitter_mm"] = float(c.dr_loop_site * 1000)
+
         # ---- gravity tilt = the cheap sloped-floor proxy --------------------------------------
         # Rotating gravity by a small angle is dynamically identical to tilting the whole world,
         # and costs nothing (no terrain geometry, no contact-model changes). Also absorbs IMU
@@ -181,6 +201,7 @@ class PlantRandomizer:
         model.qpos_spring[:] = self.n_qpos_spring
         model.opt.gravity[:] = self.n_gravity
         model.actuator_forcerange[:] = self.n_forcerange
+        model.site_pos[:] = self.n_site_pos
 
 
 class SensorNoise:

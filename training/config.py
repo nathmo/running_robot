@@ -994,6 +994,50 @@ PRESETS.update({
 })
 
 
+# ----- m1..m6_CPG: the full base-DOF-unlocking curriculum on the CPG generator (2026-07-30) ------
+# A from-scratch CPG lineage that walks the whole milestone ladder, m1 (only X free) -> m6 (fully
+# free), each stage warm-started from the previous one. The A/B (see above) said the CPG is at least
+# competitive and is the better cold learner, so this is the "does it go all the way" run.
+#
+# CURRICULA ARE COMPRESSED TO THE PER-STAGE BUDGET, and that is a deliberate departure from the
+# m1..m7 presets. train.py restarts a warm-started stage's ramps from zero, so with the _HZ200
+# defaults (gait ramp 240 M, ent anneal deadline 100 M) a ~60 M-step stage would only ever traverse
+# a quarter of its own stance-ratio ramp and would never leave maximum exploration. That is exactly
+# what happened to the A/B arms: policy std sat at ~1.0 and ent_coef never left 0.01 in every run
+# that stopped under 80 M steps. Sized to 60 M per stage, every ramp completes inside the stage:
+#   gait/efficiency 30 M, sprint line 20 M, entropy anneal 12 M with a 20 M gate deadline.
+# The trade is that each stage sees a faster-moving curriculum than the historical presets did.
+_CPG_STAGE_STEPS = 60_000_000
+_CPG_CHAIN = dict(
+    action_mode="cpg",
+    # plant knowledge carried over from m7 (see m7-cadence-freq-bug): the k=350 ankle spring that
+    # solved m3 balance, damping near critical so it cannot ring at 6.3 Hz, and the frequency
+    # remap without which a neutral action means a 25 Hz gait clock
+    ankle_stiffness=350.0, ankle_damping=10.0, gait_freq_hz=(0.5, 4.0),
+    total_steps=_CPG_STAGE_STEPS,
+    gait_curriculum_steps=30_000_000,
+    efficiency_ramp_steps=30_000_000,
+    sprint_curriculum_steps=20_000_000,
+    ent_anneal_steps=12_000_000,
+    ent_anneal_deadline_steps=20_000_000,
+)
+
+
+def _cpg_stage(m):
+    """One rung of the CPG milestone ladder. Deliberately does NOT reuse _ab/_react: those pass
+    ent_anneal_deadline_steps=100_000_000, which is the override that kept the A/B arms pinned at
+    full exploration for their whole run."""
+    kw = dict(_CPG_CHAIN)
+    if LOCKS[m][4] == 0:      # pitch free (m3..m6): add the sim2real timing curriculum, competence
+        kw.update(           # gated, as the Fourier lineage did — m1/m2 stay a clean fast prior
+            ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+            jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=20_000_000)
+    return _sprint200(m, **kw)
+
+
+PRESETS.update({f"{m}_CPG": (lambda m=m: _cpg_stage(m)) for m in LOCKS})
+
+
 # ----- teleop: joystick command + the full sim2real package (2026-07-29) ------------------------
 # The demo target: a robot you can DRIVE — stand still on a centred stick (stepping in place is
 # fine, the plant cannot stand passively), walk and slow-run forward, back up, and steer left/right
