@@ -1028,7 +1028,25 @@ def _cpg_stage(m):
     ent_anneal_deadline_steps=100_000_000, which is the override that kept the A/B arms pinned at
     full exploration for their whole run."""
     kw = dict(_CPG_CHAIN)
-    if LOCKS[m][4] == 0:      # pitch free (m3..m6): add the sim2real timing curriculum, competence
+    if LOCKS[m][4] == 0:
+        # PITCH-FREE RUNGS KEEP THE UNCOMPRESSED _HZ200 CURRICULA. Compressing them was a mistake
+        # and cost three failed m3 attempts, each killed by a different clock-driven ramp reaching
+        # its target while the policy was still falling at ~1.3 s:
+        #   attempt 1: stance hit 0.42 (flight demanded) at 19.6 M with ep_len 257
+        #   attempt 2: gated stance, but the warm-start prior was itself a flight-phase runner
+        #   attempt 3: gated stance AND a grounded prior, but the sprint line -- which the gate does
+        #             NOT cover -- had already ramped to 77 m by 14 M, vs 34 m for the run that
+        #             worked, so a robot falling in 1.3 s was being asked to run 77 m.
+        # The A/B's ab_cpg_m3warm_s0 reached ep_len 3772 and crossed the line on exactly these
+        # (long) schedules, so use them rather than keep guessing which ramp bites next. m1/m2 keep
+        # the compressed schedules, which demonstrably work there (m2_CPG ran the full 100 m dash).
+        # Consequence to be honest about: within a 60 M stage these ramps barely move, so m3..m6
+        # produce a WALKING controller on a free plant, not a flight-phase runner.
+        for k in ("gait_curriculum_steps", "efficiency_ramp_steps", "sprint_curriculum_steps",
+                  "ent_anneal_steps", "ent_anneal_deadline_steps"):
+            kw.pop(k, None)                      # fall through to the _HZ200 defaults
+        kw.update(ent_anneal_deadline_steps=100_000_000)
+        # pitch free (m3..m6): add the sim2real timing curriculum, competence
         kw.update(           # gated, as the Fourier lineage did — m1/m2 stay a clean fast prior
             ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
             jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=20_000_000,
