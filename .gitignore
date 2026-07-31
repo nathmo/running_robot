@@ -69,3 +69,6 @@ training/runs/**/*.mp4
 
 # archived pre-2026-07-17 run outputs (moved out of the deleted rl/ tree; delete when done)
 old_runs/
+
+# training run outputs: checkpoints/videos are pulled on demand, not versioned
+training/runs/
