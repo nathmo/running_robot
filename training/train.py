@@ -108,15 +108,29 @@ class GatedRampCallback(BaseCallback):
     gate/persist pattern. Fixes the clock-driven-curriculum failure: an m3 policy that can't yet
     balance the freed pitch DOF is never hardened toward flight-phase running until it can actually
     survive. A gate that never opens holds `start` (the easy regime) forever — the correct failure
-    mode. num_timesteps-based, so gate + ramp both continue across --resume."""
-    def __init__(self, key, method, start, target, warmup, run_dir, gate_len, patience=5):
+    mode. num_timesteps-based, so gate + ramp both continue across --resume.
+    With retreat_frac > 0 the ramp also becomes BIDIRECTIONAL, which is what the teleop_v2 run
+    showed it has to be. There, the gate opened correctly at ep_len 1855 — and then the ramp
+    advanced on a CLOCK for the next 215 M steps while performance collapsed to ep_len 725, because
+    once open it never looked at competence again. Competence-gating the OPEN but not the ADVANCE
+    just delays the same failure. With retreat_frac set, progress along start->target advances only
+    while ep_len >= gate_len, holds in the band between, and retreats while ep_len falls below
+    retreat_frac * gate_len — so an over-ambitious curriculum walks itself back instead of grinding
+    the policy down. retreat_frac = 0 keeps the exact legacy clock-driven path, so every m1..m7
+    preset is bit-for-bit unaffected.
+    """
+    def __init__(self, key, method, start, target, warmup, run_dir, gate_len, patience=5,
+                 retreat_frac=0.0):
         super().__init__()
         self.key, self.method = key, method
         self.start, self.target, self.warmup = float(start), float(target), int(warmup)
         self.run_dir, self.gate_len, self.patience = run_dir, float(gate_len), int(patience)
+        self.retreat_frac = float(retreat_frac)
         self._streak = 0
         self._open_from = None
         self._last = None
+        self._progress = 0.0        # 0..1 along start->target (bidirectional mode only)
+        self._last_ts = None
 
     def _on_training_start(self) -> None:
         # requeue persistence: restore the gate-open step so a resumed job continues the ramp
@@ -127,11 +141,13 @@ class GatedRampCallback(BaseCallback):
                 self._open_from = int(d[f"{self.key}_gate_from"])
                 print(f"[train] restored curriculum gate '{self.key}' (open from step "
                       f"{self._open_from})")
+            if f"{self.key}_progress" in d:
+                self._progress = float(d[f"{self.key}_progress"])
 
     def _on_rollout_start(self) -> None:
+        ep_len = (safe_mean([ep["l"] for ep in self.model.ep_info_buffer])
+                  if len(self.model.ep_info_buffer) > 0 else 0.0)
         if self._open_from is None:
-            ep_len = (safe_mean([ep["l"] for ep in self.model.ep_info_buffer])
-                      if len(self.model.ep_info_buffer) > 0 else 0.0)
             self._streak = self._streak + 1 if ep_len > self.gate_len else 0
             if self._streak >= self.patience:
                 self._open_from = self.num_timesteps
@@ -140,15 +156,30 @@ class GatedRampCallback(BaseCallback):
                       f"steps (ep_len_mean={ep_len:.0f} > {self.gate_len:.0f})")
         if self._open_from is None:
             val = self.start
-        else:
+        elif self.retreat_frac <= 0.0:
+            # legacy: clock-driven from the open step, monotonic
             frac = 1.0 if self.warmup <= 0 else \
                 min(1.0, (self.num_timesteps - self._open_from) / self.warmup)
             val = self.start + frac * (self.target - self.start)
+        else:
+            # competence-tracked: advance / hold / retreat by this rollout's share of the warmup
+            d_ts = 0 if self._last_ts is None else max(0, self.num_timesteps - self._last_ts)
+            step = 1.0 if self.warmup <= 0 else d_ts / self.warmup
+            if ep_len >= self.gate_len:
+                self._progress += step
+            elif ep_len < self.retreat_frac * self.gate_len:
+                self._progress -= step
+            self._progress = float(np.clip(self._progress, 0.0, 1.0))
+            val = self.start + self._progress * (self.target - self.start)
+            self.logger.record(f"curriculum/{self.key}_progress", self._progress)
+        self._last_ts = self.num_timesteps
         self.logger.record(f"curriculum/{self.key}", val)
         if val != self._last:
             self._last = val
             self.training_env.env_method(self.method, val)
             _persist_curriculum(self.run_dir, self.key, val)
+            if self.retreat_frac > 0.0:
+                _persist_curriculum(self.run_dir, f"{self.key}_progress", self._progress)
 
     def _on_step(self) -> bool:
         return True
@@ -615,11 +646,13 @@ def main():
                                     cfg.sprint_dist_start_m, cfg.sprint_dist_m,
                                     cfg.sprint_curriculum_steps, run))
     gate = cfg.curriculum_gate_ep_len
+    rf = cfg.curriculum_retreat_frac          # >0 = bidirectional ramp (see GatedRampCallback)
     if cfg.gait_curriculum_steps > 0 and cfg.w_phase_contact > 0:
         if gate > 0:
             cb_list.append(GatedRampCallback("stance_ratio", "set_stance_ratio",
                                              cfg.stance_ratio_start, cfg.stance_ratio_final,
-                                             cfg.gait_curriculum_steps, run, gate))
+                                             cfg.gait_curriculum_steps, run, gate,
+                                             retreat_frac=rf))
         else:
             cb_list.append(RampCallback("stance_ratio", "set_stance_ratio",
                                         cfg.stance_ratio_start, cfg.stance_ratio_final,
@@ -627,10 +660,13 @@ def main():
     if cfg.efficiency_ramp_steps > 0:
         if gate > 0:
             cb_list.append(GatedRampCallback("eff_scale", "set_efficiency_scale",
-                                             0.0, 1.0, cfg.efficiency_ramp_steps, run, gate))
+                                             0.0, cfg.efficiency_target,
+                                             cfg.efficiency_ramp_steps, run, gate,
+                                             retreat_frac=rf))
         else:
             cb_list.append(RampCallback("eff_scale", "set_efficiency_scale",
-                                        0.0, 1.0, cfg.efficiency_ramp_steps, run))
+                                        0.0, cfg.efficiency_target,
+                                        cfg.efficiency_ramp_steps, run))
     # decaying pitch-assist training-wheel (m2->m3 bridge): fade the SCALE 1 -> 0 (clock-driven so
     # the help always retreats and the policy must take over pitch balance; never competence-gated).
     if cfg.pitch_assist_ramp_steps > 0 and cfg.pitch_assist_kp > 0:
@@ -647,11 +683,13 @@ def main():
         if cfg.ctrl_jitter_ms_final > 0:
             cb_list.append(GatedRampCallback("ctrl_jitter_ms", "set_ctrl_jitter",
                                              0.0, cfg.ctrl_jitter_ms_final,
-                                             cfg.jitter_curriculum_steps, run, jgate))
+                                             cfg.jitter_curriculum_steps, run, jgate,
+                                             retreat_frac=rf))
         if cfg.ctrl_drop_prob_final > 0:
             cb_list.append(GatedRampCallback("ctrl_drop_prob", "set_ctrl_drop",
                                              0.0, cfg.ctrl_drop_prob_final,
-                                             cfg.jitter_curriculum_steps, run, jgate))
+                                             cfg.jitter_curriculum_steps, run, jgate,
+                                             retreat_frac=rf))
     # torque-budget curriculum (cadence fix): shrink the actuator torque budget while competent,
     # stop when well-saturated. Persists its scale + can auto-terminate the run.
     if cfg.torque_util_target > 0:
