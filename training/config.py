@@ -1031,7 +1031,16 @@ def _cpg_stage(m):
     if LOCKS[m][4] == 0:      # pitch free (m3..m6): add the sim2real timing curriculum, competence
         kw.update(           # gated, as the Fourier lineage did — m1/m2 stay a clean fast prior
             ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
-            jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=20_000_000)
+            jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=20_000_000,
+            # COMPETENCE-GATE the stance/efficiency ramps once pitch is free. Measured on the first
+            # run of this chain: with the clock-driven ramp, stance_ratio hit 0.42 (flight demanded)
+            # at 19.6 M steps while m3's ep_len was 257 — the reward asked a robot that could barely
+            # stand for 1.3 s to start running, and it never recovered (ep_len capped at 323 for the
+            # whole 60 M, and m4..m6 inherited the wreck). The same ramp was harmless at m2, which
+            # was already at ep_len 11119 by then. The A/B's successful m3 never got below stance
+            # 0.583 at all. So the ramp must follow competence, not the clock, exactly as
+            # curriculum_gate_ep_len was built for. 1500 ~= 7.5 s upright at 200 Hz (a fall is ~240).
+            curriculum_gate_ep_len=1500.0)
     return _sprint200(m, **kw)
 
 
