@@ -412,6 +412,19 @@ class Config:
     # DEMANDS swing) so it slows cadence without collapsing to a skate. Logged as reward_terms/
     # step_rate. 0 = off.
     w_contact_switch: float = 0.0       # penalty per foot that flips grounded<->airborne this step
+    # duty-SYMMETRY / anti-one-legged (2026-07-31): the slow_gait lineage still converged to a ONE-
+    # LEGGED gait (m3_slow_gait: left foot duty 0%, right foot patters 6.4 Hz, asymmetry 0.99) -- the
+    # freq-map + ankle-damping + gentle contact-switch fixes slowed the CLOCK but did not stop the
+    # policy from using one leg as its whole support+propulsion+balance actuator while the other is
+    # just carried. This penalizes any foot whose STANCE-DUTY (grounded fraction, EMA over
+    # duty_sym_tau_s) sinks below duty_floor -> a foot that never bears load pays, forcing a two-legged
+    # gait. Linear in the deficit (non-vanishing gradient), _pen-capped. Logged as reward_terms/
+    # duty_sym. 0 = off (byte-identical to every pre-existing preset). Pairs with a stronger
+    # w_contact_switch (symmetry alone could be met by both feet chattering fast; the switch penalty
+    # keeps it slow).
+    w_duty_sym: float = 0.0             # penalty weight per unit of summed per-foot duty deficit
+    duty_floor: float = 0.30           # min per-foot grounded-fraction (duty) before the penalty bites
+    duty_sym_tau_s: float = 1.0        # EMA time constant (s) for the per-foot duty estimate
 
     # ----- reward: phase-gated contact schedule (Siekmann-style; NEW) -----
     # The gait clock the ACTION uses is also the reward's contact schedule: each foot pays for
@@ -433,6 +446,18 @@ class Config:
     # open step. 0 = the old clock-driven behavior. A gate that never opens = easy regime forever
     # (the correct failure mode: keep it upright rather than force it to run and fall).
     curriculum_gate_ep_len: float = 0.0
+    # BIDIRECTIONAL ramp (2026-07-31). Competence-gating the ramp's OPEN but not its ADVANCE only
+    # delays the failure it was meant to prevent: teleop_v2's gate opened correctly at ep_len 1855,
+    # then the ramp advanced on a clock for 215 M more steps while the policy collapsed to 725 —
+    # nothing was watching. With this > 0, progress along start->target ADVANCES only while
+    # ep_len >= gate, HOLDS in the band, and RETREATS while ep_len < this * gate, so a curriculum
+    # that turns out to be too ambitious walks itself back instead of grinding the policy down.
+    # 0 = the legacy one-way clock ramp (every m1..m7 preset keeps it, bit for bit).
+    curriculum_retreat_frac: float = 0.0
+    # Ramp target for the efficiency terms. Was hard-coded to 1.0 in train.py; the sprint lineage
+    # wants full efficiency pressure, a walking demo does not (teleop_v2 peaked at eff_scale 0.00
+    # and degraded monotonically as this climbed).
+    efficiency_target: float = 1.0
 
     # ----- reward: efficiency (Cassie-100m recipe; annealed IN over efficiency_ramp_steps) -----
     # Weighted to comparable magnitudes at running speed so the optimizer trades them off, which
@@ -1168,6 +1193,21 @@ PRESETS.update({
     #   (b) the two steering channels were scaled inversely to their measured authority. Corrected.
     # Warm-startable from the v1 teleop run: dims are unchanged, only scales and DR.
     "teleop_v2": lambda: _teleop(dr_loop_site=0.0015),
+    # v3 (2026-07-31): v2 PEAKED at ep_len 1855 / rew 512 at 113 M and then declined monotonically
+    # for the remaining 215 M steps, ending at 725 / 26. Nothing was broken — the curriculum simply
+    # kept demanding more (stance_ratio 0.70 -> 0.52, eff_scale 0 -> 0.90) with no feedback path,
+    # and the policy was ground down against targets it could not hold. Two changes, no new physics:
+    #   * curriculum_retreat_frac=0.7 -> the stance/efficiency/jitter ramps now RETREAT when ep_len
+    #     falls below 70% of the gate, so an over-ambitious target self-corrects.
+    #   * gentler targets. The peak lived at stance 0.70 / eff 0.00; 0.50/1.0 was inherited from the
+    #     SPRINT lineage and is the wrong reference for "clean walking and slow running, robust".
+    #     0.62 keeps real double support; eff 0.35 still buys smoothness without dominating.
+    # Warm-starts from the v2 PEAK checkpoint, not its final one.
+    "teleop_v3": lambda: _teleop(
+        dr_loop_site=0.0015,
+        curriculum_retreat_frac=0.7,
+        stance_ratio_final=0.62,
+        efficiency_target=0.35),
     # Wider randomization, for the robustness-vs-performance ablation the eval grid scores.
     "teleop_hard": lambda: _teleop(
         dr_mass_global=0.20, dr_mass_body=0.25, dr_inertia=0.40, dr_com_offset=0.03,
@@ -1213,6 +1253,26 @@ def _mk_slow(m):
 
 
 PRESETS.update({f"{m}_slow_gait": _mk_slow(m) for m in LOCKS})
+
+
+# ----- mX_sym_gait: slow_gait + the anti-one-legged fix (2026-07-31) -----------------------------
+# slow_gait solved balance/performance but converged ONE-LEGGED (m3: left duty 0%, right patters
+# 6.4 Hz, asymmetry 0.99) — the freq/ankle/contact-switch levers slowed the CLOCK but did not force
+# two-leggedness. This lineage adds the duty-symmetry penalty (w_duty_sym: a foot that never bears
+# load is expensive) and a 4x stronger contact-switch (0.05 -> 0.20; symmetry alone could be met by
+# both feet chattering fast, so the switch penalty keeps it slow). Everything else is the slow_gait
+# plant, so this is a clean A/B vs the one-legged baseline. Same obs/action dims -> warm-chains end
+# to end. Reward-only (no obs change) on purpose — watch m1/m2_sym cadence early; if the duty signal
+# proves too delayed to learn, the fallback is to add the duty EMA to the observation.
+_SYM_PLANT = dict(_SLOW_PLANT)
+_SYM_PLANT.update(w_contact_switch=0.20, w_duty_sym=8.0, duty_floor=0.30, duty_sym_tau_s=1.0)
+
+
+def _mk_sym(m):
+    return lambda: _react(m, **_SYM_PLANT)
+
+
+PRESETS.update({f"{m}_sym_gait": _mk_sym(m) for m in LOCKS})
 
 
 def get_config(name: str = "default") -> Config:

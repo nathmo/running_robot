@@ -134,6 +134,7 @@ class DashEnv(gym.Env):
         self._contact_time = np.zeros(2, np.float32)  # continuous seconds grounded, per foot
         self._grounded_prev = np.zeros(2, bool)
         self._prev_toe_xy = np.zeros((2, 2))
+        self._duty_ema = np.full(2, 0.5, np.float64)  # per-foot grounded-fraction EMA (duty_sym term)
         self._push_countdown = 0
 
         # nominal standing pose / targets from the keyframe
@@ -602,6 +603,8 @@ class DashEnv(gym.Env):
         self._contact_time[:] = 0.0
         self._grounded_prev = self._foot_contacts() | (self._toe_heights() < self.cfg.grounded_h)
         self._prev_toe_xy = self.data.geom_xpos[self.foot_gids_arr, 0:2].copy()
+        self._duty_ema[:] = 0.5          # neutral start: above duty_floor, so no penalty until the
+        #                                  gait actually parks a foot in the air (EMA then decays)
         self._push_countdown = self._next_push_in()
         self._step_n = 0
         self._prev_vel_body[:] = 0.0
@@ -1037,6 +1040,17 @@ class DashEnv(gym.Env):
                                        * float(np.sum(grounded != self._grounded_prev)))
         else:
             t["step_rate"] = 0.0
+
+        # duty-symmetry / anti-one-legged: EMA each foot's grounded fraction and penalize (linearly)
+        # any foot whose duty sinks below duty_floor, so a foot that never bears load is expensive ->
+        # forces both legs to share stance instead of one-legged pattering (the slow_gait failure).
+        if c.w_duty_sym > 0.0:
+            a = min(1.0, dt / max(c.duty_sym_tau_s, 1e-3))
+            self._duty_ema += a * (grounded.astype(np.float64) - self._duty_ema)
+            deficit = np.maximum(0.0, c.duty_floor - self._duty_ema)
+            t["duty_sym"] = self._pen(-c.w_duty_sym * float(deficit.sum()))
+        else:
+            t["duty_sym"] = 0.0
 
         self._grounded_prev = grounded
         self._prev_toe_xy = toe_pos[:, 0:2]

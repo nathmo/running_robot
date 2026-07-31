@@ -465,6 +465,29 @@ def test_contact_switch():
     check("m3_cad enables cadence penalty", get_config("m3_cad").w_contact_switch == 0.15)
 
 
+def test_duty_sym():
+    """The duty-symmetry penalty fires for a foot whose grounded-fraction EMA is below the floor
+    (anti-one-legged); 0 when both feet share stance and when disabled."""
+    print("duty-symmetry (anti-one-legged) penalty:")
+    env = DashEnv(get_config("m3_sym_gait"))          # w_duty_sym=8.0, floor 0.30
+    env.reset(seed=0)
+    env.step(np.zeros(env.action_dim, np.float32))    # populate per-step state before _reward
+    env._duty_ema[:] = [0.0, 0.5]                      # left foot never bears load
+    _, t = env._reward(np.zeros(6, np.float32), np.array([True, True]))
+    check("one-legged duty penalized (-2.0 cap)", abs(t["duty_sym"] - (-2.0)) < 1e-6, str(t["duty_sym"]))
+    env._duty_ema[:] = [0.45, 0.45]                    # both feet share stance
+    _, t2 = env._reward(np.zeros(6, np.float32), np.array([True, True]))
+    check("symmetric duty -> 0", t2["duty_sym"] == 0.0, str(t2["duty_sym"]))
+    env2 = DashEnv(get_config("m3_slow_gait"))         # disabled (w_duty_sym=0)
+    env2.reset(seed=0)
+    env2.step(np.zeros(env2.action_dim, np.float32))
+    _, t3 = env2._reward(np.zeros(6, np.float32), np.array([True, True]))
+    check("duty_sym present + 0 when disabled", t3.get("duty_sym") == 0.0, str(t3.get("duty_sym")))
+    check("m3_sym_gait enables duty sym + 0.20 switch",
+          get_config("m3_sym_gait").w_duty_sym == 8.0
+          and get_config("m3_sym_gait").w_contact_switch == 0.20)
+
+
 def test_torque_curriculum():
     """m7 torque-budget curriculum: freq remap, set_torque_limit scales forcerange (floor-clamped),
     torque_util reported in info; m7_freq isolates the freq fix (no curriculum)."""
@@ -725,6 +748,7 @@ if __name__ == "__main__":
     test_foot_ahead()
     test_motor_limits()
     test_contact_switch()
+    test_duty_sym()
     test_torque_curriculum()
     test_hz200_timing()
     test_angmom_term()
