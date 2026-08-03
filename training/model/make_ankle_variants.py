@@ -41,9 +41,23 @@ ANKLE_BODY = {"L": "FootLeftNCS-v1", "R": "FootRightNCS-v1"}
 # ankle qpos addresses in the composite-scalar-base layout (see env.py); used for the lock targets
 ANKLE_QADR = {"L": 11, "R": 17}
 
-# --- ankle motor spec (output/joint side, after gearbox) -- AK60-39, as used on hip-roll ---
-ANKLE_MOTOR = dict(mass=0.75, inertia=0.001, armature=0.046, forcerange=72.0,
-                   kp=120.0, kv=4.0, ctrlrange=(-1.047, 1.047))
+# --- ankle motor spec (output/joint side, after gearbox) ---------------------------------------
+# MASSLESS, with an AKE90-8's PERFORMANCE envelope (170 N*m peak / 55 continuous, no-load 22 rad/s).
+#
+# Deliberate: we do not yet know whether an ankle motor is worth anything, nor what performance it
+# would need, and those are the two things this study is for. Charging the active arm a specific
+# motor's mass and rotor inertia would answer a narrower question ("is THIS motor worth it") and
+# would let a loss be blamed on the hardware choice rather than on the idea. So the active arm is
+# an UPPER BOUND: real torque and real speed limits, no mass, no reflected inertia. If it still
+# loses, an actuated ankle is dead on the merits and no motor selection rescues it. If it wins, the
+# telemetry (peak torque, peak speed, peak power, time above continuous torque) is the SPEC — and
+# only then is it worth re-running with that motor's actual mass at the ankle.
+ANKLE_MOTOR = dict(mass=0.0,            # massless: see above. >0 welds a point mass at the ankle.
+                   inertia=0.0,
+                   armature=None,       # None = leave the joint's own; no rotor inertia charged
+                   forcerange=170.0,    # N*m peak, AKE90-8
+                   kp=200.0, kv=5.0,    # same servo gains as the cam/thigh AKE90s
+                   ctrlrange=(-1.047, 1.047))
 
 
 def _read(path):
@@ -98,25 +112,30 @@ def make_active(src=BASE, dst=ACTIVE, motor=ANKLE_MOTOR):
     txt = _read(src)
     lo, hi = motor["ctrlrange"]
 
-    # 1. the joint gets the motor's reflected rotor inertia (it was a free spring hinge before)
-    for side in ("L", "R"):
-        j = _joint_name_in(txt, side)
-        txt = re.sub(rf'(<joint\s+name="{re.escape(j)}"[^>]*?)\barmature="[^"]*"',
-                     lambda m: f'{m.group(1)}armature="{motor["armature"]:g}"', txt, count=1)
+    # 1. rotor inertia, only if the spec charges it (armature=None keeps the joint's own value, so
+    #    the idealized motor adds no reflected inertia either -- at the ankle that matters a lot:
+    #    an AKE90's 0.0216 kg*m^2 is ~4x the foot's own 0.006 swing inertia)
+    if motor["armature"] is not None:
+        for side in ("L", "R"):
+            j = _joint_name_in(txt, side)
+            txt = re.sub(rf'(<joint\s+name="{re.escape(j)}"[^>]*?)\barmature="[^"]*"',
+                         lambda m: f'{m.group(1)}armature="{motor["armature"]:g}"', txt, count=1)
 
     # 2. motor mass welded at the ankle, inside the FOOT body (the ankle joint's own body) at the
-    #    joint anchor -- the foot body's frame origin IS the ankle, so pos="0 0 0".
-    for side in ("L", "R"):
-        body = ANKLE_BODY[side]
-        weld = (f'<body name="motor_ankle_{side}" pos="0 0 0">'
-                f'<inertial pos="0 0 0" mass="{motor["mass"]:g}" '
-                f'diaginertia="{motor["inertia"]:g} {motor["inertia"]:g} {motor["inertia"]:g}"/>'
-                f'</body>')
-        m = re.search(rf'(<body\s+name="{re.escape(body)}"[^>]*>\n)([ \t]*)', txt)
-        if not m:
-            raise SystemExit(f"body {body} not found")
-        indent = m.group(2)
-        txt = txt[:m.end(1)] + indent + weld + "\n" + txt[m.end(1):]
+    #    joint anchor -- the foot body's frame origin IS the ankle, so pos="0 0 0". Skipped for the
+    #    massless spec, which is the default (see ANKLE_MOTOR).
+    if motor["mass"] > 0:
+        for side in ("L", "R"):
+            body = ANKLE_BODY[side]
+            weld = (f'<body name="motor_ankle_{side}" pos="0 0 0">'
+                    f'<inertial pos="0 0 0" mass="{motor["mass"]:g}" '
+                    f'diaginertia="{motor["inertia"]:g} {motor["inertia"]:g} '
+                    f'{motor["inertia"]:g}"/></body>')
+            m = re.search(rf'(<body\s+name="{re.escape(body)}"[^>]*>\n)([ \t]*)', txt)
+            if not m:
+                raise SystemExit(f"body {body} not found")
+            indent = m.group(2)
+            txt = txt[:m.end(1)] + indent + weld + "\n" + txt[m.end(1):]
 
     # 3. the actuators themselves, appended so the ankle dims land AFTER the 6 gait actuators
     #    (action/ctrl order = actuator order; env.py appends the ankle channel at the tail).
@@ -152,7 +171,10 @@ def make_active(src=BASE, dst=ACTIVE, motor=ANKLE_MOTOR):
     m3 = mujoco.MjModel.from_xml_path(dst)
     print(f"\n{dst}\n  nu {model.nu} -> {m3.nu}, "
           f"mass {model.body_subtreemass[1]:.3f} -> {m3.body_subtreemass[1]:.3f} kg "
-          f"(+{2*motor['mass']:.2f} kg at the ankles)")
+          + (f"(+{2*motor['mass']:.2f} kg at the ankles)" if motor["mass"] > 0
+             else "(MASSLESS motor — upper bound, see ANKLE_MOTOR)"))
+    print(f"  torque {motor['forcerange']:g} N*m peak"
+          + ("" if motor["armature"] is not None else ", no reflected rotor inertia"))
     print(f"  stance height {float(model.key_qpos[0][2]):.5f} -> {float(qk[2]):.5f} m")
     print(f"  actuators: " + ", ".join(
         mujoco.mj_id2name(m3, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in range(m3.nu)))

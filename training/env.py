@@ -411,6 +411,9 @@ class DashEnv(gym.Env):
         self.n_gait_act = self.nu - self.n_ankle_act
         self._ankle_dof = np.array([int(self.model.jnt_dofadr[j]) for j in ankle_j], dtype=int)
         self._ankle_qpos = np.array([int(self.model.jnt_qposadr[j]) for j in ankle_j], dtype=int)
+        # torque-speed envelope: only meaningful when there IS a motor and a finite no-load speed
+        self._ankle_ts_curve = bool(self.n_ankle_act and c.ankle_motor_noload_rads > 0.0)
+        self._ankle_peak_w = 0.0        # peak |ankle speed| this control step (substep-resolved)
 
     # nominal_ctrl is rebound at reset by the m1 ride-height LUT, so these stay views rather than
     # snapshots — a stale copy would silently command the previous episode's posture.
@@ -465,6 +468,24 @@ class DashEnv(gym.Env):
         between resets, the DR draw writes at reset)."""
         self.model.actuator_forcerange[:] = (self._orig_forcerange * self._torque_scale
                                              * self._dr_torque_scale)
+
+    def _apply_ankle_torque_speed(self):
+        """Clamp the ankle servos to a real motor's TORQUE-SPEED curve, re-evaluated every substep.
+
+        A constant forcerange would let the idealized ankle deliver peak torque at any speed, which
+        no motor does: available torque falls roughly linearly to zero at the no-load speed. Since
+        the study's whole purpose is to find out whether an ankle motor is worth it AND what
+        performance it would need, the envelope has to be the realistic part even when the mass is
+        not — otherwise a win could just mean "an impossible actuator wins".
+
+        Multiplies the same curriculum/DR scaling _apply_torque_limit applies, so the torque-budget
+        curriculum still reaches the ankle instead of being silently overwritten here."""
+        w = np.abs(self.data.qvel[self._ankle_dof])
+        frac = np.clip(1.0 - w / self.cfg.ankle_motor_noload_rads, 0.0, 1.0)
+        lim = (self._orig_forcerange[self.ankle_act_idx, 1]
+               * self._torque_scale * self._dr_torque_scale * frac)
+        self.model.actuator_forcerange[self.ankle_act_idx, 0] = -lim
+        self.model.actuator_forcerange[self.ankle_act_idx, 1] = lim
 
     def set_dr_scale(self, s):
         """0..1 curriculum on the WIDTH of every domain-randomization range (applies from the next
@@ -878,9 +899,13 @@ class DashEnv(gym.Env):
                 -self._ctrl_jitter_substeps, self._ctrl_jitter_substeps + 1)))
         contact_acc = np.zeros(2, bool)
         for _ in range(n):
+            if self._ankle_ts_curve:
+                self._apply_ankle_torque_speed()
             mujoco.mj_step(self.model, self.data)
             if not contact_acc.all():
                 contact_acc |= self._foot_contacts()
+            self._ankle_peak_w = max(self._ankle_peak_w,
+                                     float(np.max(np.abs(self.data.qvel[self._ankle_dof]))))
         return contact_acc
 
     def step(self, action):
@@ -1084,11 +1109,23 @@ class DashEnv(gym.Env):
                # 1/2 k x^2 per side, summed: the elastic energy the structure has to store
                "ankle_spring_energy": float(np.sum(0.5 * self.ankle_k * defl ** 2))}
         if self.n_ankle_act:
+            # THE SPEC READOUT. If the active arm wins, these four numbers are the answer to "what
+            # performance do we need from an ankle motor" — which is half the point of the study,
+            # so they are logged per step rather than reconstructed from video afterwards.
             tau = self.data.actuator_force[self.ankle_act_idx]
-            out["ankle_motor_trq"] = float(np.max(np.abs(tau)))
-            out["ankle_motor_power"] = float(np.sum(np.abs(tau * qd)))
+            out["ankle_motor_trq"] = float(np.max(np.abs(tau)))          # -> peak torque needed
+            out["ankle_motor_w"] = self._ankle_peak_w                    # -> no-load speed needed
+            out["ankle_motor_power"] = float(np.sum(np.abs(tau * qd)))   # -> peak power needed
+            # thermal: a motor may hit peak torque briefly but must live below continuous. This is
+            # the fraction of ankles over the continuous rating right now; averaged over a run it
+            # says whether the duty cycle is survivable or whether the motor cooks.
+            out["ankle_motor_over_cont"] = float(np.mean(
+                np.abs(tau) > self.cfg.ankle_motor_cont_nm))
+            # utilization against the CURRENT (speed-derated) limit: ~1.0 means the torque-speed
+            # curve, not the policy, is what is capping the ankle
             out["ankle_motor_util"] = float(np.max(
                 np.abs(tau) / np.maximum(self.model.actuator_forcerange[self.ankle_act_idx, 1], 1e-6)))
+            self._ankle_peak_w = 0.0
         return out
 
     # ---------- reward ----------

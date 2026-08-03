@@ -810,10 +810,39 @@ def test_ankle_study():
     check("active plant has 2 ankle actuators", aenv.n_ankle_act == 2, f"{aenv.n_ankle_act}")
     check("active action is +2 dims", aenv.action_dim == penv.action_dim + 2)
     check("active obs is wider", ao.shape[0] > po.shape[0])
-    check("active motor telemetry", "ankle_motor_trq" in ainfo and "ankle_motor_util" in ainfo)
-    check("ankle motors carry mass",
-          float(aenv.model.body_subtreemass[1]) > float(penv.model.body_subtreemass[1]) + 1.4,
+    check("active spec telemetry",
+          all(k in ainfo for k in ("ankle_motor_trq", "ankle_motor_w", "ankle_motor_power",
+                                   "ankle_motor_over_cont", "ankle_motor_util")))
+    # the ankle motor is MASSLESS on purpose (upper bound: is a motor useful AT ALL, and at what
+    # spec). If this ever fails, someone re-enabled the mass weld and the active arm silently
+    # became "is THIS motor worth it" instead.
+    check("ankle motor is massless",
+          abs(float(aenv.model.body_subtreemass[1])
+              - float(penv.model.body_subtreemass[1])) < 1e-6,
           f"{float(aenv.model.body_subtreemass[1]):.3f} vs {float(penv.model.body_subtreemass[1]):.3f}")
+    check("ankle motor adds no rotor inertia",
+          float(aenv.model.dof_armature[aenv._ankle_dof[0]])
+          == float(penv.model.dof_armature[penv._ankle_dof[0]]))
+    check("ankle peak torque is AKE90-class",
+          abs(float(aenv._orig_forcerange[aenv.ankle_act_idx[0], 1]) - 170.0) < 1e-6,
+          f"{float(aenv._orig_forcerange[aenv.ankle_act_idx[0], 1]):.1f} N*m")
+
+    # torque-speed curve: available torque must fall to ~0 at the no-load speed, and be full at rest
+    tsenv = DashEnv(Config(model_path=MA, ankle_mode="active"))
+    tsenv.reset(seed=0)
+    peak = float(tsenv._orig_forcerange[tsenv.ankle_act_idx[0], 1])
+    got = {}
+    for wfrac in (0.0, 0.5, 1.0):
+        tsenv.data.qvel[tsenv._ankle_dof] = wfrac * tsenv.cfg.ankle_motor_noload_rads
+        tsenv._apply_ankle_torque_speed()
+        got[wfrac] = float(tsenv.model.actuator_forcerange[tsenv.ankle_act_idx[0], 1])
+    check("torque-speed: full torque at rest", abs(got[0.0] - peak) < 1e-6, f"{got[0.0]:.1f}")
+    check("torque-speed: half at half no-load speed",
+          abs(got[0.5] - 0.5 * peak) < 1e-3, f"{got[0.5]:.1f} vs {0.5*peak:.1f}")
+    check("torque-speed: zero at no-load speed", got[1.0] < 1e-6, f"{got[1.0]:.3f}")
+    check("torque-speed does not touch the gait actuators",
+          abs(float(tsenv.model.actuator_forcerange[1, 1])
+              - float(tsenv._orig_forcerange[1, 1])) < 1e-6)
 
     # mode/plant mismatch must FAIL LOUDLY, not run the wrong arm
     for kw, why in ((dict(model_path=M, ankle_mode="active"), "active on the 6-actuator plant"),

@@ -327,6 +327,23 @@ class Config:
     # Bill the ankle motors in the torque/energy penalty like any other actuator. Off would let the
     # active arm buy stability with unpriced energy and win the comparison for the wrong reason.
     ankle_torque_billed: bool = True
+    # ----- ankle MOTOR envelope (active modes only) ---------------------------------------------
+    # The active arm's motor is MASSLESS with an AKE90-8's performance. That is deliberate: we do
+    # not yet know whether an ankle motor is worth anything, nor what performance it would need, and
+    # both are what the study is for. Charging it a specific motor's mass and rotor inertia would
+    # answer the narrower "is THIS motor worth it" and would let a loss be blamed on the hardware
+    # pick rather than on the idea. So the active arm is an UPPER BOUND -- real torque, real speed,
+    # no mass, no reflected inertia. If it still loses, an actuated ankle is dead on the merits. If
+    # it wins, the telemetry below IS the spec, and only then is paying the mass worth simulating.
+    #
+    # The torque-speed CURVE is enforced (env._apply_ankle_torque_speed, re-evaluated every substep):
+    # available torque falls linearly to zero at the no-load speed, as a real motor's does. Without
+    # it the "ideal" ankle would deliver peak torque at any speed, and a win could just mean an
+    # impossible actuator wins. peak_nm lives in the model's forcerange; these two shape the curve
+    # and the reporting.
+    ankle_motor_noload_rads: float = 22.0   # output-side no-load speed (AKE90-8). 0 = no speed limit
+    ankle_motor_cont_nm: float = 55.0       # continuous rating; telemetry-only thermal proxy
+    #                                         (fraction of time above it -> can it run continuously?)
     # ----- action mode: which gait generator turns the action into PD targets ---------------
     # "fourier" = fourier_gait.py (the m1..m7 lineage). "cpg" = cpg_gait.py, the Ijspeert-school
     # alternative: two coupled amplitude-controlled phase oscillators whose parameters (amplitude,
@@ -1365,6 +1382,15 @@ PRESETS.update({f"{m}_sym_gait": _mk_sym(m) for m in LOCKS})
 #   active             servo, no spring         -- would an actuated angle have been better?
 #   active_k350        servo + spring, parallel  -- or is parallel-elastic the real answer?
 #
+# The active arms use a MASSLESS motor with an AKE90-8's performance envelope (170 N*m peak,
+# no-load 22 rad/s, enforced as a torque-SPEED curve every substep). That is an upper bound by
+# design: we do not know yet whether an ankle motor is worth anything or what performance it would
+# need, so charging it one specific motor's mass and rotor inertia would answer the narrower "is
+# THIS motor worth it" and would let a loss be blamed on the hardware pick. If the upper bound
+# still loses, an actuated ankle is dead on the merits. If it wins, the ankle/* telemetry (peak
+# torque, peak speed, peak power, fraction of time above the 55 N*m continuous rating) IS the spec,
+# and paying the real mass is worth simulating only then.
+#
 # Three things make it a fair test, all of which the 2026-07-24 sweep lacked:
 #   1. ankle_zeta=0.7 -- damping is DERIVED from k against the measured stance inertia, so every
 #      arm sits at the same damping ratio and k is genuinely the only variable. (Measured: the
@@ -1374,9 +1400,10 @@ PRESETS.update({f"{m}_sym_gait": _mk_sym(m) for m in LOCKS})
 #   2. The MEASURED-MASS plant (dash01_measured.xml, 15.14 kg vs the CAD placeholder's 12.83, with
 #      a 2.6x heavier shin). The spring's job is distal energy storage, so getting distal mass
 #      wrong would answer the question about a robot that does not exist.
-#   3. The active arms carry their motors' real mass (0.75 kg AK60-39 per side, welded AT the
-#      ankle) and their torque is billed in the efficiency reward, so "active" cannot win on free
-#      energy or free mass.
+#   3. The active arms' torque is billed in the efficiency reward like any other actuator, and they
+#      are held to a real torque-speed curve, so "active" cannot win on free energy or on an
+#      actuator that delivers peak torque at any speed. (It IS given free mass — deliberately; see
+#      the upper-bound note above.)
 _STUDY_PLANT = {k: v for k, v in _SYM_PLANT.items()
                 if k not in ("ankle_stiffness", "ankle_damping")}   # the study sets these per arm
 _STUDY_PLANT.update(

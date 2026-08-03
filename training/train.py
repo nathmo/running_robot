@@ -75,6 +75,44 @@ class RewardTermCallback(BaseCallback):
         self._sums, self._count = {}, 0
 
 
+class AnkleTelemetryCallback(BaseCallback):
+    """Log the ankle-spring study's telemetry as ankle/* so it lands in progress.csv.
+
+    Without this the spec readout exists only inside the info dict and dies with the rollout, which
+    would make half the study unanswerable after the fact: if the active arm wins, the peak torque /
+    speed / power it actually used IS the motor spec being asked for, and it has to survive to the
+    CSV to be read off. Peaks are MAXed (a spec is a worst case, not an average) while the duty-cycle
+    and utilization fractions are MEANed (those are exactly averages)."""
+    PEAK = ("ankle_motor_trq", "ankle_motor_w", "ankle_motor_power", "ankle_spring_trq",
+            "ankle_spring_energy", "ankle_defl")
+    MEAN = ("ankle_motor_over_cont", "ankle_motor_util")
+
+    def __init__(self):
+        super().__init__()
+        self._peak, self._sum, self._n = {}, {}, 0
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            if "ankle_defl" not in info:
+                continue
+            for k in self.PEAK:
+                if k in info:
+                    self._peak[k] = max(self._peak.get(k, 0.0), float(info[k]))
+            for k in self.MEAN:
+                if k in info:
+                    self._sum[k] = self._sum.get(k, 0.0) + float(info[k])
+            self._n += 1
+        return True
+
+    def _on_rollout_end(self) -> None:
+        for k, v in self._peak.items():
+            self.logger.record(f"ankle/{k}_peak", v)
+        if self._n:
+            for k, s in self._sum.items():
+                self.logger.record(f"ankle/{k}", s / self._n)
+        self._peak, self._sum, self._n = {}, {}, 0
+
+
 class RampCallback(BaseCallback):
     """Generic linear curriculum ramp start -> target over `warmup` timesteps, pushed into every
     worker env via env_method (DummyVecEnv and SubprocVecEnv alike) and persisted to
@@ -637,6 +675,7 @@ def main():
         CheckpointCallback(save_freq=max(1_000_000 // n_envs, 1), save_path=str(run),
                            name_prefix="ppo", save_vecnormalize=True),
         RewardTermCallback(),
+        AnkleTelemetryCallback(),
         EntropyCallback(cfg, run_dir=run),
         PlotCallback(run, every_steps=500_000),
     ]

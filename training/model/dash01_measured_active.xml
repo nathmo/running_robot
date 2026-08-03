@@ -64,8 +64,7 @@
             <geom name="LegLeftNCS-v1_geom" type="mesh" mesh="LegLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
             <inertial mass="0.573" pos="-0.24518356685145476 -0.00017709874116033454 0.000420485236984125" fullinertia="9.08704862e-05 0.0146967658 0.0146222985 1.22532825e-05 -4.4836015e-05 1.40296465e-06" />
             <body name="FootLeftNCS-v1" pos="-0.5000000000000007 -0.0015999999999976567 9.201528428093297e-15" euler="-2.231028885975213e-15 5.551115123125783e-17 -3.8456969129524326e-30">
-              <body name="motor_ankle_L" pos="0 0 0"><inertial pos="0 0 0" mass="0.75" diaginertia="0.001 0.001 0.001"/></body>
-              <joint name="LegLeftNCS-v1_RÃ©volution-9" type="hinge" axis="1.4729443511407235e-15 -1.0 -6.650599895248049e-16" pos="-8.679350578343133e-08 -0.004700000008616256 -2.293391507246932e-07" damping="0.3" armature="0.046" limited="true" range="-1.047 1.047" stiffness="28.65" springref="-0.7" />
+              <joint name="LegLeftNCS-v1_RÃ©volution-9" type="hinge" axis="1.4729443511407235e-15 -1.0 -6.650599895248049e-16" pos="-8.679350578343133e-08 -0.004700000008616256 -2.293391507246932e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="-0.7" />
               <geom name="FootLeftNCS-v1_geom" type="mesh" mesh="FootLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
               <inertial mass="0.222" pos="-0.004826310056437695 0.000377045846251916 -0.10466467671885393" fullinertia="0.00254888344 0.00254345046 5.54919617e-05 1.54171857e-06 0.00014412983 -1.30987407e-05" />
               <geom name="foot_L_col" class="collision" type="sphere" size="0.025" pos="-3.74889e-10 1.77817e-11 -0.3115" />
@@ -105,8 +104,7 @@
             <geom name="LegRightNCS-v1_geom" type="mesh" mesh="LegRightNCS-v1" pos="0 0 0" euler="0 0 0" />
             <inertial mass="0.573" pos="-0.24462818745306347 4.3409556023459375e-05 0.00042237404783052046" fullinertia="9.10119227e-05 0.0146476144 0.0145729834 -1.24086835e-05 -4.46829026e-05 -1.43572174e-06" />
             <body name="FootRightNCS-v1" pos="-0.4999999999999763 3.161915174132446e-15 -7.862155371185508e-14" euler="-8.292000563311185e-16 0.0023217002353604597 -1.6375833748463927e-15">
-              <body name="motor_ankle_R" pos="0 0 0"><inertial pos="0 0 0" mass="0.75" diaginertia="0.001 0.001 0.001"/></body>
-              <joint name="LegRightNCS-v1_RÃ©volution-10" type="hinge" axis="2.2644132062488165e-07 1.0000002844449258 1.4601449516496445e-07" pos="3.4514539044840315e-07 0.004700248978108805 -2.0422932496191323e-07" damping="0.3" armature="0.046" limited="true" range="-1.047 1.047" stiffness="28.65" springref="0.7" />
+              <joint name="LegRightNCS-v1_RÃ©volution-10" type="hinge" axis="2.2644132062488165e-07 1.0000002844449258 1.4601449516496445e-07" pos="3.4514539044840315e-07 0.004700248978108805 -2.0422932496191323e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="0.7" />
               <geom name="FootRightNCS-v1_geom" type="mesh" mesh="FootRightNCS-v1" pos="0 0 0" euler="0 0 0" />
               <inertial mass="0.222" pos="-0.00495501786349592 -0.0002889852253573598 -0.10446233298751854" fullinertia="0.0025505821 0.00254513751 5.55102195e-05 -1.52328442e-06 0.000145179859 1.23587927e-05" />
               <geom name="foot_R_col" class="collision" type="sphere" size="0.025" pos="1.99588e-10 1.05647e-11 -0.3115" />
@@ -149,8 +147,8 @@
     <position name="hip_roll_R" joint="bodyNCS-v1_RÃ©volution-2" kp="120" kv="4.0" forcerange="-72 72" ctrlrange="-0.785 0.785" />
     <position name="cam_R" joint="HipRightNCS-v1_RÃ©volution-4" kp="200" kv="5.0" forcerange="-170 170" ctrlrange="-1.5 1.5" />
     <position name="thigh_R" joint="HipRightNCS-v1_RÃ©volution-6" kp="200" kv="5.0" forcerange="-170 170" ctrlrange="-1.047 1.047" />
-    <position name="ankle_L" joint="LegLeftNCS-v1_RÃ©volution-9" kp="120" kv="4" forcerange="-72 72" ctrlrange="-1.047 1.047" />
-    <position name="ankle_R" joint="LegRightNCS-v1_RÃ©volution-10" kp="120" kv="4" forcerange="-72 72" ctrlrange="-1.047 1.047" />
+    <position name="ankle_L" joint="LegLeftNCS-v1_RÃ©volution-9" kp="200" kv="5" forcerange="-170 170" ctrlrange="-1.047 1.047" />
+    <position name="ankle_R" joint="LegRightNCS-v1_RÃ©volution-10" kp="200" kv="5" forcerange="-170 170" ctrlrange="-1.047 1.047" />
   </actuator>
   <sensor>
     <accelerometer name="imu_acc" site="imu" />
@@ -176,6 +174,6 @@
     <actuatorfrc name="thigh_R_frc" actuator="thigh_R" />
   </sensor>
   <keyframe>
-    <key name="stand" qpos="0 0 1.00292 0 0 0 0.000531865 -0.0114808 -0.123626 0.145639 0.28949 -0.176695 -0.000216085 0.0112621 -0.123669 -0.145175 -0.282199 0.178907" ctrl="0 0 0.12 0 0 -0.12 -0.201849 0.205416" />
+    <key name="stand" qpos="0 0 1.00849 0 0 0 0.000300059 -0.0220413 -0.128252 0.133279 0.236513 -0.19158 -0.000323242 0.0224172 -0.128729 -0.132606 -0.228884 0.19482" ctrl="0 0 0.12 0 0 -0.12 -0.201849 0.205416" />
   </keyframe>
 </mujoco>

@@ -121,6 +121,39 @@ def main():
                  "monotone/edge -> no interior optimum in the swept range; extend the grid")
         print(f"  passive curve peaks at k={passive[i]['k']:g} ({shape})")
 
+    # ---- the motor SPEC, for whichever arms actually had a motor ------------------------------
+    # Half the point of the study: if an actuated ankle wins, what performance does it need? These
+    # come from ankle/* in progress.csv (AnkleTelemetryCallback), peaks over the run.
+    spec_arms = [a for a in ("active", "active_k350", "active_freeenergy") if a in data]
+    if spec_arms:
+        print("\nankle motor demand (peak over training — this is the SPEC if active wins):")
+        print(f"  {'arm':13s} {'torque N*m':>11s} {'speed rad/s':>12s} {'power W':>9s} "
+              f"{'>cont %':>8s} {'util':>6s}")
+        for a in spec_arms:
+            g = lambda col: np.nanmax([at_step(p, col, step)          # noqa: E731 - local shorthand
+                                       for p in data[a].values()])
+            print(f"  {a:13s} {g('ankle/ankle_motor_trq_peak'):11.1f} "
+                  f"{g('ankle/ankle_motor_w_peak'):12.1f} "
+                  f"{g('ankle/ankle_motor_power_peak'):9.1f} "
+                  f"{100*g('ankle/ankle_motor_over_cont'):8.1f} "
+                  f"{g('ankle/ankle_motor_util'):6.2f}")
+        print("  (util ~1.0 means the torque-speed curve, not the policy, is the binding limit;\n"
+              "   >cont % is time above the 55 N*m continuous rating — the thermal question)")
+
+    # ---- and the SPRING demand, which decides whether a winning k is buildable ------------------
+    if passive:
+        print("\npassive spring demand (peak over training — can the part survive it?):")
+        print(f"  {'k':>8s} {'torque N*m':>11s} {'energy J':>9s} {'defl rad':>9s}")
+        for r in passive:
+            seeds = data[r["arm"]]
+            g = lambda col: np.nanmax([at_step(p, col, step)          # noqa: E731 - local shorthand
+                                       for p in seeds.values()])
+            print(f"  {r['k']:8g} {g('ankle/ankle_spring_trq_peak'):11.1f} "
+                  f"{g('ankle/ankle_spring_energy_peak'):9.2f} "
+                  f"{g('ankle/ankle_defl_peak'):9.3f}")
+        print("  (the real spring today is k=28.65 with a 2.27 N*m preload — compare against that\n"
+              "   before treating a high-k winner as a drop-in change)")
+
     # ---- plot ---------------------------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(9, 5.5))
     if passive:
