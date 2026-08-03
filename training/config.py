@@ -165,6 +165,13 @@ class Config:
     # stays byte-identical. dr_enable=False makes the whole module inert -> every pre-existing
     # preset trains exactly as before.
     dr_enable: bool = False
+    # Competence-gated ramp on the WIDTH of every dr_* range (0 -> full). 0 steps = no ramp, full
+    # width from the first episode (the legacy behaviour, and what teleop v1..v3 all did). That was
+    # a mistake: ablating teleop_v3 showed DR alone cost 20x MTBF (196 s clean -> 4.8 s), far more
+    # than trips (1.8x), sensor noise (1.5x) or pushes (1.0x, no measurable effect), and it was the
+    # only adversity applied at full strength from step 0. Uses the same gate + retreat as the gait
+    # ramps, so an over-wide plant distribution walks itself back instead of pinning the policy.
+    dr_curriculum_steps: int = 0
     dr_mass_global: float = 0.12        # whole-robot mass scale (build + payload tolerance)
     dr_mass_body: float = 0.15          # per-link mass jitter (CAD vs as-built)
     dr_inertia: float = 0.25            # per-link inertia jitter ON TOP of the mass scaling. Wide
@@ -289,6 +296,37 @@ class Config:
     ankle_stiffness: float = 0.0        # N*m/rad on the passive ankle springs (0 = keep model 28.65)
     ankle_damping: float = 0.0          # N*m*s/rad ankle joint damping (0 = keep model 0.3); raise
     #                                     with stiffness to keep the stiffer spring ~critically damped
+    # ----- ankle-spring STUDY (2026-08-03) ------------------------------------------------------
+    # The 2026-07-24 sweep only ever compared SOFTER-vs-STIFFER passive springs, warm-started, one
+    # seed, and (as m7 later found) under-damped throughout -- so it never answered whether the
+    # spring is needed at all, whether an ACTUATED ankle would beat it, or where the optimum sits.
+    # This axis makes the plant's ankle a first-class experimental variable:
+    #   "passive"      k = ankle_stiffness (or the model's 28.65 when 0). The status quo.
+    #   "free"         k = 0 EXACTLY -- a floppy, undriven ankle. The null that ankle_stiffness
+    #                  alone cannot express, because 0 there means "keep the model value".
+    #   "rigid"        ankle welded at its stance angle via the lock_ankle_L/R equalities. The
+    #                  other null: no compliance, no actuation, just a stiff foot.
+    #   "active"       policy-driven ankle servo, NO spring (k=0). Needs the +2-actuator plant
+    #                  (model/dash01_measured_active.xml) -- action/obs widen, own lineage.
+    #   "active_spring" policy-driven ankle servo IN PARALLEL with the spring (parallel-elastic).
+    # NOTE "rigid" needs the lock_ankle equalities and the active modes need the 8-actuator model;
+    # env.py raises if model_path lacks them, rather than silently running the wrong arm.
+    ankle_mode: str = "passive"
+    # Damping as a DAMPING RATIO instead of an absolute number. The 2026-07-24 sweep hand-picked
+    # ankle_damping per arm (1.6 at k=350 = ~9% of critical) and the resulting spring ring became
+    # the m7 6 Hz cadence bug -- i.e. the k-curve was measured with damping varying independently
+    # of k, confounding the very thing being swept. With ankle_zeta > 0 the env computes
+    # damping = 2*zeta*sqrt(k*I) from the ankle's EFFECTIVE inertia, so every k in the sweep sits
+    # at the same point on the damping curve and k is the only thing that changes. Overrides
+    # ankle_damping. 1.0 = critical; 0.7 is the usual "fast without ringing" choice.
+    ankle_zeta: float = 0.0
+    # Active-ankle command range, rad about the settled stance angle. The servo's ctrlrange is the
+    # joint's full +-1.047, but handing the policy the whole range makes early exploration slam the
+    # foot; this scales the action into a sane authority band, mirroring residual_scale.
+    ankle_action_scale: float = 0.5
+    # Bill the ankle motors in the torque/energy penalty like any other actuator. Off would let the
+    # active arm buy stability with unpriced energy and win the comparison for the wrong reason.
+    ankle_torque_billed: bool = True
     # ----- action mode: which gait generator turns the action into PD targets ---------------
     # "fourier" = fourier_gait.py (the m1..m7 lineage). "cpg" = cpg_gait.py, the Ijspeert-school
     # alternative: two coupled amplitude-controlled phase oscillators whose parameters (amplitude,
@@ -425,6 +463,19 @@ class Config:
     w_duty_sym: float = 0.0             # penalty weight per unit of summed per-foot duty deficit
     duty_floor: float = 0.30           # min per-foot grounded-fraction (duty) before the penalty bites
     duty_sym_tau_s: float = 1.0        # EMA time constant (s) for the per-foot duty estimate
+    # workspace-KILL termination (2026-08-04): the one-legged gait parks a leg FOLDED, with the toe
+    # OUTSIDE the measured real-robot foot workspace (visible in the slow_gait videos) — a sim-only
+    # exploit the physical 4-bar cannot do. Terminate the episode (fall_penalty) when either foot's
+    # toe leaves the measured reachable box, sustained for workspace_grace_s. The box is in the BASE
+    # frame relative to the LUT nominal_toe (cpg_foot_lut.npz): dx = fore-aft toe travel, dz = lift
+    # (dz>0 = foot up / shorter leg). Measured envelope is dx +-0.30 m, dz 0..0.10 m (folded branch
+    # past dz>0.40). Unlike the soft duty/cadence penalties this makes the exploit IMPOSSIBLE rather
+    # than merely taxed. 0/False = off (byte-identical to every existing preset).
+    workspace_kill: bool = False
+    workspace_dx_max: float = 0.34      # fore-aft toe travel ceiling (m); measured box 0.30 + margin
+    workspace_dz_max: float = 0.14      # lift ceiling (m); measured box 0.10, fold at 0.40
+    workspace_dz_min: float = -0.18     # extension floor (m); generous, don't kill push-off
+    workspace_grace_s: float = 0.10     # a foot must be outside continuously this long to terminate
 
     # ----- reward: phase-gated contact schedule (Siekmann-style; NEW) -----
     # The gait clock the ACTION uses is also the reward's contact schedule: each foot pays for
@@ -1208,6 +1259,21 @@ PRESETS.update({
         curriculum_retreat_frac=0.7,
         stance_ratio_final=0.62,
         efficiency_target=0.35),
+    # v4 (2026-08-03): v3's retreat fix worked — no collapse, reward held ~500 to the end instead of
+    # falling to 26 — but on a FIXED eval task v1/v2/v3 were indistinguishable (MTBF 9.6-11.2 s over
+    # 20 seeded episodes). v3 only scored better because the retreat correctly kept it at an easier
+    # curriculum point; it never got harder, so it never got better. Ablation found why nothing could
+    # progress: the plant randomization alone costs 20x MTBF (196 s clean -> 4.8 s full DR), while
+    # trips cost 1.8x, sensor noise 1.5x and pushes nothing measurable. Every other adversity was
+    # ramped; DR was not, so the policy spent every run pinned just under the competence gate.
+    # v4 = v3 + a gated, retreating ramp on the DR width. Everything else identical.
+    "teleop_v4": lambda: _teleop(
+        dr_loop_site=0.0015,
+        curriculum_retreat_frac=0.7,
+        stance_ratio_final=0.62,
+        efficiency_target=0.35,
+        dr_curriculum_steps=120_000_000,
+        push_dv=0.6),                  # pushes at 0.35 had no measurable effect; make them real
     # Wider randomization, for the robustness-vs-performance ablation the eval grid scores.
     "teleop_hard": lambda: _teleop(
         dr_mass_global=0.20, dr_mass_body=0.25, dr_inertia=0.40, dr_com_offset=0.03,
@@ -1273,6 +1339,113 @@ def _mk_sym(m):
 
 
 PRESETS.update({f"{m}_sym_gait": _mk_sym(m) for m in LOCKS})
+
+
+# ================================================================================================
+# ANKLE-SPRING STUDY (2026-08-03) -- is the passive foot spring useful, must it be actuated, and
+# is there an optimal stiffness?
+# ================================================================================================
+# What the record actually contained before this, and why none of it answers the question:
+#   * 2026-07-24 swept ankle_stiffness 90/200/350/550/750 and found a threshold at k>=350. But it
+#     was ONE seed, WARM-STARTED from a policy trained on the soft spring, and -- as m7 later
+#     discovered -- under-damped at every point, because ankle_damping was hand-picked per arm
+#     instead of tracking k. So the sweep varied two things at once and never located an optimum;
+#     it only showed ">=350 beats <=200".
+#   * The only "actuated ankle" ever tested was a FIXED, phase-blind PD on base pitch (ankle_kp/kd).
+#     Strong destabilized the gait (ep_len 28), gentle was marginal (284 vs 212). A policy-controlled
+#     ankle was recommended twice and never built -- it needed a hardware decision from the user.
+#   * k=0 was never runnable at all: ankle_stiffness=0 means "keep the model's 28.65".
+#
+# So the study is 11 arms on ONE fixed control stack (_SYM_PLANT: the current best -- Fourier
+# generator, (0.5,4.0) freq map, contact-switch 0.20, duty-symmetry 8.0), COLD-started, 3 seeds:
+#
+#   rigid              ankle welded             -- null: is compliance worth anything?
+#   free               k=0, floppy              -- null: is it the SPRING or just the joint?
+#   k29 .. k1100       7-point passive sweep    -- where is the optimum, if there is one?
+#   active             servo, no spring         -- would an actuated angle have been better?
+#   active_k350        servo + spring, parallel  -- or is parallel-elastic the real answer?
+#
+# Three things make it a fair test, all of which the 2026-07-24 sweep lacked:
+#   1. ankle_zeta=0.7 -- damping is DERIVED from k against the measured stance inertia, so every
+#      arm sits at the same damping ratio and k is genuinely the only variable. (Measured: the
+#      ankle's stance inertia is 0.316 kg*m^2, 53x its swing inertia. That is why the old fixed
+#      ankle_damping=1.6 was ~7.6% of critical at k=350 and rang at 5.3 Hz -- the m7 6 Hz footfall,
+#      re-derived from the plant instead of from a training curve.)
+#   2. The MEASURED-MASS plant (dash01_measured.xml, 15.14 kg vs the CAD placeholder's 12.83, with
+#      a 2.6x heavier shin). The spring's job is distal energy storage, so getting distal mass
+#      wrong would answer the question about a robot that does not exist.
+#   3. The active arms carry their motors' real mass (0.75 kg AK60-39 per side, welded AT the
+#      ankle) and their torque is billed in the efficiency reward, so "active" cannot win on free
+#      energy or free mass.
+_STUDY_PLANT = {k: v for k, v in _SYM_PLANT.items()
+                if k not in ("ankle_stiffness", "ankle_damping")}   # the study sets these per arm
+_STUDY_PLANT.update(
+    model_path="model/dash01_measured.xml",
+    ankle_zeta=0.7,          # derived damping; overrides ankle_damping. See _setup_ankle.
+)
+_ACTIVE_MODEL = "model/dash01_measured_active.xml"
+
+# The passive stiffness grid, log-spaced so an optimum shows up as a peak rather than a plateau
+# edge. k=28.65 is the real spring the robot has today; 350 is the 2026-07-24 winner, kept as the
+# anchor that lets this study be compared against the old one; 1100 extends past it because that
+# sweep never established an upper bound (750 was still climbing when it was cut).
+STUDY_K = (28.65, 90.0, 200.0, 350.0, 550.0, 750.0, 1100.0)
+
+STUDY_ARMS = {
+    "rigid": dict(ankle_mode="rigid"),
+    "free":  dict(ankle_mode="free"),
+    **{f"k{k:g}".replace(".", "_"): dict(ankle_mode="passive", ankle_stiffness=k)
+       for k in STUDY_K},
+    "active":     dict(ankle_mode="active", model_path=_ACTIVE_MODEL),
+    "active_k350": dict(ankle_mode="active_spring", ankle_stiffness=350.0,
+                        model_path=_ACTIVE_MODEL),
+}
+
+
+def _study(m, arm, **kw):
+    """One study arm at milestone m. Everything except the ankle is _SYM_PLANT, identical in every
+    arm -- that is the whole point, so any difference in the result is attributable to the ankle."""
+    if arm not in STUDY_ARMS:
+        raise KeyError(f"unknown study arm {arm!r}; have {sorted(STUDY_ARMS)}")
+    return _react(m, **{**_STUDY_PLANT, **STUDY_ARMS[arm], **kw})
+
+
+# m3 (pitch free) is where the ankle decides the outcome -- it is the rung the whole k=350 result
+# came from, and the cheapest rung that is still sensitive. m6 (fully free) re-runs only the top
+# arms, to check the ranking survives on the real 6-DOF plant.
+PRESETS.update({f"study_m3_{a}": (lambda a=a: _study("m3", a)) for a in STUDY_ARMS})
+PRESETS.update({f"study_m6_{a}": (lambda a=a: _study("m6", a)) for a in STUDY_ARMS})
+
+# Control arm: the 2026-07-24 winner on the OLD placeholder-mass plant. Not part of the sweep --
+# it exists to measure how much the mass correction alone moved the answer, i.e. whether any of the
+# pre-2026-08 results transfer to the real robot at all.
+PRESETS["study_m3_k350_oldmass"] = lambda: _react(
+    "m3", **{**_STUDY_PLANT, **STUDY_ARMS["k350"], "model_path": "model/dash01.xml"})
+
+# Sensitivity check, run ONLY if the active arm loses: does it still lose when its energy is free?
+# If yes, active is dead on the merits; if no, active is dead on its energy budget, which is a
+# different (and more fixable) conclusion.
+PRESETS["study_m3_active_freeenergy"] = lambda: _study("m3", "active", ankle_torque_billed=False)
+
+
+# ----- mX_wskill_gait: hard workspace-kill on top of sym (2026-08-04) ----------------------------
+# The one-legged gait parks a leg FOLDED with the toe OUTSIDE the measured real-robot foot workspace
+# (a sim-only exploit, visible in the slow_gait videos). sym_gait only TAXED one-leggedness (duty
+# term) and still lost at the DOF releases (m4/m5/m6_sym collapsed to ep_len ~230). This makes the
+# exploit IMPOSSIBLE: `workspace_kill` terminates the episode (fall_penalty) the moment a foot leaves
+# the measured reachable box. Recipe = the sym plant (duty term kept as belt-and-suspenders) + the
+# kill. Meant to be WARM-STARTED from m3_sym (already two-legged, so the kill barely bites) up the
+# m4->m6 ladder that collapsed — the test of whether removing the one-legged crutch lets the
+# lateral/roll/yaw releases finally survive. Same obs/action dims, so it warm-chains from m3_sym.
+_WSKILL_PLANT = dict(_SYM_PLANT)
+_WSKILL_PLANT.update(workspace_kill=True)
+
+
+def _mk_wskill(m):
+    return lambda: _react(m, **_WSKILL_PLANT)
+
+
+PRESETS.update({f"{m}_wskill_gait": _mk_wskill(m) for m in LOCKS})
 
 
 def get_config(name: str = "default") -> Config:

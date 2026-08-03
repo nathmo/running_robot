@@ -694,6 +694,12 @@ def main():
     # stop when well-saturated. Persists its scale + can auto-terminate the run.
     if cfg.torque_util_target > 0:
         cb_list.append(TorqueCurriculumCallback(cfg, run))
+    # domain-randomization curriculum: widen the PLANT distribution only while the policy can still
+    # stand up in it. Same gate + retreat as the gait ramps.
+    if cfg.dr_enable and cfg.dr_curriculum_steps > 0:
+        cb_list.append(GatedRampCallback("dr_scale", "set_dr_scale", 0.0, 1.0,
+                                         cfg.dr_curriculum_steps, run,
+                                         cfg.curriculum_gate_ep_len, retreat_frac=rf))
     # joystick command-range curriculum: widen the commandable box only while the policy tracks
     # the top of it. Persists the resolved m/s box for teleop/eval to map the stick onto.
     if cfg.objective == "command":

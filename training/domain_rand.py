@@ -74,6 +74,22 @@ class PlantRandomizer:
         # the standing pose the ankle preload is defined at (set by the env)
         self.stand_qpos = None
         self.last = {}          # the draw actually applied, for logging / eval reporting
+        # 0..1 curriculum on the WIDTH of every range below (env.set_dr_scale). Ablation on the
+        # v3 policy: with DR off it survives 196 s and never falls; with full-width DR it survives
+        # 4.8 s. Randomization was ~20x more destructive than pushes, trips and sensor noise
+        # COMBINED, and it was applied at full width from step 0 while everything else got a
+        # curriculum. 1.0 = the configured ranges (and the default, so nothing changes unless a
+        # preset asks for the ramp).
+        self.scale = 1.0
+
+    def _rel(self, r):
+        """A relative range, narrowed by the curriculum scale."""
+        return r * self.scale
+
+    def _abs_range(self, lo_hi):
+        """An absolute (lo, hi) range, contracted toward its nominal midpoint 1.0 by the scale."""
+        lo, hi = lo_hi
+        return 1.0 + (lo - 1.0) * self.scale, 1.0 + (hi - 1.0) * self.scale
 
     def resample(self, model, rng):
         """Draw a fresh plant and write it into `model`. Returns the per-episode dict, which also
@@ -88,44 +104,46 @@ class PlantRandomizer:
 
         # ---- mass / inertia / CoM ----------------------------------------------------------
         # global scale (whole-robot build tolerance) x per-body jitter (link-level CAD error).
-        g = _u(rng, c.dr_mass_global)
-        per = _uv(rng, c.dr_mass_body, model.nbody)
+        g = _u(rng, self._rel(c.dr_mass_global))
+        per = _uv(rng, self._rel(c.dr_mass_body), model.nbody)
         m_scale = g * per
         model.body_mass[:] = self.n_mass * m_scale
         # inertia tracks mass, plus an independent shape/placeholder-CAD jitter. This is the axis
         # the speed oracle said dominates, and the one whose CAD values are still placeholders.
-        i_scale = m_scale[:, None] * _uv(rng, c.dr_inertia, model.nbody * 3).reshape(model.nbody, 3)
+        i_scale = m_scale[:, None] * _uv(rng, self._rel(c.dr_inertia),
+                                         model.nbody * 3).reshape(model.nbody, 3)
         model.body_inertia[:] = self.n_inertia * i_scale
         # CoM offset, applied to every body (battery/harness placement, assembly tolerance)
         if c.dr_com_offset > 0:
-            model.body_ipos[:] = self.n_ipos + rng.uniform(
-                -c.dr_com_offset, c.dr_com_offset, (model.nbody, 3))
+            off = self._rel(c.dr_com_offset)
+            model.body_ipos[:] = self.n_ipos + rng.uniform(-off, off, (model.nbody, 3))
+        d["dr_scale"] = self.scale
         d["mass_scale"] = float(g)
         d["total_mass"] = float(model.body_mass.sum())
 
         # ---- contact ------------------------------------------------------------------------
         # sliding friction only (columns 1,2 are torsional/rolling and are already ~0 here).
         if c.dr_friction > 0:
-            f = float(rng.uniform(*c.dr_friction_range))
+            f = float(rng.uniform(*self._abs_range(c.dr_friction_range)))
             model.geom_friction[:, 0] = self.n_friction[:, 0] * (f / max(self.n_friction[:, 0].max(), 1e-9))
             d["friction"] = f
 
         # ---- actuators: servo gains + torque headroom ---------------------------------------
         # MuJoCo <position>: gainprm[0] = kp, biasprm[1] = -kp, biasprm[2] = -kv. kp and kv must be
         # scaled consistently or the servo is not the servo you think it is.
-        kp_s = _uv(rng, c.dr_kp, model.nu)
-        kv_s = _uv(rng, c.dr_kv, model.nu)
+        kp_s = _uv(rng, self._rel(c.dr_kp), model.nu)
+        kv_s = _uv(rng, self._rel(c.dr_kv), model.nu)
         model.actuator_gainprm[:, 0] = self.n_gainprm[:, 0] * kp_s
         model.actuator_biasprm[:, 1] = self.n_biasprm[:, 1] * kp_s
         model.actuator_biasprm[:, 2] = self.n_biasprm[:, 2] * kv_s
         d["kp_scale"] = float(np.mean(kp_s))
         # torque headroom: returned, NOT written — the env combines it with the torque-budget
         # curriculum's own scale so the two never overwrite each other.
-        d["torque_scale"] = _u(rng, c.dr_torque)
+        d["torque_scale"] = _u(rng, self._rel(c.dr_torque))
 
         # ---- joint damping / friction --------------------------------------------------------
         if c.dr_joint_damping > 0 and self._leg_dofs.size:
-            s = _uv(rng, c.dr_joint_damping, self._leg_dofs.size)
+            s = _uv(rng, self._rel(c.dr_joint_damping), self._leg_dofs.size)
             model.dof_damping[self._leg_dofs] = self.n_dof_damping[self._leg_dofs] * s
 
         # ---- the passive ankle spring (preload-preserving, as in env.__init__) ---------------
@@ -133,8 +151,8 @@ class PlantRandomizer:
         # that will not be manufactured to spec. Randomizing it wide is the single highest-value
         # axis in this module.
         if c.dr_ankle_k > 0 and self._ankle_j and self.stand_qpos is not None:
-            ks = _u(rng, c.dr_ankle_k)
-            kd = _u(rng, c.dr_ankle_damping)
+            ks = _u(rng, self._rel(c.dr_ankle_k))
+            kd = _u(rng, self._rel(c.dr_ankle_damping))
             for j in self._ankle_j:
                 qadr = int(self._jnt_qposadr[j])
                 k_old = float(self.n_jnt_stiffness[j])
@@ -162,8 +180,8 @@ class PlantRandomizer:
         # than a constant it can bake in. That is the version that transfers.
         if c.dr_loop_site > 0 and self._loop_sites.size:
             for sid in self._loop_sites:
-                model.site_pos[sid] = self.n_site_pos[sid] + rng.uniform(
-                    -c.dr_loop_site, c.dr_loop_site, 3)
+                j = self._rel(c.dr_loop_site)
+                model.site_pos[sid] = self.n_site_pos[sid] + rng.uniform(-j, j, 3)
             d["loop_site_jitter_mm"] = float(c.dr_loop_site * 1000)
 
         # ---- gravity tilt = the cheap sloped-floor proxy --------------------------------------
@@ -171,7 +189,7 @@ class PlantRandomizer:
         # and costs nothing (no terrain geometry, no contact-model changes). Also absorbs IMU
         # mount misalignment, which is indistinguishable from a slope to the policy.
         if c.dr_gravity_tilt > 0:
-            tilt = np.deg2rad(rng.uniform(0.0, c.dr_gravity_tilt))
+            tilt = np.deg2rad(rng.uniform(0.0, self._rel(c.dr_gravity_tilt)))
             az = rng.uniform(0.0, 2 * np.pi)
             gmag = float(np.linalg.norm(self.n_gravity))
             model.opt.gravity[:] = gmag * np.array([
@@ -181,8 +199,11 @@ class PlantRandomizer:
         # ---- latency ---------------------------------------------------------------------------
         # The fixed 4-step delay was always a guess. Draw it per episode so the policy cannot tune
         # itself to one exact latency.
-        lo, hi = c.dr_delay_steps_range
-        d["action_delay_steps"] = int(rng.integers(lo, hi + 1)) if hi > lo else int(c.action_delay_steps)
+        # delay range contracts toward the nominal delay, not toward 1.0
+        nom = float(c.action_delay_steps)
+        lo = int(round(nom + (c.dr_delay_steps_range[0] - nom) * self.scale))
+        hi = int(round(nom + (c.dr_delay_steps_range[1] - nom) * self.scale))
+        d["action_delay_steps"] = int(rng.integers(lo, hi + 1)) if hi > lo else int(nom)
 
         self.last = d
         return d

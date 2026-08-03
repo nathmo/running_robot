@@ -488,6 +488,25 @@ def test_duty_sym():
           and get_config("m3_sym_gait").w_contact_switch == 0.20)
 
 
+def test_workspace_kill():
+    """The workspace-kill terminates when a foot's toe leaves the measured reachable box (sustained
+    for the grace window); off by default and never fires at the stand pose."""
+    print("workspace-kill termination:")
+    env = DashEnv(get_config("m3_wskill_gait"))
+    env.reset(seed=0)
+    check("kill on + LUT nominal loaded", env.cfg.workspace_kill and env._ws_ref is not None)
+    check("stand pose in-box -> no fire", not any(env._workspace_violation() for _ in range(60)))
+    env._ws_out_t[:] = 0.0
+    env._ws_ref = env._ws_ref + np.array([0.0, 0.0, 1.0])   # shift nominal 1 m -> foot reads OOB
+    n = int(round(env.cfg.workspace_grace_s / env.control_dt))
+    res = [env._workspace_violation() for _ in range(n + 4)]
+    fire = res.index(True) if True in res else None
+    check("OOB fires after ~grace", fire is not None and fire >= n - 1, str(fire))
+    env2 = DashEnv(get_config("m3_sym_gait"))               # kill off
+    env2.reset(seed=0)
+    check("kill off -> ref None + no fire", env2._ws_ref is None and not env2._workspace_violation())
+
+
 def test_torque_curriculum():
     """m7 torque-budget curriculum: freq remap, set_torque_limit scales forcerange (floor-clamped),
     torque_util reported in info; m7_freq isolates the freq fix (no curriculum)."""
@@ -733,6 +752,110 @@ def test_cpg_gait():
           e2.action_dim == cpg_gait.spec_dim(0), f"{e2.action_dim}")
 
 
+def test_ankle_study():
+    """Ankle-spring study: every arm must build, roll finite, and actually BE the arm it claims.
+
+    The failure this guards against is not a crash — it is an arm that trains for 400 M steps
+    while silently being a different arm (a 'rigid' run whose ankle still swings, an 'active' run
+    with no ankle actuator, a k-sweep whose damping does not track k). That produces a clean,
+    plausible, wrong curve, and nothing downstream would catch it."""
+    print("ankle-spring study:")
+    import os
+    M = "model/dash01_measured.xml"
+    MA = "model/dash01_measured_active.xml"
+    have = all(os.path.exists(PKG_DIR / p) for p in (M, MA))
+    if not have:
+        check("study plants present", False, "run `python -m model.make_ankle_variants`")
+        return
+
+    # measured masses actually landed (15.14 kg, not the 12.83 kg CAD placeholder)
+    e = DashEnv(Config(model_path=M, ankle_mode="passive"))
+    check("measured-mass plant", abs(float(e.model.body_subtreemass[1]) - 15.136) < 0.01,
+          f"{float(e.model.body_subtreemass[1]):.3f} kg")
+
+    # each mode is what it says it is
+    modes = {}
+    for tag, kw in (("passive", dict(model_path=M, ankle_mode="passive")),
+                    ("free", dict(model_path=M, ankle_mode="free")),
+                    ("rigid", dict(model_path=M, ankle_mode="rigid")),
+                    ("active", dict(model_path=MA, ankle_mode="active")),
+                    ("active_spring", dict(model_path=MA, ankle_mode="active_spring",
+                                           ankle_stiffness=350.0, ankle_zeta=0.7))):
+        env = DashEnv(Config(**kw))
+        o, _ = env.reset(seed=0)
+        for _ in range(40):
+            o, _, term, trunc, info = env.step(np.zeros(env.action_dim, np.float32))
+            if term or trunc:
+                break
+        modes[tag] = (env, o, info)
+        check(f"{tag} rolls finite", bool(np.isfinite(o).all()))
+
+    check("free has NO spring", modes["free"][0].ankle_k == 0.0)
+    # rigid: the welded ankle must not drift over a rollout (a soft equality that quietly gives way
+    # would make "rigid" a mislabelled compliant arm)
+    renv = modes["rigid"][0]
+    renv.reset(seed=1)
+    qs = float(renv.data.qpos[renv._ankle_qpos[0]])
+    for _ in range(60):
+        renv.step(np.zeros(renv.action_dim, np.float32))
+    check("rigid ankle stays welded",
+          abs(float(renv.data.qpos[renv._ankle_qpos[0]]) - qs) < 5e-3,
+          f"drifted {float(renv.data.qpos[renv._ankle_qpos[0]]) - qs:+.4f} rad from {qs:+.4f}")
+    check("free ankle DOES move (the null is a real null)",
+          abs(modes["free"][2]["ankle_defl"]) > 0.05, f"{modes['free'][2]['ankle_defl']:.4f}")
+
+    # active plant: 2 extra actuators, 2 extra action dims, wider obs, telemetry present
+    aenv, ao, ainfo = modes["active"]
+    penv, po, _ = modes["passive"]
+    check("active plant has 2 ankle actuators", aenv.n_ankle_act == 2, f"{aenv.n_ankle_act}")
+    check("active action is +2 dims", aenv.action_dim == penv.action_dim + 2)
+    check("active obs is wider", ao.shape[0] > po.shape[0])
+    check("active motor telemetry", "ankle_motor_trq" in ainfo and "ankle_motor_util" in ainfo)
+    check("ankle motors carry mass",
+          float(aenv.model.body_subtreemass[1]) > float(penv.model.body_subtreemass[1]) + 1.4,
+          f"{float(aenv.model.body_subtreemass[1]):.3f} vs {float(penv.model.body_subtreemass[1]):.3f}")
+
+    # mode/plant mismatch must FAIL LOUDLY, not run the wrong arm
+    for kw, why in ((dict(model_path=M, ankle_mode="active"), "active on the 6-actuator plant"),
+                    (dict(model_path=MA, ankle_mode="passive"), "passive on the ankle-motor plant"),
+                    (dict(model_path=M, ankle_mode="nonsense"), "unknown ankle_mode")):
+        try:
+            DashEnv(Config(**kw))
+            check(f"rejects {why}", False)
+        except (ValueError, KeyError):
+            check(f"rejects {why}", True)
+
+    # zeta ties damping to k: b must scale as sqrt(k), so b(4k) == 2*b(k)
+    b = {}
+    for k in (100.0, 400.0):
+        env = DashEnv(Config(model_path=M, ankle_mode="passive",
+                             ankle_stiffness=k, ankle_zeta=0.7))
+        b[k] = env.ankle_b
+    # Not exactly 2.0: the inertia is MEASURED by impulse response in a sim where the spring is
+    # live, so a stiffer spring perturbs its own measurement slightly (~1% over a 4x k range).
+    # That residual k-dependence is far smaller than the confound it replaces — the old sweep had
+    # damping varying by 6x independently of k — so tolerate it rather than model it away.
+    check("zeta damping scales as sqrt(k)", abs(b[400.0] / b[100.0] - 2.0) < 0.05,
+          f"b(100)={b[100.0]:.3f} b(400)={b[400.0]:.3f} ratio={b[400.0]/b[100.0]:.3f}")
+    # and it must be sized off the STANCE inertia, not the foot's swing inertia — the m7 bug.
+    # At k=350 the stance-critical damping is ~21, so zeta=0.7 must land near 15, not near 2.
+    env = DashEnv(Config(model_path=M, ankle_mode="passive",
+                         ankle_stiffness=350.0, ankle_zeta=0.7))
+    check("zeta uses STANCE inertia (not swing)", 10.0 < env.ankle_b < 20.0,
+          f"b={env.ankle_b:.3f} (swing-inertia sizing would give ~2.0)")
+
+    # every study preset builds
+    study = [n for n in PRESETS if n.startswith("study_")]
+    check("study presets exist", len(study) >= 22, f"{len(study)}")
+    bad = []
+    for n in study:
+        try:
+            PRESETS[n]()
+        except Exception as exc:                       # noqa: BLE001 - report, don't abort
+            bad.append(f"{n}: {exc}")
+    check("all study presets build", not bad, "; ".join(bad[:3]))
+
+
 if __name__ == "__main__":
     test_fourier_gait()
     test_cpg_gait()
@@ -749,11 +872,13 @@ if __name__ == "__main__":
     test_motor_limits()
     test_contact_switch()
     test_duty_sym()
+    test_workspace_kill()
     test_torque_curriculum()
     test_hz200_timing()
     test_angmom_term()
     test_rejuvenate_obs_rms()
     test_curriculum_setters()
     test_m1_rail()
+    test_ankle_study()
     print(f"\n{'ALL OK' if FAIL == 0 else f'{FAIL} FAILURES'}")
     sys.exit(1 if FAIL else 0)

@@ -135,6 +135,11 @@ class DashEnv(gym.Env):
         self._grounded_prev = np.zeros(2, bool)
         self._prev_toe_xy = np.zeros((2, 2))
         self._duty_ema = np.full(2, 0.5, np.float64)  # per-foot grounded-fraction EMA (duty_sym term)
+        self._ws_out_t = np.zeros(2)                  # per-foot continuous time outside the workspace
+        self._ws_ref = None                           # LUT nominal_toe (base frame) for workspace-kill
+        if self.cfg.workspace_kill:
+            _lut = np.load(str(PKG_DIR / "model" / "cpg_foot_lut.npz"), allow_pickle=True)
+            self._ws_ref = np.asarray(_lut["nominal_toe"], float)
         self._push_countdown = 0
 
         # nominal standing pose / targets from the keyframe
@@ -155,18 +160,7 @@ class DashEnv(gym.Env):
         # and topple the robot -> also shift springref (model.qpos_spring) to PRESERVE the standing
         # preload k*(q_stand - ref), leaving posture unchanged while only the restoring gain rises.
         # Applied before _stand_torque below so the holding-torque baseline reflects the new spring.
-        if self.cfg.ankle_stiffness > 0.0:
-            k_new = float(self.cfg.ankle_stiffness)
-            for j in _ankle_j:
-                qadr = int(self.model.jnt_qposadr[j])
-                k_old = float(self.model.jnt_stiffness[j])
-                ref_old = float(self.model.qpos_spring[qadr])
-                q_stand = float(self.default_qpos[qadr])
-                self.model.qpos_spring[qadr] = q_stand - (k_old / k_new) * (q_stand - ref_old)
-                self.model.jnt_stiffness[j] = k_new
-        if self.cfg.ankle_damping > 0.0:
-            for j in _ankle_j:
-                self.model.dof_damping[int(self.model.jnt_dofadr[j])] = float(self.cfg.ankle_damping)
+        self._setup_ankle(_ankle_j)
         # standing-baseline holding torque: the torque penalty prices torque ABOVE this, so
         # single-support stance isn't taxed into being strictly worse than double-support skating.
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.key_id)
@@ -199,11 +193,20 @@ class DashEnv(gym.Env):
             self.spec_dim = fourier_gait.spec_dim(self.cfg.n_harmonics, self.n_steer)
             self._cpg_lut = None
             self.phase_obs_dim = 2
+        # ACTIVE ANKLE: 2 extra action dims APPENDED after the gait generator's own. Both decoders
+        # slice from the front and take exactly what they need, so a tail extension leaves every
+        # existing preset's layout byte-identical -- the ankle is a separate channel bolted on, not
+        # a change to the generator. That is what makes passive-vs-active a clean comparison: the
+        # gait generator, the reward and the curriculum are the same in both arms; only the ankle
+        # differs. (The action WIDTH still changes, so active runs are their own warm-start lineage.)
+        self.gait_action_dim = self.action_dim
+        self.action_dim += self.n_ankle_act
         self.action_space = spaces.Box(-1.0, 1.0, (self.action_dim,), np.float32)
         self._prev_action = np.zeros(self.action_dim, np.float32)   # policy output (obs)
         self._prev_applied = np.zeros(self.action_dim, np.float32)  # post-delay, for coef_rate
         self._prev_motor_cmd = np.zeros(self.nu, np.float32)        # normalized targets, action_rate
-        self._prev_residual = np.zeros(self.nu, np.float32)         # for the residual-rate penalty
+        # the residual is per GAIT actuator (the active ankle has its own channel, not a residual)
+        self._prev_residual = np.zeros(self.n_gait_act, np.float32)  # for the residual-rate penalty
         self._residual_rate_sq = 0.0
         self._reflex_prate_filt = 0.0                               # pitch-reflex rate low-pass state
         self._coef_rate_gated = 0.0
@@ -228,9 +231,11 @@ class DashEnv(gym.Env):
         self._cmd_scale = 1.0            # 0..1 command-RANGE curriculum (set by the callback)
         self._track_err_sum, self._track_err_n = 0.0, 0
 
-        # frame: pos6 vel6 trq6 grav3 gyro3 [vbody3] phase2 task prev_action
+        # frame: pos_nu vel_nu trq_nu grav3 gyro3 [vbody3] phase2 task prev_action
+        # (nu is 6 on the passive plants and 8 with actuated ankles — the ankle servo's encoder and
+        # current are real onboard measurements, so the policy sees them like any other joint.)
         self.obs_base_vel = bool(self.cfg.obs_base_vel)
-        self.frame_dim = (6 + 6 + 6 + 3 + 3 + (3 if self.obs_base_vel else 0)
+        self.frame_dim = (3 * self.nu + 3 + 3 + (3 if self.obs_base_vel else 0)
                           + self.phase_obs_dim + self.task_dim + self.action_dim)
         obs_dim = self.frame_dim * self.cfg.history_len
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
@@ -292,6 +297,133 @@ class DashEnv(gym.Env):
         # optional zero-arg hook fired once per control step (frame capture / metrics / pacing)
         self.on_control_step = None
 
+    # ---------- ankle-spring study ----------
+    ANKLE_MODES = ("passive", "free", "rigid", "active", "active_spring")
+
+    def _ankle_inertia(self, dadr, tau=5.0, n=10):
+        """Effective inertia the ankle sees IN LOADED STANCE, measured by impulse response.
+
+        NOT the mass-matrix diagonal. M[dadr,dadr] is the inertia of the subtree distal to the
+        joint — i.e. just the foot (~0.006 kg*m^2), which is the SWING inertia and has nothing to
+        do with the resonance this damping has to kill. The m7 cadence bug was a LOADED spring
+        ringing in stance, where the ankle is reacting against the ground and the inertia is the
+        robot's, not the foot's; sizing damping off M[i,i] there lands ~40x under-damped, which is
+        exactly the 1.6-N*m*s/rad mistake the 2026-07-24 sweep made.
+
+        So measure it: apply a known torque at the ankle for a few ms from the settled stance and
+        difference the resulting velocity against a zero-torque baseline (which cancels gravity,
+        spring preload and contact transients), then I = tau*dt / dv. Contact, the closed leg loop
+        and the rest of the robot are all included because they are all still in the sim."""
+        def _vel(t):
+            d = mujoco.MjData(self.model)
+            mujoco.mj_resetDataKeyframe(self.model, d, self.key_id)
+            mujoco.mj_forward(self.model, d)
+            for _ in range(n):
+                d.qfrc_applied[dadr] = t
+                mujoco.mj_step(self.model, d)
+            return float(d.qvel[dadr])
+
+        dv = _vel(tau) - _vel(0.0)
+        if abs(dv) < 1e-12:                      # welded/constrained ankle — no meaningful inertia
+            return float('inf')
+        return abs(tau * n * self.sim_dt / dv)
+
+    def _setup_ankle(self, ankle_j):
+        """Configure the ankle as an experimental variable: spring / no spring / welded / actuated.
+
+        Deliberately FAILS LOUDLY on a mode/plant mismatch. Silently running "rigid" on a model with
+        no lock equalities (or "active" on the 6-actuator plant) would produce a plausible-looking
+        curve for the wrong arm, which is the one failure mode this study cannot survive."""
+        c = self.cfg
+        mode = str(c.ankle_mode)
+        if mode not in self.ANKLE_MODES:
+            raise ValueError(f"ankle_mode {mode!r} not in {self.ANKLE_MODES}")
+        self.ankle_mode = mode
+
+        self.ankle_act_idx = np.array(
+            [a for a in range(self.nu)
+             if (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) or "")
+             .startswith("ankle_")], dtype=int)
+        self.n_ankle_act = int(len(self.ankle_act_idx))
+        actuated = mode in ("active", "active_spring")
+        if actuated and self.n_ankle_act != 2:
+            raise ValueError(
+                f"ankle_mode={mode!r} needs the actuated-ankle plant (2 'ankle_*' actuators, found "
+                f"{self.n_ankle_act}). Set model_path='model/dash01_measured_active.xml' "
+                f"(generate it with `python -m model.make_ankle_variants`).")
+        if not actuated and self.n_ankle_act:
+            raise ValueError(
+                f"ankle_mode={mode!r} but model_path has {self.n_ankle_act} ankle actuators — that "
+                f"plant carries the ankle motors' mass, which would silently penalise a passive arm.")
+
+        self._ankle_lock_eq = np.array([
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_EQUALITY, f"lock_ankle_{s}")
+            for s in ("L", "R")], dtype=int)
+        if mode == "rigid" and (self._ankle_lock_eq < 0).any():
+            raise ValueError(
+                "ankle_mode='rigid' needs the lock_ankle_L/R equalities — run "
+                "`python -m model.make_ankle_variants` and point model_path at the patched model.")
+
+        # ----- stiffness -----
+        # "free"/"active" mean k=0 EXACTLY. ankle_stiffness cannot express that (0 there is the
+        # legacy "keep the model's 28.65" sentinel, kept so every m1..m7 preset keeps its meaning).
+        # "rigid" zeroes it too: the joint cannot move, so a spring there is not physics, it is just
+        # ~14 N*m of stance preload for the lock constraint to fight (and solver noise to explain).
+        if mode in ("free", "active", "rigid"):
+            k_new = 0.0
+        elif c.ankle_stiffness > 0.0:
+            k_new = float(c.ankle_stiffness)
+        else:
+            k_new = None                              # keep whatever the model ships
+        if k_new is not None:
+            for j in ankle_j:
+                qadr = int(self.model.jnt_qposadr[j])
+                if k_new == 0.0:
+                    self.model.jnt_stiffness[j] = 0.0
+                    continue
+                # preload-preserving: shift springref so k*(q_stand - ref) is unchanged, i.e. only
+                # the restoring GAIN rises and the standing posture does not move. Raising k alone
+                # balloons the ~12.8 N*m stance preload and flips the robot (verified 2026-07-24).
+                k_old = float(self.model.jnt_stiffness[j])
+                ref_old = float(self.model.qpos_spring[qadr])
+                q_stand = float(self.default_qpos[qadr])
+                self.model.qpos_spring[qadr] = q_stand - (k_old / k_new) * (q_stand - ref_old)
+                self.model.jnt_stiffness[j] = k_new
+
+        # ----- damping -----
+        # ankle_zeta ties damping to the CURRENT k, so a stiffness sweep no longer also sweeps the
+        # damping ratio (the confound that produced the m7 6 Hz spring-ring). Skipped at k=0, where
+        # a ratio is undefined and the honest model of a floppy ankle is the joint's own friction.
+        if c.ankle_zeta > 0.0:
+            for j in ankle_j:
+                dadr = int(self.model.jnt_dofadr[j])
+                k = float(self.model.jnt_stiffness[j])
+                if k <= 0.0:
+                    continue
+                self.model.dof_damping[dadr] = (
+                    2.0 * float(c.ankle_zeta) * np.sqrt(k * self._ankle_inertia(dadr)))
+        elif c.ankle_damping > 0.0:
+            for j in ankle_j:
+                self.model.dof_damping[int(self.model.jnt_dofadr[j])] = float(c.ankle_damping)
+
+        self.ankle_k = float(self.model.jnt_stiffness[ankle_j[0]])
+        self.ankle_b = float(self.model.dof_damping[int(self.model.jnt_dofadr[ankle_j[0]])])
+        self.n_gait_act = self.nu - self.n_ankle_act
+        self._ankle_dof = np.array([int(self.model.jnt_dofadr[j]) for j in ankle_j], dtype=int)
+        self._ankle_qpos = np.array([int(self.model.jnt_qposadr[j]) for j in ankle_j], dtype=int)
+
+    # nominal_ctrl is rebound at reset by the m1 ride-height LUT, so these stay views rather than
+    # snapshots — a stale copy would silently command the previous episode's posture.
+    @property
+    def _nominal6(self):
+        """The gait generator's slice of the nominal control (it only ever knows 6 joints)."""
+        return self.nominal_ctrl[:self.n_gait_act]
+
+    @property
+    def _nominal_ankle(self):
+        """Settled stance angle of each ankle servo — the active ankle commands relative to this."""
+        return self.nominal_ctrl[self.n_gait_act:]
+
     # ---------- curriculum hooks (VecEnv.env_method reaches SubprocVecEnv workers) ----------
     def set_sprint_dist(self, d):
         """Move the sprint finish line. Applies from the NEXT reset — never mid-dash."""
@@ -333,6 +465,14 @@ class DashEnv(gym.Env):
         between resets, the DR draw writes at reset)."""
         self.model.actuator_forcerange[:] = (self._orig_forcerange * self._torque_scale
                                              * self._dr_torque_scale)
+
+    def set_dr_scale(self, s):
+        """0..1 curriculum on the WIDTH of every domain-randomization range (applies from the next
+        reset). Measured on teleop_v3: on the nominal plant the policy survives 196 s and never
+        falls; at full-width DR it survives 4.8 s — randomization was ~20x more destructive than
+        pushes, trips and sensor noise combined, and unlike all of those it had no curriculum.
+        A policy cannot learn to be robust to a plant it cannot stand up on."""
+        self._dr.scale = float(np.clip(s, 0.0, 1.0))
 
     def set_cmd_scale(self, s):
         """0..1 command-RANGE curriculum: interpolates the sampled command box from
@@ -554,6 +694,9 @@ class DashEnv(gym.Env):
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.key_id)
         # activate this milestone's base-DOF locks (loop-closure equalities stay untouched)
         self.data.eq_active[self.lock_eq_ids] = self.base_lock
+        # ankle_mode="rigid": weld both ankles at their stance angle for the whole episode
+        if self.ankle_mode == "rigid":
+            self.data.eq_active[self._ankle_lock_eq] = 1
         # m1: rail Z at a per-episode RANDOM ride height, legs seated from the LUT so the episode
         # starts in a valid on-floor stance; otherwise a locked Z pins at the natural stance height.
         if self.z_locked:
@@ -561,7 +704,12 @@ class DashEnv(gym.Env):
                 H = float(self.np_random.uniform(*self.cfg.z_rail_range))
                 k = int(np.argmin(np.abs(self._lut["H"] - H)))
                 self.data.qpos[self.hinge_qadr_start:] = self._lut["hinges"][k]
-                self.nominal_ctrl = self._lut["ctrl"][k].astype(np.float64).copy()
+                lut_ctrl = self._lut["ctrl"][k].astype(np.float64)
+                # the ride-height LUT was generated on the 6-actuator plant; on the actuated-ankle
+                # plant keep the ankle servos at their stance angle rather than truncating nu.
+                if lut_ctrl.size < self.nu:
+                    lut_ctrl = np.concatenate([lut_ctrl, self.model.key_ctrl[self.key_id][lut_ctrl.size:]])
+                self.nominal_ctrl = lut_ctrl.copy()
             else:
                 H = float(self.height_target)
             if self._fixed_base_h is not None:      # in-air test rig (set_fixed_base)
@@ -605,6 +753,7 @@ class DashEnv(gym.Env):
         self._prev_toe_xy = self.data.geom_xpos[self.foot_gids_arr, 0:2].copy()
         self._duty_ema[:] = 0.5          # neutral start: above duty_floor, so no penalty until the
         #                                  gait actually parks a foot in the air (EMA then decays)
+        self._ws_out_t[:] = 0.0          # reset the per-foot outside-workspace timers
         self._push_countdown = self._next_push_in()
         self._step_n = 0
         self._prev_vel_body[:] = 0.0
@@ -697,12 +846,12 @@ class DashEnv(gym.Env):
         progress_frac = float(np.clip(cmd_speed / max(c.cmd_v_fwd_max, 1e-6), 0.0, 1.0))
         return cmd_speed, progress_frac
 
-    def _run_physics(self, target6):
+    def _run_physics(self, target):
         """One control step of plant: EMA-filter the target, clip to ctrlrange, run
         control_decimation sim substeps (OR-accumulating foot contact so a sub-20 ms hop can't
         pass as continuous flight/contact at the 50 Hz boundary)."""
         c = self.cfg
-        self._filt_target = c.action_filter * self._filt_target + (1 - c.action_filter) * target6
+        self._filt_target = c.action_filter * self._filt_target + (1 - c.action_filter) * target
         tgt = np.clip(self._filt_target, self.ctrl_lo, self.ctrl_hi)
         # motor velocity + acceleration limits: slew-limit the commanded target so joint velocity
         # <= motor_vel_limit and its rate of change <= motor_accel_limit (a velocity/accel-bounded
@@ -781,16 +930,28 @@ class DashEnv(gym.Env):
                                        + (1.0 - c.pitch_reflex_rate_lp) * pitch_rate)
             pitch_rate = self._reflex_prate_filt
         if self.cpg_mode:
-            target6 = cpg_gait.assemble(self._cpg, reflex, roll, roll_rate, self.nominal_ctrl, c,
+            target6 = cpg_gait.assemble(self._cpg, reflex, roll, roll_rate, self._nominal6, c,
                                         stance_ratio=self._stance_ratio,
                                         pitch=pitch, pitch_rate=pitch_rate, steer=steer,
                                         lut=self._cpg_lut)
         else:
             target6 = fourier_gait.assemble(cam_c, thigh_c, reflex, phase_used,
-                                            roll, roll_rate, self.nominal_ctrl, c,
+                                            roll, roll_rate, self._nominal6, c,
                                             pitch=pitch, pitch_rate=pitch_rate, steer=steer)
         target6 = target6 + c.residual_scale * residual  # the per-step fast-feedback channel
-        motor_cmd = ((target6 - self.nominal_ctrl) / c.action_scale).astype(np.float32)
+        if self.n_ankle_act:
+            # ACTIVE ANKLE: the tail dims are a position command about the settled stance angle.
+            # Deliberately NOT routed through the gait generator — the ankle gets no clock, no
+            # Fourier series and no phase, only per-step feedback authority, so "active" tests an
+            # ankle STRATEGY the policy has to learn rather than a second scripted waveform. This
+            # is also the channel the 2026-07-23 fixed PD reflex could not provide: that one was
+            # phase-blind by construction and failed for exactly that reason.
+            ankle_cmd = (self._nominal_ankle
+                         + c.ankle_action_scale * applied[self.gait_action_dim:])
+            target = np.concatenate([target6, ankle_cmd])
+        else:
+            target = target6
+        motor_cmd = ((target - self.nominal_ctrl) / c.action_scale).astype(np.float32)
         self._residual_sq = float(np.sum(residual ** 2))
         # per-step residual CHANGE (for the residual-rate penalty that suppresses fast chatter)
         self._residual_rate_sq = float(np.sum((residual - self._prev_residual) ** 2))
@@ -850,7 +1011,7 @@ class DashEnv(gym.Env):
             self.data.qfrc_applied[self._ankle_dadr[0]] = u_ank if gnd[0] else 0.0
             self.data.qfrc_applied[self._ankle_dadr[1]] = -u_ank if gnd[1] else 0.0
 
-        contact_acc = self._run_physics(target6)
+        contact_acc = self._run_physics(target)
         self._elapsed_t += self.control_dt
         finished = c.objective == "sprint" and self._update_sprint()
         # advance the gait phase AFTER assembly (the obs frame carries the NEXT step's phase)
@@ -904,7 +1065,31 @@ class DashEnv(gym.Env):
             np.abs(self.data.actuator_force[:self.nu]) / np.maximum(_lim, 1e-6)))
         if c.objective == "sprint":
             info["sprint"] = self._sprint_info(finished)
+        info.update(self._ankle_info())
         return self._obs(), float(reward), bool(terminated), bool(truncated), info
+
+    def _ankle_info(self):
+        """Per-step ankle telemetry — the numbers that decide whether a winning arm is BUILDABLE.
+
+        A stiffness that wins in sim is only useful if a real spring can survive it, and an active
+        ankle that wins is only useful if a real motor can deliver it. So log the peak demands, not
+        just the score: spring torque and stored energy (does the part exist?), motor torque and
+        mechanical power (does the motor exist?). |q - springref| also catches an arm that is
+        silently living on the joint's +-1.047 travel limit rather than on its spring."""
+        q = self.data.qpos[self._ankle_qpos]
+        qd = self.data.qvel[self._ankle_dof]
+        defl = q - self.model.qpos_spring[self._ankle_qpos]
+        out = {"ankle_defl": float(np.max(np.abs(defl))),
+               "ankle_spring_trq": float(np.max(np.abs(self.ankle_k * defl))),
+               # 1/2 k x^2 per side, summed: the elastic energy the structure has to store
+               "ankle_spring_energy": float(np.sum(0.5 * self.ankle_k * defl ** 2))}
+        if self.n_ankle_act:
+            tau = self.data.actuator_force[self.ankle_act_idx]
+            out["ankle_motor_trq"] = float(np.max(np.abs(tau)))
+            out["ankle_motor_power"] = float(np.sum(np.abs(tau * qd)))
+            out["ankle_motor_util"] = float(np.max(
+                np.abs(tau) / np.maximum(self.model.actuator_forcerange[self.ankle_act_idx, 1], 1e-6)))
+        return out
 
     # ---------- reward ----------
     def _pen(self, v):
@@ -1056,9 +1241,14 @@ class DashEnv(gym.Env):
         self._prev_toe_xy = toe_pos[:, 0:2]
 
         # ----- efficiency (Cassie-100m recipe; ramped in by the curriculum callback) -----
-        tau = self.data.actuator_force[:self.nu]
-        qd = self.data.qvel[self.act_dadr]
-        exc = np.maximum(np.abs(tau) - np.abs(self._stand_torque), 0.0)
+        # The ankle servos are billed here like every other actuator (nu is 8 on the active plant),
+        # so an active arm cannot buy stability with free energy and win the study for the wrong
+        # reason. ankle_torque_billed=False exempts them, which exists only as a sensitivity check:
+        # "does active still lose once its energy is free?"
+        n_eff = self.nu if (c.ankle_torque_billed or not self.n_ankle_act) else self.n_gait_act
+        tau = self.data.actuator_force[:n_eff]
+        qd = self.data.qvel[self.act_dadr[:n_eff]]
+        exc = np.maximum(np.abs(tau) - np.abs(self._stand_torque[:n_eff]), 0.0)
         es = self._eff_scale
         t["torque"] = self._pen(-es * c.w_torque * float(np.sum(exc ** 2)))
         t["motor_vel"] = self._pen(-es * c.w_motor_vel * float(np.sum(qd ** 2)))
@@ -1118,4 +1308,30 @@ class DashEnv(gym.Env):
             return True
         if self._floor_violation():
             return True
+        if self._workspace_violation():
+            return True
         return False
+
+    def _workspace_violation(self):
+        """Terminate when a foot's toe leaves the MEASURED real-robot workspace, sustained for
+        workspace_grace_s -- kills the one-legged gait's parked/folded leg (a sim-only exploit the
+        physical 4-bar cannot do). Toe (dx fore-aft, dz lift) in the BASE frame relative to the LUT
+        nominal_toe, exactly the frame build_cpg_lut measured the reachable box in. Per-foot grace
+        timer: a foot parked outside fires; a transient swing overshoot resets and does not."""
+        c = self.cfg
+        if not c.workspace_kill or self._ws_ref is None:
+            return False
+        base = self.data.xpos[self.base_id]
+        R = self.data.xmat[self.base_id].reshape(3, 3)
+        fired = False
+        for fi, g in enumerate(self.foot_gids):
+            tb = R.T @ (self.data.geom_xpos[g] - base)
+            dx = tb[0] - self._ws_ref[0]
+            dz = tb[2] - self._ws_ref[2]
+            if abs(dx) > c.workspace_dx_max or dz > c.workspace_dz_max or dz < c.workspace_dz_min:
+                self._ws_out_t[fi] += self.control_dt
+                if self._ws_out_t[fi] >= c.workspace_grace_s:
+                    fired = True
+            else:
+                self._ws_out_t[fi] = 0.0
+        return fired
