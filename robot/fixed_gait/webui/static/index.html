@@ -8,22 +8,26 @@
 </head>
 <body>
 
-<header id="header">
-  <div class="hgroup">
-    <span class="brand">🤖 DASH-01</span>
-    <span id="mode-badge" class="badge">—</span>
-    <span id="calib-badge" class="badge">—</span>
-    <span id="daemon-dot" class="dot" title="daemon">●</span>
-    <span id="loop-info" class="loopinfo"></span>
-  </div>
-  <div class="hgroup">
-    <button id="btn-limp" class="btn">Limp</button>
-    <button id="btn-estop" class="btn estop">E-STOP</button>
-  </div>
-</header>
+<!-- header + banners scroll together and stick: a rejection raised from a panel at the bottom of
+     the page (system-ID, playback) must stay on screen where you are, not 2000 px above. -->
+<div id="topbar">
+  <header id="header">
+    <div class="hgroup">
+      <span class="brand">🤖 DASH-01</span>
+      <span id="mode-badge" class="badge">—</span>
+      <span id="calib-badge" class="badge">—</span>
+      <span id="daemon-dot" class="dot" title="daemon">●</span>
+      <span id="loop-info" class="loopinfo"></span>
+    </div>
+    <div class="hgroup">
+      <button id="btn-limp" class="btn">Limp</button>
+      <button id="btn-estop" class="btn estop">E-STOP</button>
+    </div>
+  </header>
 
-<div id="banner" class="banner hidden"></div>
-<div id="reject-banner" class="banner warn hidden"></div>
+  <div id="banner" class="banner hidden"></div>
+  <div id="reject-banner" class="banner warn hidden"></div>
+</div>
 
 <main id="main">
 
@@ -68,6 +72,16 @@
   <!-- ============================ telemetry ============================ -->
   <section class="panel" id="panel-telemetry">
     <h2>Telemetry <span class="hint">raw°, normalized°, A, °C — live</span></h2>
+    <div class="chart-legend">
+      <span><i class="sw" style="background:#4da3ff"></i>position (normalized °)</span>
+      <span><i class="sw dash" style="background:#f2f2f2"></i>commanded target °
+        <span class="hint">— gap = nothing commanded (limp)</span></span>
+      <span><i class="sw" style="background:#e0a020"></i>current (A)</span>
+      <span><i class="sw" style="background:#e04545"></i>temperature (°C)</span>
+      <span><i class="sw dash" style="background:#e04545"></i>80 °C limit</span>
+      <span class="hint">one row of charts per motor, in that order; each spans the last 60 s,
+        auto-scaled (the two numbers at the left edge are that chart's range)</span>
+    </div>
     <div id="motor-cards" class="motor-cards"></div>
   </section>
 
@@ -346,6 +360,14 @@
       kd <input type="number" id="pb-kd" class="num small" value="0.02" step="0.01">
       ramp <input type="number" id="pb-ramp" class="num small" value="3" step="0.5"> s
     </div>
+    <div class="row small">
+      tracking limit <input type="number" id="pb-trackerr" class="num small" value="30" step="5"> °
+      <label title="Tracking error alone stops being a fault signal at high cadence: the drive lags
+because it cannot keep up, not because the leg is jammed. Unchecking decouples ONLY this check —
+workspace, runaway speed, over-temperature, motor faults and the E-STOP button all still latch.">
+        <input type="checkbox" id="pb-trackerr-estop" checked> E-STOP on tracking error</label>
+      <span id="pb-trackerr-state" class="hint"></span>
+    </div>
     <div class="row">
       <button id="btn-pb-start" class="btn primary">▶ Play</button>
       <button id="btn-pb-stop" class="btn">■ Stop</button>
@@ -375,6 +397,10 @@
       <div class="step-h"><span class="step-n">1</span> Excitation
         <span class="hint">— per-joint amplitude &amp; frequency sweep; the whole path is
           workspace-checked before it can start</span></div>
+      <p class="step-note">The chirp is centred on the leg's <b>current pose</b>, so
+        <b>🏠 Home the robot first</b> (Manual control): from a pose near a hard limit — or outside
+        the drawn workspace — every amplitude is refused and the run simply never starts. The reason
+        for a refusal appears in red next to the buttons below.</p>
       <table class="meas-grid">
         <thead><tr><th>joint</th><th>amplitude °</th><th>start Hz</th><th>end Hz (chirp)</th></tr></thead>
         <tbody id="meas-joint-rows"></tbody>

@@ -63,8 +63,21 @@ def _clamp_period(v):
     return min(PERIOD_MAX, max(PERIOD_MIN, v))
 
 
+# track_err_estop: does exceeding max_track_err latch the E-STOP, or only warn?
+#
+# Tracking error conflates two different things. A JAM (the leg is against a hard stop, the drive is
+# winding up against it) must stop the robot. LAG (the commanded cadence is faster than the drive can
+# follow) is not a fault -- it grows with period^-1 and is exactly what you see when deliberately
+# pushing playback speed. The trip cannot tell them apart, so at high cadence it fires on the benign
+# one and the run is unusable.
+#
+# Setting this False decouples ONLY this check. Everything else still latches: workspace violation,
+# runaway ERPM (max_speed), over-temperature, motor error codes, and the user E-STOP. The peak error
+# is tracked and published either way, so "warn" is not "ignore" -- the UI shows how far behind the
+# robot actually is, which is the number you want when deciding whether the cadence is realistic.
 PLAYBACK_DEFAULTS = dict(period=8.0, mode="position", current_limit=3.0, kp=0.8, ki=0.4, kd=0.02,
                          ramp=3.0, max_track_err=30.0, speed_limit=9000.0, max_speed=16000.0,
+                         track_err_estop=True,
                          left_phase=None, legs="both", abd_right=None, abd_left=None)
 
 # System-ID excitation (position mode: stream SET_POS chirps, the drive tracks, we log the current).
@@ -348,6 +361,8 @@ class RobotDaemon(threading.Thread):
     def playback_start(self, data, params):
         p = {**PLAYBACK_DEFAULTS, **params}
         p["period"] = _clamp_period(p["period"])
+        # coerce explicitly: JSON "false" is a truthy string, and this flag disables a safety check
+        p["track_err_estop"] = p["track_err_estop"] not in (False, 0, "false", "False", "0", "", None)
         with self.lock:
             self._playback_req = {"data": data, **p}
 
@@ -763,6 +778,7 @@ class RobotDaemon(threading.Thread):
             m.prev_target = None
             m.tvel = 0.0
         self._pb = dict(req, data=data, sides=sides, t0=now,
+                        track_err_peak=0.0, track_err_worst=None, track_err_over=False,
                         start_pos={id(m): self.calib.norm(self._name_of[id(m)], m.pos)
                                    for m in self.motors})
         self.mode = "PLAYBACK"
@@ -778,6 +794,12 @@ class RobotDaemon(threading.Thread):
             if k in patch and patch[k] is not None:
                 pb[k] = float(patch[k])
         pb["period"] = _clamp_period(pb["period"])   # live patch: never let phase divide by 0
+        if patch.get("track_err_estop") is not None:
+            pb["track_err_estop"] = bool(patch["track_err_estop"])
+        if patch.get("reset_track_err"):
+            # the peak is a per-attempt statistic: let the UI zero it when re-arming or retuning
+            pb["track_err_peak"], pb["track_err_worst"] = 0.0, None
+            pb["track_err_over"] = False
         if "left_phase" in patch and patch["left_phase"] is not None \
                 and pb["data"].get("left") is not None:
             pb["data"]["left"]["phase_shift"] = float(patch["left_phase"])
@@ -822,10 +844,17 @@ class RobotDaemon(threading.Thread):
             if pb["mode"] == "position":
                 canio.set_pos(m.bus, m.cid, target_raw)
                 self._last_cmd_raw[n] = target_raw
-                if abs(target_raw - m.pos) > pb["max_track_err"]:
-                    self._trip(f"{n} tracking err {target_raw - m.pos:+.0f} deg "
-                               f"(> {pb['max_track_err']:.0f}) — hitting a stop?")
-                    return
+                err_deg = target_raw - m.pos
+                if abs(err_deg) > pb["track_err_peak"]:
+                    pb["track_err_peak"] = abs(err_deg)
+                    pb["track_err_worst"] = n
+                if abs(err_deg) > pb["max_track_err"]:
+                    if pb["track_err_estop"]:
+                        self._trip(f"{n} tracking err {err_deg:+.0f} deg "
+                                   f"(> {pb['max_track_err']:.0f}) — hitting a stop?")
+                        return
+                    # override: keep running, but say so. The other trips are untouched.
+                    pb["track_err_over"] = True
             else:
                 # current mode: software PID in RAW frame -> SET_CURRENT, hard torque cap
                 # (play_trajectory.py:325-345 verbatim, incl. governor + runaway cut)
@@ -1005,12 +1034,21 @@ class RobotDaemon(threading.Thread):
         cur = np.full(paths.N_MOTORS, np.nan)
         temp = np.full(paths.N_MOTORS, np.nan)
         err = np.zeros(paths.N_MOTORS)
+        # commanded target alongside the measurement: NaN wherever nothing is being commanded (limp,
+        # e-stopped, or a mode that does not stream SET_POS), so the chart simply has no target line
+        # there rather than a stale one held flat. _last_cmd_raw is cleared on every mode change.
+        cmd_raw = np.full(paths.N_MOTORS, np.nan)
         for i, n in enumerate(paths.MOTOR_NAMES):
             m = self.by_name[n]
             if m.pos is not None:
                 raw[i], spd[i], cur[i], temp[i], err[i] = m.pos, m.spd, m.cur, m.temp, m.err
+            c = self._last_cmd_raw.get(n)
+            if c is not None:
+                cmd_raw[i] = c
         norm = self.calib.norm_array(raw)
-        self.ring.push(now, dict(pos_raw=raw, pos_norm=norm, spd=spd, cur=cur, temp=temp, err=err))
+        cmd_norm = self.calib.norm_array(cmd_raw)
+        self.ring.push(now, dict(pos_raw=raw, pos_norm=norm, spd=spd, cur=cur, temp=temp, err=err,
+                                 cmd_raw=cmd_raw, cmd_norm=cmd_norm))
 
         r = self._rec
         with self.lock:
@@ -1037,7 +1075,12 @@ class RobotDaemon(threading.Thread):
                 playback=(None if self._pb is None else dict(
                     running=self.mode == "PLAYBACK", phase=round(self._pb.get("phase", 0.0), 3),
                     period=self._pb["period"], mode=self._pb["mode"], sides=self._pb["sides"],
-                    current_limit=self._pb["current_limit"])),
+                    current_limit=self._pb["current_limit"],
+                    max_track_err=self._pb["max_track_err"],
+                    track_err_estop=self._pb["track_err_estop"],
+                    track_err_peak=round(self._pb.get("track_err_peak", 0.0), 1),
+                    track_err_worst=self._pb.get("track_err_worst"),
+                    track_err_over=self._pb.get("track_err_over", False))),
                 measure=(None if self._meas is None else dict(
                     running=self._meas["running"], done=self._meas.get("done", False),
                     leg=self._meas["leg"], profile=self._meas["profile"],

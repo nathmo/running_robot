@@ -149,6 +149,7 @@ def api_telemetry():
         out["motors"][n] = {
             "pos_norm": _nan_list(data["pos_norm"][:, i]),
             "pos_raw": _nan_list(data["pos_raw"][:, i]),
+            "cmd_norm": _nan_list(data["cmd_norm"][:, i]),
             "cur": _nan_list(data["cur"][:, i]),
             "temp": _nan_list(data["temp"][:, i]),
             "spd": _nan_list(data["spd"][:, i]),

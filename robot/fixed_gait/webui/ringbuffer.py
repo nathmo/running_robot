@@ -7,7 +7,9 @@ import paths
 
 
 class TelemetryRing:
-    FIELDS = ("pos_raw", "pos_norm", "spd", "cur", "temp", "err")
+    # cmd_* is the COMMANDED target (NaN when nothing is being commanded), kept in the same ring as
+    # the measurement so the chart never has to align two independently-sampled streams.
+    FIELDS = ("pos_raw", "pos_norm", "spd", "cur", "temp", "err", "cmd_raw", "cmd_norm")
 
     def __init__(self, capacity=4096):
         self.cap = capacity

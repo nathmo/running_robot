@@ -6,7 +6,7 @@
 const MOTORS = ["right.abd", "right.cam", "right.thigh", "left.abd", "left.cam", "left.thigh"];
 const ROLES = ["abd", "cam", "thigh"];
 const HARD = { abd: 48, cam: 88, thigh: 62 };
-const COLORS = { pos: "#4da3ff", cur: "#e0a020", temp: "#e04545", good: "#2c9e3f",
+const COLORS = { pos: "#4da3ff", target: "#f2f2f2", cur: "#e0a020", temp: "#e04545", good: "#2c9e3f",
   region: "rgba(44,158,63,0.55)", samples: "rgba(160,170,185,0.4)", gait: "#ff35c8",
   stroke: "#ffd23f", zero: "#ffffff" };
 
@@ -228,22 +228,41 @@ $("btn-recal-reset").onclick = () => {
 
 /* ================================================================ strip charts */
 class StripChart {
-  constructor(canvas, color, span = 60) {
-    this.cv = canvas; this.color = color; this.span = span;
-    this.t = []; this.v = [];
+  /** color2, when given, draws an optional second series (the commanded target) under the first. */
+  constructor(canvas, color, span = 60, color2 = null) {
+    this.cv = canvas; this.color = color; this.color2 = color2; this.span = span;
+    this.t = []; this.v = []; this.v2 = [];
   }
-  push(t, v) {
+  /** v2 is optional and may be null on any sample — nothing is commanded while limp, and the line
+   *  must BREAK there rather than hold the last target flat, which would read as a real command. */
+  push(t, v, v2) {
     if (v === null || v === undefined) return;
     this.t.push(t); this.v.push(v);
+    this.v2.push(v2 === null || v2 === undefined ? NaN : v2);
     const cut = t - this.span;
-    while (this.t.length && this.t[0] < cut) { this.t.shift(); this.v.shift(); }
+    while (this.t.length && this.t[0] < cut) { this.t.shift(); this.v.shift(); this.v2.shift(); }
+  }
+  _stroke(g, vals, now, lo, hi, w, h) {
+    let pen = false;
+    g.beginPath();
+    for (let i = 0; i < this.t.length; i++) {
+      if (!Number.isFinite(vals[i])) { pen = false; continue; }
+      const x = ((this.t[i] - now + this.span) / this.span) * w;
+      const y = h - ((vals[i] - lo) / (hi - lo)) * h;
+      pen ? g.lineTo(x, y) : g.moveTo(x, y);
+      pen = true;
+    }
+    g.stroke();
   }
   draw(now, refLine = null) {
     const c = this.cv, g = c.getContext("2d");
     const w = c.width, h = c.height;
     g.clearRect(0, 0, w, h);
     if (this.v.length < 2) return;
-    let lo = Math.min(...this.v), hi = Math.max(...this.v);
+    // Scale over BOTH series: if the target is clipped out of view you cannot see the tracking
+    // error, which is the entire reason for drawing it.
+    const finite2 = this.color2 ? this.v2.filter(Number.isFinite) : [];
+    let lo = Math.min(...this.v, ...finite2), hi = Math.max(...this.v, ...finite2);
     if (refLine !== null) { lo = Math.min(lo, refLine - 5); hi = Math.max(hi, refLine + 5); }
     if (hi - lo < 1e-6) { hi += 1; lo -= 1; }
     const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
@@ -252,13 +271,13 @@ class StripChart {
       g.strokeStyle = "rgba(224,69,69,.5)"; g.setLineDash([3, 3]);
       g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); g.setLineDash([]);
     }
-    g.strokeStyle = this.color; g.lineWidth = 1.2; g.beginPath();
-    for (let i = 0; i < this.t.length; i++) {
-      const x = ((this.t[i] - now + this.span) / this.span) * w;
-      const y = h - ((this.v[i] - lo) / (hi - lo)) * h;
-      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    if (this.color2 && finite2.length) {
+      g.strokeStyle = this.color2; g.lineWidth = 1; g.setLineDash([4, 3]);
+      this._stroke(g, this.v2, now, lo, hi, w, h);
+      g.setLineDash([]);
     }
-    g.stroke();
+    g.strokeStyle = this.color; g.lineWidth = 1.2;
+    this._stroke(g, this.v, now, lo, hi, w, h);
     g.fillStyle = "rgba(139,151,168,.9)"; g.font = "9px monospace";
     g.fillText(hi.toFixed(1), 2, 9); g.fillText(lo.toFixed(1), 2, h - 2);
   }
@@ -282,7 +301,7 @@ function buildMotorCards() {
   for (const n of MOTORS) {
     const card = $("mc-" + n.replace(".", "-"));
     charts[n] = {
-      pos: new StripChart(card.querySelector(".c-pos"), COLORS.pos),
+      pos: new StripChart(card.querySelector(".c-pos"), COLORS.pos, 60, COLORS.target),
       cur: new StripChart(card.querySelector(".c-cur"), COLORS.cur),
       temp: new StripChart(card.querySelector(".c-temp"), COLORS.temp),
     };
@@ -312,7 +331,7 @@ async function pollTelemetry() {
     for (const name of MOTORS) {
       const m = d.motors[name];
       for (let i = 0; i < n; i++) {
-        charts[name].pos.push(d.t[i], m.pos_norm[i]);
+        charts[name].pos.push(d.t[i], m.pos_norm[i], m.cmd_norm ? m.cmd_norm[i] : null);
         charts[name].cur.push(d.t[i], m.cur[i]);
         charts[name].temp.push(d.t[i], m.temp[i]);
       }
@@ -1498,7 +1517,9 @@ $("btn-pb-start").onclick = () => api("/api/playback/start", { json: {
   name: $("pb-file").value, legs: $("pb-legs").value, mode: $("pb-mode").value,
   period: +$("pb-period").value, left_phase: +$("pb-leftphase").value,
   current_limit: +$("pb-ilimit").value, kp: +$("pb-kp").value, ki: +$("pb-ki").value,
-  kd: +$("pb-kd").value, ramp: +$("pb-ramp").value } });
+  kd: +$("pb-kd").value, ramp: +$("pb-ramp").value,
+  max_track_err: +$("pb-trackerr").value,
+  track_err_estop: $("pb-trackerr-estop").checked } });
 $("btn-pb-stop").onclick = () => api("/api/playback/stop", { method: "POST" });
 
 let pbPatchTimer = null;
@@ -1506,15 +1527,31 @@ function schedulePatch() {
   if (!(S.state && S.state.playback && S.state.playback.running)) return;
   if (pbPatchTimer) clearTimeout(pbPatchTimer);
   pbPatchTimer = setTimeout(() => api("/api/playback", { method: "PATCH", json: {
-    period: +$("pb-period").value, left_phase: +$("pb-leftphase").value } }), 250);
+    period: +$("pb-period").value, left_phase: +$("pb-leftphase").value,
+    max_track_err: +$("pb-trackerr").value,
+    track_err_estop: $("pb-trackerr-estop").checked } }), 250);
 }
 $("pb-period").addEventListener("input", schedulePatch);
 $("pb-leftphase").addEventListener("input", schedulePatch);
+// live too: the whole point is retuning the limit while the gait runs, without restarting it
+$("pb-trackerr").addEventListener("input", schedulePatch);
+$("pb-trackerr-estop").addEventListener("change", schedulePatch);
 
 function updatePlaybackUI(st) {
   const pb = st.playback;
   $("pb-phase").style.width = pb && pb.running ? (pb.phase * 100) + "%" : "0%";
   $("btn-pb-start").disabled = !!(pb && pb.running);
+
+  // Peak tracking error, so "warn" is never "ignore": with the E-STOP decoupled this is the only
+  // thing telling you how far behind the robot actually is.
+  const el = $("pb-trackerr-state");
+  if (!pb || pb.track_err_peak == null) { el.textContent = ""; el.className = "hint"; return; }
+  const worst = pb.track_err_worst ? ` (${pb.track_err_worst})` : "";
+  el.textContent = `peak ${pb.track_err_peak.toFixed(1)}°${worst}`;
+  el.className = pb.track_err_over ? "hint warn-text" : "hint";
+  if (pb.track_err_over && !pb.track_err_estop) {
+    el.textContent += ` — OVER ${pb.max_track_err.toFixed(0)}°, E-STOP decoupled`;
+  }
 }
 
 /* ================================================================ mock tools */

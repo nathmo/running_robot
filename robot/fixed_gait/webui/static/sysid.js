@@ -8,6 +8,7 @@ const SID = {
   curChart: null, model: null, selLimb: null, viewer: null,
   meshCache: {}, dynInit: false, runningWas: false,
   masses: null, massesKey: null,   // own copy: the limbs list must not depend on poll ordering
+  measError: "",                   // last refused start/save, shown in-panel until the next attempt
 };
 const ROLES3 = ["abd", "cam", "thigh"];
 const PROFILES = {
@@ -64,14 +65,17 @@ function wireMeasure() {
   });
   $("meas-prof-static").onclick = () => applyProfile("quasi_static");
   $("meas-prof-dyn").onclick = () => applyProfile("dynamic");
-  $("btn-meas-start").onclick = () =>
+  $("btn-meas-start").onclick = () => {
+    measSetError("");
     api("/api/measure/start", { json: { spec: measSpec() } })
-      .then(() => setBanner("measurement running…", "", 2500)).catch(() => {});
-  $("btn-meas-stop").onclick = () => api("/api/measure/stop", { method: "POST" });
+      .then(() => setBanner("measurement running…", "", 2500)).catch(measSetError);
+  };
+  $("btn-meas-stop").onclick = () =>
+    api("/api/measure/stop", { method: "POST" }).catch(measSetError);
   $("btn-meas-finish").onclick = () =>
     api("/api/measure/finish", { json: { name: $("meas-name").value } })
       .then((d) => { if (d && d.ok) setBanner("saved " + (d.saved && d.saved.name), "", 3000); })
-      .catch(() => {});
+      .catch(measSetError);
   $("btn-identify-run").onclick = runIdentify;
   $("identify-import").onchange = importIdentify;
   SID.curChart = new StripChart($("meas-chart"), "#e0a020", 30);
@@ -104,13 +108,34 @@ async function importIdentify(e) {
   if (d.ok) loadModelInertia();
 }
 
+/** A refused start/save is the panel's own business: the global banner sits at the top of the page
+ *  and this panel is at the bottom, so a rejection there reads as "the button does nothing".
+ *  Held (not auto-hidden) until the next start attempt, and re-rendered on every poll below —
+ *  updateMeasureUI owns #meas-status and would otherwise wipe it within 500 ms. */
+function measSetError(e) {
+  SID.measError = e ? (e.message || String(e)) : "";
+  renderMeasStatus(S.state && S.state.measure);
+}
+function renderMeasStatus(m) {
+  const el = $("meas-status");
+  const running = !!(m && m.running);
+  if (SID.measError && !running) {
+    el.textContent = "⛔ " + SID.measError;
+    el.classList.add("err");
+    return;
+  }
+  el.classList.remove("err");
+  el.textContent = m ? (running ? `running ${m.leg} ${m.profile} — ${m.elapsed}/${m.duration}s, ${m.n_samples} samples`
+    : m.done ? `captured ${m.n_samples} samples — save it below` : "") : "";
+}
+
 function updateMeasureUI(st) {
   const m = st.measure;
   const running = !!(m && m.running);
   $("meas-phase").style.width = m ? (100 * (m.elapsed || 0) / (m.duration || 1)) + "%" : "0%";
   $("btn-meas-start").disabled = running;
-  $("meas-status").textContent = m ? (running ? `running ${m.leg} ${m.profile} — ${m.elapsed}/${m.duration}s, ${m.n_samples} samples`
-    : m.done ? `captured ${m.n_samples} samples — save it below` : "") : "";
+  if (running) SID.measError = "";        // it started — the last rejection is history
+  renderMeasStatus(m);
   // saved runs
   const runs = st.measurements || [];
   const box = $("meas-runs");
@@ -125,7 +150,7 @@ function updateMeasureUI(st) {
     box.querySelectorAll("[data-exp]").forEach((b) => b.onclick = () =>
       window.location = "/api/measure/export?name=" + encodeURIComponent(b.dataset.exp));
     box.querySelectorAll("[data-del]").forEach((b) => b.onclick = () =>
-      api("/api/measure/delete", { json: { name: b.dataset.del } }).catch(() => {}));
+      api("/api/measure/delete", { json: { name: b.dataset.del } }).catch(measSetError));
   }
 }
 
