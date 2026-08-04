@@ -7,6 +7,7 @@ const SID = {
   leg: "right", profile: "dynamic",
   curChart: null, model: null, selLimb: null, viewer: null,
   meshCache: {}, dynInit: false, runningWas: false,
+  masses: null, massesKey: null,   // own copy: the limbs list must not depend on poll ordering
 };
 const ROLES3 = ["abd", "cam", "thigh"];
 const PROFILES = {
@@ -164,14 +165,33 @@ async function loadModelInertia() {
   try {
     SID.model = await (await fetch("/api/model/inertia")).json();
   } catch (e) { return; }
+  // This runs at page load, BEFORE the first /api/state poll, so S.state is still empty here and
+  // every mass field would paint blank. Fetch the masses ourselves for the first paint; after that
+  // onSysidState keeps SID.masses current.
+  if (SID.masses === null) {
+    try {
+      const st = await (await fetch("/api/state")).json();
+      setLimbMasses(st.dynamics && st.dynamics.masses);
+    } catch (e) { /* leave null; the next poll fills it in */ }
+  }
   renderLimbsList();
   renderActuatorTable();
   if (SID.selLimb) selectLimb(SID.selLimb);
 }
 
+/** Store the polled masses; returns true if they changed (i.e. the list needs a repaint). */
+function setLimbMasses(m) {
+  const key = JSON.stringify(m || {});
+  if (key === SID.massesKey) return false;
+  SID.massesKey = key;
+  SID.masses = m || {};
+  return true;
+}
+
 function renderLimbsList() {
   const md = SID.model; if (!md || !md.bodies) return;
-  const masses = (S.state && S.state.dynamics && S.state.dynamics.masses) || {};
+  const masses = SID.masses
+    || (S.state && S.state.dynamics && S.state.dynamics.masses) || {};
   const names = Object.keys(md.bodies).filter((n) => !n.startsWith("motor_"));
   $("limbs-list").innerHTML = names.map((n) => {
     const cmp = md.bodies[n].comparison || {};
@@ -181,15 +201,19 @@ function renderLimbsList() {
     return `<div class="limb-row ${SID.selLimb === n ? "sel" : ""}" data-limb="${n}">
       <span class="limb-name">${n.replace("NCS-v1", "")}</span>
       <input type="number" class="num small limb-mass" data-body="${n}" placeholder="kg"
-        value="${masses[n] != null ? masses[n] : ""}" step="0.01" title="weighed mass (kg)">
+        value="${masses[n] != null ? masses[n] : ""}" step="0.001" title="weighed mass (kg)">
       <span class="verdict ${VERDICT_CLASS[cat]}">${badge}</span></div>`;
   }).join("");
   $("limbs-list").querySelectorAll(".limb-row").forEach((row) => {
     row.querySelector(".limb-name").onclick = () => selectLimb(row.dataset.limb);
     const mi = row.querySelector(".limb-mass");
+    // The POST returns the updated config; take the masses straight from it, otherwise the repaint
+    // below would briefly restore the pre-edit value (and, on a blank = revert-to-default, the
+    // field would look like it did nothing until the next poll).
     mi.onchange = () => api("/api/dynamics/mass",
       { json: { body: mi.dataset.body, mass: mi.value === "" ? null : +mi.value } })
-      .then(() => loadModelInertia()).catch(() => {});
+      .then((d) => { setLimbMasses(d && d.dynamics && d.dynamics.masses); loadModelInertia(); })
+      .catch(() => {});
   });
   if (!SID.selLimb && names.length) selectLimb(names.find((n) => n.includes("Thigh")) || names[0]);
 }
@@ -283,6 +307,9 @@ function wireLimbs() {
 window.onSysidState = function (st) {
   updateMeasureUI(st);
   if (st.dynamics && !SID.dynInit) { SID.dynInit = true; buildPidRows(st.dynamics); }
+  // Repaint whenever the masses actually change (a default arriving, another tab's edit, a revert).
+  // Cheap: setLimbMasses compares before anything is rebuilt, so a steady state costs one compare.
+  if (st.dynamics && setLimbMasses(st.dynamics.masses) && SID.model) renderLimbsList();
   // refresh the inertia/actuator view once identification appears, or on first load
   if (st.identified !== undefined && SID.identifiedWas !== st.identified) {
     SID.identifiedWas = st.identified; loadModelInertia();
