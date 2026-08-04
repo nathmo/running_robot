@@ -291,6 +291,24 @@ def api_manual_home():
     return _ok(token=token) if ok else _err(why)
 
 
+@app.post("/api/manual/center")
+def api_manual_center():
+    """Slew both legs to the pose with the most room around it (the inscribed-square centre of the
+    safe workspace). Returns the room each joint has there, which is the excitation amplitude the
+    system-ID panel can use without being refused."""
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    targets, info, why = _dm().center(slew_dps=b.get("slew_dps"))
+    if why:
+        return _err(why)
+    return _ok(token=token, targets=targets, legs=info)
+
+
 @app.post("/api/manual/sine_defaults")
 def api_sine_defaults():
     why = _require_calibrated()

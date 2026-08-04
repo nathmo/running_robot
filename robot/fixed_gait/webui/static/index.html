@@ -92,6 +92,9 @@
     <div class="row">
       <button id="btn-hold" class="btn primary">Hold pose (enter manual)</button>
       <button id="btn-home" class="btn">🏠 Home (slow → zero pose)</button>
+      <button id="btn-center" class="btn" title="Slew both legs to the centre of the largest safe
+box in the workspace — the pose with the most room in every direction. Same slow guided move as
+Home, and like Home it works from a pose outside the safe region.">⌖ Centre (max room)</button>
       <span id="home-status" class="hint"></span>
       <button id="btn-release" class="btn">Release → limp</button>
       <span class="spacer"></span>
@@ -400,10 +403,17 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
       <div class="step-h"><span class="step-n">1</span> Excitation
         <span class="hint">— per-joint amplitude &amp; frequency sweep; the whole path is
           workspace-checked before it can start</span></div>
-      <p class="step-note">The chirp is centred on the leg's <b>current pose</b>, so
-        <b>🏠 Home the robot first</b> (Manual control): from a pose near a hard limit — or outside
-        the drawn workspace — every amplitude is refused and the run simply never starts. The reason
-        for a refusal appears in red next to the buttons below.</p>
+      <p class="step-note">The chirp is centred on the leg's <b>current pose</b>: from a pose near a
+        hard limit — or outside the drawn workspace — every amplitude is refused and the run never
+        starts. Hit <b>⌖ Centre legs</b> to park both legs where the safe workspace leaves the most
+        room in every direction; the amplitudes below are then trimmed to what fits. The reason for
+        any refusal appears in red next to the buttons.</p>
+      <div class="row">
+        <button id="btn-meas-center" class="btn" title="Slew both legs to the centre of the largest
+safe box in the workspace — the pose that leaves the most excitation room on every joint. Works
+even when a leg is currently parked outside the safe region.">⌖ Centre legs (max room)</button>
+        <span id="meas-room" class="hint"></span>
+      </div>
       <table class="meas-grid">
         <thead><tr><th>joint</th><th>amplitude °</th><th>start Hz</th><th>end Hz (chirp)</th></tr></thead>
         <tbody id="meas-joint-rows"></tbody>

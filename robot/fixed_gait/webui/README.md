@@ -17,7 +17,7 @@ What it does (one page):
 |---|---|
 | Telemetry | live raw/normalized position, current, temperature per motor + strip charts |
 | Calibration wizard | **blocks all motion after boot** until zero pose + direction check are done |
-| Manual control | per-actuator slider that **tracks the live motor position** (grab to jog) + exact-angle box; **🏠 Home** slowly returns every joint to the zero pose; per-actuator sine (start↔stop **preset to 70% of the safe range**, frequency); workspace-override checkbox |
+| Manual control | per-actuator slider that **tracks the live motor position** (grab to jog) + exact-angle box; **🏠 Home** slowly returns every joint to the zero pose and **⌖ Centre** parks both legs where the safe workspace leaves the most room in every direction (the largest inscribed box — the pose to excite from); per-actuator sine (start↔stop **preset to 70% of the safe range**, frequency); workspace-override checkbox |
 | Safe workspace | abduction bar + (cam, thigh) pixel editor — draw/erase/flood-fill, undo, save/export/import |
 | Gait trajectory | hand-**draw** a path, or **teach** by backdriving (record takes), smooth + save |
 | EE animation | live linkage + workspace + gait + zero in foot (end-effector) space, per leg |

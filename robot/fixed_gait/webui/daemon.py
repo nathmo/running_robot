@@ -124,7 +124,9 @@ class RobotDaemon(threading.Thread):
         self._manual_targets = {}          # name -> desired normalized deg
         self._manual_override = False
         self._slew_dps = DEFAULT_SLEW_DPS
-        self._home_active = False           # slow return-to-zero engaged (feasibility-net checked)
+        self._home_active = False           # slow guided move engaged (feasibility-net checked)
+        self._home_kind = "zero"            # "zero" (Home) or "center" (max-room pose) — label only
+        self._home_relax = False            # guided move started from a pose the band net rejects
         self._home_slew = 20.0
         self._sine = {n: dict(enabled=False, a=-10.0, b=10.0, freq=0.3, _blend0=None)
                       for n in paths.MOTOR_NAMES}
@@ -293,6 +295,20 @@ class RobotDaemon(threading.Thread):
             self._req_mode = "MANUAL"
         return True, ""
 
+    def _pose_rejected_by_band(self):
+        """Does the CURRENT pose already fail the assembly-band net? A guided move that starts here
+        has to be allowed to leave it (see _tick_manual), or the robot is pinned where it stands."""
+        if self.fklut is None or not self.fklut.available or not self.by_name:
+            return False
+        if any(m.pos is None for m in self.motors):
+            return False
+        pose = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items()}
+        for side in paths.SIDES:
+            ok, _ = self.fklut.feasible_check(side, pose[f"{side}.cam"], pose[f"{side}.thigh"])
+            if not ok:
+                return True
+        return False
+
     def home(self, slew_dps=None):
         """Slowly drive every joint back to the URDF zero pose (normalized 0 = the stance we
         manually zero to). Trusts the CAD zero: it slews under the physical-feasibility net (like
@@ -303,14 +319,105 @@ class RobotDaemon(threading.Thread):
             with self.lock:
                 self._last_reject = why
             return False, why
+        relax = self._pose_rejected_by_band()
         with self.lock:
             self._manual_targets = {n: 0.0 for n in paths.MOTOR_NAMES}
             self._home_active = True
+            self._home_kind = "zero"
+            self._home_relax = relax
             self._home_slew = float(np.clip(slew_dps if slew_dps else 20.0, 5.0, 120.0))
             for s in self._sine.values():
                 s["enabled"] = False
             self._req_mode = "MANUAL"
         return True, ""
+
+    # ---------------------------------------------------------------- centering (max room around)
+    @staticmethod
+    def _largest_safe_square(grid, res, cam_origin, thigh_origin):
+        """Centre of the LARGEST axis-aligned square of safe (cam, thigh) cells, as
+        (cam_deg, thigh_deg, half_width_deg), or None if the grid holds no safe cell.
+
+        A square (not a disc) because the thing that has to fit inside is a box: the excitation
+        moves cam and thigh independently, so the swept set is [c±A_cam] x [t±A_thigh], and the
+        half-width returned here is exactly the amplitude that is guaranteed to stay safe on both
+        axes at once. Integral image, no scipy (this runs on the Pi). Ties go to the square nearest
+        the zero pose, so the leg travels as little as possible to get there."""
+        g = np.asarray(grid, bool)
+        h, w = g.shape
+        integ = np.zeros((h + 1, w + 1), np.int64)
+        integ[1:, 1:] = g.cumsum(0).cumsum(1)
+        hits, half = None, 0
+        for r in range(min(h, w) // 2 + 1):
+            n = 2 * r + 1
+            # block sum over every n x n window, indexed by its top-left cell
+            blocks = integ[n:, n:] - integ[:-n, n:] - integ[n:, :-n] + integ[:-n, :-n]
+            found = np.argwhere(blocks == n * n)
+            if not len(found):
+                break
+            hits, half = found, r
+        if hits is None:
+            return None
+        # cell centres: a safe cell is safe across its whole width (the check floors into the grid),
+        # so the room around the centre of the middle cell is (half + 0.5) cells on every side
+        cam = cam_origin + (hits[:, 0] + half + 0.5) * res
+        thigh = thigh_origin + (hits[:, 1] + half + 0.5) * res
+        k = int(np.argmin(np.hypot(cam, thigh)))
+        return float(cam[k]), float(thigh[k]), float((half + 0.5) * res)
+
+    def workspace_center(self, sides=None):
+        """Per-leg pose with the MOST room around it, as ({name: deg}, {side: info}).
+
+        This is the pose a system-ID chirp is most likely to fit in: near a hard limit or a
+        workspace edge every amplitude is refused at t=0, which is the usual reason a measurement
+        will not start. `room` is the symmetric amplitude each joint can take FROM that pose:
+        cam/thigh share the inscribed-square half-width (both move at once), abduction is half its
+        safe range. A leg with no workspace falls back to the zero pose, like Home."""
+        targets, info = {}, {}
+        for side in (sides or paths.SIDES):
+            leg = self.wstore.legs.get(side) if self.wstore else None
+            got = None
+            if leg is not None and leg.get("knee_grid") is not None:
+                got = self._largest_safe_square(leg["knee_grid"], leg["knee_grid_deg"],
+                                                leg["knee_cam_origin"], leg["knee_thigh_origin"])
+            if got is None:
+                for role in paths.ROLES:
+                    targets[f"{side}.{role}"] = 0.0
+                info[side] = dict(source="zero pose (no workspace for this leg)",
+                                  room={r: HARD_CLAMP[r] for r in paths.ROLES})
+                continue
+            cam, thigh, room = got
+            lo, hi = leg["abd_safe"]
+            abd = 0.5 * (lo + hi)
+            targets[f"{side}.abd"] = round(abd, 1)
+            targets[f"{side}.cam"] = round(cam, 1)
+            targets[f"{side}.thigh"] = round(thigh, 1)
+            info[side] = dict(source="workspace centre",
+                              room=dict(abd=round(min(abd - lo, hi - abd), 1),
+                                        cam=round(room, 1), thigh=round(room, 1)))
+        return targets, info
+
+    def center(self, sides=None, slew_dps=None):
+        """Slew to workspace_center(). Uses the same guided move as home(): the feasibility net
+        rather than the eroded polygon, so it also works when the leg is currently parked OUTSIDE
+        the safe region — which is exactly when you reach for this button.
+        Returns (targets, info, "") or (None, None, reason)."""
+        ok, why = self._motion_allowed()
+        if not ok:
+            with self.lock:
+                self._last_reject = why
+            return None, None, why
+        targets, info = self.workspace_center(sides)
+        relax = self._pose_rejected_by_band()
+        with self.lock:
+            self._manual_targets.update(targets)
+            self._home_active = True
+            self._home_kind = "center"
+            self._home_relax = relax
+            self._home_slew = float(np.clip(slew_dps if slew_dps else 20.0, 5.0, 120.0))
+            for s in self._sine.values():
+                s["enabled"] = False
+            self._req_mode = "MANUAL"
+        return targets, info, ""
 
     def sine_defaults(self, frac=0.7):
         """Per-actuator sine endpoints = `frac` of the contiguous SAFE travel around the CURRENT
@@ -753,15 +860,29 @@ class RobotDaemon(threading.Thread):
                 self._last_reject = reason
                 self._held = held_before                   # do NOT advance through refused space
                 return                                     # hold previous commands, don't send
-        elif self.fklut is not None and self.fklut.available:
+        note = ""
+        if override and self.fklut is not None and self.fklut.available:
+            bad = ""
             for side in paths.SIDES:                       # physically-assemblable band net
                 ok, reason = self.fklut.feasible_check(side, targets_norm[f"{side}.cam"],
                                                        targets_norm[f"{side}.thigh"])
                 if not ok:
-                    self._last_reject = reason
-                    self._held = held_before
-                    return
-        self._last_reject = ""
+                    bad = reason
+                    break
+            if not bad:
+                self._home_relax = False                   # back in the band: re-arm the net
+            elif not (homing and self._home_relax):
+                self._last_reject = bad
+                self._held = held_before
+                return
+            else:
+                # The move STARTED from a pose the band net rejects, so enforcing it here would
+                # pin the robot in that pose forever — and getting out of it is the whole point of
+                # Home / ⌖ Centre. The destination was validated before the move was accepted, the
+                # slew is slow, and the hard clamps, the tracking-error trip and the E-STOP all
+                # still apply. The net re-arms the moment the leg is back inside the band (above).
+                note = f"recovering toward a checked target — {bad}"
+        self._last_reject = note
 
         for n, m in self.by_name.items():
             raw = self.calib.raw(n, targets_norm[n])
@@ -1079,7 +1200,8 @@ class RobotDaemon(threading.Thread):
                                 err=int(err[i]))
                         for i, n in enumerate(paths.MOTOR_NAMES)},
                 manual=dict(targets=manual_targets, override=override, slew_dps=self._slew_dps,
-                            sine=sine_pub, homing=self._home_active),
+                            sine=sine_pub, homing=self._home_active,
+                            homing_kind=self._home_kind),
                 playback=(None if self._pb is None else dict(
                     running=self.mode == "PLAYBACK", phase=round(self._pb.get("phase", 0.0), 3),
                     period=self._pb["period"], mode=self._pb["mode"], sides=self._pb["sides"],
