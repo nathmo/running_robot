@@ -43,13 +43,21 @@ DEFAULT_SLEW_DPS = 60.0
 HARD_CLAMP = {"abd": 48.0, "cam": 88.0, "thigh": 62.0}
 HARD_WIDEN_DEG = 10.0
 
-# Playback cycle period, seconds. The floor is a real limit, not a slider preference: phase is
-# play_t / period, so a 0 sails straight into a ZeroDivisionError in _tick_playback, and the PATCH
-# endpoint takes whatever number it is handed. 0.2 s = 5 Hz is the fastest the UI offers; at the
-# daemon's 200 Hz that is still 40 control samples per cycle. Going faster is not blocked by this
-# clamp being generous -- it is blocked by max_speed / max_track_err tripping first, which is the
-# guard that should be doing the work.
-PERIOD_MIN = 0.2
+# Playback cycle period, seconds. Two independent reasons for the floor:
+#
+#   1. phase = play_t / period, so a 0 from the PATCH endpoint (no schema, takes what it is handed)
+#      is a ZeroDivisionError in the CAN thread -- a daemon death with the motors mid-gait.
+#   2. HARDWARE (2026-08-04, after a part failed during a high-cadence run). 0.4 s = 2.5 Hz is a
+#      HARD ceiling now, not a slider preference. Measured off gait_drawn_tuesday.npz, the cam is
+#      the binding joint: 68.8 deg of travel means a peak of 359 deg/s per Hz of cadence, so it
+#      reaches the AKE90-8's 1261 deg/s no-load speed at 3.5 Hz. Past that the command is not
+#      merely hard to follow, it is kinematically impossible -- the drive saturates current chasing
+#      a target it cannot reach, which is a mechanism for breaking things rather than a tracking
+#      nuisance. At 2.5 Hz the cam sits at 71% of no-load (so ~29% of stall torque left) and the
+#      thigh at 44%. That is already the aggressive end; it is a limit, not a target.
+#
+# Raising this needs a hardware argument, not a UI one. See scripts in the commit message.
+PERIOD_MIN = 0.4
 PERIOD_MAX = 600.0
 
 

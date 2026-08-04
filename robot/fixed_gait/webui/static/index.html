@@ -348,7 +348,10 @@
       </select>
     </div>
     <div class="row">
-      <label>period <input type="range" id="pb-period" min="0.2" max="20" value="8" step="0.1">
+      <label title="Hard limit 0.4 s = 2.5 Hz (daemon.PERIOD_MIN), set after a part failed on a
+high-cadence run. The cam reaches its motor's no-load speed at 3.5 Hz on this gait, so beyond
+that the command is kinematically impossible, not just hard to track.">period
+        <input type="range" id="pb-period" min="0.4" max="20" value="8" step="0.1">
         <span id="pb-period-val">8</span> s/cycle <span id="pb-period-hz" class="hint">(0.13 Hz)</span></label>
       <label>left phase <input type="range" id="pb-leftphase" min="0" max="1" value="0.5" step="0.05">
         <span id="pb-leftphase-val">0.5</span></label>

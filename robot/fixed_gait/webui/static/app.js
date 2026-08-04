@@ -1005,8 +1005,9 @@ const TRAJ_COLORS = { right: "#ff35c8", left: "#35d0ff" };
 const trajBackdrops = {};                       // leg -> {key, grid} unpacked-bits cache
 
 function previewPhase() {
-  // floor matches daemon.PERIOD_MIN, so the on-screen preview and the robot stay in step
-  const period = Math.max(0.2, +$("pb-period").value || 8);
+  // floor matches daemon.PERIOD_MIN (0.4 s = 2.5 Hz hard limit), so the on-screen preview and the
+  // robot stay in step
+  const period = Math.max(0.4, +$("pb-period").value || 8);
   return (((performance.now() - S.preview.t0) / 1000) / period) % 1;
 }
 function previewIdx(tr, side, p) {
