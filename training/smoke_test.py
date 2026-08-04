@@ -761,14 +761,16 @@ def test_ankle_study():
     plausible, wrong curve, and nothing downstream would catch it."""
     print("ankle-spring study:")
     import os
-    M = "model/dash01_measured.xml"
-    MA = "model/dash01_measured_active.xml"
+    M = "model/dash01.xml"
+    MA = "model/dash01_active.xml"
     have = all(os.path.exists(PKG_DIR / p) for p in (M, MA))
     if not have:
         check("study plants present", False, "run `python -m model.make_ankle_variants`")
         return
 
-    # measured masses actually landed (15.14 kg, not the 12.83 kg CAD placeholder)
+    # measured masses actually landed (15.14 kg, not the 12.83 kg CAD placeholder). Since the
+    # correction is baked into the one plant, this now also guards every non-study preset: a CAD
+    # regen that skipped model.apply_measured_masses would fail right here.
     e = DashEnv(Config(model_path=M, ankle_mode="passive"))
     check("measured-mass plant", abs(float(e.model.body_subtreemass[1]) - 15.136) < 0.01,
           f"{float(e.model.body_subtreemass[1]):.3f} kg")

@@ -1,18 +1,19 @@
-"""Generate the PLANT variants for the ankle-spring study from dash01_measured.xml.
+"""Generate the PLANT variants for the ankle-spring study from dash01.xml.
 
 The study asks three things about the passive foot spring: is it useful at all, must it be actuated,
 and is there an optimal stiffness. Two of those need a different PLANT, not just a different number:
 
-  dash01_measured.xml         (patched in place) -- gains `lock_ankle_L/R` equality constraints,
-                              INACTIVE by default. Activating them welds the ankle => the RIGID
-                              null arm. Done with equalities rather than by deleting the joint on
-                              purpose: the qpos/qvel layout, the obs width and every hard-coded
-                              ankle index stay identical, so rigid/free/passive arms are the same
-                              network shape and can even share a warm start.
-  dash01_measured_active.xml  -- adds a real ankle ACTUATOR per side (position servo, motor point
-                              mass welded at the ankle joint) => the ACTIVE arms. This one does
-                              change the action/obs width (nu 6 -> 8), so active arms are their own
-                              lineage and never warm-start from a passive checkpoint.
+  dash01.xml           (patched in place) -- gains `lock_ankle_L/R` equality constraints, INACTIVE
+                       by default. Activating them welds the ankle => the RIGID null arm. Done with
+                       equalities rather than by deleting the joint on purpose: the qpos/qvel
+                       layout, the obs width and every hard-coded ankle index stay identical, so
+                       rigid/free/passive arms are the same network shape and can even share a warm
+                       start. Inactive equalities change no dynamics, which is why they can live in
+                       the one shared plant rather than in a study-only copy.
+  dash01_active.xml    -- adds a real ankle ACTUATOR per side (position servo, motor point mass
+                       welded at the ankle joint) => the ACTIVE arms. This one does change the
+                       action/obs width (nu 6 -> 8), so active arms are their own lineage and never
+                       warm-start from a passive checkpoint.
 
 The `free` (k=0, floppy ankle) and the passive stiffness sweep need no new plant -- they are runtime
 settings of ankle_mode / ankle_stiffness in env.py.
@@ -33,8 +34,8 @@ import sys
 import mujoco
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BASE = os.path.join(HERE, "dash01_measured.xml")
-ACTIVE = os.path.join(HERE, "dash01_measured_active.xml")
+BASE = os.path.join(HERE, "dash01.xml")
+ACTIVE = os.path.join(HERE, "dash01_active.xml")
 
 ANKLE_JOINTS = {"L": "LegLeftNCS-v1_Révolution-9", "R": "LegRightNCS-v1_Révolution-10"}
 ANKLE_BODY = {"L": "FootLeftNCS-v1", "R": "FootRightNCS-v1"}

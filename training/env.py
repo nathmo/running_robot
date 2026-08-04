@@ -349,7 +349,7 @@ class DashEnv(gym.Env):
         if actuated and self.n_ankle_act != 2:
             raise ValueError(
                 f"ankle_mode={mode!r} needs the actuated-ankle plant (2 'ankle_*' actuators, found "
-                f"{self.n_ankle_act}). Set model_path='model/dash01_measured_active.xml' "
+                f"{self.n_ankle_act}). Set model_path='model/dash01_active.xml' "
                 f"(generate it with `python -m model.make_ankle_variants`).")
         if not actuated and self.n_ankle_act:
             raise ValueError(

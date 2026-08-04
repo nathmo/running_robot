@@ -19,7 +19,11 @@ from typing import List
 @dataclass
 class Config:
     # ----- model & timing -----
-    model_path: str = "model/dash01.xml"   # resolved relative to this package if not found from CWD
+    # The one plant: measured masses (15.14 kg), ankle-lock equalities, settled loaded stance.
+    # Resolved relative to this package if not found from CWD. Only the active-ankle arms override
+    # it (dash01_active.xml, 8 actuators) -- mass is not an experimental variable, see
+    # model/apply_measured_masses.py.
+    model_path: str = "model/dash01.xml"
     control_decimation: int = 20           # sim steps per control step. sim is 1 kHz -> 50 Hz control
     keyframe: str = "stand"
 
@@ -307,7 +311,7 @@ class Config:
     #   "rigid"        ankle welded at its stance angle via the lock_ankle_L/R equalities. The
     #                  other null: no compliance, no actuation, just a stiff foot.
     #   "active"       policy-driven ankle servo, NO spring (k=0). Needs the +2-actuator plant
-    #                  (model/dash01_measured_active.xml) -- action/obs widen, own lineage.
+    #                  (model/dash01_active.xml) -- action/obs widen, own lineage.
     #   "active_spring" policy-driven ankle servo IN PARALLEL with the spring (parallel-elastic).
     # NOTE "rigid" needs the lock_ankle equalities and the active modes need the 8-actuator model;
     # env.py raises if model_path lacks them, rather than silently running the wrong arm.
@@ -1295,7 +1299,9 @@ PRESETS.update({
     # and in the meantime the MEASURED-mass model landed. v1..v4 all trained on dash01.xml at
     # 12.83 kg with a 0.222 kg shin; the real robot is 15.14 kg with a 0.573 kg shin (2.6x). Distal
     # leg mass is the axis the speed oracle says dominates, so that is not a detail — every teleop
-    # policy so far is tuned to a robot that does not exist. v5 = v4 on dash01_measured.xml.
+    # policy so far is tuned to a robot that does not exist. v5 = v4 on the corrected plant, which
+    # since 2026-08-04 is just the default dash01.xml (no model_path override needed, and none
+    # possible: the mass correction is baked in).
     #
     # Mass DR narrowed because the masses are now measured; inertia DR deliberately NOT narrowed:
     # checking the two models body by body, every inertia tensor scaled by EXACTLY its body's mass
@@ -1303,7 +1309,6 @@ PRESETS.update({
     # tensors rescaled proportionally. The mass DISTRIBUTION inside each link is still a placeholder,
     # so the radius of gyration is exactly as uncertain as it was before and dr_inertia stays wide.
     "teleop_v5": lambda: _teleop(
-        model_path="model/dash01_measured.xml",
         dr_loop_site=0.0015,
         curriculum_retreat_frac=0.7,
         stance_ratio_final=0.62,
@@ -1419,9 +1424,10 @@ PRESETS.update({f"{m}_sym_gait": _mk_sym(m) for m in LOCKS})
 #      ankle's stance inertia is 0.316 kg*m^2, 53x its swing inertia. That is why the old fixed
 #      ankle_damping=1.6 was ~7.6% of critical at k=350 and rang at 5.3 Hz -- the m7 6 Hz footfall,
 #      re-derived from the plant instead of from a training curve.)
-#   2. The MEASURED-MASS plant (dash01_measured.xml, 15.14 kg vs the CAD placeholder's 12.83, with
-#      a 2.6x heavier shin). The spring's job is distal energy storage, so getting distal mass
-#      wrong would answer the question about a robot that does not exist.
+#   2. The MEASURED-MASS plant (15.14 kg vs the CAD placeholder's 12.83, with a 2.6x heavier shin).
+#      The spring's job is distal energy storage, so getting distal mass wrong would answer the
+#      question about a robot that does not exist. Since 2026-08-04 that is just dash01.xml -- the
+#      correction is baked into the one plant, so no arm can opt out of it by accident.
 #   3. The active arms' torque is billed in the efficiency reward like any other actuator, and they
 #      are held to a real torque-speed curve, so "active" cannot win on free energy or on an
 #      actuator that delivers peak torque at any speed. (It IS given free mass — deliberately; see
@@ -1429,10 +1435,9 @@ PRESETS.update({f"{m}_sym_gait": _mk_sym(m) for m in LOCKS})
 _STUDY_PLANT = {k: v for k, v in _SYM_PLANT.items()
                 if k not in ("ankle_stiffness", "ankle_damping")}   # the study sets these per arm
 _STUDY_PLANT.update(
-    model_path="model/dash01_measured.xml",
     ankle_zeta=0.7,          # derived damping; overrides ankle_damping. See _setup_ankle.
 )
-_ACTIVE_MODEL = "model/dash01_measured_active.xml"
+_ACTIVE_MODEL = "model/dash01_active.xml"
 
 # The passive stiffness grid, log-spaced so an optimum shows up as a peak rather than a plateau
 # edge. k=28.65 is the real spring the robot has today; 350 is the 2026-07-24 winner, kept as the
@@ -1465,11 +1470,12 @@ def _study(m, arm, **kw):
 PRESETS.update({f"study_m3_{a}": (lambda a=a: _study("m3", a)) for a in STUDY_ARMS})
 PRESETS.update({f"study_m6_{a}": (lambda a=a: _study("m6", a)) for a in STUDY_ARMS})
 
-# Control arm: the 2026-07-24 winner on the OLD placeholder-mass plant. Not part of the sweep --
-# it exists to measure how much the mass correction alone moved the answer, i.e. whether any of the
-# pre-2026-08 results transfer to the real robot at all.
-PRESETS["study_m3_k350_oldmass"] = lambda: _react(
-    "m3", **{**_STUDY_PLANT, **STUDY_ARMS["k350"], "model_path": "model/dash01.xml"})
+# REMOVED 2026-08-04: study_m3_k350_oldmass, the control arm on the CAD placeholder masses. It only
+# made sense while two plant files existed; now that dash01.xml IS the measured plant, its
+# model_path override pointed at the same model as study_m3_k350 and it would have run as a silent
+# duplicate -- the exact "clean, plausible, wrong curve" failure test_ankle_study guards against.
+# The question it asked (do pre-2026-08 results transfer to the real robot?) is a question about the
+# old runs, not about the ankle; answer it by re-running an old preset off a git checkout if needed.
 
 # Sensitivity check, run ONLY if the active arm loses: does it still lose when its energy is free?
 # If yes, active is dead on the merits; if no, active is dead on its energy budget, which is a

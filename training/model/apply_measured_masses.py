@@ -8,10 +8,18 @@ leg mass is the dominant cost term for a runner (see [[hardware-speed-ceiling]]:
 the ankle-spring study has to run on the corrected plant or it answers a question about a robot
 that does not exist.
 
-Writes a NEW model (dash01_measured.xml) rather than editing dash01.xml, so the existing m1..m7 /
-slow_gait / sym_gait lineages keep their plant and the study can A/B the mass correction itself.
+Patches dash01.xml IN PLACE (2026-08-04 decision). The first version of this script wrote a separate
+dash01_measured.xml so the m1..m7 / slow_gait / sym_gait lineages could keep their plant and the
+ankle study could A/B the mass correction. That framing was wrong: there is one robot and it weighs
+15.14 kg, so the mass is a plant FACT, not an experimental variable, and a second plant file only
+creates ways to train on a robot that does not exist. The CAD masses are recoverable from git
+history if a comparison is ever wanted.
 
-    python -m model.apply_measured_masses            # -> model/dash01_measured.xml
+    python -m model.apply_measured_masses            # patches model/dash01.xml
+
+Idempotent: re-running on an already-patched file computes a scale of 1.0 and changes nothing, which
+is what makes it safe to call from build_model at the end of a CAD regen (a regen rewrites dash01.xml
+from CAD and would otherwise silently restore the placeholder masses).
 
 MEASURED INPUT (grams, from the user):
     base 5764 (incl. BOTH abduction motors + battery) | hip 3271 (incl. its two motors)
@@ -34,7 +42,7 @@ import mujoco
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "dash01.xml")
-DST = os.path.join(HERE, "dash01_measured.xml")
+DST = SRC                                          # in place: one plant file, see the module docstring
 
 # Measured GROUP masses in kg. A group = one CAD link body + the motor point-masses welded onto it
 # by build_model.add_motor_masses (the user weighed assemblies, the model splits motors out).

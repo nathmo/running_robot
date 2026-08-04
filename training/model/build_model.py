@@ -349,14 +349,24 @@ def build():
     # generated model (armature/damping/link-inertials/masses). CAD values above are the fallback.
     apply_identified_params(OUT)
 
-    # the keyframe edit only changes key_qpos, not masses/sizes — reuse the compiled model for
-    # the summary and just verify the final file parses
-    total_mass = float(model.body_subtreemass[
-        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")])
-    mujoco.MjModel.from_xml_path(OUT)
-    print(f"compiled OK: nq={model.nq} nv={model.nv} nu={model.nu} neq={model.neq} "
-          f"nsensor={model.nsensor} nkey={model.nkey}; stance height={qpos[2]:.3f} m; "
-          f"total mass={total_mass:.2f} kg")
+    # The masses above are CAD placeholders (12.83 kg); the robot was weighed and is 15.14 kg. Since
+    # 2026-08-04 there is only ONE plant file, so a regen that stopped here would silently hand the
+    # next run a robot that does not exist. Both steps are idempotent. Imported here, not at module
+    # scope: apply_measured_masses imports compute_standing_keyframe back out of this module.
+    from apply_measured_masses import restand, patch
+    from make_ankle_variants import add_ankle_locks, make_active
+    restand(patch(OUT, OUT))
+    add_ankle_locks(OUT)
+    make_active(OUT)
+
+    # summarize the FILE as it now stands, not the pre-patch compile: the mass patch and the ankle
+    # locks both changed it, so reusing `model` here would report the CAD mass and a stale keyframe.
+    final = mujoco.MjModel.from_xml_path(OUT)
+    total_mass = float(final.body_subtreemass[
+        mujoco.mj_name2id(final, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")])
+    print(f"compiled OK: nq={final.nq} nv={final.nv} nu={final.nu} neq={final.neq} "
+          f"nsensor={final.nsensor} nkey={final.nkey}; "
+          f"stance height={float(final.key_qpos[0][2]):.3f} m; total mass={total_mass:.2f} kg")
 
 
 if __name__ == "__main__":
