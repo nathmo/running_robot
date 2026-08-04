@@ -61,8 +61,14 @@ training/model/_*.png
 robot/model/_*.png
 robot/fixed_gait/calibration/_selftest/
 
-# web UI runtime data (session calibration, saved workspaces/gaits) — machine-local
-robot/fixed_gait/webui/data/
+# web UI runtime data — machine-local: session calibration (only valid until the motors are power
+# cycled), the active workspace, the fitted model map, and the raw sys-ID captures.
+robot/fixed_gait/webui/data/*
+# ...except the HAND-AUTHORED artifacts. A drawn workspace and a taught gait are work, not runtime
+# state, and they only exist on whichever machine drew them — one reimaged Pi loses them. The Pi has
+# no uplink (it serves the AP), so these arrive here by scp and get pushed from the desktop.
+!robot/fixed_gait/webui/data/workspaces/
+!robot/fixed_gait/webui/data/trajectories/
 
 # RL run intermediates — keep only final model + summary artifacts
 training/runs/**/ppo_*_steps.zip
