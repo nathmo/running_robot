@@ -410,8 +410,11 @@
 
     <div class="step">
       <div class="step-h"><span class="step-n">3</span> Drive PID gains
-        <span class="hint">— the position-loop gains your controller actually uses (stored with each
-          run, used to match the model)</span></div>
+        <span class="hint">— the drive's <b>position-loop</b> gains, read off the motor driver
+          boards. Recorded with each run so the estimator can model the loop; editing them here
+          does <b>not</b> change the boards. The inner current/speed loops are stored too
+          (dynstore.DRIVE_GAINS). Note ki = kd = 0: the position loop is P-only, so a loaded joint
+          settles short of its target.</span></div>
       <table class="meas-grid"><thead><tr><th>motor</th><th>kp</th><th>ki</th><th>kd</th></tr></thead>
         <tbody id="meas-pid-rows"></tbody></table>
     </div>

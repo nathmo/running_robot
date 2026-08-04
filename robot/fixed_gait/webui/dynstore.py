@@ -9,6 +9,11 @@ plain JSON side-file rather than the daemon. It is:
     Kt converts the logged current to torque, the PID gains let the estimator model / cross-check the
     drive's position loop.
 
+The app closes NO control loop of its own: canio speaks CubeMars servo mode (SET_POS / SET_CURRENT),
+and the drive's three cascaded loops do the rest. The gains here are therefore a RECORD of what the
+driver boards are configured with -- they cannot be pushed to the motors from this app, and editing
+them changes nothing on the robot. See DRIVE_GAINS.
+
 Masses are keyed by MODEL BODY name (so they line up with the STL meshes shown in the 3D viewer);
 pid/kt are keyed by webui motor name (paths.MOTOR_NAMES). All values are plain floats; a key absent
 from BOTH the file and DEFAULT_MASSES means "not measured yet" and falls back to the CAD/model value
@@ -42,9 +47,47 @@ MOTOR_NAME_TO_BODY = {
     "left.abd": "motor_hip_roll_L", "left.cam": "motor_cam_L", "left.thigh": "motor_thigh_L",
 }
 
-# CubeMars servo-firmware default position-loop gains are unknown to us; these are neutral seeds the
-# user overwrites with the values their controller actually uses (answer to the PID question).
-DEFAULT_PID = {"kp": 0.0, "ki": 0.0, "kd": 0.0}
+# ------------------------------------------------------------------ the drive's own control loops
+# READ OFF THE MOTOR DRIVER BOARDS (user, 2026-08-04). This answers the open PID question: the gains
+# used to be neutral zeros because we did not know what the drives were running.
+#
+# These are the CubeMars firmware's THREE CASCADED loops, innermost first: current -> speed ->
+# position. We do not close any of them. canio speaks servo mode -- SET_POS (packet 4) and
+# SET_CURRENT (packet 1) only -- so every position command the UI or a gait playback sends is closed
+# by the drive using exactly these numbers. There is no CAN packet here to write them either: they
+# are board configuration, changed with the CubeMars tool, and this table only RECORDS them.
+#
+# Why it matters beyond bookkeeping: the position loop is P-ONLY (ki = kd = 0 on all six). A pure
+# proportional position loop has steady-state droop under a constant load, so a joint holding
+# against gravity settles SHORT of its target by roughly (gravity torque / loop gain) -- that is a
+# systematic bias in any quasi-static identification run, not noise, and the estimator has to model
+# it rather than average it away. The abduction axis is 3x stiffer (kp 0.009 vs 0.003) so it droops
+# ~3x less than the sagittal pair.
+#
+# Grouping is the user's: one gain set per driver board. "Thigh+Knee" is a leg's SAGITTAL PAIR --
+# the knee is driven by the cam through the pushrod, so cam and thigh share a board and a tune. The
+# left/right current-loop gains differ (0.1255 vs 0.2066 kp) despite identical AKE90-8 motors, which
+# is what per-board current-loop autotuning against the real winding R/L looks like.
+_SAGITTAL_L = {"current": {"kp": 0.1255, "ki": 1704.8199},
+               "speed":   {"kp": 0.002, "ki": 0.1},
+               "position": {"kp": 0.003, "ki": 0.0, "kd": 0.0}}
+_SAGITTAL_R = {"current": {"kp": 0.2066, "ki": 2544.6150},
+               "speed":   {"kp": 0.002, "ki": 0.1},
+               "position": {"kp": 0.003, "ki": 0.0, "kd": 0.0}}
+_ABDUCTION = {"current": {"kp": 0.1190, "ki": 2290.1199},     # one tune for BOTH abduction boards
+              "speed":   {"kp": 0.002, "ki": 0.06},
+              "position": {"kp": 0.009, "ki": 0.0, "kd": 0.0}}
+
+DRIVE_GAINS = {
+    "left.cam": _SAGITTAL_L, "left.thigh": _SAGITTAL_L,
+    "right.cam": _SAGITTAL_R, "right.thigh": _SAGITTAL_R,
+    "left.abd": _ABDUCTION, "right.abd": _ABDUCTION,
+}
+
+# `pid` (the editable field, the UI table, the file) is the POSITION loop -- the one that shapes the
+# drive's response to the SET_POS commands this app actually sends. The inner loops live in
+# DRIVE_GAINS and ride along in the config snapshot so a measurement run stays self-describing.
+DEFAULT_PID = {m: dict(g["position"]) for m, g in DRIVE_GAINS.items()}
 
 # The user's WEIGHED segment masses (2026-08-03), in kg. These seed every fresh install so a new Pi
 # (data/ is git-ignored) starts on the real plant instead of the CAD placeholders in
@@ -74,7 +117,8 @@ class DynConfig:
     def __init__(self):
         self._lock = threading.Lock()
         self.masses = dict(DEFAULT_MASSES)      # body name -> kg
-        self.pid = {n: dict(DEFAULT_PID) for n in paths.MOTOR_NAMES}
+        self.pid = {n: dict(DEFAULT_PID.get(n, {"kp": 0.0, "ki": 0.0, "kd": 0.0}))
+                    for n in paths.MOTOR_NAMES}
         self.kt = {}                            # motor name -> Nm/A (filled by Kt calibration)
         self.updated = None
 
@@ -98,8 +142,11 @@ class DynConfig:
 
     def save(self, path=paths.DYN_CONFIG_FILE):
         with self._lock:
+            # drive_gains is board firmware config, not user state: written out so a run captured
+            # against this file is self-describing, but always re-read from DRIVE_GAINS on load.
             d = {"updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                 "masses": dict(self.masses), "pid": dict(self.pid), "kt": dict(self.kt)}
+                 "masses": dict(self.masses), "pid": dict(self.pid), "kt": dict(self.kt),
+                 "drive_gains": DRIVE_GAINS}
             self.updated = d["updated"]
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -144,7 +191,8 @@ class DynConfig:
     def as_dict(self):
         with self._lock:
             return {"updated": self.updated, "masses": dict(self.masses),
-                    "pid": {n: dict(g) for n, g in self.pid.items()}, "kt": dict(self.kt)}
+                    "pid": {n: dict(g) for n, g in self.pid.items()}, "kt": dict(self.kt),
+                    "drive_gains": DRIVE_GAINS}   # rides along into measurement-run metadata
 
     def snapshot(self):
         """Config + the fixed body/motor catalog the frontend needs to lay out the panels."""

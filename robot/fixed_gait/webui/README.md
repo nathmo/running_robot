@@ -73,6 +73,32 @@ the EE display per leg only when the winner is decisive.
 > hard-stop travel expressed in model coordinates. `data/model_map.json` stores signs + offsets
 > and can still be hand-edited / force-enabled in the UI.
 
+## Drive control loops (read off the motor driver boards, 2026-08-04)
+
+This app closes **no** control loop. `canio` speaks CubeMars servo mode — `SET_POS` and
+`SET_CURRENT` only — so the drives close everything with their own three cascaded loops. These are
+their configured gains, recorded in `dynstore.DRIVE_GAINS` and shipped with every measurement run so
+a capture is self-describing. They are **not settable from here** (no gain-write packet; use the
+CubeMars tool), and editing the PID table in the UI changes nothing on the robot.
+
+| group | motors | current kp / ki | speed kp / ki | position kp / ki / kd |
+|---|---|---|---|---|
+| left sagittal | `left.cam`, `left.thigh` | 0.1255 / 1704.8199 | 0.002 / 0.1 | 0.003 / 0 / 0 |
+| right sagittal | `right.cam`, `right.thigh` | 0.2066 / 2544.6150 | 0.002 / 0.1 | 0.003 / 0 / 0 |
+| abduction | `left.abd`, `right.abd` | 0.1190 / 2290.1199 | 0.002 / 0.06 | 0.009 / 0 / 0 |
+
+"Thigh+Knee" on the driver board is a leg's **sagittal pair**: the knee is driven by the cam through
+the pushrod, so cam and thigh share a board and a tune. Left and right current-loop gains differ
+despite identical AKE90-8 motors — that is per-board autotuning against the real winding R/L, not an
+asymmetry in the robot.
+
+Two consequences worth remembering when reading identification data:
+
+* **The position loop is P-only** (ki = kd = 0 on all six). A pure proportional loop droops under a
+  constant load, so a joint holding against gravity settles *short* of its target by roughly
+  (gravity torque / gain). That is a systematic bias in a quasi-static run, not noise.
+* **Abduction is ~3x stiffer** than the sagittal axes (kp 0.009 vs 0.003), so it droops ~3x less.
+
 ## Install on the Pi (offline)
 
 ```
