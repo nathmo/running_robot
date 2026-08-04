@@ -43,6 +43,26 @@ DEFAULT_SLEW_DPS = 60.0
 HARD_CLAMP = {"abd": 48.0, "cam": 88.0, "thigh": 62.0}
 HARD_WIDEN_DEG = 10.0
 
+# Playback cycle period, seconds. The floor is a real limit, not a slider preference: phase is
+# play_t / period, so a 0 sails straight into a ZeroDivisionError in _tick_playback, and the PATCH
+# endpoint takes whatever number it is handed. 0.2 s = 5 Hz is the fastest the UI offers; at the
+# daemon's 200 Hz that is still 40 control samples per cycle. Going faster is not blocked by this
+# clamp being generous -- it is blocked by max_speed / max_track_err tripping first, which is the
+# guard that should be doing the work.
+PERIOD_MIN = 0.2
+PERIOD_MAX = 600.0
+
+
+def _clamp_period(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return PLAYBACK_DEFAULTS["period"]
+    if v != v:                                  # NaN: json.loads happily produces one
+        return PLAYBACK_DEFAULTS["period"]
+    return min(PERIOD_MAX, max(PERIOD_MIN, v))
+
+
 PLAYBACK_DEFAULTS = dict(period=8.0, mode="position", current_limit=3.0, kp=0.8, ki=0.4, kd=0.02,
                          ramp=3.0, max_track_err=30.0, speed_limit=9000.0, max_speed=16000.0,
                          left_phase=None, legs="both", abd_right=None, abd_left=None)
@@ -327,6 +347,7 @@ class RobotDaemon(threading.Thread):
 
     def playback_start(self, data, params):
         p = {**PLAYBACK_DEFAULTS, **params}
+        p["period"] = _clamp_period(p["period"])
         with self.lock:
             self._playback_req = {"data": data, **p}
 
@@ -756,6 +777,7 @@ class RobotDaemon(threading.Thread):
                   "max_speed", "max_track_err"):
             if k in patch and patch[k] is not None:
                 pb[k] = float(patch[k])
+        pb["period"] = _clamp_period(pb["period"])   # live patch: never let phase divide by 0
         if "left_phase" in patch and patch["left_phase"] is not None \
                 and pb["data"].get("left") is not None:
             pb["data"]["left"]["phase_shift"] = float(patch["left_phase"])

@@ -986,7 +986,8 @@ const TRAJ_COLORS = { right: "#ff35c8", left: "#35d0ff" };
 const trajBackdrops = {};                       // leg -> {key, grid} unpacked-bits cache
 
 function previewPhase() {
-  const period = Math.max(0.5, +$("pb-period").value || 8);
+  // floor matches daemon.PERIOD_MIN, so the on-screen preview and the robot stay in step
+  const period = Math.max(0.2, +$("pb-period").value || 8);
   return (((performance.now() - S.preview.t0) / 1000) / period) % 1;
 }
 function previewIdx(tr, side, p) {
@@ -1479,7 +1480,15 @@ function syncFkMapSelects(st) {
 }
 
 /* ================================================================ playback */
-$("pb-period").oninput = () => $("pb-period-val").textContent = $("pb-period").value;
+// Show the cadence in Hz too: the slider is seconds/cycle, but a gait is thought about in Hz and
+// the fast end is where that matters (0.2 s/cycle reads as nothing, 5 Hz reads as fast).
+function updatePeriodLabel() {
+  const p = +$("pb-period").value;
+  $("pb-period-val").textContent = p.toFixed(p < 1 ? 2 : 1);
+  $("pb-period-hz").textContent = `(${(1 / p).toFixed(p < 1 ? 1 : 2)} Hz)`;
+}
+$("pb-period").oninput = updatePeriodLabel;
+updatePeriodLabel();
 $("pb-leftphase").oninput = () => $("pb-leftphase-val").textContent = $("pb-leftphase").value;
 $("pb-mode").onchange = () =>
   $("pb-current-params").style.display = $("pb-mode").value === "current" ? "" : "none";
