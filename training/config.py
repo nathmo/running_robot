@@ -1291,6 +1291,28 @@ PRESETS.update({
         efficiency_target=0.35,
         dr_curriculum_steps=120_000_000,
         push_dv=0.6),                  # pushes at 0.35 had no measurable effect; make them real
+    # v5 (2026-08-04): v4 never got a node (25 h pending), so nothing was burned on the stale plant —
+    # and in the meantime the MEASURED-mass model landed. v1..v4 all trained on dash01.xml at
+    # 12.83 kg with a 0.222 kg shin; the real robot is 15.14 kg with a 0.573 kg shin (2.6x). Distal
+    # leg mass is the axis the speed oracle says dominates, so that is not a detail — every teleop
+    # policy so far is tuned to a robot that does not exist. v5 = v4 on dash01_measured.xml.
+    #
+    # Mass DR narrowed because the masses are now measured; inertia DR deliberately NOT narrowed:
+    # checking the two models body by body, every inertia tensor scaled by EXACTLY its body's mass
+    # ratio (1.000 in all 13 bodies), i.e. the measured model has real masses with the CAD inertia
+    # tensors rescaled proportionally. The mass DISTRIBUTION inside each link is still a placeholder,
+    # so the radius of gyration is exactly as uncertain as it was before and dr_inertia stays wide.
+    "teleop_v5": lambda: _teleop(
+        model_path="model/dash01_measured.xml",
+        dr_loop_site=0.0015,
+        curriculum_retreat_frac=0.7,
+        stance_ratio_final=0.62,
+        efficiency_target=0.35,
+        dr_curriculum_steps=120_000_000,
+        push_dv=0.6,
+        dr_mass_global=0.06,           # was 0.12 — masses measured, payload placement still varies
+        dr_mass_body=0.08),            # was 0.15 — ditto
+        # dr_inertia stays 0.25: measured masses did NOT bring measured inertia tensors
     # Wider randomization, for the robustness-vs-performance ablation the eval grid scores.
     "teleop_hard": lambda: _teleop(
         dr_mass_global=0.20, dr_mass_body=0.25, dr_inertia=0.40, dr_com_offset=0.03,
