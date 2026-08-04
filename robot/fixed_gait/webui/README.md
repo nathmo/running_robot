@@ -4,9 +4,9 @@ One Flask app, served **on the robot's Raspberry Pi**, reachable from any phone/
 robot's WiFi hotspot. No internet needed at runtime — every asset is served locally.
 
 ```
-python fixed_gait/webui/server.py                # real robot (socketcan can0/can1)
-python fixed_gait/webui/server.py --mock         # simulated motors — try the UI on any machine
-python fixed_gait/webui/server.py --port 8080 --host 0.0.0.0
+python robot/fixed_gait/webui/server.py          # real robot (socketcan can0/can1)
+python robot/fixed_gait/webui/server.py --mock   # simulated motors — try the UI on any machine
+python robot/fixed_gait/webui/server.py --port 8080 --host 0.0.0.0
 ```
 
 Then browse to `http://<robot-ip>:8080/` (on the hotspot, the Pi's own address).
@@ -85,7 +85,7 @@ pip install -r requirements-rpi.txt          # if not already there (numpy, pyth
 pip install --no-index --find-links wheels/ flask
 sudo ip link set can0 up type can bitrate 1000000
 sudo ip link set can1 up type can bitrate 1000000
-python fixed_gait/webui/server.py
+python robot/fixed_gait/webui/server.py
 ```
 
 ### Run at boot (two systemd units)
@@ -123,7 +123,7 @@ Wants=can-up.service
 [Service]
 User=nemo
 WorkingDirectory=/home/nemo/running_robot
-ExecStart=/home/nemo/running_robot/.venv/bin/python fixed_gait/webui/server.py --port 8080
+ExecStart=/home/nemo/running_robot/.venv/bin/python robot/fixed_gait/webui/server.py --port 8080
 Restart=on-failure
 
 [Install]

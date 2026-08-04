@@ -52,6 +52,9 @@ Thumbs.db
 # Temporary
 *.tmp
 *.log
+# MuJoCo's own warning log, written next to whatever script ran (trailing comments are NOT
+# supported in .gitignore, hence the separate line)
+MUJOCO_LOG.TXT
 
 # scratch validation renders
 training/model/_*.png
