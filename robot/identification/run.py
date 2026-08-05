@@ -102,6 +102,8 @@ def main():
 
     paramio.save(params, args.out)
     print(f"\nwrote {args.out}")
+    for motor, why in (ident.get("skipped") or {}).items():
+        print(f"  SKIPPED {motor}: {why}")
     print("Kt (Nm/A):", {m: round(v, 3) for m, v in ident["kt"].items()})
     print("rotor armature (kg m^2):", {m: round(v, 4) for m, v in ident["armature"].items()})
     print("fit residual RMS (Nm):", round(ident["residual_rms_nm_overall"] or 0, 3),

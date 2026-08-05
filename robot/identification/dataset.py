@@ -219,5 +219,6 @@ def build(model, run, meta, cutoff_hz=12.0, decimate=1):
     out = dict(t=t[sl], q_act=q_f[sl], qd_act=qd[sl], qdd_act=qdd[sl], cur=cur[sl],
                qpos=qpos[sl], qvel=qvel[sl], qacc=qacc[sl], act_dof=act_dof, fs=fs,
                loop_resid=float(loop_resid),
+               leg=meta.get("leg"), hold_other=bool(meta.get("hold_other", True)),
                moving=(np.abs(qd[sl]) > np.radians(2.0)))
     return out
