@@ -161,6 +161,8 @@ class DashEnv(gym.Env):
         # preload k*(q_stand - ref), leaving posture unchanged while only the restoring gain rises.
         # Applied before _stand_torque below so the holding-torque baseline reflects the new spring.
         self._setup_ankle(_ankle_j)
+        if self.cfg.ankle_resettle:
+            self._resettle_keyframe()
         # standing-baseline holding torque: the torque penalty prices torque ABOVE this, so
         # single-support stance isn't taxed into being strictly worse than double-support skating.
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.key_id)
@@ -298,7 +300,9 @@ class DashEnv(gym.Env):
         self.on_control_step = None
 
     # ---------- ankle-spring study ----------
-    ANKLE_MODES = ("passive", "free", "rigid", "active", "active_spring")
+    ANKLE_MODES = ("passive", "free", "rigid", "active", "active_spring", "bar")
+    SHIN_BODIES = ("LegLeftNCS-v1", "LegRightNCS-v1")
+    BAR_SAT_RAD = 0.035     # travel over which the strut reaches its full buckling load (~2 deg)
 
     def _ankle_inertia(self, dadr, tau=5.0, n=10):
         """Effective inertia the ankle sees IN LOADED STANCE, measured by impulse response.
@@ -364,31 +368,98 @@ class DashEnv(gym.Env):
                 "ankle_mode='rigid' needs the lock_ankle_L/R equalities — run "
                 "`python -m model.make_ankle_variants` and point model_path at the patched model.")
 
+        # ----- the tension-only strut ("bar") -----
+        # Set up BEFORE stiffness so the k=0 branch below finds the geometry already resolved.
+        # Sign convention, derived from the plant rather than hard-coded: the shipped spring pushes
+        # the ankle TOWARDS springref, so the direction the ground loads the joint is the one AWAY
+        # from springref, i.e. sign(q_stand - springref). The strut is in TRACTION on that side.
+        self._bar_sign = np.zeros(len(ankle_j))
+        self._bar_q0 = np.zeros(len(ankle_j))
+        for i, j in enumerate(ankle_j):
+            qadr = int(self.model.jnt_qposadr[j])
+            q_stand = float(self.default_qpos[qadr])
+            self._bar_q0[i] = q_stand              # taut at the flat-foot angle (= the lock angle)
+            self._bar_sign[i] = np.sign(q_stand - float(self.model.qpos_spring[qadr])) or 1.0
+        if mode == "bar":
+            # Traction side = a HARD STOP: an inextensible strut, so the joint simply cannot travel
+            # past the flat-foot angle under load. Implemented as a one-sided joint limit (the range
+            # stays open on the compression side, where the buckling law below takes over).
+            for i, j in enumerate(ankle_j):
+                lo, hi = self.model.jnt_range[j]
+                if self._bar_sign[i] > 0:
+                    self.model.jnt_range[j] = (lo, self._bar_q0[i])
+                else:
+                    self.model.jnt_range[j] = (self._bar_q0[i], hi)
+                self.model.jnt_limited[j] = 1
+                # MuJoCo's DEFAULT limit softness (solref 0.02) lets body weight push 0.059 rad
+                # (3.4 deg) past the stop — measured. That is not an inextensible bar, it is a
+                # rubber one, and it would have quietly given the strut arm a compliant ankle:
+                # the exact confound this study exists to avoid. Stiffened to the same solref/
+                # solimp the lock_ankle equalities use, which brings penetration to ~0.
+                self.model.jnt_solref[j] = (0.005, 1.0)
+                self.model.jnt_solimp[j] = (0.95, 0.99, 0.001, 0.5, 2.0)
+
         # ----- stiffness -----
         # "free"/"active" mean k=0 EXACTLY. ankle_stiffness cannot express that (0 there is the
         # legacy "keep the model's 28.65" sentinel, kept so every m1..m7 preset keeps its meaning).
         # "rigid" zeroes it too: the joint cannot move, so a spring there is not physics, it is just
         # ~14 N*m of stance preload for the lock constraint to fight (and solver noise to explain).
-        if mode in ("free", "active", "rigid"):
+        # "bar" has no spring at all -- its restoring law is the strut, applied per substep.
+        if mode in ("free", "active", "rigid", "bar"):
             k_new = 0.0
         elif c.ankle_stiffness > 0.0:
             k_new = float(c.ankle_stiffness)
         else:
             k_new = None                              # keep whatever the model ships
+        zero_preload = str(c.ankle_preload) == "zero"
+        if zero_preload and mode in ("passive", "active_spring") and k_new is None:
+            k_new = float(self.model.jnt_stiffness[ankle_j[0]])   # keep k, but re-reference it
         if k_new is not None:
             for j in ankle_j:
                 qadr = int(self.model.jnt_qposadr[j])
                 if k_new == 0.0:
                     self.model.jnt_stiffness[j] = 0.0
                     continue
-                # preload-preserving: shift springref so k*(q_stand - ref) is unchanged, i.e. only
-                # the restoring GAIN rises and the standing posture does not move. Raising k alone
-                # balloons the ~12.8 N*m stance preload and flips the robot (verified 2026-07-24).
-                k_old = float(self.model.jnt_stiffness[j])
-                ref_old = float(self.model.qpos_spring[qadr])
                 q_stand = float(self.default_qpos[qadr])
-                self.model.qpos_spring[qadr] = q_stand - (k_old / k_new) * (q_stand - ref_old)
+                if zero_preload:
+                    # NO preload: the spring is at free length with the foot flat and unloaded, so
+                    # it makes zero torque there and only resists deflection from it. Strictly
+                    # weaker at stance than the same k preloaded -- that is the point of the arm.
+                    self.model.qpos_spring[qadr] = q_stand
+                else:
+                    # preload-preserving: shift springref so k*(q_stand - ref) is unchanged, i.e.
+                    # only the restoring GAIN rises and the standing posture does not move. Raising
+                    # k alone balloons the ~14 N*m stance preload and flips the robot (2026-07-24).
+                    k_old = float(self.model.jnt_stiffness[j])
+                    ref_old = float(self.model.qpos_spring[qadr])
+                    self.model.qpos_spring[qadr] = q_stand - (k_old / k_new) * (q_stand - ref_old)
                 self.model.jnt_stiffness[j] = k_new
+
+        # ----- distal mass: delete the spring assembly with the spring -----
+        # Only legitimate when there IS no spring; charging a passive arm for hardware it needs (or
+        # crediting it for hardware it still carries) is the one confound this study cannot survive.
+        if c.ankle_spring_mass_kg > 0.0:
+            if mode not in ("bar", "free", "rigid", "active"):
+                raise ValueError(
+                    f"ankle_spring_mass_kg={c.ankle_spring_mass_kg} with ankle_mode={mode!r} — that "
+                    "arm still has a spring, so its mass cannot be removed.")
+            for name in self.SHIN_BODIES:
+                b = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+                if b < 0:
+                    raise ValueError(f"shin body {name!r} not found in {c.model_path}")
+                m_old = float(self.model.body_mass[b])
+                m_new = m_old - float(c.ankle_spring_mass_kg)
+                if m_new <= 0.0:
+                    raise ValueError(
+                        f"ankle_spring_mass_kg={c.ankle_spring_mass_kg} exceeds the {name} mass "
+                        f"({m_old:.3f} kg)")
+                # inertia scaled by the mass ratio, exactly as apply_measured_masses.py does. The
+                # CoM is left alone: we do not know where in the shin the spring sat.
+                self.model.body_mass[b] = m_new
+                self.model.body_inertia[b] *= m_new / m_old
+        self.shin_mass = float(
+            self.model.body_mass[mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_BODY, self.SHIN_BODIES[0])])
 
         # ----- damping -----
         # ankle_zeta ties damping to the CURRENT k, so a stiffness sweep no longer also sweeps the
@@ -411,6 +482,16 @@ class DashEnv(gym.Env):
         self.n_gait_act = self.nu - self.n_ankle_act
         self._ankle_dof = np.array([int(self.model.jnt_dofadr[j]) for j in ankle_j], dtype=int)
         self._ankle_qpos = np.array([int(self.model.jnt_qposadr[j]) for j in ankle_j], dtype=int)
+        # Compression-side gain of the tension strut. It is a rigid bar, not a spring, so this is
+        # only the numerical ramp that makes the saturating law continuous: full buckling load is
+        # reached within BAR_SAT_RAD of the taut angle. The physics is the SATURATION, not the gain.
+        self._bar_k = float(c.ankle_bar_buckle_nm) / self.BAR_SAT_RAD
+        self._bar_active = (mode == "bar")
+        if self._bar_active and c.ankle_kp > 0.0:
+            # both write qfrc_applied on the ankle dofs; the reflex would silently overwrite the
+            # strut and the arm would be measuring an actuated ankle instead of a passive one.
+            raise ValueError("ankle_mode='bar' is incompatible with the ankle_kp pitch reflex — "
+                             "both drive qfrc_applied on the ankle joints.")
         # torque-speed envelope: only meaningful when there IS a motor and a finite no-load speed
         self._ankle_ts_curve = bool(self.n_ankle_act and c.ankle_motor_noload_rads > 0.0)
         self._ankle_peak_w = 0.0        # peak |ankle speed| this control step (substep-resolved)
@@ -486,6 +567,142 @@ class DashEnv(gym.Env):
                * self._torque_scale * self._dr_torque_scale * frac)
         self.model.actuator_forcerange[self.ankle_act_idx, 0] = -lim
         self.model.actuator_forcerange[self.ankle_act_idx, 1] = lim
+
+    def _search_stance(self):
+        """Find THIS arm's best standing posture before re-settling into it.
+
+        `nominal_ctrl` ([0,0,0.12,0,0,-0.12]) is the stance the robot was tuned to with the shipped
+        stiff, preloaded spring. A softer ankle does not stand there: measured, the k=41.4 no-preload
+        arm settles with the ankle 26.6 deg past flat, far enough that the foot body grazes the floor
+        and `_floor_violation` ends the episode in 3 steps -- from the RESET pose, for any policy.
+        Screening that arm against a posture it cannot hold would answer a question nobody asked.
+
+        So each arm gets the same small symmetric (cam, thigh) search, walked in order of INCREASING
+        deviation from the design stance and stopping at the first pose that settles without a floor
+        violation. "Keep the design posture unless this ankle cannot hold it, and then change it as
+        little as possible." Identical procedure everywhere, so a stiff arm simply keeps the nominal
+        stance (deviation 0 is tried first) and only a collapsing ankle is forced to crouch -- and
+        HOW FAR it is forced to crouch is itself a reported result.
+
+        Scoring on ankle deflection instead was tried and is wrong: it drags every arm into a deep
+        crouch that unloads the ankle at the cost of ride height, and it is meaningless for `rigid`,
+        whose welded ankle reads ~0 deflection at every pose. Returns the winning ctrl."""
+        grid = (0.0, -0.05, 0.05, -0.10, 0.10)
+        cands = sorted(((dc, dt) for dc in grid for dt in grid), key=lambda p: (abs(p[0]) + abs(p[1])))
+        for dc, dt in cands:
+            ctrl = self.nominal_ctrl.copy()
+            ctrl[1] += dc; ctrl[2] += dt                  # cam_L, thigh_L
+            ctrl[4] -= dc; ctrl[5] -= dt                  # mirrored R (flipped sagittal axes)
+            qpos, viol = self._settle(ctrl, t_s=1.0)
+            if qpos is not None and not viol:
+                self.stance_search_delta = (float(dc), float(dt))
+                return ctrl
+        raise RuntimeError(
+            f"ankle arm {self.ankle_mode!r} (k={self.ankle_k}) has NO standing posture in the search "
+            "grid that settles without the foot going through the floor — it cannot stand at all.")
+
+    def _settle(self, ctrl, t_s=2.0):
+        """Gravity-settle from the keyframe with base x/y/roll/pitch/yaw held and Z free, motors
+        holding `ctrl`. Runs on self.data (construction-time only; reset() re-initialises it) so the
+        floor check sees the same contact state the episode will.
+
+        Returns (qpos, floor_violated), or (None, True) on divergence. floor_violated is watched over
+        the SETTLED TAIL, not just the final pose: the violation flickers on and off as the foot
+        grazes the ground, so a single end-of-settle sample reads clean on a pose that terminates
+        2 steps into an episode -- measured, on exactly the k=41.4 no-preload arm this matters for."""
+        held = np.array([0, 1, 3, 4, 5])
+        d = self.data
+        mujoco.mj_resetDataKeyframe(self.model, d, self.key_id)
+        d.ctrl[:] = ctrl
+        if self.ankle_mode == "rigid":
+            d.eq_active[self._ankle_lock_eq] = 1
+        base_q = d.qpos[held].copy()
+        n = int(t_s / self.sim_dt)
+        tail = int(0.7 * n)
+        viol = False
+        for i in range(n):
+            if self._bar_active:
+                e = self._bar_sign * (d.qpos[self._ankle_qpos] - self._bar_q0)
+                d.qfrc_applied[self._ankle_dof] = self._bar_sign * np.clip(
+                    np.clip(-e, 0.0, None) * self._bar_k, 0.0, self.cfg.ankle_bar_buckle_nm)
+            mujoco.mj_step(self.model, d)
+            d.qpos[held] = base_q
+            d.qvel[held] = 0.0
+            if i >= tail and not viol:
+                viol = bool(self._floor_violation())
+        d.qfrc_applied[:] = 0.0
+        d.eq_active[self._ankle_lock_eq] = 0
+        if not np.all(np.isfinite(d.qpos)):
+            return None, True
+        return d.qpos.copy(), viol
+
+    def _resettle_keyframe(self, t_s=2.0):
+        """Re-settle the `stand` keyframe against THIS arm's ankle law.
+
+        The shipped keyframe is a gravity-settled equilibrium of the k=28.65 preloaded spring. Any
+        arm that changes the ankle law starts off that equilibrium and lurches for the first few
+        control steps of every episode — which would show up as a handicap on exactly the soft arms
+        the study is about, and would also bias `_stand_torque` (the torque penalty's baseline) and
+        `height_target`. So each arm gets its own settled stance.
+
+        Settled the same way the record's loaded-stance numbers were measured: base x/y/roll/pitch/
+        yaw held, Z free, motors holding the nominal stance targets. Holding the 5 base DOFs is what
+        makes it a plant measurement rather than a balance test — a floppy ankle would simply topple
+        with the base free, and toppling is the RL question, not the keyframe question."""
+        z_before = float(self.model.key_qpos[self.key_id][2])
+        # posture first, then settle into it (the search itself settles each candidate)
+        self.nominal_ctrl[:] = self._search_stance()
+        self.model.key_ctrl[self.key_id] = self.nominal_ctrl
+        qpos, _ = self._settle(self.nominal_ctrl, t_s=t_s)
+        if qpos is None:
+            raise RuntimeError(f"ankle arm {self.ankle_mode!r} diverged while re-settling the stance")
+        self.model.key_qpos[self.key_id] = qpos
+        self.default_qpos = qpos.copy()
+        self.default_motor_pos = self.default_qpos[self.act_qadr]
+        self.height_target = float(self.default_qpos[2])
+        # how far this ankle sags relative to the shipped k=28.65 preloaded stance. Reported by the
+        # statics tool: a large sag IS the answer for a soft arm, not a nuisance to be normalized.
+        self.settle_sag_m = z_before - self.height_target
+        self.settle_ankle = self.default_qpos[self._ankle_qpos].copy()
+        # Re-reference the workspace box to THIS arm's settled stance.
+        #
+        # workspace_kill measures the toe in the BASE frame against the LUT's nominal_toe, so it
+        # cannot tell a collapsed ANKLE from a folded 4-BAR — a sagging base lifts the toe relative
+        # to the base exactly as a parked leg does. That conflation is harmless in the wskill
+        # lineage, where every run has the same ankle. Across an ankle STUDY it is fatal: measured,
+        # the no-preload arm stands at dz=+0.180 m against a +0.14 ceiling, so the kill would fire
+        # 0.1 s into every episode from the reset pose and the arm would score zero for a reason
+        # that has nothing to do with whether it can be controlled.
+        # Re-centering on each arm's own stance (same half-widths, applied identically to every arm,
+        # including the k350 control) restores the question the box was built to ask — how far has
+        # this foot travelled from where this robot stands. The 4-bar's real reachability is still
+        # enforced independently by the loop-closure equality and the joint ranges.
+        if self._ws_ref is not None:
+            d = self.data
+            mujoco.mj_resetDataKeyframe(self.model, d, self.key_id)
+            mujoco.mj_forward(self.model, d)
+            base, R = d.xpos[self.base_id], d.xmat[self.base_id].reshape(3, 3)
+            self._ws_ref = np.array([R.T @ (d.geom_xpos[g] - base) for g in self.foot_gids])
+
+    def _apply_ankle_bar(self):
+        """Tension-only strut, re-evaluated every substep (ankle_mode='bar').
+
+        The traction side is a joint LIMIT (set in _setup_ankle) — an inextensible bar cannot let
+        the ankle travel past the flat-foot angle under load, and MuJoCo's limit constraint is a
+        better model of that than any stiff spring we could write here.
+
+        This handles the other side. A real strut is not a one-way constraint: it pushes back until
+        it BUCKLES, and past that its capacity is gone (Euler collapse), so the honest law is a
+        SATURATION at ankle_bar_buckle_nm rather than a hard stop or nothing at all. That matters
+        more than it looks — the saturated torque (0.2-0.6 N*m over the plausible lever arms) is
+        larger than the foot's own gravity torque (~0.13 N*m), so the strut carries the unloaded
+        foot near flat through swing instead of letting it flop to the joint stop and slam on
+        touchdown. It only gives way when something pushes harder than the buckling load."""
+        q = self.data.qpos[self._ankle_qpos]
+        e = self._bar_sign * (q - self._bar_q0)          # >0 traction (the limit handles it), <0 compression
+        tau = np.clip(-e, 0.0, None) * self._bar_k
+        np.clip(tau, 0.0, self.cfg.ankle_bar_buckle_nm, out=tau)
+        self.data.qfrc_applied[self._ankle_dof] = self._bar_sign * tau
 
     def set_dr_scale(self, s):
         """0..1 curriculum on the WIDTH of every domain-randomization range (applies from the next
@@ -901,6 +1118,8 @@ class DashEnv(gym.Env):
         for _ in range(n):
             if self._ankle_ts_curve:
                 self._apply_ankle_torque_speed()
+            if self._bar_active:
+                self._apply_ankle_bar()
             mujoco.mj_step(self.model, self.data)
             if not contact_acc.all():
                 contact_acc |= self._foot_contacts()
@@ -1361,10 +1580,14 @@ class DashEnv(gym.Env):
         base = self.data.xpos[self.base_id]
         R = self.data.xmat[self.base_id].reshape(3, 3)
         fired = False
+        # _ws_ref is the LUT's single nominal_toe by default, or -- when the ankle law has been
+        # changed and the stance re-settled -- this arm's own per-foot settled toe (see
+        # _resettle_keyframe for why that re-referencing is necessary and what it costs).
+        ref = self._ws_ref if self._ws_ref.ndim == 2 else np.broadcast_to(self._ws_ref, (2, 3))
         for fi, g in enumerate(self.foot_gids):
             tb = R.T @ (self.data.geom_xpos[g] - base)
-            dx = tb[0] - self._ws_ref[0]
-            dz = tb[2] - self._ws_ref[2]
+            dx = tb[0] - ref[fi][0]
+            dz = tb[2] - ref[fi][2]
             if abs(dx) > c.workspace_dx_max or dz > c.workspace_dz_max or dz < c.workspace_dz_min:
                 self._ws_out_t[fi] += self.control_dt
                 if self._ws_out_t[fi] >= c.workspace_grace_s:

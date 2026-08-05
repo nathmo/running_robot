@@ -887,6 +887,102 @@ def test_ankle_study():
     check("all study presets build", not bad, "; ".join(bad[:3]))
 
 
+def test_ankle2():
+    """The 2026-08-05 arms: the REAL spring with no preload (Q1) and the tension-only strut (Q2)."""
+    import numpy as np
+    from config import ANKLE2_ARMS, PRESETS, get_config
+    from env import DashEnv
+
+    bad = []
+    for a in ANKLE2_ARMS:
+        for m in ("m3", "m6"):
+            try:
+                PRESETS[f"ankle2_{m}_{a}"]()
+            except Exception as exc:                    # noqa: BLE001
+                bad.append(f"ankle2_{m}_{a}: {exc}")
+    check("all ankle2 presets build", not bad, "; ".join(bad[:3]))
+
+    # ----- preload ------------------------------------------------------------------------------
+    e = DashEnv(get_config("ankle2_m3_k41_4"))
+    ref_pre = e.model.qpos_spring[e._ankle_qpos].copy()
+    e.close()
+    e = DashEnv(get_config("ankle2_m3_k41_4_np"))
+    check("no-preload puts springref AT the flat-foot angle",
+          np.allclose(e.model.qpos_spring[e._ankle_qpos], e._bar_q0, atol=1e-9))
+    check("no-preload makes ZERO spring torque at the flat foot",
+          abs(e.ankle_k * float(e.model.qpos_spring[e._ankle_qpos][0] - e._bar_q0[0])) < 1e-9)
+    check("preload-preserving and zero-preload are DIFFERENT springrefs",
+          not np.allclose(ref_pre, e.model.qpos_spring[e._ankle_qpos]))
+    # the whole point of Q1: same k, but removing the preload collapses the stance
+    sag_np = e.settle_sag_m
+    e.close()
+    e = DashEnv(get_config("ankle2_m3_k41_4"))
+    # measured 2026-08-05: 145 mm vs 19 mm = 7.6x. The preload, not the stiffness, is doing almost
+    # all the work in the shipped ankle -- which is the whole reason Q1 is a separate arm from k41_4.
+    check("removing the preload costs >5x the stance sag at the SAME k",
+          sag_np > 5 * e.settle_sag_m, f"{sag_np*1000:.0f} mm vs {e.settle_sag_m*1000:.0f} mm")
+    e.close()
+
+    # ----- the tension-only strut ---------------------------------------------------------------
+    e = DashEnv(get_config("ankle2_m3_bar"))
+    check("bar has no spring", e.ankle_k == 0.0)
+    j = [int(jj) for jj in range(e.model.njnt)
+         if e.model.jnt_qposadr[jj] in list(e._ankle_qpos)]
+    one_sided = all(
+        (abs(e.model.jnt_range[jj][1] - e._bar_q0[i]) < 1e-9) if e._bar_sign[i] > 0
+        else (abs(e.model.jnt_range[jj][0] - e._bar_q0[i]) < 1e-9)
+        for i, jj in enumerate(j))
+    check("bar limit is ONE-SIDED, taut at the flat-foot angle", one_sided)
+    check("bar limit is stiff (not MuJoCo's default rubber)",
+          all(e.model.jnt_solref[jj][0] <= 0.005 for jj in j))
+    # traction: rigid. It must not be pushed past the stop by body weight.
+    check("bar holds the stance within 0.2 deg of taut",
+          np.degrees(np.max(e._bar_sign * (e.settle_ankle - e._bar_q0))) < 0.2)
+    # compression: saturates at the buckling load, and that load beats the foot's own gravity
+    # torque -- which is why the foot does not flop to the joint stop in swing.
+    e.data.qpos[e._ankle_qpos] = e._bar_q0 - e._bar_sign * 0.5      # deep on the compression side
+    e._apply_ankle_bar()
+    tau = e.data.qfrc_applied[e._ankle_dof]
+    check("bar compression SATURATES at the buckling load",
+          np.allclose(np.abs(tau), e.cfg.ankle_bar_buckle_nm, rtol=1e-9))
+    check("bar compression pushes back TOWARD taut",
+          np.all(e._bar_sign * tau > 0))
+    check("buckling load exceeds the foot's own gravity torque (no swing flop)",
+          e.cfg.ankle_bar_buckle_nm > 0.15, f"{e.cfg.ankle_bar_buckle_nm} N*m")
+    check("bar sheds the 249 g spring assembly from each shin",
+          abs(e.shin_mass - 0.324) < 1e-6, f"{e.shin_mass:.3f} kg")
+    e.close()
+    e = DashEnv(get_config("ankle2_m3_bar_heavy"))
+    check("bar_heavy KEEPS the spring mass (isolates strut from mass)",
+          abs(e.shin_mass - 0.573) < 1e-3, f"{e.shin_mass:.3f} kg")
+    e.close()
+
+    # ----- guards ------------------------------------------------------------------------------
+    from config import Config
+    for kw, why in ((dict(ankle_mode="passive", ankle_spring_mass_kg=0.249),
+                     "removing spring mass from an arm that still HAS a spring"),
+                    (dict(ankle_mode="bar", ankle_spring_mass_kg=99.0),
+                     "removing more mass than the shin has")):
+        try:
+            DashEnv(Config(**kw)); ok = False
+        except ValueError:
+            ok = True
+        check(f"rejects {why}", ok)
+
+    # ----- the study's own integrity ------------------------------------------------------------
+    # every arm re-settles, including the controls -- otherwise the soft arms are handicapped by
+    # starting off an equilibrium the stiff ones start on.
+    check("every ankle2 arm re-settles its stance",
+          all(get_config(f"ankle2_m3_{a}").ankle_resettle for a in ANKLE2_ARMS))
+    check("ankle2 keeps workspace_kill on",
+          all(get_config(f"ankle2_m3_{a}").workspace_kill for a in ANKLE2_ARMS))
+    # and the legacy lineages must be untouched by all of the above
+    c = get_config("m3_sym_gait")
+    check("legacy presets do NOT re-settle (bit-for-bit unchanged)",
+          not c.ankle_resettle and c.ankle_preload == "preserve"
+          and c.ankle_spring_mass_kg == 0.0)
+
+
 if __name__ == "__main__":
     test_fourier_gait()
     test_cpg_gait()
@@ -911,5 +1007,6 @@ if __name__ == "__main__":
     test_curriculum_setters()
     test_m1_rail()
     test_ankle_study()
+    test_ankle2()
     print(f"\n{'ALL OK' if FAIL == 0 else f'{FAIL} FAILURES'}")
     sys.exit(1 if FAIL else 0)

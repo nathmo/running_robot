@@ -313,9 +313,44 @@ class Config:
     #   "active"       policy-driven ankle servo, NO spring (k=0). Needs the +2-actuator plant
     #                  (model/dash01_active.xml) -- action/obs widen, own lineage.
     #   "active_spring" policy-driven ankle servo IN PARALLEL with the spring (parallel-elastic).
+    #   "bar"          NO spring. A rigid TENSION-ONLY strut (2026-08-05, user's v2 candidate):
+    #                  it takes unlimited load in traction, so it is a hard stop at the flat-foot
+    #                  angle in the direction the ground loads it; in compression it BUCKLES past
+    #                  ankle_bar_buckle_nm and carries nothing more. Removes the 249 g spring
+    #                  assembly from each shin (see ankle_spring_mass_kg) -- distal mass being the
+    #                  axis the speed ceiling is most sensitive to.
     # NOTE "rigid" needs the lock_ankle equalities and the active modes need the 8-actuator model;
     # env.py raises if model_path lacks them, rather than silently running the wrong arm.
     ankle_mode: str = "passive"
+    # PRELOAD. The shipped spring is preloaded ~14.3 N*m at stance (springref -+0.7 vs a standing
+    # ankle at -+0.20), and _setup_ankle's k-change is preload-PRESERVING by default: raising k
+    # alone balloons that preload and flips the robot (verified 2026-07-24). "zero" instead puts
+    # springref AT the flat-foot standing angle, so the spring makes no torque on an unloaded flat
+    # foot and only resists deflection from it -- the physically-real "spring with no preload".
+    # This is a much WEAKER ankle than the same k with preload, so the two are separate arms.
+    ankle_preload: str = "preserve"     # "preserve" | "zero"
+    # Compressive torque the tension-only strut carries before it buckles ("bar" mode). The user's
+    # spec is a 10 N buckling FORCE; the plant has no spring geometry at all (build_model.py models
+    # the spring as pure joint stiffness -- the preload breakaway is an explicit TODO there), so
+    # there is no lever arm to convert it. Realistic ankle lever arms of 20-60 mm put 10 N at
+    # 0.2-0.6 N*m, and the foot's own gravity torque is ~0.13 N*m, so the strut holds the foot near
+    # flat through swing across that whole band -- the conclusion is insensitive to the lever arm.
+    # Swept rather than guessed; see the ankle2 study arms.
+    ankle_bar_buckle_nm: float = 0.4
+    # Mass REMOVED from each shin (LegLeft/RightNCS-v1) when the spring assembly is deleted, with
+    # that body's inertia tensor scaled by the mass ratio -- the same approximation
+    # apply_measured_masses.py makes. The measured shin is 573 g = 324 g of link + 249 g of spring
+    # hardware folded in (they are parallel and very close), so 0.249 restores the bare shin.
+    # 0 = keep the plant as built. Distal mass costs ~0.93 m/s per kg, so this is not a detail.
+    ankle_spring_mass_kg: float = 0.0
+    # Re-settle the `stand` keyframe against THIS arm's ankle law before training (env
+    # ._resettle_keyframe). The shipped keyframe is an equilibrium of the k=28.65 PRELOADED spring,
+    # so a softer/preload-free/strut ankle starts off equilibrium and lurches at every reset -- a
+    # handicap falling on exactly the arms under test, and a bias in _stand_torque and
+    # height_target too. Default OFF so every m1..m7 / slow / sym / wskill / ankle-study preset is
+    # bit-for-bit unchanged; the 2026-08-05 arms all turn it on, INCLUDING their k350 control, so
+    # every arm in that comparison gets identical treatment.
+    ankle_resettle: bool = False
     # Damping as a DAMPING RATIO instead of an absolute number. The 2026-07-24 sweep hand-picked
     # ankle_damping per arm (1.6 at k=350 = ~9% of critical) and the resulting spring ring became
     # the m7 6 Hz cadence bug -- i.e. the k-curve was measured with damping varying independently
@@ -1501,6 +1536,83 @@ def _mk_wskill(m):
 
 
 PRESETS.update({f"{m}_wskill_gait": _mk_wskill(m) for m in LOCKS})
+
+
+# ================================================================================================
+# ANKLE-2 STUDY (2026-08-05) -- can the REAL ankle, or no ankle spring at all, be stabilised?
+# ================================================================================================
+# The whole m1..m7 record was obtained on a k=350 ankle spring that WILL NOT BE BUILT, and the
+# 2026-08-04 force map showed the real spring is 8x short of the 3.5 BW running requirement. So the
+# open question is no longer "which k is best" -- it is a MECHANICAL DESIGN decision with exactly
+# two candidates the user can actually build:
+#
+#   Q1  the real spring: k = 41.4 N*m/rad (user-measured, replaces the 28.65 spec) with NO preload.
+#       Can any controller keep the robot from falling on that?
+#   Q2  no spring at all: a rigid TENSION-ONLY strut (unlimited in traction, buckles past 10 N in
+#       compression), which also deletes the 249 g spring assembly from each shin. Can that
+#       stabilise? Distal mass costs ~0.93 m/s per kg, so this arm is cheaper AND lighter if it
+#       works.
+#
+# Everything except the ankle is _WSKILL_PLANT, identical in every arm: the sym stack (Fourier,
+# freq (0.5,4.0), contact-switch 0.20, duty-symmetry 8.0) PLUS workspace_kill. The kill is on at
+# the user's call because this is a build decision and a false pass is expensive -- without it an
+# arm can "succeed" one-legged with a foot parked outside the real robot's reachable box, which is
+# a sim exploit, not a stable robot.
+#
+# Every arm sets ankle_resettle: the shipped keyframe is an equilibrium of the PRELOADED 28.65
+# spring, so without it the soft arms would start every episode out of equilibrium and be measured
+# against a stance they cannot hold. The k350 control gets it too, so the treatment is identical.
+_ANKLE2_PLANT = {k: v for k, v in _WSKILL_PLANT.items()
+                 if k not in ("ankle_stiffness", "ankle_damping")}
+_ANKLE2_PLANT.update(ankle_zeta=0.7, ankle_resettle=True)
+
+SHIN_SPRING_KG = 0.249      # spring assembly folded into the measured 573 g shin (bare shin 324 g)
+
+ANKLE2_ARMS = {
+    # --- controls, so a failure below can be read ------------------------------------------------
+    # the known-good, unbuildable spring. If THIS fails on the corrected plant (144.5 N*m torque,
+    # measured masses, workspace_kill) then the whole screen is uninterpretable and nothing else
+    # here means anything. It is the first curve to look at.
+    "k350":     dict(ankle_mode="passive", ankle_stiffness=350.0),
+    # today's robot as modelled: the 28.65 spec spring, preload preserved.
+    "k28_65":   dict(ankle_mode="passive", ankle_stiffness=28.65),
+    # welded ankle, spring mass still aboard. Upper bound on stiffness, and the reference the
+    # tension strut is measured against -- bar vs rigid isolates the cost of being UNILATERAL.
+    "rigid":    dict(ankle_mode="rigid"),
+    # --- Q1: the real spring -----------------------------------------------------------------
+    # real k, preload PRESERVED. Not the question, but it separates "k is too low" from "removing
+    # the preload is what kills it" -- without this arm a k41_4_np failure is unattributable.
+    "k41_4":    dict(ankle_mode="passive", ankle_stiffness=41.4),
+    # THE Q1 ARM: real k, no preload.
+    "k41_4_np": dict(ankle_mode="passive", ankle_stiffness=41.4, ankle_preload="zero"),
+    # --- Q2: the tension-only strut ----------------------------------------------------------
+    # THE Q2 ARM: strut + the shin lightened by the deleted spring assembly.
+    "bar":      dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG),
+    # strut with the shin mass left on: separates "the strut works" from "the lighter shin works".
+    "bar_heavy": dict(ankle_mode="bar"),
+    # buckling-load sensitivity. The user's spec is a 10 N buckling FORCE and the plant carries no
+    # spring geometry to convert it (build_model.py models the spring as pure joint stiffness), so
+    # the lever arm is unknown to within 20-60 mm = 0.2-0.6 N*m. These two bracket it. If they
+    # agree, the lever arm does not matter and the answer is robust; if they disagree, the user
+    # needs to tape-measure the ankle lever arm before believing either.
+    "bar_lo":   dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG,
+                     ankle_bar_buckle_nm=0.2),
+    "bar_hi":   dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG,
+                     ankle_bar_buckle_nm=0.6),
+}
+
+
+def _ankle2(m, arm, **kw):
+    if arm not in ANKLE2_ARMS:
+        raise KeyError(f"unknown ankle2 arm {arm!r}; have {sorted(ANKLE2_ARMS)}")
+    return _react(m, **{**_ANKLE2_PLANT, **ANKLE2_ARMS[arm], **kw})
+
+
+# m3 (pitch free) is the screen: the cheapest rung that is still ankle-sensitive, and where every
+# prior ankle result lives. m6 (all six base DOF free) is what "does not fall down" really means and
+# is deliberately NOT chained -- which arms earn it is a human call on the m3 curves.
+PRESETS.update({f"ankle2_m3_{a}": (lambda a=a: _ankle2("m3", a)) for a in ANKLE2_ARMS})
+PRESETS.update({f"ankle2_m6_{a}": (lambda a=a: _ankle2("m6", a)) for a in ANKLE2_ARMS})
 
 
 def get_config(name: str = "default") -> Config:
