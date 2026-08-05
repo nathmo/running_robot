@@ -32,6 +32,7 @@ import dynstore
 import fklut
 import gaitstore
 import measurestore
+import sensehat
 import workspace
 
 # pure-numpy identification helpers (safe to import on the Pi; the heavy estimator is imported
@@ -49,6 +50,7 @@ STATE = {
     "wstore": None,          # workspace.WorkspaceStore
     "fk": None,              # fklut.FkLut
     "dyn": None,             # dynstore.DynConfig (weighed masses, drive PID, Kt)
+    "sense": None,           # sensehat.SenseHat (I2C poll thread; None if --no-sensors)
     "interface": "socketcan",
     "mock": False,
     "ctl": {"token": None, "ts": 0.0},
@@ -172,8 +174,38 @@ def api_telemetry():
     return jsonify(out)
 
 
-def _nan_list(a):
-    return [None if not np.isfinite(v) else round(float(v), 2) for v in a]
+def _nan_list(a, nd=2):
+    return [None if not np.isfinite(v) else round(float(v), nd) for v in a]
+
+
+# ===================================================================== Sense HAT (B) sensors
+@app.get("/api/sensors")
+def api_sensors():
+    """Latest Sense HAT values + new ring samples since `since` (same seq contract as telemetry).
+
+    Always 200, even with no HAT: the panel renders the reason from `available`/`error` rather than
+    the client having to treat a missing board as a failed request."""
+    sh = STATE["sense"]
+    if sh is None:
+        return jsonify({"available": False, "error": "sensors disabled (--no-sensors)", "seq": 0,
+                        "t": [], "series": {}})
+    out = sh.snapshot() or {"available": False, "error": sh.error}
+    since = int(request.args.get("since", 0))
+    seq, t, data = sh.ring.read_since(since)
+    out["seq"] = seq
+    out["t"] = np.round(t, 3).tolist()
+    out["series"] = {f: _nan_list(data[f], 3) for f in sh.ring.fields}
+    return jsonify(out)
+
+
+@app.post("/api/sensors/gyro_bias")
+def api_sensors_gyro_bias():
+    """Re-average the gyro zero-rate offset. The robot must stand still while it runs."""
+    sh = STATE["sense"]
+    if sh is None:
+        return _err("sensors disabled (--no-sensors)")
+    r = sh.calibrate_gyro()
+    return _ok() if r.get("ok") else _err(r.get("error", "gyro calibration failed"))
 
 
 # ===================================================================== e-stop / mode
@@ -877,6 +909,9 @@ def api_mock_drag():
 
 # ===================================================================== lifecycle
 def _shutdown():
+    sh = STATE.get("sense")
+    if sh is not None:
+        sh.stop()
     d = STATE.get("daemon")
     if d is None:
         return
@@ -894,6 +929,10 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--interface", default="socketcan")
     ap.add_argument("--mock", action="store_true", help="simulated motors (no CAN needed)")
+    ap.add_argument("--no-sensors", action="store_true",
+                    help="do not touch the Sense HAT (B) / I2C bus at all")
+    ap.add_argument("--i2c-bus", type=int, default=sensehat.I2C_BUS,
+                    help="I2C bus the Sense HAT (B) sits on (default %(default)s)")
     args = ap.parse_args()
 
     STATE["interface"] = args.interface
@@ -907,6 +946,13 @@ def main():
     STATE["daemon"] = d
     d.start()
     d._started_ok.wait(5.0)
+
+    # Sense HAT (B) on I2C — its own thread, started after the daemon so a wedged I2C bus can never
+    # delay motor bring-up. In --mock it synthesises values so the panel works off the robot.
+    if not args.no_sensors:
+        sh = sensehat.SenseHat(bus_num=args.i2c_bus, mock=args.mock)
+        STATE["sense"] = sh
+        sh.start()
     atexit.register(_shutdown)
 
     print(f"\nDASH-01 web UI: http://{args.host}:{args.port}/  "

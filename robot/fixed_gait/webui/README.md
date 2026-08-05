@@ -16,6 +16,7 @@ What it does (one page):
 | Panel | Function |
 |---|---|
 | Telemetry | live raw/normalized position, current, temperature per motor + strip charts |
+| Sense HAT (B) | live 9-DOF IMU (attitude horizon, accel/gyro/mag), air temperature/humidity/pressure, ambient light/colour, 4 analog inputs — see below |
 | Calibration wizard | **blocks all motion after boot** until zero pose + direction check are done |
 | Manual control | per-actuator slider that **tracks the live motor position** (grab to jog) + exact-angle box; **🏠 Home** slowly returns every joint to the zero pose and **⌖ Centre** parks both legs where the safe workspace leaves the most room in every direction (the largest inscribed box — the pose to excite from); per-actuator sine (start↔stop **preset to 70% of the safe range**, frequency); workspace-override checkbox |
 | Safe workspace | abduction bar + (cam, thigh) pixel editor — draw/erase/flood-fill, undo, save/export/import |
@@ -99,16 +100,54 @@ Two consequences worth remembering when reading identification data:
   (gravity torque / gain). That is a systematic bias in a quasi-static run, not noise.
 * **Abduction is ~3x stiffer** than the sagittal axes (kp 0.009 vs 0.003), so it droops ~3x less.
 
+## Sense HAT (B) — the sensor panel
+
+The Waveshare **Sense HAT (B)** sits on the Pi's 40-pin header and answers on **I2C bus 1**. All
+five chips are read by one background thread (`sensehat.py`), never by the Flask handlers and never
+by the CAN daemon — an I2C stall must not be able to delay a motor command.
+
+| Address | Chip | Published |
+|---|---|---|
+| 0x68 | ICM-20948 | accel (g), gyro (deg/s), die temperature; magnetometer via the AK09916 at 0x0C |
+| 0x70 | SHTC3 | air temperature, relative humidity |
+| 0x5C | LPS22HB | barometric pressure + its own die temperature |
+| 0x29 | TCS34725 | ambient light (lux), correlated colour temperature, raw RGBC |
+| 0x48 | ADS1015 | AIN0..AIN3, volts (one channel per tick) |
+
+```
+python robot/fixed_gait/webui/sensehat.py          # CLI self-test: one live line per second
+python robot/fixed_gait/webui/sensehat.py --mock   # synthetic values, no hardware
+python robot/fixed_gait/webui/server.py --no-sensors   # do not touch I2C at all
+```
+
+Things worth knowing before trusting a number here:
+
+* **Roll and pitch are absolute** (a 6-axis Madgwick filter references them to gravity); **yaw is
+  gyro-integrated and drifts.** The magnetometer is deliberately *not* fused into the attitude —
+  it sits centimetres from two brushless motors and the battery, so its heading is published as an
+  advisory number only.
+* **Zero the gyro** (button under the horizon) with the robot standing still: it averages the
+  zero-rate offset for 1.5 s and refuses if the robot moved (it says so rather than storing a bad
+  bias).
+* **Values are in the IMU chip's own frame**, not the robot's body frame. The hint under the
+  horizon reports which chip axis gravity is on — on this robot it reads **−Z**, i.e. the HAT is
+  mounted inverted. Set `AXIS_MAP` in `sensehat.py` once the mounting is final; changing it is the
+  only place the mapping lives.
+* Missing HAT, missing `smbus2`, or I2C disabled → the panel shows the reason and the rest of the
+  UI is unaffected. Per-chip failures are counted and shown, not silent.
+
 ## Install on the Pi (offline)
 
 ```
 # on the desktop (internet):
-pip download flask -d wheels/
+pip download flask smbus2 -d wheels/
 scp -r wheels nemo@<pi>:running_robot/
 
 # on the Pi:
 pip install -r requirements-rpi.txt          # if not already there (numpy, python-can)
-pip install --no-index --find-links wheels/ flask
+pip install --no-index --find-links wheels/ flask smbus2
+# smbus2 is pure Python, so if Raspberry Pi OS already ships it system-wide you can instead just
+# drop it into the venv:  cp -r /usr/lib/python3/dist-packages/smbus2 .venv/lib/python3*/site-packages/
 sudo ip link set can0 up type can bitrate 1000000
 sudo ip link set can1 up type can bitrate 1000000
 python robot/fixed_gait/webui/server.py
@@ -196,5 +235,8 @@ journalctl -u dash01-webui -f               # live logs
   `joint_limits.py`, `trajectory.py` (files stay compatible with the CLI tools).
 - `fklut.py` — pure-numpy LUT runtime + the sign-map verifier.
 - `canio.py` — real socketcan or `--mock` simulated motors (random boot offsets included).
+- `sensehat.py` — Sense HAT (B) I2C drivers + its own poll thread (100 Hz IMU / 20 Hz logged);
+  `--mock` synthesises values. Publishes a snapshot + a `ScalarRing`, same read-by-sequence
+  contract as motor telemetry.
 - `static/` — vanilla JS, no CDN. `server.py` — thin Flask routes.
 - Runtime data lives in `webui/data/` (git-ignored, machine-local).

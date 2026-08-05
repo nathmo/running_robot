@@ -1,4 +1,5 @@
-"""Telemetry ring buffer: daemon writes ~20 Hz samples, HTTP readers copy slices by sequence."""
+"""Telemetry ring buffers: a writer thread pushes ~20 Hz samples, HTTP readers copy slices by
+sequence number (so a reader only ever transfers what it has not seen yet)."""
 import threading
 
 import numpy as np
@@ -38,3 +39,38 @@ class TelemetryRing:
                 return end, np.zeros(0), {f: np.zeros((0, paths.N_MOTORS)) for f in self.FIELDS}
             idx = np.arange(start, end) % self.cap
             return end, self.t[idx].copy(), {f: self.data[f][idx].copy() for f in self.FIELDS}
+
+
+class ScalarRing:
+    """Same contract as TelemetryRing but for one scalar per named field (no motor axis) — the
+    Sense HAT stream, where every channel is a single number."""
+
+    def __init__(self, fields, capacity=2048):
+        self.fields = tuple(fields)
+        self.cap = capacity
+        self.t = np.zeros(capacity)
+        self.data = {f: np.full(capacity, np.nan, np.float32) for f in self.fields}
+        self.seq = 0
+        self._lock = threading.Lock()
+
+    def push(self, t, sample):
+        """sample: {field: value}; a field left out of the dict is stored as NaN (charts break the
+        line there rather than holding a stale value flat)."""
+        with self._lock:
+            i = self.seq % self.cap
+            self.t[i] = t
+            for f in self.fields:
+                v = sample.get(f)
+                self.data[f][i] = np.nan if v is None else v
+            self.seq += 1
+
+    def read_since(self, since_seq, max_samples=512):
+        with self._lock:
+            end = self.seq
+            start = max(since_seq, end - self.cap, 0)
+            start = max(start, end - max_samples)
+            n = end - start
+            if n <= 0:
+                return end, np.zeros(0), {f: np.zeros(0) for f in self.fields}
+            idx = np.arange(start, end) % self.cap
+            return end, self.t[idx].copy(), {f: self.data[f][idx].copy() for f in self.fields}

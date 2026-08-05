@@ -85,6 +85,77 @@
     <div id="motor-cards" class="motor-cards"></div>
   </section>
 
+  <!-- ============================ Sense HAT (B) ============================ -->
+  <section class="panel" id="panel-sensors">
+    <h2>Sense HAT (B)
+      <span class="hint">Waveshare 9-DOF IMU + air + light + analog, on the Pi's I2C bus — live</span>
+      <span id="sns-status" class="hint"></span></h2>
+
+    <div id="sns-down" class="sns-down hidden"></div>
+
+    <div id="sns-body" class="sns-wrap">
+      <div class="sns-att">
+        <canvas id="sns-horizon" width="230" height="230"></canvas>
+        <div class="sns-att-vals">
+          <span>roll <b id="sns-roll">—</b>°</span>
+          <span>pitch <b id="sns-pitch">—</b>°</span>
+          <span>yaw <b id="sns-yaw">—</b>°</span>
+        </div>
+        <div class="row small">
+          <button id="btn-gyro-bias" class="btn small" title="Average the gyro's zero-rate offset.
+The robot must stand completely still for ~1.5 s — the attitude filter restarts from level
+afterwards.">⌖ Zero gyro (hold still)</button>
+        </div>
+        <div id="sns-bias" class="hint"></div>
+        <div id="sns-mount" class="hint"></div>
+      </div>
+
+      <div class="sns-cols">
+        <div class="sns-group">
+          <div class="sns-gh">Accelerometer <span class="hint">g</span></div>
+          <div class="sns-grid" id="sns-acc"></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Gyroscope <span class="hint">°/s, bias-corrected</span></div>
+          <div class="sns-grid" id="sns-gyr"></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Magnetometer <span class="hint">µT — uncalibrated, and the motors
+            move it; NOT fused into the attitude</span></div>
+          <div class="sns-grid" id="sns-mag"></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Air <span class="hint">SHTC3 + LPS22HB</span></div>
+          <div class="sns-grid" id="sns-air"></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Light <span class="hint">TCS34725</span></div>
+          <div class="sns-grid" id="sns-light"></div>
+          <div class="row small"><span class="hint">colour</span><i id="sns-swatch" class="sns-swatch"></i></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Analog in <span class="hint">ADS1015, V — cycled one channel at a time</span></div>
+          <div class="sns-grid" id="sns-adc"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="chart-legend">
+      <span><i class="sw" style="background:#4da3ff"></i>pitch °</span>
+      <span><i class="sw dash" style="background:#f2f2f2"></i>roll °</span>
+      <span><i class="sw" style="background:#e0a020"></i>|ω| °/s</span>
+      <span><i class="sw" style="background:#2c9e3f"></i>|a| g</span>
+      <span><i class="sw" style="background:#e04545"></i>air °C</span>
+      <span class="hint">last 60 s, auto-scaled</span>
+    </div>
+    <div class="sns-charts">
+      <div class="sns-chart"><span>attitude</span><canvas id="sns-c-att" width="300" height="46"></canvas></div>
+      <div class="sns-chart"><span>rotation rate</span><canvas id="sns-c-gyr" width="300" height="46"></canvas></div>
+      <div class="sns-chart"><span>acceleration</span><canvas id="sns-c-acc" width="300" height="46"></canvas></div>
+      <div class="sns-chart"><span>temperature</span><canvas id="sns-c-temp" width="300" height="46"></canvas></div>
+    </div>
+  </section>
+
   <!-- ============================ manual control ============================ -->
   <section class="panel" id="panel-manual">
     <h2>Manual control <span class="hint">sliders track the live motor position — grab one to jog
@@ -539,5 +610,6 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
 <script src="/static/app.js"></script>
 <script src="/static/inertia3d.js"></script>
 <script src="/static/sysid.js"></script>
+<script src="/static/sensors.js"></script>
 </body>
 </html>
