@@ -412,6 +412,9 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
         <button id="btn-meas-center" class="btn" title="Slew both legs to the centre of the largest
 safe box in the workspace — the pose that leaves the most excitation room on every joint. Works
 even when a leg is currently parked outside the safe region.">⌖ Centre legs (max room)</button>
+        <button id="btn-meas-fit" class="btn" title="Size the excitation to this pose: 80% of the safe
+travel each joint has here, and the chirp frequency that puts that sine at 80% of the motor's no-load
+speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range costs frequency.">⤢ Fit excitation (80%)</button>
         <span id="meas-room" class="hint"></span>
       </div>
       <table class="meas-grid">

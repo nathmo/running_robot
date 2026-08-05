@@ -40,7 +40,8 @@ function applyProfile(name) {
     tr.querySelector(".m-f0").value = p.f0;
     tr.querySelector(".m-f1").value = p.f1;
   });
-  trimAmplitudes();          // a profile's default amplitude may not fit this leg's room
+  trimAmplitudes();          // static fallback if the daemon cannot answer
+  fitExcitation(true);       // then size it to what this pose actually affords (80% preset)
   $("meas-prof-dyn").classList.toggle("primary", name === "dynamic");
   $("meas-prof-static").classList.toggle("primary", name === "quasi_static");
   const base = SID.leg === "right" ? "measure_right" : "measure_left";
@@ -77,6 +78,28 @@ function trimAmplitudes() {
   });
   return cut;
 }
+/* ---- 80% preset: ask the daemon what this pose actually affords. The server owns the hardware
+ * numbers (safe travel + no-load speed) and validates the whole swept envelope, so amplitude and
+ * frequency come back already consistent with each other and with the workspace. */
+async function fitExcitation(quiet) {
+  try {
+    const d = await api("/api/measure/defaults",
+                        { json: { leg: SID.leg, profile: SID.profile } });
+    const f = d && d.defaults;
+    if (!f) return;
+    document.querySelectorAll("#meas-joint-rows tr").forEach((tr) => {
+      const r = tr.dataset.role;
+      tr.querySelector(".m-amp").value = f.amp[r];
+      tr.querySelector(".m-f0").value = f.f0[r];
+      tr.querySelector(".m-f1").value = f.f1[r];
+    });
+    const backed = f.scale < 0.999 ? ` (backed off to ${Math.round(f.scale * 100)}% — the cam/thigh
+      band does not fit all three at once)` : "";
+    if (!quiet) setBanner(`excitation set to ${Math.round(f.frac * 100)}% of travel and no-load
+      speed${backed}`, "", 6000);
+  } catch (e) { if (!quiet) measSetError(e); }
+}
+
 async function centerLegs() {
   measSetError("");
   $("meas-room").textContent = "⌖ centring…";
@@ -92,11 +115,13 @@ window.onCenterResult = function (d) {
   SID.roomSeen = false;              // armed on the first poll that reports the move (renderRoom)
   const cut = trimAmplitudes();
   if (cut.length) setBanner("amplitudes trimmed to fit the centred pose: " + cut.join(", "), "", 6000);
+  fitExcitation(true);       // centring freed up room — take 80% of the new envelope
 };
 
 function wireMeasure() {
   buildMeasRows();
   $("btn-meas-center").onclick = centerLegs;
+  $("btn-meas-fit").onclick = () => fitExcitation(false);
   $("meas-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
     $("meas-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
     b.classList.add("active"); SID.leg = b.dataset.leg; applyProfile(SID.profile);

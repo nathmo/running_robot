@@ -623,6 +623,20 @@ def api_playback_stop():
 
 
 # ===================================================================== system-ID: MEASURE capture
+@app.post("/api/measure/defaults")
+def api_measure_defaults():
+    """Excitation preset for the CURRENT pose: 80% of the safe travel each joint has here, and the
+    chirp frequency that puts the resulting sine at 80% of the motor's no-load speed."""
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    out, err = _dm().measure_defaults(leg=b.get("leg", "right"),
+                                      profile=b.get("profile", "dynamic"),
+                                      frac=float(b.get("frac", daemon_mod.MEASURE_FRAC)))
+    return _ok(defaults=out) if out else _err(err)
+
+
 @app.post("/api/measure/start")
 def api_measure_start():
     why = _require_calibrated()

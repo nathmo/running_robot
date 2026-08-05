@@ -104,6 +104,20 @@ MEASURE_DEFAULTS = dict(
 )
 MEASURE_ENVELOPE_SAMPLES = 480          # trajectory samples validated before a run may start
 
+# No-load OUTPUT speed per role, deg/s: abduction is an AK60-39 (10.3 rad/s), cam and thigh are
+# AKE90-8 (22 rad/s) — the same 1261 deg/s the PERIOD_MIN argument above is built on.
+NO_LOAD_DPS = {"abd": 590.0, "cam": 1261.0, "thigh": 1261.0}
+
+# What a DEFAULT excitation should claim of the hardware, on both axes at once: `frac` of the safe
+# travel the leg actually has around its current pose, and `frac` of the motor's no-load speed.
+# Amplitude and frequency are not independent — a sine of amplitude A at f Hz peaks at 2*pi*f*A
+# deg/s — so the two couple, and asking for more range costs you frequency. Measurements taken at
+# 0.6 Hz / 9 deg put only 0.7-4.8% of the drive current into the qddot column (the rest was Coulomb
+# friction), which is why the identified inertia was garbage: excitation, not estimator.
+MEASURE_FRAC = 0.8
+MEASURE_F_MAX = 3.0                     # ceiling from _merge_measure_spec's clamp
+MEASURE_F_STATIC = 0.03                 # quasi-static: velocity ~ 0, every sample is gravity
+
 
 class RobotDaemon(threading.Thread):
     def __init__(self, interface="socketcan", mock=False, calib=None, wstore=None, fklut=None):
@@ -439,6 +453,60 @@ class RobotDaemon(threading.Thread):
                           center=round(c, 1), room_up=round(room_up, 1),
                           room_down=round(room_dn, 1))
         return out, ""
+
+    def measure_defaults(self, leg="right", profile="dynamic", frac=MEASURE_FRAC):
+        """Excitation sized to what the hardware actually offers from the CURRENT pose.
+
+        Per role: amplitude = `frac` of the contiguous safe travel (the smaller of the two
+        directions — the chirp is a sine centred on the pose, so it needs symmetric room), and the
+        chirp's end frequency = the one whose peak sine velocity 2*pi*f*A reaches `frac` of that
+        motor's no-load speed at that amplitude, capped at MEASURE_F_MAX.
+
+        Per-role room does NOT compose: cam and thigh share the 4-bar assembly band, so three
+        individually-safe amplitudes can still leave the workspace when swept together. The whole
+        envelope is therefore validated here and the amplitudes backed off uniformly until it fits,
+        which is the same check measure_start will apply. Returns ({amp, f0, f1, room}, "") or
+        (None, reason)."""
+        if not self.by_name or any(m.pos is None for m in self.motors):
+            return None, "not all motors are reporting yet"
+        if leg not in paths.SIDES:
+            return None, f"leg must be right|left (got {leg})"
+        frac = float(np.clip(frac, 0.05, 0.98))
+        pose = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items()}
+        room = {}
+        for role in paths.ROLES:
+            n = f"{leg}.{role}"
+            c = pose[n]
+            lo, hi = self._hard_bounds(leg, role)
+            room[role] = min(self._safe_room(pose, n, +1.0, hi - c),
+                             self._safe_room(pose, n, -1.0, c - lo))
+
+        def freq_for(role, a):
+            if profile == "quasi_static":
+                return MEASURE_F_STATIC
+            if a < 0.1:
+                return MEASURE_F_STATIC
+            return min(MEASURE_F_MAX, frac * NO_LOAD_DPS[role] / (2.0 * np.pi * a))
+
+        meas = self._merge_measure_spec(dict(leg=leg, profile=profile))
+        meas["base"] = pose
+        scale, amp, f0, f1 = 1.0, {}, {}, {}
+        for _ in range(12):
+            amp = {r: round(frac * room[r] * scale, 1) for r in paths.ROLES}
+            f1 = {r: round(freq_for(r, amp[r]), 2) for r in paths.ROLES}
+            f0 = {r: (MEASURE_F_STATIC if profile == "quasi_static"
+                      else MEASURE_DEFAULTS["f0"][r]) for r in paths.ROLES}
+            meas["amp"], meas["f0"], meas["f1"] = amp, f0, f1
+            T = meas["duration"]
+            if all(self._validate_pose(self._measure_pose(meas, T * k / (MEASURE_ENVELOPE_SAMPLES - 1)),
+                                       meas["override"])[0]
+                   for k in range(MEASURE_ENVELOPE_SAMPLES)):
+                break
+            scale *= 0.8
+        else:
+            return None, "no excitation amplitude fits here — centre the leg first"
+        return dict(amp=amp, f0=f0, f1=f1, frac=frac, scale=round(scale, 3),
+                    room={r: round(room[r], 1) for r in paths.ROLES}), ""
 
     def _safe_room(self, pose, name, direction, max_reach):
         """Largest contiguous safe displacement of `name` from its current value in `direction`
