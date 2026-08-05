@@ -118,6 +118,28 @@ MEASURE_FRAC = 0.8
 MEASURE_F_MAX = 3.0                     # ceiling from _merge_measure_spec's clamp
 MEASURE_F_STATIC = 0.03                 # quasi-static: velocity ~ 0, every sample is gravity
 
+# Measured closed-loop response of the drive's POSITION loop (swept-sine on all six joints,
+# 2026-08-05 measure_*_dyn_2.npz). It is a first-order roll-off at 0.8 Hz plus ~25 ms of transport
+# delay, and it is the same on both legs to two decimals -- 0.71 gain / -48 deg at 0.8 Hz, 0.50/-71
+# at 1.4, 0.37/-86 at 2.0, 0.28/-104 at 2.9. This is the REAL ceiling on excitation: above ~1 Hz the
+# commanded chirp is mostly not executed, and the un-executed part IS the tracking error.
+POS_LOOP_BW_HZ = 0.8
+POS_LOOP_DELAY_S = 0.025
+# Keep predicted tracking error to this fraction of max_track_err. The trip is latching and costs a
+# whole run, so leave real headroom: a 32.4 deg abduction sweep reached 30.0 deg of error at 1.2 Hz
+# and e-stopped the right leg mid-run.
+MEASURE_TRACK_FRAC = 0.55
+
+
+def _pos_loop_error_ratio(f):
+    """|1 - G(f)| for the position loop: the fraction of a commanded sine amplitude that shows up as
+    tracking error. ~0 when the drive tracks, ->1 once it has given up and stopped following."""
+    if f <= 0.0:
+        return 0.0
+    g = 1.0 / np.hypot(1.0, f / POS_LOOP_BW_HZ)
+    phi = -np.arctan2(f, POS_LOOP_BW_HZ) - 2.0 * np.pi * f * POS_LOOP_DELAY_S
+    return float(abs(1.0 - g * np.exp(1j * phi)))
+
 
 class RobotDaemon(threading.Thread):
     def __init__(self, interface="socketcan", mock=False, calib=None, wstore=None, fklut=None):
@@ -482,18 +504,34 @@ class RobotDaemon(threading.Thread):
                              self._safe_room(pose, n, -1.0, c - lo))
 
         def freq_for(role, a):
-            if profile == "quasi_static":
-                return MEASURE_F_STATIC
-            if a < 0.1:
+            if profile == "quasi_static" or a < 0.1:
                 return MEASURE_F_STATIC
             return min(MEASURE_F_MAX, frac * NO_LOAD_DPS[role] / (2.0 * np.pi * a))
+
+        def size(role, a_room):
+            """Trade amplitude against frequency until BOTH the no-load speed and the position
+            loop's tracking error are satisfied. A and f fight each other -- peak speed is 2*pi*f*A,
+            and error is A*|1-G(f)| -- so solve by iterating rather than in closed form. Quasi-static
+            is untouched: at 0.03 Hz the loop tracks perfectly and amplitude is free."""
+            a = a_room
+            for _ in range(6):
+                f = freq_for(role, a)
+                room_for_err = MEASURE_TRACK_FRAC * meas["max_track_err"]
+                a_track = room_for_err / max(_pos_loop_error_ratio(f), 1e-6)
+                a_new = min(a_room, a_track)
+                if abs(a_new - a) < 0.05:
+                    a = a_new
+                    break
+                a = a_new
+            return round(a, 1), round(freq_for(role, a), 2)
 
         meas = self._merge_measure_spec(dict(leg=leg, profile=profile))
         meas["base"] = pose
         scale, amp, f0, f1 = 1.0, {}, {}, {}
         for _ in range(12):
-            amp = {r: round(frac * room[r] * scale, 1) for r in paths.ROLES}
-            f1 = {r: round(freq_for(r, amp[r]), 2) for r in paths.ROLES}
+            sized = {r: size(r, frac * room[r] * scale) for r in paths.ROLES}
+            amp = {r: sized[r][0] for r in paths.ROLES}
+            f1 = {r: sized[r][1] for r in paths.ROLES}
             f0 = {r: (MEASURE_F_STATIC if profile == "quasi_static"
                       else MEASURE_DEFAULTS["f0"][r]) for r in paths.ROLES}
             meas["amp"], meas["f0"], meas["f1"] = amp, f0, f1
