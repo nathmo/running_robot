@@ -139,12 +139,12 @@
     <joint name="lock_yaw" joint1="base_yaw" polycoef="0 0 0 0 0" active="false" solref="0.005 1" solimp="0.95 0.99 0.001" />
   </equality>
   <actuator>
-    <position name="hip_roll_L" joint="bodyNCS-v1_Révolution-1" kp="120" kv="4.0" forcerange="-72 72" ctrlrange="-0.785 0.785" />
-    <position name="cam_L" joint="HipLeftNCS-v1_Révolution-3" kp="200" kv="5.0" forcerange="-170 170" ctrlrange="-1.5 1.5" />
-    <position name="thigh_L" joint="HipLeftNCS-v1_Révolution-5" kp="200" kv="5.0" forcerange="-170 170" ctrlrange="-1.047 1.047" />
-    <position name="hip_roll_R" joint="bodyNCS-v1_Révolution-2" kp="120" kv="4.0" forcerange="-72 72" ctrlrange="-0.785 0.785" />
-    <position name="cam_R" joint="HipRightNCS-v1_Révolution-4" kp="200" kv="5.0" forcerange="-170 170" ctrlrange="-1.5 1.5" />
-    <position name="thigh_R" joint="HipRightNCS-v1_Révolution-6" kp="200" kv="5.0" forcerange="-170 170" ctrlrange="-1.047 1.047" />
+    <position name="hip_roll_L" joint="bodyNCS-v1_Révolution-1" kp="120" kv="4.0" forcerange="-61.2 61.2" ctrlrange="-0.785 0.785" />
+    <position name="cam_L" joint="HipLeftNCS-v1_Révolution-3" kp="200" kv="5.0" forcerange="-144.5 144.5" ctrlrange="-1.5 1.5" />
+    <position name="thigh_L" joint="HipLeftNCS-v1_Révolution-5" kp="200" kv="5.0" forcerange="-144.5 144.5" ctrlrange="-1.047 1.047" />
+    <position name="hip_roll_R" joint="bodyNCS-v1_Révolution-2" kp="120" kv="4.0" forcerange="-61.2 61.2" ctrlrange="-0.785 0.785" />
+    <position name="cam_R" joint="HipRightNCS-v1_Révolution-4" kp="200" kv="5.0" forcerange="-144.5 144.5" ctrlrange="-1.5 1.5" />
+    <position name="thigh_R" joint="HipRightNCS-v1_Révolution-6" kp="200" kv="5.0" forcerange="-144.5 144.5" ctrlrange="-1.047 1.047" />
   </actuator>
   <sensor>
     <accelerometer name="imu_acc" site="imu" />
