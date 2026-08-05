@@ -144,11 +144,15 @@ def loop_sites(model):
     return [(_sid(model, LOOP[s]["s1"]), _sid(model, LOOP[s]["s2"])) for s in ("L", "R")]
 
 
-def loop_jacobian(model, data, sites, d_dof, act_dof, damp=1e-3):
+def loop_jacobian(model, data, sites, d_dof, act_dof, damp=1e-6):
     """G = dq_passive/dq_actuated (4x6) from the connect constraint, damped near the 4-bar
     singularity so it stays bounded. Assumes data.qpos is set and kinematics fresh-ish (recomputes).
     Used to express loop-coupled gravity/torque in the actuated (reduced) coordinates.
-    """
+
+    `damp` was 1e-3, which is far more than this constraint needs away from the singularity —
+    cond(Jd'Jd) is ~157 over a normal measurement sweep, and that damping shrank G enough to inflate
+    the identified gravity torque by ~20%. Results converge for damp <= 1e-5; 1e-6 keeps a margin
+    against the singular poses while leaving the well-conditioned ones untouched."""
     mujoco.mj_kinematics(model, data)
     mujoco.mj_comPos(model, data)
     Jc = np.zeros((6, model.nv)); j1 = np.zeros((3, model.nv)); j2 = np.zeros((3, model.nv))
