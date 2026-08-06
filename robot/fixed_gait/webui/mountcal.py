@@ -183,6 +183,16 @@ class MountCal:
             return self._R.copy()
 
     @property
+    def R_flat(self):
+        """The same rotation as a flat 9-tuple of floats. The IMU poll thread applies it 200 times
+        a second in scalar arithmetic, where indexing a numpy array costs more than the multiply."""
+        with self._lock:
+            R = self._R
+            return (float(R[0][0]), float(R[0][1]), float(R[0][2]),
+                    float(R[1][0]), float(R[1][1]), float(R[1][2]),
+                    float(R[2][0]), float(R[2][1]), float(R[2][2]))
+
+    @property
     def calibrated(self):
         return self.up_chip is not None and (self.fwd_chip is not None or self.fwd_declared)
 
@@ -190,9 +200,9 @@ class MountCal:
         """The lever arm actually used for compensation, in body axes, or None."""
         with self._lock:
             if self.lever_use == "cad" and self.lever_cad is not None:
-                return np.asarray(self.lever_cad, float)
+                return tuple(float(v) for v in self.lever_cad)
             if self.lever_use == "fit" and self.lever_fit and self.lever_fit.get("ok"):
-                return np.asarray(self.lever_fit["r"], float)
+                return tuple(float(v) for v in self.lever_fit["r"])
             return None
 
     def cross_check(self):
@@ -216,11 +226,18 @@ class MountCal:
             self._rebuild()
         self.save()
 
+    # A small tilt is the trap in this step. The fore-aft direction is the HORIZONTAL part of the
+    # gravity change, so an unintended roll while tipping rotates it by roughly
+    # atan(roll / tilt): at a 4 deg tilt, 1 deg of accidental roll is 14 deg of fore-aft error,
+    # while at 15 deg it is under 4. The magnitude never enters the maths — but it sets how much
+    # the answer is worth, so a shallow tilt is accepted and flagged rather than silently trusted.
+    TILT_MIN_DEG = 3.0
+    TILT_GOOD_DEG = 8.0
+
     def set_forward_from_tilt(self, acc_tilted, meta):
         """The tilt capture. Tipping the robot NOSE-DOWN swings the measured up-vector backwards in
         body axes, so the horizontal part of (tilted - level) points AFT and forward is its
-        negative. Only the direction is used — the tilt angle never enters, which is why the step
-        does not need to be a measured angle."""
+        negative. Only the direction is used — the tilt angle never enters the result."""
         with self._lock:
             if self.up_chip is None:
                 return False, "capture the level reference first"
@@ -228,13 +245,22 @@ class MountCal:
             d = np.asarray(acc_tilted, float) - up
             horiz = d - np.dot(d, up) * up
             tilt_deg = angle_between(acc_tilted, up)
-            if np.linalg.norm(horiz) < 0.05:            # < ~3 deg of tilt: direction is all noise
-                return False, (f"only {tilt_deg:.1f} deg of tilt — tip the robot nose-down further "
-                               f"(10-20 deg) and hold it still")
+            if tilt_deg < self.TILT_MIN_DEG or np.linalg.norm(horiz) < 1e-3:
+                return False, (f"only {tilt_deg:.1f}° of tilt — the fore-aft direction would be "
+                               f"mostly noise. Tip the robot nose-down 10-20° and hold it still.")
+            weak = tilt_deg < self.TILT_GOOD_DEG
             self.fwd_chip = [float(v) for v in _unit(-horiz)]
-            self.captures["forward"] = {"when": time.time(), "tilt_deg": tilt_deg, **meta}
+            self.captures["forward"] = {"when": time.time(), "tilt_deg": tilt_deg, "weak": weak,
+                                        # what 1 deg of unintended roll during the tilt would cost
+                                        "roll_sensitivity_deg": math.degrees(
+                                            math.atan2(1.0, max(tilt_deg, 1e-3))),
+                                        **meta}
             self._rebuild()
         self.save()
+        if weak:
+            return True, (f"only {tilt_deg:.1f}° of tilt: any roll while tipping rotates the "
+                          f"fore-aft axis by ~{math.degrees(math.atan2(1.0, tilt_deg)):.0f}° per "
+                          f"degree of roll. Re-do it at 10-20° for an axis you can trust.")
         return True, None
 
     def set_declared(self, axis):

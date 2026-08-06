@@ -49,13 +49,20 @@ except ImportError:                                     # dev machines / the Pi 
     smbus2 = None
 
 I2C_BUS = 1
-IMU_HZ = 100.0          # AHRS update rate (also the I2C read rate for accel/gyro)
+# 200 Hz to match the robot's control loop. Measured headroom on this Pi's 100 kHz I2C bus: an
+# accel+gyro+temp burst costs 1.68 ms (594/s), so 200 Hz is ~34% of one thread's wall time — and
+# the thread is blocked in the ioctl for most of it, not burning CPU. The magnetometer costs
+# another ~1 ms per read, which is why it is decimated rather than read every tick: it is an
+# advisory signal, it is not fused into the attitude, and its own ODR is only 100 Hz.
+IMU_HZ = 200.0          # AHRS update rate (also the accel/gyro I2C read rate)
+MAG_HZ = 25.0           # magnetometer read rate
 LOG_HZ = 20.0           # ring-buffer/chart rate, matched to the motor telemetry stream
 ENV_PERIOD_S = 1.0      # SHTC3 + LPS22HB (slow, and self-heating if hammered)
 COLOR_PERIOD_S = 0.5    # TCS34725 (its integration time is 154 ms)
 ADC_PERIOD_S = 0.2      # ADS1015, one channel per tick -> all four at 1.25 Hz
 
 OMEGA_TAU_S = 0.02      # low-pass on the rate gyro before differentiating it for angular accel
+_DEG2RAD = math.pi / 180.0
 
 RING_FIELDS = ("ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz",
                "roll", "pitch", "yaw", "heading", "acc_mag", "gyro_mag",
@@ -92,6 +99,14 @@ class ICM20948:
     ACC_RANGE_G = 4
     GYR_RANGE_DPS = 1000
 
+    # Internal sample rate, 1125 Hz / (1 + SMPLRT_DIV). Kept ~1.1x above the poll rate so nearly
+    # every read returns a fresh sample (poll faster than the ODR and reads simply repeat), while
+    # staying below the point where we are paying I2C time for samples nobody looks at.
+    ODR_HZ = 225.0
+    # Low-pass inside the chip, DLPFCFG 3: 51.2 Hz (gyro) / 50.4 Hz (accel) 3 dB bandwidth. Well
+    # under the ODR's Nyquist, so nothing aliases into the band we sample.
+    DLPF_CFG = 3
+
     def __init__(self, bus):
         self.bus = bus
         self._bank = None
@@ -124,15 +139,16 @@ class ICM20948:
         time.sleep(0.02)
         self._w(0, 0x07, 0x00)                  # PWR_MGMT_2: accel + gyro all axes on
 
-        # Sample rate 1.125 kHz / (1 + div) with the low-pass filters engaged (FCHOICE = 1). div=8
-        # -> 125 Hz, comfortably above our 100 Hz read rate so we never read the same sample twice.
+        # Sample rate 1.125 kHz / (1 + div) with the low-pass filters engaged (FCHOICE = 1).
         fs_g = {250: 0, 500: 1, 1000: 2, 2000: 3}[self.GYR_RANGE_DPS]
         fs_a = {2: 0, 4: 1, 8: 2, 16: 3}[self.ACC_RANGE_G]
-        self._w(2, 0x00, 8)                     # GYRO_SMPLRT_DIV
-        self._w(2, 0x01, (3 << 3) | (fs_g << 1) | 1)   # GYRO_CONFIG_1: DLPF 3 (~51 Hz)
+        div = max(0, min(255, int(round(1125.0 / self.ODR_HZ)) - 1))
+        self.odr_hz = 1125.0 / (1 + div)
+        self._w(2, 0x00, div)                   # GYRO_SMPLRT_DIV
+        self._w(2, 0x01, (self.DLPF_CFG << 3) | (fs_g << 1) | 1)   # GYRO_CONFIG_1
         self._w(2, 0x10, 0)                     # ACCEL_SMPLRT_DIV_1 (high byte)
-        self._w(2, 0x11, 8)                     # ACCEL_SMPLRT_DIV_2 (low byte)
-        self._w(2, 0x14, (3 << 3) | (fs_a << 1) | 1)   # ACCEL_CONFIG: DLPF 3 (~50 Hz)
+        self._w(2, 0x11, div)                   # ACCEL_SMPLRT_DIV_2 (low byte)
+        self._w(2, 0x14, (self.DLPF_CFG << 3) | (fs_a << 1) | 1)   # ACCEL_CONFIG
 
         # Expose the AK09916 directly on the Pi's bus (bypass) instead of running the ICM's own I2C
         # master: one fewer moving part, and the mag is a low-rate advisory signal here anyway.
@@ -364,19 +380,25 @@ class Madgwick:
     """6-axis (accel + gyro) Madgwick gradient-descent filter.
 
     Accel-only correction, so roll and pitch are absolute (gravity-referenced) while yaw is pure
-    gyro integration and drifts — see the module docstring for why the magnetometer is kept out."""
+    gyro integration and drifts — see the module docstring for why the magnetometer is kept out.
+
+    Written out in scalars rather than numpy on purpose. Every operation here is on 3- and
+    4-vectors, where numpy's per-call overhead dwarfs the arithmetic: measured on this Pi, the
+    numpy version of this update cost 2.1 ms per tick, which at 200 Hz is 43% of a core held with
+    the GIL — enough to make the 200 Hz CAN control loop in the same process miss 13% of its ticks.
+    Scalars make the same maths ~40x cheaper."""
 
     def __init__(self, beta=0.06):
         self.beta = beta                    # correction gain: bigger = trusts accel over gyro more
-        self.q = np.array([1.0, 0.0, 0.0, 0.0])
+        self.q = [1.0, 0.0, 0.0, 0.0]
 
     def reset(self, acc=None):
         """Restart from the attitude the accelerometer implies (yaw arbitrarily 0), so the filter
         does not have to converge from level after a bias calibration."""
-        self.q = np.array([1.0, 0.0, 0.0, 0.0])
+        self.q = [1.0, 0.0, 0.0, 0.0]
         if acc is None:
             return
-        ax, ay, az = acc
+        ax, ay, az = float(acc[0]), float(acc[1]), float(acc[2])
         n = math.sqrt(ax * ax + ay * ay + az * az)
         if n < 1e-6:
             return
@@ -385,44 +407,56 @@ class Madgwick:
         pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az))
         cr, sr = math.cos(roll / 2), math.sin(roll / 2)
         cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
-        self.q = np.array([cr * cp, sr * cp, cr * sp, -sr * sp])
+        self.q = [cr * cp, sr * cp, cr * sp, -sr * sp]
 
     def update(self, gyro_dps, acc_g, dt):
         q0, q1, q2, q3 = self.q
-        gx, gy, gz = (math.radians(v) for v in gyro_dps)
+        gx = gyro_dps[0] * _DEG2RAD
+        gy = gyro_dps[1] * _DEG2RAD
+        gz = gyro_dps[2] * _DEG2RAD
 
         # quaternion rate from the rate gyro
-        qd = 0.5 * np.array([-q1 * gx - q2 * gy - q3 * gz,
-                             q0 * gx + q2 * gz - q3 * gy,
-                             q0 * gy - q1 * gz + q3 * gx,
-                             q0 * gz + q1 * gy - q2 * gx])
+        d0 = 0.5 * (-q1 * gx - q2 * gy - q3 * gz)
+        d1 = 0.5 * (q0 * gx + q2 * gz - q3 * gy)
+        d2 = 0.5 * (q0 * gy - q1 * gz + q3 * gx)
+        d3 = 0.5 * (q0 * gz + q1 * gy - q2 * gx)
 
-        n = math.sqrt(sum(v * v for v in acc_g))
+        ax, ay, az = acc_g[0], acc_g[1], acc_g[2]
+        n = math.sqrt(ax * ax + ay * ay + az * az)
         if n > 1e-6:
-            ax, ay, az = (v / n for v in acc_g)
-            # gradient of |predicted gravity - measured gravity|^2 w.r.t. the quaternion
-            f = np.array([2 * (q1 * q3 - q0 * q2) - ax,
-                          2 * (q0 * q1 + q2 * q3) - ay,
-                          2 * (0.5 - q1 * q1 - q2 * q2) - az])
-            j = np.array([[-2 * q2, 2 * q3, -2 * q0, 2 * q1],
-                          [2 * q1, 2 * q0, 2 * q3, 2 * q2],
-                          [0.0, -4 * q1, -4 * q2, 0.0]])
-            step = j.T @ f
-            sn = np.linalg.norm(step)
+            ax, ay, az = ax / n, ay / n, az / n
+            # gradient of |predicted gravity - measured gravity|^2 w.r.t. the quaternion, i.e.
+            # J^T f with f the error against the accelerometer and J its Jacobian
+            f1 = 2.0 * (q1 * q3 - q0 * q2) - ax
+            f2 = 2.0 * (q0 * q1 + q2 * q3) - ay
+            f3 = 2.0 * (0.5 - q1 * q1 - q2 * q2) - az
+            s0 = -2.0 * q2 * f1 + 2.0 * q1 * f2
+            s1 = 2.0 * q3 * f1 + 2.0 * q0 * f2 - 4.0 * q1 * f3
+            s2 = -2.0 * q0 * f1 + 2.0 * q3 * f2 - 4.0 * q2 * f3
+            s3 = 2.0 * q1 * f1 + 2.0 * q2 * f2
+            sn = math.sqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3)
             if sn > 1e-9:
-                qd -= self.beta * step / sn
+                b = self.beta / sn
+                d0 -= b * s0
+                d1 -= b * s1
+                d2 -= b * s2
+                d3 -= b * s3
 
-        q = self.q + qd * dt
-        self.q = q / np.linalg.norm(q)
+        q0 += d0 * dt
+        q1 += d1 * dt
+        q2 += d2 * dt
+        q3 += d3 * dt
+        n = math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3) or 1.0
+        self.q = [q0 / n, q1 / n, q2 / n, q3 / n]
         return self.rpy()
 
     def up_body(self):
         """The world's UP direction expressed in body axes — what a still accelerometer reads.
         Gravity is the negative of this, scaled by g."""
         q0, q1, q2, q3 = self.q
-        return np.array([2 * (q1 * q3 - q0 * q2),
-                         2 * (q0 * q1 + q2 * q3),
-                         1 - 2 * (q1 * q1 + q2 * q2)])
+        return [2 * (q1 * q3 - q0 * q2),
+                2 * (q0 * q1 + q2 * q3),
+                1 - 2 * (q1 * q1 + q2 * q2)]
 
     def rpy(self):
         """(roll, pitch, yaw) in degrees, aerospace Z-Y-X convention."""
@@ -532,9 +566,12 @@ class SenseHat(threading.Thread):
     ACC_STILL_G = 0.04          # how far |a| may sit from 1 g during a pose capture
     LEVER_MAX_S = 40.0          # cap on a lever-arm excitation recording
 
-    def __init__(self, bus_num=I2C_BUS, mock=False, mount=None):
+    def __init__(self, bus_num=I2C_BUS, mock=False, mount=None, imu_hz=IMU_HZ):
         super().__init__(daemon=True, name="sensehat")
         self.bus_num = bus_num
+        # Read/AHRS rate. 200 Hz matches the control loop; lowering it is the first lever if the
+        # Pi cannot afford the wakeups (the panel publishes the rate actually achieved).
+        self.imu_hz = float(imu_hz)
         self.mock = mock
         self.available = False
         self.error = None if (smbus2 or mock) else "smbus2 not installed (pip install smbus2)"
@@ -542,11 +579,12 @@ class SenseHat(threading.Thread):
         self.ring = ScalarRing(RING_FIELDS, capacity=2048)
         self.filt = Madgwick()
         self.mount = mount if mount is not None else mountcal.MountCal.load_or_new()
-        self.gyro_bias = np.zeros(3)
+        self.gyro_bias = [0.0, 0.0, 0.0]
         self.bias_status = {"state": "pending", "msg": "not calibrated yet"}
         # One capture machine for all three still-robot averages; `kind` says which is running.
         self._cap = None
         self.capture_status = {"kind": None, "state": "idle", "msg": ""}
+        self.loop = {"hz": 0.0, "slip": 0, "nominal_hz": self.imu_hz}
         self._lever_buf = None       # list of (f_body, omega, alpha, up_body) while recording
         self.lever_status = {"state": "idle", "msg": "", "n": 0}
         self._lock = threading.Lock()
@@ -662,15 +700,23 @@ class SenseHat(threading.Thread):
             return
         print(f"Sense HAT (B): {'MOCK' if self.mock else ', '.join(sorted(self._chips))}")
 
-        dt_nom = 1.0 / IMU_HZ
+        dt_nom = 1.0 / self.imu_hz
         next_imu = time.time()
-        next_env = next_color = next_adc = 0.0
+        next_env = next_color = next_adc = next_mag = 0.0
         next_log = 0.0
+        mag_last = None         # held between decimated magnetometer reads
+        mag_fresh = False
+        # achieved-rate accounting, same idea as the CAN daemon's loop stats: a poll thread that
+        # quietly runs at half its nominal rate changes what the attitude filter and any consumer
+        # downstream are actually getting, so it is measured rather than assumed.
+        rate_n, rate_slip, rate_t0 = 0, 0, time.time()
         last_t = time.time()
         env = {}
         adc_ch = 0
         w_lp = np.zeros(3)          # low-passed body rate, differentiated for angular acceleration
-        mount_version = self.mount.version
+        mount_version = -1
+        lever = self.mount.lever()
+        r0 = r1 = r2 = r3 = r4 = r5 = r6 = r7 = r8 = 0.0
 
         while not self.stop_event.is_set():
             now = time.time()
@@ -681,7 +727,22 @@ class SenseHat(threading.Thread):
             dt = min(max(now - last_t, 1e-4), 0.1)
             last_t = now
 
-            acc, gyr, mag, temp_imu = self._read_motion(dt)
+            rate_n += 1
+            if dt > 1.5 * dt_nom:
+                rate_slip += 1
+            if now - rate_t0 >= 1.0:
+                self.loop = {"hz": round(rate_n / (now - rate_t0), 1), "slip": rate_slip,
+                             "nominal_hz": self.imu_hz}
+                rate_n, rate_slip, rate_t0 = 0, 0, now
+
+            want_mag = now >= next_mag
+            acc, gyr, mag_new, temp_imu = self._read_motion(dt, want_mag)
+            if want_mag:
+                next_mag = max(now, next_mag + 1.0 / MAG_HZ)
+                mag_fresh = mag_new is not None
+                if mag_fresh:
+                    mag_last = mag_new
+            mag = mag_last              # held between reads; the panel shows whether it is fresh
             if acc is None:
                 continue
 
@@ -689,12 +750,23 @@ class SenseHat(threading.Thread):
             # the mount rotation is what they are being measured to produce.
             self._tick_capture(acc, gyr)
 
-            # chip -> body. The gyro bias is measured in chip axes, so subtract before rotating.
-            R = self.mount.R
-            gyr_c = np.asarray(gyr, float) - self.gyro_bias
-            acc_b = R @ np.asarray(acc, float)
-            gyr_b = R @ gyr_c
-            mag_b = R @ np.asarray(mag, float) if mag else None
+            # chip -> body, in scalars (see Madgwick's docstring: numpy on 3-vectors costs more in
+            # call overhead than the whole loop's arithmetic, and it holds the GIL while doing it).
+            # The gyro bias is measured in chip axes, so subtract before rotating.
+            if self.mount.version != mount_version:
+                r0, r1, r2, r3, r4, r5, r6, r7, r8 = self.mount.R_flat
+            bx, by, bz = self.gyro_bias
+            gcx, gcy, gcz = gyr[0] - bx, gyr[1] - by, gyr[2] - bz
+            acx, acy, acz = acc
+            acc_b = (r0 * acx + r1 * acy + r2 * acz,
+                     r3 * acx + r4 * acy + r5 * acz,
+                     r6 * acx + r7 * acy + r8 * acz)
+            gyr_b = (r0 * gcx + r1 * gcy + r2 * gcz,
+                     r3 * gcx + r4 * gcy + r5 * gcz,
+                     r6 * gcx + r7 * gcy + r8 * gcz)
+            mag_b = None if mag is None else (r0 * mag[0] + r1 * mag[1] + r2 * mag[2],
+                                              r3 * mag[0] + r4 * mag[1] + r5 * mag[2],
+                                              r6 * mag[0] + r7 * mag[1] + r8 * mag[2])
 
             # The frame just moved under the filter: its quaternion describes an attitude in the
             # OLD body axes, which can be arbitrarily far from the truth in the new ones — and a
@@ -703,31 +775,40 @@ class SenseHat(threading.Thread):
             if self.mount.version != mount_version:
                 mount_version = self.mount.version
                 self.filt.reset(acc_b)
-                w_lp = np.zeros(3)
+                w_lp = (0.0, 0.0, 0.0)
+                lever = self.mount.lever()
 
             # Angular acceleration for the lever-arm terms: differentiating a rate gyro amplifies
             # its noise, so the rate is low-passed first and the difference taken on that. The SAME
             # low-passed rate then feeds the omega x (omega x r) term — pairing a raw omega with an
             # alpha derived from a filtered one mismatches their phase and biases the fit.
-            w_rad = np.radians(gyr_b)
             a_lp = dt / (OMEGA_TAU_S + dt)
-            w_prev = w_lp
-            w_lp = (1 - a_lp) * w_lp + a_lp * w_rad
-            alpha = (w_lp - w_prev) / dt
+            p0, p1, p2 = w_lp
+            w0 = p0 + a_lp * (gyr_b[0] * _DEG2RAD - p0)
+            w1 = p1 + a_lp * (gyr_b[1] * _DEG2RAD - p1)
+            w2 = p2 + a_lp * (gyr_b[2] * _DEG2RAD - p2)
+            w_lp = (w0, w1, w2)
+            al0, al1, al2 = (w0 - p0) / dt, (w1 - p1) / dt, (w2 - p2) / dt
 
             # Subtract what the offset alone accounts for, so the filter sees the specific force at
             # the base centre rather than at the IMU. Zero at rest; only matters while rotating.
             acc_filt = acc_b
-            lever = self.mount.lever()
             if lever is not None:
-                rot_ms2 = np.cross(alpha, lever) + np.cross(w_lp, np.cross(w_lp, lever))
-                acc_filt = acc_b - rot_ms2 / mountcal.G0
+                lx, ly, lz = lever
+                # alpha x r  +  omega x (omega x r)
+                cx, cy, cz = w1 * lz - w2 * ly, w2 * lx - w0 * lz, w0 * ly - w1 * lx
+                rx = al1 * lz - al2 * ly + w1 * cz - w2 * cy
+                ry = al2 * lx - al0 * lz + w2 * cx - w0 * cz
+                rz = al0 * ly - al1 * lx + w0 * cy - w1 * cx
+                acc_filt = (acc_b[0] - rx / mountcal.G0,
+                            acc_b[1] - ry / mountcal.G0,
+                            acc_b[2] - rz / mountcal.G0)
 
             roll, pitch, yaw = self.filt.update(gyr_b, acc_filt, dt)
             heading = tilt_compensated_heading(mag_b, roll, pitch)
 
             if self._lever_buf is not None:
-                self._tick_lever(acc_b, w_lp, alpha)
+                self._tick_lever(acc_b, w_lp, (al0, al1, al2))
 
             if now >= next_env:
                 next_env = now + ENV_PERIOD_S
@@ -747,7 +828,8 @@ class SenseHat(threading.Thread):
                 "my": mag_b[1] if mag_b is not None else None,
                 "mz": mag_b[2] if mag_b is not None else None,
                 "roll": roll, "pitch": pitch, "yaw": yaw, "heading": heading,
-                "acc_mag": float(np.linalg.norm(acc_b)), "gyro_mag": float(np.linalg.norm(gyr_b)),
+                "acc_mag": math.sqrt(acc_b[0]**2 + acc_b[1]**2 + acc_b[2]**2),
+                "gyro_mag": math.sqrt(gyr_b[0]**2 + gyr_b[1]**2 + gyr_b[2]**2),
                 "temp_imu": temp_imu, **env,
             }
             # The AHRS runs at IMU_HZ, but nothing downstream reads faster than the UI polls, so
@@ -755,7 +837,7 @@ class SenseHat(threading.Thread):
             if now >= next_log:
                 next_log = max(now, next_log + 1.0 / LOG_HZ)
                 self.ring.push(now - self._t0, sample)
-                self._publish(sample, acc, mag is not None)
+                self._publish(sample, acc, mag_fresh)
 
     # ---- calibration captures --------------------------------------------------------------
     def _tick_capture(self, acc, gyr):
@@ -766,7 +848,7 @@ class SenseHat(threading.Thread):
             return
         cap["acc"].append(acc)
         cap["gyr"].append(gyr)
-        if len(cap["gyr"]) < int(self.CAPTURE_S * IMU_HZ):
+        if len(cap["gyr"]) < int(self.CAPTURE_S * self.imu_hz):
             return
 
         g = np.array(cap["gyr"])
@@ -793,9 +875,9 @@ class SenseHat(threading.Thread):
 
         meta = {"spread_dps": round(spread, 2), "acc_mag_g": round(mag, 4), "n": len(g)}
         if kind == "gyro":
-            self.gyro_bias = g.mean(0)
+            self.gyro_bias = [float(v) for v in g.mean(0)]
             self.bias_status = {"state": "ok",
-                                "msg": f"bias {np.array2string(self.gyro_bias, precision=2)} deg/s"}
+                                "msg": f"bias [{self.gyro_bias[0]:.2f} {self.gyro_bias[1]:.2f} {self.gyro_bias[2]:.2f}] deg/s"}
             self.filt.reset(self.mount.R @ acc_mean)
             with self._lock:
                 self.capture_status = {"kind": "gyro", "state": "ok", "msg": self.bias_status["msg"]}
@@ -810,10 +892,12 @@ class SenseHat(threading.Thread):
             if not ok:
                 self._capture_failed("forward", "tilt", why)
                 return
-            tilt = self.mount.captures["forward"]["tilt_deg"]
+            cap = self.mount.captures["forward"]
             with self._lock:
-                self.capture_status = {"kind": "forward", "state": "ok",
-                                       "msg": f"fore-aft axis fixed from a {tilt:.1f}° nose-down tilt"}
+                self.capture_status = {
+                    "kind": "forward",
+                    "state": "weak" if cap.get("weak") else "ok",
+                    "msg": why or f"fore-aft axis fixed from a {cap['tilt_deg']:.1f}° nose-down tilt"}
 
     def _capture_failed(self, kind, state, msg):
         with self._lock:
@@ -826,11 +910,13 @@ class SenseHat(threading.Thread):
         buf = self._lever_buf
         if buf is None:
             return
-        buf.append((acc_b * mountcal.G0, w_rad.copy(), alpha.copy(), self.filt.up_body()))
+        g0 = mountcal.G0
+        buf.append(((acc_b[0] * g0, acc_b[1] * g0, acc_b[2] * g0),
+                    tuple(w_rad), tuple(alpha), self.filt.up_body()))
         if len(buf) % 20 == 0:
             with self._lock:
                 self.lever_status = dict(self.lever_status, n=len(buf))
-        if len(buf) >= int(self.LEVER_MAX_S * IMU_HZ):
+        if len(buf) >= int(self.LEVER_MAX_S * self.imu_hz):
             self.lever_stop()
 
     def _publish(self, sample, acc_chip, mag_live):
@@ -844,6 +930,8 @@ class SenseHat(threading.Thread):
                 "capture_status": dict(self.capture_status),
                 "lever_status": dict(self.lever_status),
                 "i2c_errors": self._err_count, "last_error": self._last_err,
+                "loop": dict(self.loop),
+                "odr_hz": round(getattr(self._chips.get("imu"), "odr_hz", 0.0), 1) if not self.mock else IMU_HZ,
                 # the raw chip-frame accelerometer, kept alongside the body-frame values: it is what
                 # the mount panel checks against, and it is the only thing shown before calibration
                 "acc_chip": [_clean(v) for v in acc_chip],
@@ -861,7 +949,7 @@ class SenseHat(threading.Thread):
         if self._err_count % 200 == 1:
             print(f"!! Sense HAT {self._last_err} ({self._err_count} read errors so far)")
 
-    def _read_motion(self, dt=1.0 / IMU_HZ):
+    def _read_motion(self, dt=1.0 / IMU_HZ, want_mag=True):
         if self.mock:
             t = time.time() - self._t0
             # the simulator must advance on the SAME clock the loop differentiates with, or the
@@ -870,7 +958,8 @@ class SenseHat(threading.Thread):
             return acc, gyr, mag, 34.0 + 0.5 * math.sin(t * 0.05)
         try:
             acc, gyr, temp = self._chips["imu"].read_motion()
-            return acc, gyr, self._chips["imu"].read_mag(), temp
+            mag = self._chips["imu"].read_mag() if want_mag else None
+            return acc, gyr, mag, temp
         except Exception as e:
             self._fail("imu", e)
             return None, None, None, None

@@ -1006,7 +1006,15 @@ def main():
                     help="do not touch the Sense HAT (B) / I2C bus at all")
     ap.add_argument("--i2c-bus", type=int, default=sensehat.I2C_BUS,
                     help="I2C bus the Sense HAT (B) sits on (default %(default)s)")
+    ap.add_argument("--imu-hz", type=float, default=sensehat.IMU_HZ,
+                    help="IMU read/AHRS rate in Hz (default %(default)s, matching the control loop)")
     args = ap.parse_args()
+
+    # Python hands the GIL between threads at most every `switchinterval` seconds — 5 ms by
+    # default, which is exactly the 200 Hz CAN loop's period, so one thread could hold it across a
+    # whole control tick. Measured on the robot: dropping it takes the daemon's late ticks from
+    # ~10% back to well under 1% once the IMU thread also runs at 200 Hz.
+    sys.setswitchinterval(0.0005)
 
     STATE["interface"] = args.interface
     STATE["mock"] = args.mock
@@ -1023,7 +1031,7 @@ def main():
     # Sense HAT (B) on I2C — its own thread, started after the daemon so a wedged I2C bus can never
     # delay motor bring-up. In --mock it synthesises values so the panel works off the robot.
     if not args.no_sensors:
-        sh = sensehat.SenseHat(bus_num=args.i2c_bus, mock=args.mock)
+        sh = sensehat.SenseHat(bus_num=args.i2c_bus, mock=args.mock, imu_hz=args.imu_hz)
         STATE["sense"] = sh
         sh.start()
     atexit.register(_shutdown)

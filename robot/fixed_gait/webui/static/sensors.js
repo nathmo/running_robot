@@ -117,15 +117,17 @@ function updateMountUI(d) {
   const ls = d.lever_status || {};
 
   const capMsg = (kind) => (cs.kind === kind ? cs.msg : "");
-  const capCls = (kind) => "hint" + (cs.kind === kind && ["moving", "tilt"].includes(cs.state) ? " warn-text" : "");
+  const capCls = (kind) => "hint" + (cs.kind === kind && ["moving", "tilt", "weak"].includes(cs.state) ? " warn-text" : "");
   const lvl = m.captures && m.captures.level;
   $("cap-level-status").textContent = capMsg("level") ||
     (lvl ? `captured (|a| ${fmt(lvl.acc_mag_g, 3)} g)` : "not captured");
   $("cap-level-status").className = capCls("level");
   const fwd = m.captures && m.captures.forward;
   $("cap-fwd-status").textContent = capMsg("forward") ||
-    (fwd ? `tilt capture: ${fmt(fwd.tilt_deg, 1)}° nose-down` : "no tilt capture");
-  $("cap-fwd-status").className = capCls("forward");
+    (fwd ? `tilt capture: ${fmt(fwd.tilt_deg, 1)}° nose-down` +
+           (fwd.weak ? ` — SHALLOW: 1° of roll while tipping = ~${fmt(fwd.roll_sensitivity_deg, 0)}° of fore-aft error; redo at 10–20°` : "")
+         : "no tilt capture");
+  $("cap-fwd-status").className = "hint" + ((cs.kind === "forward" && ["moving","tilt","weak"].includes(cs.state)) || (fwd && fwd.weak) ? " warn-text" : "");
 
   const cc = m.cross_check_deg;
   if (cc === null || cc === undefined) {
