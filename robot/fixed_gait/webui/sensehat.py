@@ -10,9 +10,14 @@ Five chips, all confirmed present on the robot (`i2cdetect` + WHO_AM_I):
     0x48  ADS1015     4-channel 12-bit ADC on the HAT's external analog header
 
 Everything here is register-level over `smbus2`; no Waveshare vendor code and no GPIO. The chips
-are read by ONE background thread (`SenseHat`), never by the Flask handlers and never by the
-200 Hz CAN daemon — an I2C stall must not be able to delay a motor command. Handlers only read the
+are read by background threads of their own, never by the Flask handlers and never by the 200 Hz
+CAN daemon — an I2C stall must not be able to delay a motor command. Handlers only read the
 published snapshot / ring buffer, exactly like motor telemetry.
+
+Two threads, split by timescale. The IMU runs at IMU_HZ (200, matching the control loop); the air,
+pressure, light and ADC chips run at 1-5 Hz on a second thread because their drivers spend nearly
+all their time asleep waiting for a conversion — inline, that cost the fast loop ~43 ms every
+second and it could only reach ~192 Hz. `_SharedBus` serialises the transfers between them.
 
 Degrades instead of failing: a missing `smbus2`, a missing /dev/i2c-1 or an unplugged HAT leaves
 `available = False` with the reason in `error`, and the rest of the web UI is unaffected.
@@ -79,6 +84,39 @@ def _clean(v):
         return None
     v = float(v)
     return None if not math.isfinite(v) else round(v, 4)
+
+
+class _SharedBus:
+    """Serialises I2C transfers between the fast IMU thread and the slow environment thread.
+
+    The lock covers the transfer and nothing else. That is the entire point of splitting the two
+    threads: the slow chips spend almost all their time *waiting* for a conversion (the SHTC3 alone
+    sleeps 15 ms), and those sleeps happen in the driver BETWEEN transfers, so they now overlap the
+    IMU's reads instead of stalling them for three ticks."""
+
+    def __init__(self, bus):
+        self._bus = bus
+        self._lock = threading.Lock()
+
+    def read_byte_data(self, addr, reg):
+        with self._lock:
+            return self._bus.read_byte_data(addr, reg)
+
+    def write_byte_data(self, addr, reg, val):
+        with self._lock:
+            return self._bus.write_byte_data(addr, reg, val)
+
+    def read_i2c_block_data(self, addr, reg, n):
+        with self._lock:
+            return self._bus.read_i2c_block_data(addr, reg, n)
+
+    def write_i2c_block_data(self, addr, reg, data):
+        with self._lock:
+            return self._bus.write_i2c_block_data(addr, reg, data)
+
+    def i2c_rdwr(self, *msgs):
+        with self._lock:
+            return self._bus.i2c_rdwr(*msgs)
 
 
 # ============================================================================ ICM-20948 (IMU)
@@ -593,6 +631,7 @@ class SenseHat(threading.Thread):
         self._t0 = time.time()
         self._err_count = 0
         self._last_err = None
+        self._env = {}               # latest slow-sensor values, published by _env_loop
         self._mock = MockImu() if mock else None
         self._rng = np.random.default_rng(0)
 
@@ -669,7 +708,7 @@ class SenseHat(threading.Thread):
         if smbus2 is None:
             return
         try:
-            self.bus = smbus2.SMBus(self.bus_num)
+            self.bus = _SharedBus(smbus2.SMBus(self.bus_num))
         except Exception as e:
             self.error = f"cannot open /dev/i2c-{self.bus_num}: {e} (enable I2C with raspi-config)"
             return
@@ -698,11 +737,14 @@ class SenseHat(threading.Thread):
                 self._snap = {"available": False, "error": self.error}
             print(f"!! Sense HAT (B) unavailable: {self.error}")
             return
-        print(f"Sense HAT (B): {'MOCK' if self.mock else ', '.join(sorted(self._chips))}")
+        print(f"Sense HAT (B): {'MOCK' if self.mock else ', '.join(sorted(self._chips))} "
+              f"— IMU thread at {self.imu_hz:.0f} Hz, environment on its own thread")
+        env_thread = threading.Thread(target=self._env_loop, name="sensehat-env", daemon=True)
+        env_thread.start()
 
         dt_nom = 1.0 / self.imu_hz
         next_imu = time.time()
-        next_env = next_color = next_adc = next_mag = 0.0
+        next_mag = 0.0
         next_log = 0.0
         mag_last = None         # held between decimated magnetometer reads
         mag_fresh = False
@@ -711,8 +753,6 @@ class SenseHat(threading.Thread):
         # downstream are actually getting, so it is measured rather than assumed.
         rate_n, rate_slip, rate_t0 = 0, 0, time.time()
         last_t = time.time()
-        env = {}
-        adc_ch = 0
         w_lp = np.zeros(3)          # low-passed body rate, differentiated for angular acceleration
         mount_version = -1
         lever = self.mount.lever()
@@ -810,17 +850,7 @@ class SenseHat(threading.Thread):
             if self._lever_buf is not None:
                 self._tick_lever(acc_b, w_lp, (al0, al1, al2))
 
-            if now >= next_env:
-                next_env = now + ENV_PERIOD_S
-                env.update(self._read_env())
-            if now >= next_color:
-                next_color = now + COLOR_PERIOD_S
-                env.update(self._read_color())
-            if now >= next_adc:
-                next_adc = now + ADC_PERIOD_S
-                env.update(self._read_adc(adc_ch))
-                adc_ch = (adc_ch + 1) % 4
-
+            env = self._env            # published by the environment thread, read-only here
             sample = {
                 "ax": acc_b[0], "ay": acc_b[1], "az": acc_b[2],
                 "gx": gyr_b[0], "gy": gyr_b[1], "gz": gyr_b[2],
@@ -838,6 +868,30 @@ class SenseHat(threading.Thread):
                 next_log = max(now, next_log + 1.0 / LOG_HZ)
                 self.ring.push(now - self._t0, sample)
                 self._publish(sample, acc, mag_fresh)
+
+    def _env_loop(self):
+        """The slow chips, on their own thread.
+
+        Air, pressure, light and the ADC are all 1-5 Hz signals whose drivers spend nearly all of
+        their time asleep waiting for a conversion. Run inline they cost the 200 Hz IMU loop about
+        43 ms every second — some 8 missed ticks — for data nothing time-critical reads. Out here
+        those waits overlap the IMU's reads, and _SharedBus keeps the two off each other's
+        transfers."""
+        next_env = next_color = next_adc = 0.0
+        adc_ch = 0
+        while not self.stop_event.is_set():
+            now = time.time()
+            if now >= next_env:
+                next_env = now + ENV_PERIOD_S
+                self._env = {**self._env, **self._read_env()}
+            if now >= next_color:
+                next_color = now + COLOR_PERIOD_S
+                self._env = {**self._env, **self._read_color()}
+            if now >= next_adc:
+                next_adc = now + ADC_PERIOD_S
+                self._env = {**self._env, **self._read_adc(adc_ch)}
+                adc_ch = (adc_ch + 1) % 4
+            self.stop_event.wait(0.02)
 
     # ---- calibration captures --------------------------------------------------------------
     def _tick_capture(self, acc, gyr):

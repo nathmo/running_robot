@@ -102,9 +102,15 @@ Two consequences worth remembering when reading identification data:
 
 ## Sense HAT (B) — the sensor panel
 
-The Waveshare **Sense HAT (B)** sits on the Pi's 40-pin header and answers on **I2C bus 1**. All
-five chips are read by one background thread (`sensehat.py`), never by the Flask handlers and never
-by the CAN daemon — an I2C stall must not be able to delay a motor command.
+The Waveshare **Sense HAT (B)** sits on the Pi's 40-pin header and answers on **I2C bus 1**. The
+chips are read by background threads of their own (`sensehat.py`), never by the Flask handlers and
+never by the CAN daemon — an I2C stall must not be able to delay a motor command.
+
+**Two threads, split by timescale.** The IMU polls at `--imu-hz` (200 by default, matching the
+control loop); the air/pressure/light/ADC chips run at 1-5 Hz on a second thread. That split is not
+tidiness: those drivers spend nearly all their time *asleep* waiting for a conversion (the SHTC3
+alone sleeps 15 ms), which inline cost the fast loop ~43 ms every second — about 8 missed ticks —
+and capped it at ~192 Hz. Out of the way, the IMU thread holds **199.5 Hz**.
 
 | Address | Chip | Published |
 |---|---|---|
@@ -113,6 +119,20 @@ by the CAN daemon — an I2C stall must not be able to delay a motor command.
 | 0x5C | LPS22HB | barometric pressure + its own die temperature |
 | 0x29 | TCS34725 | ambient light (lux), correlated colour temperature, raw RGBC |
 | 0x48 | ADS1015 | AIN0..AIN3, volts (one channel per tick) |
+
+Measured on the robot (100 kHz I2C, at rest, DLPF cfg 3):
+
+| | accel | gyro |
+|---|---|---|
+| range / resolution | ±4 g, 0.1221 mg/LSB | ±1000 dps, 0.0305 dps/LSB |
+| 3 dB bandwidth | 50.4 Hz | 51.2 Hz |
+| noise (RMS) | 1.8 mg (~218 µg/√Hz) | 0.08 dps (~0.0096 dps/√Hz) |
+| bias | scale error −0.03% | turn-on ~1 dps; 0.011 dps/s in-run |
+
+Quantisation sits ~15x below the noise floor on both, so widening the ranges costs nothing real if
+footfall impacts start clipping ±4 g. Sensor ODR is 225 Hz (`SMPLRT_DIV` derived from `ODR_HZ`); an
+accel+gyro burst costs 1.68 ms and the magnetometer ~1 ms, hence the mag's decimation to 25 Hz.
+The panel publishes the rate the IMU thread actually achieves, not the one it was asked for.
 
 ```
 python robot/fixed_gait/webui/sensehat.py          # CLI self-test: one live line per second
