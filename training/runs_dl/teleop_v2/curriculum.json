@@ -1,0 +1,1 @@
+{"cmd_scale": 0.0, "cmd_v_fwd": 0.6, "cmd_v_back": 0.2, "cmd_yaw": 0.3, "stance_ratio": 0.52065664, "eff_scale": 0.8967168, "ctrl_jitter_ms": 4.0, "ctrl_drop_prob": 0.05, "ent_anneal_from": 100012032, "ent_anneal_base": 0.01, "stance_ratio_gate_from": 114149376, "eff_scale_gate_from": 114149376, "ctrl_jitter_ms_gate_from": 114149376, "ctrl_drop_prob_gate_from": 114149376}
