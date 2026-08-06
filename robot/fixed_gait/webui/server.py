@@ -198,14 +198,73 @@ def api_sensors():
     return jsonify(out)
 
 
-@app.post("/api/sensors/gyro_bias")
-def api_sensors_gyro_bias():
-    """Re-average the gyro zero-rate offset. The robot must stand still while it runs."""
+def _sense():
     sh = STATE["sense"]
-    if sh is None:
-        return _err("sensors disabled (--no-sensors)")
-    r = sh.calibrate_gyro()
-    return _ok() if r.get("ok") else _err(r.get("error", "gyro calibration failed"))
+    return (sh, None) if sh is not None else (None, "sensors disabled (--no-sensors)")
+
+
+@app.post("/api/sensors/capture")
+def api_sensors_capture():
+    """Start a still-robot average: `gyro` (zero-rate bias), `level` (the upright reference on the
+    rig) or `forward` (the nose-down tilt that pins the fore-aft axis). The robot must hold still."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
+    r = sh.start_capture(b.get("kind", "gyro"))
+    return _ok() if r.get("ok") else _err(r.get("error", "capture failed"))
+
+
+@app.post("/api/sensors/mount")
+def api_sensors_mount():
+    """Edit the parts of the mount calibration that are typed rather than measured: the declared
+    forward axis, the CAD lever arm, and which lever source feeds the live compensation."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
+    m = sh.mount
+    if "forward_axis" in b:
+        ok, why = m.set_declared(b["forward_axis"])
+        if not ok:
+            return _err(why)
+    if "lever_cad" in b:
+        ok, why = m.set_lever_cad(b["lever_cad"])
+        if not ok:
+            return _err(why)
+    if "lever_use" in b:
+        ok, why = m.set_lever_use(b["lever_use"])
+        if not ok:
+            return _err(why)
+    return _ok(mount=m.snapshot())
+
+
+@app.post("/api/sensors/mount/reset")
+def api_sensors_mount_reset():
+    """Forget the measured mount rotation (and the fitted lever) — values go back to chip axes."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    sh.mount.reset()
+    return _ok(mount=sh.mount.snapshot())
+
+
+@app.post("/api/sensors/lever")
+def api_sensors_lever():
+    """`start` begins recording a rocking excitation, `stop` fits the lever arm from it."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
+    action = b.get("action", "start")
+    if action == "start":
+        r = sh.lever_start()
+    elif action == "stop":
+        r = sh.lever_stop()
+    else:
+        return _err(f"unknown lever action '{action}'")
+    return _ok(mount=sh.mount.snapshot(), fit=r.get("fit")) if r.get("ok") \
+        else _err(r.get("error", "lever-arm fit failed"))
 
 
 # ===================================================================== e-stop / mode
@@ -905,6 +964,20 @@ def api_mock_drag():
     b = request.get_json(force=True, silent=True) or {}
     ok = _dm().mock_drag(b.get("motor", ""), b.get("norm_deg"))
     return _ok() if ok else _err("unknown motor or not mock")
+
+
+@app.post("/api/mock/sensors")
+def api_mock_sensors():
+    """Pose the simulated IMU (still / tilt / rock) so the mount calibration can be walked through
+    end to end without the robot."""
+    if not STATE["mock"]:
+        return _err("mock mode only", 403)
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
+    r = sh.mock_pose(b.get("pose", "still"))
+    return _ok() if r.get("ok") else _err(r.get("error", "mock pose failed"))
 
 
 # ===================================================================== lifecycle

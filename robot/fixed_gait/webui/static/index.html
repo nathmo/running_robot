@@ -140,6 +140,90 @@ afterwards.">⌖ Zero gyro (hold still)</button>
       </div>
     </div>
 
+    <!-- ---------------- IMU mount calibration ---------------- -->
+    <div class="step" id="sns-mountcal">
+      <div class="step-h">IMU mount &amp; frame
+        <span class="hint">the HAT is bolted UNDER the robot — until this is done, every value
+          above is in the chip's own axes, not the robot's</span></div>
+
+      <div class="sns-cal-grid">
+        <div class="sns-cal-steps">
+          <div class="sns-cal-step">
+            <b>1 — Upright reference</b>
+            <span class="hint">Hang the robot on the test rig in its upright pose and let it settle.
+              This captures the direction of gravity in chip axes, which fixes the tilt — and
+              absorbs both mount misalignment and accelerometer bias into one reference. Its
+              repeatability is the accuracy ceiling of everything below.</span>
+            <div class="row small">
+              <button id="btn-cap-level" class="btn small primary">📍 Capture upright</button>
+              <span id="cap-level-status" class="hint"></span>
+            </div>
+          </div>
+
+          <div class="sns-cal-step">
+            <b>2 — Fore-aft axis</b>
+            <span class="hint">Gravity cannot see rotation <i>about</i> the vertical — the DOF that
+              separates <b>pitch from roll</b>. Fix it either by tipping the robot nose-down
+              10–20° and capturing (the angle itself does not matter, only the direction), or by
+              declaring which chip axis points forward. Do both and they cross-check each other:
+              a large disagreement means the HAT is not bolted on square.</span>
+            <div class="row small">
+              <button id="btn-cap-forward" class="btn small">📐 Capture nose-down tilt</button>
+              <label>declared forward
+                <select id="sns-fwd-axis" class="txt small">
+                  <option value="">— none —</option>
+                  <option value="+x">chip +X</option><option value="-x">chip −X</option>
+                  <option value="+y">chip +Y</option><option value="-y">chip −Y</option>
+                </select></label>
+            </div>
+            <div id="cap-fwd-status" class="hint"></div>
+            <div id="sns-crosscheck" class="hint"></div>
+          </div>
+
+          <div class="sns-cal-step">
+            <b>3 — Lever arm <span class="hint">IMU position relative to the base centre, metres</span></b>
+            <span class="hint">An IMU offset from the base also measures α×r + ω×(ω×r) whenever the
+              body rotates — zero at rest, but a bias on roll/pitch exactly while running. Type the
+              CAD vector, and/or fit one by rocking the robot. <b>The fit is relative to the point
+              the rocking rotated about</b> (the hang point on the rig), not the base centre — the
+              two agree only insofar as those coincide.</span>
+            <div class="row small">
+              <label>CAD x <input type="number" id="lev-x" class="num small" step="0.001"></label>
+              <label>y <input type="number" id="lev-y" class="num small" step="0.001"></label>
+              <label>z <input type="number" id="lev-z" class="num small" step="0.001"></label>
+              <button id="btn-lever-save" class="btn small">Save CAD vector</button>
+            </div>
+            <div class="row small">
+              <button id="btn-lever-fit" class="btn small">⟳ Fit by rocking…</button>
+              <span id="lever-fit-status" class="hint"></span>
+            </div>
+            <div id="lever-compare" class="hint"></div>
+            <div class="row small">
+              <label>compensate using
+                <select id="sns-lever-use" class="txt small">
+                  <option value="cad">CAD vector</option>
+                  <option value="fit">fitted vector</option>
+                  <option value="none">nothing</option>
+                </select></label>
+              <span class="spacer"></span>
+              <button id="btn-mount-reset" class="btn small">Reset mount calibration</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sns-cal-view">
+          <canvas id="sns-frame-canvas" width="380" height="330"></canvas>
+          <div class="row small">
+            <label><input type="checkbox" id="frame-showmesh" checked> base mesh</label>
+            <label><input type="checkbox" id="frame-showlive" checked> live up-vector</label>
+            <span class="spacer"></span>
+            <span class="hint">drag to orbit, wheel to zoom</span>
+          </div>
+          <div id="sns-frame-legend" class="hint"></div>
+        </div>
+      </div>
+    </div>
+
     <div class="chart-legend">
       <span><i class="sw" style="background:#4da3ff"></i>pitch °</span>
       <span><i class="sw dash" style="background:#f2f2f2"></i>roll °</span>
@@ -602,6 +686,16 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
       <button id="btn-mock-sweep-right" class="btn small">auto-sweep right leg</button>
       <button id="btn-mock-sweep-left" class="btn small">auto-sweep left leg</button>
       <button id="btn-mock-stop" class="btn small">stop sweeps</button>
+    </div>
+    <div class="row">
+      <span class="hint">simulated IMU pose — the three motions the mount calibration asks for
+        (the mock mounts the HAT at a known rotation and lever arm, so the procedure can be checked
+        against the answer it should find):</span>
+    </div>
+    <div class="row">
+      <button id="btn-mock-still" class="btn small">upright &amp; still</button>
+      <button id="btn-mock-tilt" class="btn small">nose-down tilt</button>
+      <button id="btn-mock-rock" class="btn small">rock (two axes)</button>
     </div>
   </section>
 

@@ -17,15 +17,21 @@ published snapshot / ring buffer, exactly like motor telemetry.
 Degrades instead of failing: a missing `smbus2`, a missing /dev/i2c-1 or an unplugged HAT leaves
 `available = False` with the reason in `error`, and the rest of the web UI is unaffected.
 
-Frames. Accel/gyro are reported in the ICM-20948's own chip frame (X/Y/Z as silkscreened on the
-HAT); the AK09916 sits in a rotated frame internally and is remapped here so all nine axes agree.
-How the chip frame is glued onto the robot is a MOUNTING question — `AXIS_MAP` below is the one
-place to fix that, and the web UI shows which axis currently reads +1 g so it can be checked.
+Frames. The AK09916 sits in a rotated frame inside the ICM-20948 package and is remapped here so
+all nine axes agree in the chip frame. Getting from there to the ROBOT's axes is a mounting
+question, and on this robot the HAT is bolted underneath (it reads gravity on chip -Z), so the two
+frames are nowhere near each other. `mountcal.py` measures that rotation from two captures instead
+of asserting it; until it has been run, values are published in the raw chip frame and the panel
+says so.
 
-Attitude comes from a 6-axis Madgwick filter (accel + gyro). Roll/pitch are gravity-referenced and
-absolute; YAW IS GYRO-INTEGRATED AND DRIFTS — the magnetometer deliberately does not correct it,
-because the mag sits centimetres from two brushless motors and a battery, so its heading is only
-published as an advisory number, never fused into the attitude.
+Attitude comes from a 6-axis Madgwick filter (accel + gyro) fed the BODY-frame signals. Roll/pitch
+are gravity-referenced and absolute; YAW IS GYRO-INTEGRATED AND DRIFTS — the magnetometer
+deliberately does not correct it, because the mag sits centimetres from two brushless motors and a
+battery, so its heading is only published as an advisory number, never fused into the attitude.
+
+The IMU is also offset from the base centre, so while the robot rotates it measures the lever-arm
+terms on top of gravity; when a lever arm is known (CAD or fitted, see mountcal) those are
+subtracted before the filter sees the accelerometer.
 """
 import math
 import threading
@@ -33,6 +39,7 @@ import time
 
 import numpy as np
 
+import mountcal
 import paths  # noqa: F401  — path bootstrap; every webui module imports it first
 from ringbuffer import ScalarRing
 
@@ -48,20 +55,12 @@ ENV_PERIOD_S = 1.0      # SHTC3 + LPS22HB (slow, and self-heating if hammered)
 COLOR_PERIOD_S = 0.5    # TCS34725 (its integration time is 154 ms)
 ADC_PERIOD_S = 0.2      # ADS1015, one channel per tick -> all four at 1.25 Hz
 
-# Chip axes -> robot body axes. Identity = "publish the chip frame as-is", which is what the UI
-# labels the values with today. Set this once the HAT's mounting on the torso is fixed; the tuple
-# is (source axis index, sign) for body X, Y, Z.
-AXIS_MAP = ((0, +1), (1, +1), (2, +1))
+OMEGA_TAU_S = 0.02      # low-pass on the rate gyro before differentiating it for angular accel
 
 RING_FIELDS = ("ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz",
                "roll", "pitch", "yaw", "heading", "acc_mag", "gyro_mag",
                "temp", "humidity", "pressure", "temp_baro", "temp_imu",
                "lux", "cct", "adc0", "adc1", "adc2", "adc3")
-
-
-def _remap(v):
-    """Apply AXIS_MAP to a 3-vector in chip axes."""
-    return [v[i] * s for i, s in AXIS_MAP]
 
 
 def _clean(v):
@@ -417,6 +416,14 @@ class Madgwick:
         self.q = q / np.linalg.norm(q)
         return self.rpy()
 
+    def up_body(self):
+        """The world's UP direction expressed in body axes — what a still accelerometer reads.
+        Gravity is the negative of this, scaled by g."""
+        q0, q1, q2, q3 = self.q
+        return np.array([2 * (q1 * q3 - q0 * q2),
+                         2 * (q0 * q1 + q2 * q3),
+                         1 - 2 * (q1 * q1 + q2 * q2)])
+
     def rpy(self):
         """(roll, pitch, yaw) in degrees, aerospace Z-Y-X convention."""
         q0, q1, q2, q3 = self.q
@@ -439,6 +446,80 @@ def tilt_compensated_heading(mag, roll_deg, pitch_deg):
     return math.degrees(math.atan2(-yh, xh)) % 360.0
 
 
+# ============================================================================ simulated IMU
+# A known mount and a known lever arm, so the calibration procedure can be walked end to end off
+# the robot and checked against the answer it is supposed to find. The rotation below is "HAT
+# bolted underneath, turned 90 deg" — chip axes nowhere near body axes, like the real one.
+MOCK_R = np.array([[0.0, 1.0, 0.0],          # body X (fwd)  = chip +Y
+                   [1.0, 0.0, 0.0],          # body Y (left) = chip +X
+                   [0.0, 0.0, -1.0]])        # body Z (up)   = chip -Z
+MOCK_LEVER = np.array([0.021, -0.014, -0.115])       # base centre -> IMU, metres
+MOCK_TILT_DEG = 15.0
+MOCK_MAG_BODY = np.array([21.0, -4.0, -42.0])        # uT, fixed field in body axes
+
+
+class MockImu:
+    """Rigid-body IMU simulator: poses/rocks a body, mounts an IMU on it at MOCK_LEVER through
+    MOCK_R, and reports what that chip would read — including the lever-arm terms."""
+
+    def __init__(self):
+        self.mode = "still"
+        self.q = np.array([1.0, 0.0, 0.0, 0.0])      # body -> world
+        self.t = 0.0
+        self.noise = 0.004
+
+    def set_mode(self, mode):
+        if mode not in ("still", "tilt", "rock"):
+            return False, f"unknown mock pose '{mode}' (still, tilt, rock)"
+        self.mode = mode
+        self.t = 0.0
+        # +theta about the body's left axis swings the nose DOWN, which is the pose the fore-aft
+        # capture asks for.
+        self.q = _quat_from_pitch(math.radians(MOCK_TILT_DEG) if mode == "tilt" else 0.0)
+        return True, None
+
+    def step(self, dt, rng):
+        self.t += dt
+        if self.mode == "rock":
+            w = (2.0 * np.array([1.0, 0.0, 0.0]) * math.sin(2 * math.pi * 0.7 * self.t)
+                 + 1.6 * np.array([0.0, 1.0, 0.0]) * math.sin(2 * math.pi * 1.1 * self.t))
+            al = (2.0 * 2 * math.pi * 0.7 * np.array([1.0, 0.0, 0.0]) * math.cos(2 * math.pi * 0.7 * self.t)
+                  + 1.6 * 2 * math.pi * 1.1 * np.array([0.0, 1.0, 0.0]) * math.cos(2 * math.pi * 1.1 * self.t))
+            self.q = _quat_integrate(self.q, w, dt)
+        else:
+            w = np.zeros(3)
+            al = np.zeros(3)
+
+        up_body = _quat_up_body(self.q)
+        a_imu = np.cross(al, MOCK_LEVER) + np.cross(w, np.cross(w, MOCK_LEVER))
+        f_body = a_imu / mountcal.G0 + up_body                    # specific force, g
+        n = rng.normal(0.0, self.noise, 3)
+        acc_chip = MOCK_R.T @ f_body + n
+        gyr_chip = MOCK_R.T @ np.degrees(w) + n * 20.0
+        mag_chip = MOCK_R.T @ MOCK_MAG_BODY + n * 5.0
+        return list(acc_chip), list(gyr_chip), list(mag_chip)
+
+
+def _quat_from_pitch(theta):
+    return np.array([math.cos(theta / 2), 0.0, math.sin(theta / 2), 0.0])
+
+
+def _quat_integrate(q, w, dt):
+    q0, q1, q2, q3 = q
+    gx, gy, gz = w
+    qd = 0.5 * np.array([-q1 * gx - q2 * gy - q3 * gz,
+                         q0 * gx + q2 * gz - q3 * gy,
+                         q0 * gy - q1 * gz + q3 * gx,
+                         q0 * gz + q1 * gy - q2 * gx])
+    q = q + qd * dt
+    return q / np.linalg.norm(q)
+
+
+def _quat_up_body(q):
+    q0, q1, q2, q3 = q
+    return np.array([2 * (q1 * q3 - q0 * q2), 2 * (q0 * q1 + q2 * q3), 1 - 2 * (q1 * q1 + q2 * q2)])
+
+
 # ============================================================================ the poll thread
 class SenseHat(threading.Thread):
     """Owns the I2C bus and publishes a snapshot + a ScalarRing of history.
@@ -446,10 +527,12 @@ class SenseHat(threading.Thread):
     `mock=True` synthesises plausible values so the panel can be developed off the robot (matching
     the web UI's existing `--mock` motor path)."""
 
-    GYRO_BIAS_S = 1.5           # how long the still-robot gyro-bias average runs
-    GYRO_STILL_DPS = 3.0        # per-axis spread allowed during that average
+    CAPTURE_S = 1.5             # how long a still-robot average (gyro bias, level, tilt) runs
+    GYRO_STILL_DPS = 3.0        # per-axis gyro spread allowed during any capture
+    ACC_STILL_G = 0.04          # how far |a| may sit from 1 g during a pose capture
+    LEVER_MAX_S = 40.0          # cap on a lever-arm excitation recording
 
-    def __init__(self, bus_num=I2C_BUS, mock=False):
+    def __init__(self, bus_num=I2C_BUS, mock=False, mount=None):
         super().__init__(daemon=True, name="sensehat")
         self.bus_num = bus_num
         self.mock = mock
@@ -458,27 +541,84 @@ class SenseHat(threading.Thread):
         self.stop_event = threading.Event()
         self.ring = ScalarRing(RING_FIELDS, capacity=2048)
         self.filt = Madgwick()
+        self.mount = mount if mount is not None else mountcal.MountCal.load_or_new()
         self.gyro_bias = np.zeros(3)
-        self.bias_request = threading.Event()
         self.bias_status = {"state": "pending", "msg": "not calibrated yet"}
+        # One capture machine for all three still-robot averages; `kind` says which is running.
+        self._cap = None
+        self.capture_status = {"kind": None, "state": "idle", "msg": ""}
+        self._lever_buf = None       # list of (f_body, omega, alpha, up_body) while recording
+        self.lever_status = {"state": "idle", "msg": "", "n": 0}
         self._lock = threading.Lock()
         self._snap = {}
         self._chips = {}
         self._t0 = time.time()
         self._err_count = 0
         self._last_err = None
+        self._mock = MockImu() if mock else None
+        self._rng = np.random.default_rng(0)
 
     # ---- public API (Flask side) -----------------------------------------------------------
     def snapshot(self):
         with self._lock:
             return dict(self._snap)
 
-    def calibrate_gyro(self):
-        """Ask the poll thread to re-average the gyro bias. The robot must be still."""
+    def start_capture(self, kind):
+        """Ask the poll thread for a still-robot average: `gyro` (zero-rate bias), `level` (the
+        upright reference pose) or `forward` (the nose-down tilt that pins the fore-aft axis).
+        Returns immediately; watch `capture_status` / `bias_status` for the verdict."""
+        if kind not in ("gyro", "level", "forward"):
+            return {"ok": False, "error": f"unknown capture '{kind}'"}
         if not self.available:
             return {"ok": False, "error": self.error or "sensors unavailable"}
-        self.bias_request.set()
+        if kind == "forward" and self.mount.up_chip is None:
+            return {"ok": False, "error": "capture the level reference first — the tilt is measured "
+                                          "as a change from it"}
+        with self._lock:
+            if self._cap is not None:
+                return {"ok": False, "error": f"a {self._cap['kind']} capture is already running"}
+            self._cap = {"kind": kind, "acc": [], "gyr": []}
+            self.capture_status = {"kind": kind, "state": "running",
+                                   "msg": f"averaging {self.CAPTURE_S:.1f} s — hold the robot still"}
         return {"ok": True}
+
+    def lever_start(self):
+        """Begin recording a rocking excitation for the lever-arm fit."""
+        if not self.available:
+            return {"ok": False, "error": self.error or "sensors unavailable"}
+        if not self.mount.calibrated:
+            return {"ok": False, "error": "calibrate the mount rotation first — the fit is done in "
+                                          "body axes"}
+        with self._lock:
+            self._lever_buf = []
+            self.lever_status = {"state": "recording", "n": 0,
+                                 "msg": "rock the robot by hand about TWO different axes"}
+        return {"ok": True}
+
+    def lever_stop(self):
+        """Stop recording and fit. Returns the estimate (or why it could not be made)."""
+        with self._lock:
+            buf, self._lever_buf = self._lever_buf, None
+        if not buf:
+            self.lever_status = {"state": "error", "msg": "nothing was recorded", "n": 0}
+            return {"ok": False, "error": "nothing was recorded"}
+        fit = mountcal.estimate_lever(buf)
+        if not fit.get("ok"):
+            self.lever_status = {"state": "error", "msg": fit["error"], "n": len(buf)}
+            return {"ok": False, "error": fit["error"]}
+        self.mount.set_lever_fit(fit, about=self.mount.reference)
+        self.lever_status = {"state": "ok", "n": len(buf),
+                             "msg": f"fit from {fit['samples']} rotating samples, residual "
+                                    f"{fit['residual_ms2']:.2f} m/s²"}
+        return {"ok": True, "fit": fit}
+
+    def mock_pose(self, mode):
+        """Pose the simulated robot (mock only): `still` upright, `tilt` nose-down, `rock` a
+        two-axis hand-rock — the three motions the calibration procedure asks for."""
+        if not self.mock:
+            return {"ok": False, "error": "mock mode only"}
+        ok, why = self._mock.set_mode(mode)
+        return {"ok": ok} if ok else {"ok": False, "error": why}
 
     def stop(self):
         self.stop_event.set()
@@ -510,7 +650,7 @@ class SenseHat(threading.Thread):
             return
         self.available = True
         self.error = None
-        self.bias_request.set()             # first bias average as soon as we start reading
+        self.start_capture("gyro")          # first bias average as soon as we start reading
 
     # ---- the loop --------------------------------------------------------------------------
     def run(self):
@@ -528,8 +668,9 @@ class SenseHat(threading.Thread):
         next_log = 0.0
         last_t = time.time()
         env = {}
-        bias_buf = []
         adc_ch = 0
+        w_lp = np.zeros(3)          # low-passed body rate, differentiated for angular acceleration
+        mount_version = self.mount.version
 
         while not self.stop_event.is_set():
             now = time.time()
@@ -540,32 +681,53 @@ class SenseHat(threading.Thread):
             dt = min(max(now - last_t, 1e-4), 0.1)
             last_t = now
 
-            acc, gyr, mag, temp_imu = self._read_motion()
+            acc, gyr, mag, temp_imu = self._read_motion(dt)
             if acc is None:
                 continue
 
-            # gyro bias: average while the robot is still, then restart the filter from the
-            # accelerometer so the run does not start with a wrong attitude to unwind.
-            if self.bias_request.is_set():
-                bias_buf.append(gyr)
-                if len(bias_buf) >= int(self.GYRO_BIAS_S * IMU_HZ):
-                    a = np.array(bias_buf)
-                    spread = float(np.max(a.max(0) - a.min(0)))
-                    if spread <= self.GYRO_STILL_DPS:
-                        self.gyro_bias = a.mean(0)
-                        self.bias_status = {"state": "ok",
-                                            "msg": f"bias {np.array2string(self.gyro_bias, precision=2)} deg/s"}
-                        self.filt.reset(acc)
-                    else:
-                        self.bias_status = {"state": "moving",
-                                            "msg": f"robot moved during calibration ({spread:.1f} deg/s "
-                                                   f"spread > {self.GYRO_STILL_DPS}) — keep it still and retry"}
-                    bias_buf = []
-                    self.bias_request.clear()
+            # still-robot averages (gyro bias / level / tilt) all run on the RAW chip-frame vectors:
+            # the mount rotation is what they are being measured to produce.
+            self._tick_capture(acc, gyr)
 
-            gyr_c = [gyr[i] - self.gyro_bias[i] for i in range(3)]
-            roll, pitch, yaw = self.filt.update(gyr_c, acc, dt)
-            heading = tilt_compensated_heading(mag, roll, pitch)
+            # chip -> body. The gyro bias is measured in chip axes, so subtract before rotating.
+            R = self.mount.R
+            gyr_c = np.asarray(gyr, float) - self.gyro_bias
+            acc_b = R @ np.asarray(acc, float)
+            gyr_b = R @ gyr_c
+            mag_b = R @ np.asarray(mag, float) if mag else None
+
+            # The frame just moved under the filter: its quaternion describes an attitude in the
+            # OLD body axes, which can be arbitrarily far from the truth in the new ones — and a
+            # near-antipodal Madgwick error sits on a saddle where the correction vanishes, so it
+            # would never converge out of it. Restart from what the accelerometer says instead.
+            if self.mount.version != mount_version:
+                mount_version = self.mount.version
+                self.filt.reset(acc_b)
+                w_lp = np.zeros(3)
+
+            # Angular acceleration for the lever-arm terms: differentiating a rate gyro amplifies
+            # its noise, so the rate is low-passed first and the difference taken on that. The SAME
+            # low-passed rate then feeds the omega x (omega x r) term — pairing a raw omega with an
+            # alpha derived from a filtered one mismatches their phase and biases the fit.
+            w_rad = np.radians(gyr_b)
+            a_lp = dt / (OMEGA_TAU_S + dt)
+            w_prev = w_lp
+            w_lp = (1 - a_lp) * w_lp + a_lp * w_rad
+            alpha = (w_lp - w_prev) / dt
+
+            # Subtract what the offset alone accounts for, so the filter sees the specific force at
+            # the base centre rather than at the IMU. Zero at rest; only matters while rotating.
+            acc_filt = acc_b
+            lever = self.mount.lever()
+            if lever is not None:
+                rot_ms2 = np.cross(alpha, lever) + np.cross(w_lp, np.cross(w_lp, lever))
+                acc_filt = acc_b - rot_ms2 / mountcal.G0
+
+            roll, pitch, yaw = self.filt.update(gyr_b, acc_filt, dt)
+            heading = tilt_compensated_heading(mag_b, roll, pitch)
+
+            if self._lever_buf is not None:
+                self._tick_lever(acc_b, w_lp, alpha)
 
             if now >= next_env:
                 next_env = now + ENV_PERIOD_S
@@ -578,14 +740,14 @@ class SenseHat(threading.Thread):
                 env.update(self._read_adc(adc_ch))
                 adc_ch = (adc_ch + 1) % 4
 
-            accb, gyrb, magb = _remap(acc), _remap(gyr_c), _remap(mag) if mag else None
             sample = {
-                "ax": accb[0], "ay": accb[1], "az": accb[2],
-                "gx": gyrb[0], "gy": gyrb[1], "gz": gyrb[2],
-                "mx": magb[0] if magb else None, "my": magb[1] if magb else None,
-                "mz": magb[2] if magb else None,
+                "ax": acc_b[0], "ay": acc_b[1], "az": acc_b[2],
+                "gx": gyr_b[0], "gy": gyr_b[1], "gz": gyr_b[2],
+                "mx": mag_b[0] if mag_b is not None else None,
+                "my": mag_b[1] if mag_b is not None else None,
+                "mz": mag_b[2] if mag_b is not None else None,
                 "roll": roll, "pitch": pitch, "yaw": yaw, "heading": heading,
-                "acc_mag": float(np.linalg.norm(accb)), "gyro_mag": float(np.linalg.norm(gyrb)),
+                "acc_mag": float(np.linalg.norm(acc_b)), "gyro_mag": float(np.linalg.norm(gyr_b)),
                 "temp_imu": temp_imu, **env,
             }
             # The AHRS runs at IMU_HZ, but nothing downstream reads faster than the UI polls, so
@@ -593,9 +755,85 @@ class SenseHat(threading.Thread):
             if now >= next_log:
                 next_log = max(now, next_log + 1.0 / LOG_HZ)
                 self.ring.push(now - self._t0, sample)
-                self._publish(sample, mag is not None)
+                self._publish(sample, acc, mag is not None)
 
-    def _publish(self, sample, mag_live):
+    # ---- calibration captures --------------------------------------------------------------
+    def _tick_capture(self, acc, gyr):
+        """Collect one sample into a running still-robot average and finish it when full."""
+        with self._lock:
+            cap = self._cap
+        if cap is None:
+            return
+        cap["acc"].append(acc)
+        cap["gyr"].append(gyr)
+        if len(cap["gyr"]) < int(self.CAPTURE_S * IMU_HZ):
+            return
+
+        g = np.array(cap["gyr"])
+        a = np.array(cap["acc"])
+        spread = float(np.max(g.max(0) - g.min(0)))
+        acc_mean = a.mean(0)
+        mag = float(np.linalg.norm(acc_mean))
+        kind = cap["kind"]
+        with self._lock:
+            self._cap = None
+
+        # One stillness test for all three: a moving robot invalidates a gyro bias and a pose
+        # capture alike, and saying so beats storing a quietly wrong calibration.
+        if spread > self.GYRO_STILL_DPS:
+            msg = (f"robot moved during the capture ({spread:.1f} deg/s spread > "
+                   f"{self.GYRO_STILL_DPS}) — hold it still and retry")
+            self._capture_failed(kind, "moving", msg)
+            return
+        if kind in ("level", "forward") and abs(mag - 1.0) > self.ACC_STILL_G:
+            msg = (f"|a| was {mag:.3f} g, not 1 g — the robot was accelerating (or the sensor is "
+                   f"badly scaled); retry with it hanging still")
+            self._capture_failed(kind, "moving", msg)
+            return
+
+        meta = {"spread_dps": round(spread, 2), "acc_mag_g": round(mag, 4), "n": len(g)}
+        if kind == "gyro":
+            self.gyro_bias = g.mean(0)
+            self.bias_status = {"state": "ok",
+                                "msg": f"bias {np.array2string(self.gyro_bias, precision=2)} deg/s"}
+            self.filt.reset(self.mount.R @ acc_mean)
+            with self._lock:
+                self.capture_status = {"kind": "gyro", "state": "ok", "msg": self.bias_status["msg"]}
+        elif kind == "level":
+            self.mount.set_level(acc_mean, meta)
+            self.filt.reset(self.mount.R @ acc_mean)
+            with self._lock:
+                self.capture_status = {"kind": "level", "state": "ok",
+                                       "msg": f"upright reference captured (|a| {mag:.3f} g)"}
+        else:
+            ok, why = self.mount.set_forward_from_tilt(acc_mean, meta)
+            if not ok:
+                self._capture_failed("forward", "tilt", why)
+                return
+            tilt = self.mount.captures["forward"]["tilt_deg"]
+            with self._lock:
+                self.capture_status = {"kind": "forward", "state": "ok",
+                                       "msg": f"fore-aft axis fixed from a {tilt:.1f}° nose-down tilt"}
+
+    def _capture_failed(self, kind, state, msg):
+        with self._lock:
+            self.capture_status = {"kind": kind, "state": state, "msg": msg}
+        if kind == "gyro":
+            self.bias_status = {"state": state, "msg": msg}
+
+    def _tick_lever(self, acc_b, w_rad, alpha):
+        """Append one excitation sample (body axes, SI units) for the lever-arm fit."""
+        buf = self._lever_buf
+        if buf is None:
+            return
+        buf.append((acc_b * mountcal.G0, w_rad.copy(), alpha.copy(), self.filt.up_body()))
+        if len(buf) % 20 == 0:
+            with self._lock:
+                self.lever_status = dict(self.lever_status, n=len(buf))
+        if len(buf) >= int(self.LEVER_MAX_S * IMU_HZ):
+            self.lever_stop()
+
+    def _publish(self, sample, acc_chip, mag_live):
         with self._lock:
             self._snap = {
                 "available": True, "error": None, "mock": self.mock,
@@ -603,7 +841,13 @@ class SenseHat(threading.Thread):
                 "mag_live": mag_live,
                 "gyro_bias": [round(float(v), 3) for v in self.gyro_bias],
                 "bias_status": dict(self.bias_status),
+                "capture_status": dict(self.capture_status),
+                "lever_status": dict(self.lever_status),
                 "i2c_errors": self._err_count, "last_error": self._last_err,
+                # the raw chip-frame accelerometer, kept alongside the body-frame values: it is what
+                # the mount panel checks against, and it is the only thing shown before calibration
+                "acc_chip": [_clean(v) for v in acc_chip],
+                "mount": self.mount.snapshot(),
                 "values": {k: _clean(v) for k, v in sample.items()},
             }
 
@@ -617,12 +861,12 @@ class SenseHat(threading.Thread):
         if self._err_count % 200 == 1:
             print(f"!! Sense HAT {self._last_err} ({self._err_count} read errors so far)")
 
-    def _read_motion(self):
+    def _read_motion(self, dt=1.0 / IMU_HZ):
         if self.mock:
             t = time.time() - self._t0
-            acc = [0.15 * math.sin(t * 0.7), 0.1 * math.cos(t * 0.5), 1.0]
-            gyr = [8 * math.sin(t * 0.9), 6 * math.cos(t * 0.6), 3 * math.sin(t * 0.3)]
-            mag = [22 + 3 * math.sin(t * 0.2), -8.0, 41.0]
+            # the simulator must advance on the SAME clock the loop differentiates with, or the
+            # angular acceleration it implies and the one the driver computes disagree
+            acc, gyr, mag = self._mock.step(dt, self._rng)
             return acc, gyr, mag, 34.0 + 0.5 * math.sin(t * 0.05)
         try:
             acc, gyr, temp = self._chips["imu"].read_motion()
