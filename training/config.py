@@ -1651,8 +1651,38 @@ _DRIVE = dict(drive_bandwidth_hz=0.8, drive_delay_ms=25.0)
 PRESETS.update({
     f"ankle2drv_m3_{a}": (lambda a=a: _ankle2("m3", a, **_DRIVE))
     for a in ("k350", "bar", "k28_65")})
+def _at_50hz(c):
+    """Take a 200 Hz preset back to 50 Hz *at equal ROBOT TIME*, not equal step count.
+
+    _HZ200 multiplied every step-denominated schedule by 4 when the control rate went 50 -> 200 Hz,
+    and set gamma to 0.99^(1/4) to hold the ~2 s horizon. Running those same numbers at 50 Hz would
+    make every curriculum advance 4x slower in seconds-of-robot, and shorten the discount horizon to
+    0.5 s -- so a 50 Hz arm would lose to a 200 Hz arm for reasons that have nothing to do with the
+    control rate, which is the one thing the pair exists to measure. Everything counted in control
+    steps has to come back down by 4, including the ep_len competence GATES (1600 steps is 8 s at
+    200 Hz but 32 s at 50 Hz, which nothing ever reaches, so the gated curricula would never open).
+
+    action_filter / action_delay_steps are deliberately NOT touched: drive_bandwidth_hz and
+    drive_delay_ms re-derive them from the control rate, which is the whole point of specifying the
+    drive in Hz."""
+    c.control_decimation = 20
+    c.gamma = 0.99                                   # 0.9975^4 — same ~2 s horizon
+    c.ent_gate_air_time = 0.02                       # per-step mean of an event term scales with dt
+    for f in ("total_steps", "gait_curriculum_steps", "efficiency_ramp_steps",
+              "sprint_curriculum_steps", "ent_anneal_steps", "ent_anneal_deadline_steps",
+              "jitter_curriculum_steps", "dr_curriculum_steps", "pitch_armature_ramp_steps"):
+        v = getattr(c, f, 0)
+        if v:
+            setattr(c, f, int(v // 4))
+    for f in ("curriculum_gate_ep_len", "jitter_curriculum_gate_ep_len"):
+        v = getattr(c, f, 0.0)
+        if v:
+            setattr(c, f, float(v) / 4.0)
+    return c
+
+
 PRESETS.update({
-    f"ankle2drv50_m3_{a}": (lambda a=a: _ankle2("m3", a, control_decimation=20, **_DRIVE))
+    f"ankle2drv50_m3_{a}": (lambda a=a: _at_50hz(_ankle2("m3", a, **_DRIVE)))
     for a in ("k350", "bar", "k28_65")})
 
 
