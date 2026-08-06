@@ -163,6 +163,8 @@ class DashEnv(gym.Env):
         # it down (and restore) via set_torque_limit. 1.0 = full torque.
         self._orig_forcerange = self.model.actuator_forcerange.copy()
         self._torque_scale = 1.0
+        self._sag_scale = 1.0      # bus-voltage droop (dr_torque_sag)
+        self._sag_state = 0.0
         self.height_target = float(self.default_qpos[2])
         # optional STIFFER passive ankle spring (m3 sagittal-balance experiment): a firmer foot
         # lever = more passive pitch-restoring torque in stance. The standing ankle sits well off
@@ -260,7 +262,7 @@ class DashEnv(gym.Env):
         self._hist_idx = ((self._hist_raw_len - 1)
                           - (np.arange(self.cfg.history_len) * self._hist_stride)[::-1])
         # measurement chain + per-episode plant draw (both inert unless enabled in the config)
-        self._noise = SensorNoise(self.cfg, self.nu)
+        self._noise = SensorNoise(self.cfg, self.nu, control_dt=self.control_dt)
         _leg_dofs = [int(self.model.jnt_dofadr[j]) for j in range(self.model.njnt)
                      if self.model.jnt_bodyid[j] != self.base_id]
         _loop_sites = [s for s in (mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, n)
@@ -558,7 +560,21 @@ class DashEnv(gym.Env):
         Both factors go through here so neither can clobber the other (the curriculum writes
         between resets, the DR draw writes at reset)."""
         self.model.actuator_forcerange[:] = (self._orig_forcerange * self._torque_scale
-                                             * self._dr_torque_scale)
+                                             * self._dr_torque_scale * self._sag_scale)
+
+    def _update_torque_sag(self):
+        """Bus-voltage droop: a real pack loses volts (and therefore torque) under sustained
+        current and recovers when the draw stops, which a per-EPISODE torque scale cannot express.
+        First-order lag on delivered mechanical power, normalised by the actuator's own peak."""
+        c = self.cfg
+        if c.dr_torque_sag <= 0.0:
+            return
+        p = float(np.sum(np.abs(self.data.actuator_force[:self.nu] * self.data.qvel[self.act_dadr])))
+        p_ref = float(np.sum(self._orig_forcerange[:self.nu, 1])) * 5.0    # ~peak torque x a brisk rate
+        a = self.control_dt / max(c.dr_torque_sag_tau_s, 1e-6)
+        self._sag_state += a * (min(p / max(p_ref, 1e-9), 1.0) - self._sag_state)
+        self._sag_scale = 1.0 - c.dr_torque_sag * self._sag_state
+        self._apply_torque_limit()
 
     def _apply_ankle_torque_speed(self):
         """Clamp the ankle servos to a real motor's TORQUE-SPEED curve, re-evaluated every substep.
@@ -936,6 +952,7 @@ class DashEnv(gym.Env):
         # in this episode's mass matrix and the standing-torque baseline below reflects them.
         ep = self._dr.resample(self.model, self.np_random)
         self._dr_torque_scale = ep["torque_scale"]
+        self._sag_scale, self._sag_state = 1.0, 0.0
         self._apply_torque_limit()
         self._ep_delay_steps = int(ep["action_delay_steps"])
         self._noise.reset(self.np_random)
@@ -1116,6 +1133,11 @@ class DashEnv(gym.Env):
             tgt = self._prev_cmd_pos + v_des * dt
             self._prev_cmd_vel = v_des
             self._prev_cmd_pos = tgt.copy()
+        # HOMING error, command side. The encoder reads theta - delta (applied in SensorNoise), so
+        # the drive closes its loop on that and parks the TRUE joint at target + delta. Applying it
+        # to only one side would model a robot that does not exist.
+        if self.cfg.dr_joint_zero_deg > 0.0:
+            tgt = tgt + self._noise.zero_offset[:len(tgt)]
         self.data.ctrl[:] = tgt
         # sim2real timing jitter: vary the substep count (control period) by +-jitter ms. The gait
         # phase clock still advances by the NOMINAL control_dt in step() -> models the real mismatch
@@ -1266,6 +1288,7 @@ class DashEnv(gym.Env):
             self.data.qfrc_applied[self._ankle_dadr[1]] = -u_ank if gnd[1] else 0.0
 
         contact_acc = self._run_physics(target)
+        self._update_torque_sag()
         self._elapsed_t += self.control_dt
         finished = c.objective == "sprint" and self._update_sprint()
         # advance the gait phase AFTER assembly (the obs frame carries the NEXT step's phase)

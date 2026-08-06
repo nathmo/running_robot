@@ -203,6 +203,34 @@ class Config:
     # which the real robot will not be either) turns the bias into something the policy must cancel
     # from the yaw-rate error every episode instead of a constant it can bake in. 0 = off.
     dr_loop_site: float = 0.0015        # +-1.5 mm, ~the size of the as-built asymmetry
+    # ----- MEASURED-ON-ROBOT sim2real axes (2026-08-06) -----------------------------------------
+    # HOMING ERROR. noise_encoder_offset (0.01 rad = 0.57 deg) is the encoder's own zero jitter and
+    # is far too small for what actually happens: the user re-homes before every run and calibrates
+    # to 1-2 deg, so 5 deg is the safe envelope. Crucially this is NOT just an observation error --
+    # a wrong zero means you READ theta-delta and the drive parks at theta+delta, so it must be
+    # applied to the COMMAND as well, which noise_encoder_offset never was. Only the pair is
+    # physically right; obs-only would teach the policy a bias that does not exist in the plant.
+    # NOTE only ~45% of the (cam,thigh) box is mechanically assemblable, so a large homing error can
+    # push commands out of the band on the real robot -- this trains for it, it does not fix it.
+    dr_joint_zero_deg: float = 0.0
+    # IMU MOUNTING ROTATION. noise_grav_bias adds a vector offset to gravity and renormalises, which
+    # approximates a small tilt but leaves the GYRO untouched -- physically impossible, a rotated
+    # IMU rotates both. This applies one per-episode random rotation to gravity AND angular velocity
+    # together. Distinct from dr_gravity_tilt, which rotates the WORLD (a slope): there the robot
+    # really is tilted, here it is level and the sensor lies.
+    dr_imu_rot_deg: float = 0.0
+    # IMU DROPOUT. Freeze the IMU channels for a window -- stale frames, a hung driver, or the
+    # tethered rig where the reading stops reflecting free-body dynamics. The point is NOT to make
+    # the policy IMU-blind (for a free-base biped the IMU is the only balance sensor, and blind
+    # means it can never reject a disturbance); it is to stop it LUNGING when the IMU goes
+    # uninformative. The gait generator is feedforward, so the legs should keep cycling.
+    dr_imu_dropout_prob: float = 0.0    # per-step probability of entering a stale window
+    dr_imu_dropout_s: float = 0.25      # how long a stale window lasts
+    # BUS-VOLTAGE SAG. dr_torque is a per-EPISODE constant; a real pack droops as current is drawn
+    # and recovers when it is not. First-order droop on delivered power. The EVE 50PL cells are not
+    # expected to sag much -- this is insurance, and it costs nothing.
+    dr_torque_sag: float = 0.0          # peak fractional torque loss at sustained full power
+    dr_torque_sag_tau_s: float = 2.0    # droop/recovery time constant
 
     # ----- sensor noise (see domain_rand.SensorNoise) --------------------------------------------
     # Per-episode CONSTANTS (calibration you get wrong once and live with) + per-step white noise.
@@ -1693,6 +1721,75 @@ def _at_50hz(c):
 PRESETS.update({
     f"ankle2drv50_m3_{a}": (lambda a=a: _at_50hz(_ankle2("m3", a, **_DRIVE)))
     for a in ("k350", "bar", "k28_65")})
+
+
+# ================================================================================================
+# walk_fwd (2026-08-06) -- THE UNTETHERED-WALKING TARGET
+# ================================================================================================
+# Goal: walk forward, untethered, on a real floor. Not a speed record, not teleop -- steering is
+# deferred but PROVISIONED (see below).
+#
+# This is an ADAPTATION run, not a from-scratch one. teleop_v5 reached 321 M steps as an m6
+# walking policy with the full sim2real package, and none of the changes below touch obs or action
+# width, so that checkpoint loads directly. Growing a walker from zero would not fit the schedule;
+# adapting one does.
+#
+# What changes vs teleop_v5, all of it measured on the actual robot rather than assumed:
+#   ankle       -> the `bar_comp` strut: the ankle2 screen's winner (ep_len 2307 at 29 M vs the
+#                  tension-only strut's 0.6 m dash) AND 249 g/leg lighter. Note the user's as-built
+#                  3 mm PETG rod buckles at 0.27 N, ~35x below spec -- this arm assumes the carbon
+#                  replacement.
+#   drive       -> the MEASURED 0.8 Hz + 25 ms position loop, in place of a fictional ~35 Hz filter.
+#   friction    -> (0.35, 0.60). Measured slip angle was 40 deg = mu 0.84; training well below it
+#                  is deliberate, since the failure mode is planting a foot that then slides.
+#   homing      -> 5 deg per-joint zero error on BOTH obs and command (user calibrates to 1-2 deg
+#                  and re-records the safe workspace each run, so 5 is the safety envelope).
+#   IMU         -> 10 deg mounting rotation on gravity AND gyro, plus stale-frame dropout.
+#   voltage     -> within-episode torque droop.
+#
+# STEERING IS PROVISIONED, NOT ENABLED: steer_enable stays True so the action keeps its 26 dims and
+# every checkpoint in this lineage stays loadable, but cmd_yaw_max = 0 so nothing is asked of it
+# yet. Turning steering on later is then a curriculum widening rather than a reshape that orphans
+# the run. Enabling it later WITHOUT this would break every checkpoint -- the reason it is here.
+#
+# The drive bandwidth rides the DR curriculum rather than being switched on at step 0. Going from a
+# ~35 Hz filter to 0.8 Hz is the largest single plant change in this project's history and would
+# otherwise destroy the warm start on contact.
+def _walk_fwd(**kw):
+    base = dict(
+        # --- the ankle2 winner ---
+        ankle_mode="bar", ankle_bar_buckle_nm=5.0, ankle_spring_mass_kg=SHIN_SPRING_KG,
+        ankle_resettle=True, ankle_damping=0.0, ankle_zeta=0.0,
+        # --- the measured drive ---
+        drive_bandwidth_hz=0.8, drive_delay_ms=25.0,
+        # --- measured sim2real ---
+        dr_friction=1.0, dr_friction_range=(0.35, 0.60),
+        dr_joint_zero_deg=5.0,
+        dr_imu_rot_deg=10.0, dr_imu_dropout_prob=0.0015, dr_imu_dropout_s=0.25,
+        dr_torque_sag=0.15, dr_torque_sag_tau_s=2.0,
+        # --- forward only, steering provisioned ---
+        cmd_v_fwd_max=1.0, cmd_v_back_max=0.3, cmd_yaw_max=0.0,
+        # --- keep the v3 lessons: gated+retreating curricula, DR ramped not slammed ---
+        curriculum_retreat_frac=0.7, efficiency_target=0.35,
+        stance_ratio_start=0.70, stance_ratio_final=0.62,
+        dr_curriculum_steps=80_000_000,
+    )
+    base.update(kw)
+    return _teleop(**base)
+
+
+PRESETS.update({
+    "walk_fwd": lambda: _walk_fwd(),
+    # bring-up rig: base clamped, so balance is provided by the clamp and the IMU truthfully reads
+    # a constant. Short fine-tune off the same trunk so the rig has a policy that cycles its legs
+    # without needing to balance. NOT the deployment policy.
+    "walk_fwd_rig": lambda: _walk_fwd(push_interval_s=0.0, trip_prob=0.0, dr_imu_dropout_prob=0.0),
+    # diagnostic: no adversity at all. If walking does not survive the ankle+drive change HERE,
+    # the problem is the plant change, not the randomisation.
+    "walk_fwd_easy": lambda: _walk_fwd(
+        dr_enable=False, obs_noise_enable=False, push_interval_s=0.0, trip_prob=0.0,
+        ctrl_jitter_ms_final=0.0, ctrl_drop_prob_final=0.0),
+})
 
 
 def get_config(name: str = "default") -> Config:

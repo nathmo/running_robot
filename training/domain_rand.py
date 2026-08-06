@@ -156,6 +156,13 @@ class PlantRandomizer:
             for j in self._ankle_j:
                 qadr = int(self._jnt_qposadr[j])
                 k_old = float(self.n_jnt_stiffness[j])
+                # ankle_mode free/rigid/bar/active have NO spring (k=0), so there is no stiffness to
+                # scale and the preload-preserving rewrite below would divide by zero. Damping is
+                # still randomised — a spring-less ankle still has joint friction.
+                if k_old <= 0.0:
+                    dadr = int(self._jnt_dofadr[j])
+                    model.dof_damping[dadr] = self.n_dof_damping[dadr] * kd
+                    continue
                 k_new = k_old * ks
                 ref_old = float(self.n_qpos_spring[qadr])
                 q_stand = float(self.stand_qpos[qadr])
@@ -239,9 +246,10 @@ class SensorNoise:
       * gravity contaminated by body linear acceleration, scaled by this episode's leak
     """
 
-    def __init__(self, cfg, nu):
+    def __init__(self, cfg, nu, control_dt=0.005):
         self.cfg = cfg
         self.nu = nu
+        self.control_dt = float(control_dt)      # sets the IMU stale-window length in steps
         self.enabled = bool(cfg.obs_noise_enable)
         self.reset(np.random.default_rng(0))
 
@@ -262,6 +270,21 @@ class SensorNoise:
         self.grav_tilt = rng.normal(0.0, c.noise_grav_bias, 3)
         self.gyro_bias = rng.normal(0.0, c.noise_gyro_bias, 3)
         self.accel_leak = float(rng.uniform(0.0, c.noise_accel_leak))
+        # HOMING error: one wrong zero per joint, held for the whole episode. Read by the env for
+        # the COMMAND side too -- see the dr_joint_zero_deg note in config.py for why obs-only is
+        # not merely incomplete but wrong.
+        self.zero_offset = (np.radians(c.dr_joint_zero_deg) * rng.uniform(-1.0, 1.0, n)
+                            if c.dr_joint_zero_deg > 0 else z.copy())
+        # IMU MOUNTING rotation: a real rotation matrix, applied to gravity and gyro alike.
+        self.imu_R = np.eye(3)
+        if c.dr_imu_rot_deg > 0:
+            ax = rng.normal(size=3)
+            ax /= max(np.linalg.norm(ax), 1e-9)
+            th = np.radians(c.dr_imu_rot_deg) * rng.uniform(-1.0, 1.0)
+            K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+            self.imu_R = np.eye(3) + np.sin(th) * K + (1 - np.cos(th)) * (K @ K)   # Rodrigues
+        self._stale_left = 0
+        self._stale_frame = None
 
     def step_bias(self, rng):
         """Gyro bias random walk — the drift a real MEMS gyro accumulates within one run."""
@@ -274,7 +297,8 @@ class SensorNoise:
             return motor_pos, motor_vel, motor_trq, grav, gyro
         c = self.cfg
         n = self.nu
-        motor_pos = motor_pos + self.pos_offset + rng.normal(0.0, c.noise_encoder, n)
+        motor_pos = motor_pos + self.pos_offset - self.zero_offset \
+            + rng.normal(0.0, c.noise_encoder, n)
         motor_vel = motor_vel + self.vel_bias + rng.normal(0.0, c.noise_motor_vel, n)
         motor_trq = motor_trq * (1.0 + rng.normal(0.0, c.noise_torque_gain, n)) \
             + self.trq_bias + rng.normal(0.0, c.noise_torque, n)
@@ -288,4 +312,16 @@ class SensorNoise:
         if nrm > 1e-6:
             g = g / nrm
         gyro = gyro + self.gyro_bias + rng.normal(0.0, c.noise_gyro, 3)
+        # a rotated IMU rotates BOTH channels by the same matrix
+        g, gyro = self.imu_R @ g, self.imu_R @ gyro
+        # STALE window: hold the last IMU frame. The joint channels keep updating, so the policy
+        # still has proprioception and the feedforward gait -- what it loses is balance feedback.
+        if c.dr_imu_dropout_prob > 0.0:
+            if self._stale_left > 0:
+                self._stale_left -= 1
+                if self._stale_frame is not None:
+                    g, gyro = self._stale_frame
+            elif rng.random() < c.dr_imu_dropout_prob:
+                self._stale_left = max(1, int(c.dr_imu_dropout_s / self.control_dt))
+                self._stale_frame = (g.copy(), gyro.copy())
         return motor_pos, motor_vel, motor_trq, g, gyro
