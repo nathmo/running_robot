@@ -65,8 +65,12 @@ class DashEnv(gym.Env):
         # action_delay_steps, and written back onto cfg so resolved_config.json records what
         # actually ran rather than the 0 sentinel.
         if self.cfg.drive_bandwidth_hz > 0.0:
-            tau = 1.0 / (2.0 * np.pi * float(self.cfg.drive_bandwidth_hz))
-            self.cfg.action_filter = float(np.exp(-self.control_dt / tau))
+            # start at the EASY end when a curriculum is configured; the callback tightens it
+            hz0 = (self.cfg.drive_bandwidth_start_hz
+                   if (self.cfg.drive_bandwidth_start_hz > 0.0
+                       and self.cfg.drive_curriculum_steps > 0)
+                   else self.cfg.drive_bandwidth_hz)
+            self.set_drive_bandwidth_log10(np.log10(hz0))
         if self.cfg.drive_delay_ms > 0.0:
             self.cfg.action_delay_steps = int(round(
                 float(self.cfg.drive_delay_ms) * 1e-3 / self.control_dt))
@@ -729,6 +733,18 @@ class DashEnv(gym.Env):
         tau = np.clip(-e, 0.0, None) * self._bar_k
         np.clip(tau, 0.0, self.cfg.ankle_bar_buckle_nm, out=tau)
         self.data.qfrc_applied[self._ankle_dof] = self._bar_sign * tau
+
+    def set_drive_bandwidth_log10(self, x):
+        """Curriculum setter: x = log10(bandwidth in Hz) -> the target-filter coefficient.
+
+        The drive's position loop is a first-order lag, so a bandwidth f maps to an EMA retention
+        of exp(-control_dt / tau), tau = 1/(2*pi*f). Expressed in Hz (and ramped in log-Hz) so the
+        same curriculum means the same physical drive at any control rate -- see the
+        drive_bandwidth_hz note in config.py."""
+        hz = float(10.0 ** float(x))
+        tau = 1.0 / (2.0 * np.pi * max(hz, 1e-6))
+        self.cfg.action_filter = float(np.exp(-self.control_dt / tau))
+        self.drive_bandwidth_hz = hz
 
     def set_dr_scale(self, s):
         """0..1 curriculum on the WIDTH of every domain-randomization range (applies from the next

@@ -459,6 +459,19 @@ class Config:
     # so every m1..m7 / slow / sym / wskill / ankle-study preset is bit-for-bit unchanged.
     drive_bandwidth_hz: float = 0.0
     drive_delay_ms: float = 0.0
+    # DRIVE-BANDWIDTH CURRICULUM. Going from the stack's effective ~35 Hz target filter to the
+    # measured 0.8 Hz in one step is the largest plant change in this project, and it MEASURABLY
+    # destroys a warm start: teleop_v5 ran at ep_len 1448 / reward +511, and walk_fwd_easy -- same
+    # policy, no DR, no sensor noise, no pushes, ONLY the ankle and drive changed -- collapsed to
+    # 251 / -78. Same failure family as DR-at-full-width-from-step-0, which is what pinned
+    # teleop_v3 until dr_curriculum_steps was added.
+    # Ramps in LOG10(Hz), not Hz: the filter coefficient is wildly nonlinear in frequency
+    # (alpha 0.4 -> 35 Hz, 0.6875 -> 11.9 Hz, 0.975 -> 0.8 Hz), so a linear-in-Hz ramp would do
+    # almost nothing for most of its length and then fall off a cliff at the end.
+    # 0 = no curriculum (start at drive_bandwidth_hz immediately), so every existing preset is
+    # bit-for-bit unchanged.
+    drive_bandwidth_start_hz: float = 0.0
+    drive_curriculum_steps: int = 0
     # ----- motor velocity / acceleration limits (2026-07-24; sim2real + cadence) -----
     # The position servos have NO velocity or acceleration cap in the model (only kv damping + a
     # SOFT w_motor_vel reward), so the 200 Hz policy can crank the legs arbitrarily fast -> the k350
@@ -1762,6 +1775,9 @@ def _walk_fwd(**kw):
         ankle_resettle=True, ankle_damping=0.0, ankle_zeta=0.0,
         # --- the measured drive ---
         drive_bandwidth_hz=0.8, drive_delay_ms=25.0,
+        # ease in from an optimistic drive; applying 0.8 Hz at step 0 measurably destroys the
+        # teleop_v5 warm start (ep_len 1448 -> 251 with nothing else changed)
+        drive_bandwidth_start_hz=12.0, drive_curriculum_steps=120_000_000,
         # --- measured sim2real ---
         dr_friction=1.0, dr_friction_range=(0.35, 0.60),
         dr_joint_zero_deg=5.0,
