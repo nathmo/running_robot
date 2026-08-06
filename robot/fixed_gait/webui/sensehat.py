@@ -267,8 +267,11 @@ class LPS22HB:
     def read(self):
         """(pressure hPa, die temperature degC) via a one-shot conversion."""
         self.bus.write_byte_data(self.ADDR, 0x11, self.ADDR_INC | 0x01)     # ONE_SHOT
-        for _ in range(30):                                  # ~ms each; conversion is well under
-            if self.bus.read_byte_data(self.ADDR, 0x27) & 0x03:   # STATUS: P_DA | T_DA
+        # BOTH data-available bits, not either: pressure completes first, and settling for P_DA
+        # alone reads the temperature registers before the conversion has written them (the first
+        # one-shot after power-up then reports 0.0 degC and a nonsense pressure).
+        for _ in range(30):                                  # ~2 ms each; the conversion is faster
+            if self.bus.read_byte_data(self.ADDR, 0x27) & 0x03 == 0x03:   # STATUS: P_DA and T_DA
                 break
             time.sleep(0.002)
         else:
