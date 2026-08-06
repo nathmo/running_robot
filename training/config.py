@@ -411,6 +411,26 @@ class Config:
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
     action_delay_steps: int = 1         # fixed actuation delay in control steps (Pi+CAN plant truth)
+    # ----- THE MEASURED DRIVE (2026-08-05 swept-sine Bode, identical on both legs) ---------------
+    # The plant models the motors as <position kp=200 kv=5>, a critically damped servo at ~13 Hz.
+    # The REAL drive's internal cascaded position loop is a first-order roll-off at 0.8 Hz plus a
+    # ~25 ms transport delay:
+    #       f Hz   0.8   1.1   1.4   2.0   2.5   2.9
+    #       gain  0.71  0.60  0.53  0.38  0.30  0.28
+    #       lag    -48   -61   -71   -86   -94  -104
+    # (0.71 at -48 deg IS a first-order corner, so one pole fits it.) That is a >10x bandwidth
+    # mismatch against a gait_freq_hz range topping out at 4 Hz, where the drive executes ~1/4 of
+    # the commanded amplitude ~100 deg late. Every policy trained before this assumed authority the
+    # hardware cannot deliver.
+    #
+    # Set drive_bandwidth_hz and the env DERIVES action_filter from the control rate as
+    # exp(-control_dt / tau), tau = 1/(2*pi*f). That is the point of expressing it in Hz rather than
+    # as a filter coefficient: the same PHYSICAL drive maps to 0.975 at 200 Hz and 0.904 at 50 Hz,
+    # so a 50 Hz and a 200 Hz arm are the same robot rather than two different ones. Likewise
+    # drive_delay_ms converts to whole control steps. 0 = legacy (use the raw coefficients above),
+    # so every m1..m7 / slow / sym / wskill / ankle-study preset is bit-for-bit unchanged.
+    drive_bandwidth_hz: float = 0.0
+    drive_delay_ms: float = 0.0
     # ----- motor velocity / acceleration limits (2026-07-24; sim2real + cadence) -----
     # The position servos have NO velocity or acceleration cap in the model (only kv damping + a
     # SOFT w_motor_vel reward), so the 200 Hz policy can crank the legs arbitrarily fast -> the k350
@@ -1613,6 +1633,27 @@ def _ankle2(m, arm, **kw):
 # is deliberately NOT chained -- which arms earn it is a human call on the m3 curves.
 PRESETS.update({f"ankle2_m3_{a}": (lambda a=a: _ankle2("m3", a)) for a in ANKLE2_ARMS})
 PRESETS.update({f"ankle2_m6_{a}": (lambda a=a: _ankle2("m6", a)) for a in ANKLE2_ARMS})
+
+# ----- the same arms THROUGH THE MEASURED DRIVE -------------------------------------------------
+# The arms above run against the plant's <position kp=200 kv=5> servo (~13 Hz) behind an
+# action_filter whose equivalent bandwidth is 34.7 Hz. The real drive is 0.8 Hz + 25 ms. Which
+# ankle is best is one question; whether ANY of them can be stabilised through the actuator that
+# exists is a different and more decisive one, and it is the one the build decision rests on.
+#
+# Run at BOTH control rates on purpose. Because drive_bandwidth_hz is specified in Hz and converted
+# at the control rate, the 200 Hz and 50 Hz arms are the SAME PHYSICAL ROBOT -- so the pair
+# isolates "does the control rate matter" from "does the drive matter". If they tie, 200 Hz buys
+# nothing through this drive and the Pi only ever needs 50 Hz; if 200 Hz wins, the rate is real and
+# the drive is the thing to fix. Compute is not the constraint either way: the policy is a 275->64
+# ->64->24 MLP (46 kFLOP, 9.3 MFLOP/s at 200 Hz, ~0.1% of a Pi 4) and CAN is 26% of a 1 Mbps bus.
+_DRIVE = dict(drive_bandwidth_hz=0.8, drive_delay_ms=25.0)
+
+PRESETS.update({
+    f"ankle2drv_m3_{a}": (lambda a=a: _ankle2("m3", a, **_DRIVE))
+    for a in ("k350", "bar", "k28_65")})
+PRESETS.update({
+    f"ankle2drv50_m3_{a}": (lambda a=a: _ankle2("m3", a, control_decimation=20, **_DRIVE))
+    for a in ("k350", "bar", "k28_65")})
 
 
 def get_config(name: str = "default") -> Config:

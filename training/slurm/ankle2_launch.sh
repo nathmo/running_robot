@@ -23,6 +23,7 @@ POST=training/slurm/cpg_stage_post.sbatch
 NENVS="${NENVS:-18}"
 STEPS="${STEPS:-400000000}"
 PHASE="${PHASE:-m3}"
+PREFIX="${PREFIX:-ankle2}"   # ankle2 | ankle2drv (measured 0.8 Hz drive) | ankle2drv50
 SEEDS="${SEEDS:-0 1}"
 DRY="${DRY:-}"
 LINKS="${LINKS:-4}"
@@ -31,7 +32,7 @@ TIME="${TIME:-4:00:00}"
 # Ordered so the CONTROLS land first: if k350 does not train on the corrected plant (144.5 N*m
 # torque, measured masses, workspace_kill, re-settled stance) then nothing else here is readable,
 # and that is the first curve to look at in the morning.
-ALL_ARMS="k350 bar k41_4_np rigid k28_65 k41_4 bar_heavy bar_lo bar_hi"
+ALL_ARMS="${ALL_ARMS:-k350 bar k28_65 k41_4_np rigid k41_4 bar_heavy}"
 ARMS="${ARMS:-$ALL_ARMS}"
 
 nj=0
@@ -40,7 +41,7 @@ echo "    arms:  $ARMS"
 echo "    seeds: $SEEDS   steps: $STEPS   envs: $NENVS   links: ${LINKS}x${TIME}"
 echo
 for arm in $ARMS; do
-    preset="ankle2_${PHASE}_${arm}"
+    preset="${PREFIX}_${PHASE}_${arm}"
     for seed in $SEEDS; do
         run="${preset}_s${seed}"
         exp="ALL,PRESET=$preset,STEPS=$STEPS,NENVS=$NENVS,NAME=$run,SEED=$seed"

@@ -60,6 +60,16 @@ class DashEnv(gym.Env):
         self.data = mujoco.MjData(self.model)
         self.sim_dt = float(self.model.opt.timestep)
         self.control_dt = self.sim_dt * self.cfg.control_decimation
+        # The MEASURED drive, expressed in Hz and converted at THIS control rate (see the
+        # drive_bandwidth_hz note in config.py). Resolved before anything reads action_filter /
+        # action_delay_steps, and written back onto cfg so resolved_config.json records what
+        # actually ran rather than the 0 sentinel.
+        if self.cfg.drive_bandwidth_hz > 0.0:
+            tau = 1.0 / (2.0 * np.pi * float(self.cfg.drive_bandwidth_hz))
+            self.cfg.action_filter = float(np.exp(-self.control_dt / tau))
+        if self.cfg.drive_delay_ms > 0.0:
+            self.cfg.action_delay_steps = int(round(
+                float(self.cfg.drive_delay_ms) * 1e-3 / self.control_dt))
         self.max_steps = int(round(self.cfg.episode_s / self.control_dt))
         # rate-invariance: the reward is hand-balanced in raw PER-STEP units at 50 Hz (0.02 s) with
         # normalization OFF, while the fall/finish bonuses are per-EVENT. Scaling the summed per-step
