@@ -656,7 +656,13 @@ def main():
             # the source stage's ent_coef is typically fully annealed (0.002) — a new milestone
             # needs its exploration back; the EntropyCallback re-anneals once competent again.
             model.ent_coef = cfg.ent_coef
-            print(f"[train] warm-started weights <- {warm_ckpt} (ent_coef reset to {cfg.ent_coef})")
+            # PPO.load restores the SOURCE run's seed out of the checkpoint, so --seed never
+            # reached a warm-started run: walk_fwd_s0 and _s1 produced bit-identical curves for
+            # 100 rollouts (measured 2026-08-06), i.e. a seed replicate was silently a duplicate
+            # and half the compute bought nothing. Re-seed explicitly after loading.
+            model.set_random_seed(cfg.seed)
+            print(f"[train] warm-started weights <- {warm_ckpt} (ent_coef reset to {cfg.ent_coef}, "
+                  f"reseeded to {cfg.seed})")
         else:
             venv = fresh_vecnorm()
             lr = lambda p: cfg.lr_final + p * (cfg.learning_rate - cfg.lr_final)  # p: 1 -> 0
