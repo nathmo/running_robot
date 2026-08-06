@@ -262,6 +262,12 @@ class SensorNoise:
             self.grav_tilt = np.zeros(3)
             self.gyro_bias = np.zeros(3)
             self.accel_leak = 0.0
+            # The homing/IMU-mount axes live here but are read by the ENV too (the command side of
+            # the zero offset), so they must exist even with the measurement chain switched off --
+            # and be NEUTRAL, so the clean diagnostic arm really is clean.
+            self.zero_offset = z.copy()
+            self.imu_R = np.eye(3)
+            self._stale_left, self._stale_frame = 0, None
             return
         self.pos_offset = rng.normal(0.0, c.noise_encoder_offset, n)
         self.vel_bias = rng.normal(0.0, c.noise_motor_vel_bias, n)
