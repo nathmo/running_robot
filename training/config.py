@@ -1619,6 +1619,15 @@ ANKLE2_ARMS = {
                      ankle_bar_buckle_nm=0.2),
     "bar_hi":   dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG,
                      ankle_bar_buckle_nm=0.6),
+    # 2026-08-06: `rigid` (welded BOTH ways) completes the 57 m dash at 2.55 m/s in 5 of 6 greedy
+    # episodes while `bar` (tension-only) manages 0.6 m and stands one-legged -- and the ONLY
+    # difference between them is that the strut gives way in compression past 0.4 N*m. So the
+    # tension-only-ness may be the whole cost, not the ankle compliance. This arm is a strut that
+    # also takes real COMPRESSION (5 N*m before buckling = a proper link rather than a thin rod),
+    # bracketing bar -> rigid. If it recovers rigid's performance, the build answer changes from
+    # "tension-only strut" to "just make it a stiff link", which is a trivial mechanical change.
+    "bar_comp": dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG,
+                     ankle_bar_buckle_nm=5.0),
 }
 
 
