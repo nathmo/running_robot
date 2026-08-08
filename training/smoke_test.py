@@ -11,6 +11,7 @@ clip / kwargs back-compat and its kick-arrest on the m3 plant; the angular-momen
 the VecNormalize warm-start rejuvenation; curriculum setters reach the env.
 Exits non-zero on the first failure (safe to gate an sbatch on it).
 """
+import inspect
 import sys
 from pathlib import Path
 
@@ -983,6 +984,73 @@ def test_ankle2():
           and c.ankle_spring_mass_kg == 0.0)
 
 
+def test_walk_fwd2():
+    """The sim2real calibration axes must RIDE the dr_scale curriculum, and no preset may put a
+    competence gate above what the ramps can plausibly reach.
+
+    walk_fwd measured what happens otherwise: curriculum_gate_ep_len=1600 gated all six ramps,
+    ep_len plateaued at ~500, so dr_scale sat at EXACTLY 0.00 for 530 M steps while the ungated
+    5 deg homing error and 10 deg IMU rotation ran at full width from step 0. Two seeds, half a
+    billion steps, no curriculum ever moved.
+    """
+    print("\n== walk_fwd2 / sim2real curriculum ==")
+    c = get_config("walk_fwd2")
+    check("drive starts AT the measured 0.8 Hz (parent already trained there)",
+          c.drive_bandwidth_hz == 0.8 and c.drive_bandwidth_start_hz == 0.0
+          and c.drive_curriculum_steps == 0)
+    check("gate is below the parent's competence, not above it",
+          0 < c.curriculum_gate_ep_len <= 600 and 0 < c.jitter_curriculum_gate_ep_len <= 600)
+    check("ramps still retreat if it collapses", c.curriculum_retreat_frac > 0)
+    check("dr ramp is on (the axes ride it)", c.dr_enable and c.dr_curriculum_steps > 0)
+
+    env = DashEnv(c)
+    rng = np.random.default_rng(0)
+    # the drive must be the real one from step 0, not an optimistic start value
+    hz = -np.log(env.cfg.action_filter) / (2 * np.pi * env.control_dt)
+    check("action_filter really encodes 0.8 Hz at construction", abs(hz - 0.8) < 0.02,
+          f"{hz:.3f} Hz")
+    check("25 ms drive delay -> 5 steps at 200 Hz", env.cfg.action_delay_steps == 5)
+
+    def axes(s):
+        env.set_dr_scale(s)
+        env._noise.reset(rng)
+        R = env._noise.imu_R
+        return (np.degrees(np.abs(env._noise.zero_offset)).max(),
+                np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
+    z0, r0 = axes(0.0)
+    check("dr_scale=0 -> NO homing error and NO IMU rotation", z0 == 0.0 and r0 < 1e-9,
+          f"zero {z0:.3f} deg, imu {r0:.3f} deg")
+    check("set_dr_scale drives the sensor axes too", env._noise.scale == env._dr.scale)
+    # sample the width: over many draws the max must grow with the scale and respect the cap
+    def width(s, n=60):
+        env.set_dr_scale(s)
+        zs, rs = [], []
+        for _ in range(n):
+            a, b = axes(s)
+            zs.append(a); rs.append(b)
+        return max(zs), max(rs)
+    zq, rq = width(0.25)
+    zf, rf = width(1.0)
+    check("axes scale with the curriculum (quarter width < full width)", zq < zf and rq < rf,
+          f"0.25: {zq:.2f}/{rq:.2f} deg   1.0: {zf:.2f}/{rf:.2f} deg")
+    check("full width respects the MEASURED caps (5 deg homing, 10 deg IMU)",
+          zf <= c.dr_joint_zero_deg + 1e-6 and rf <= c.dr_imu_rot_deg + 1e-6,
+          f"{zf:.2f} deg / {rf:.2f} deg")
+    check("bus sag also rides the ramp",
+          "_dr.scale" in inspect.getsource(DashEnv._update_torque_sag))
+    # and the diagnostic arm must stay genuinely clean
+    e2 = DashEnv(get_config("walk_fwd_easy"))
+    check("warm-start dims match the parent (its checkpoint still loads)",
+          e2.observation_space.shape == env.observation_space.shape
+          and e2.action_space.shape == env.action_space.shape,
+          f"{env.observation_space.shape} / {env.action_space.shape}")
+    e2.set_dr_scale(1.0)
+    e2._noise.reset(rng)
+    check("walk_fwd_easy stays clean even at dr_scale=1 (obs_noise off)",
+          float(np.abs(e2._noise.zero_offset).max()) == 0.0
+          and np.allclose(e2._noise.imu_R, np.eye(3)))
+
+
 if __name__ == "__main__":
     test_fourier_gait()
     test_cpg_gait()
@@ -1008,5 +1076,6 @@ if __name__ == "__main__":
     test_m1_rail()
     test_ankle_study()
     test_ankle2()
+    test_walk_fwd2()
     print(f"\n{'ALL OK' if FAIL == 0 else f'{FAIL} FAILURES'}")
     sys.exit(1 if FAIL else 0)

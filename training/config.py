@@ -1805,6 +1805,31 @@ PRESETS.update({
     "walk_fwd_easy": lambda: _walk_fwd(
         dr_enable=False, obs_noise_enable=False, push_interval_s=0.0, trip_prob=0.0,
         ctrl_jitter_ms_final=0.0, ctrl_drop_prob_final=0.0),
+    # --- v2 (2026-08-08): walk_fwd DEADLOCKED. Measured, both seeds, 530 M steps ------------------
+    # walk_fwd_s0/s1 sat at ep_len ~500 with dr_scale EXACTLY 0.00 and drive_bw pinned at its 12 Hz
+    # start for the entire run. Cause: curriculum_gate_ep_len=1600 gates ALL SIX ramps at once
+    # (stance, drive_bw, eff, dr, jitter, drop), the policy never reached 1600, so no curriculum
+    # ever moved -- while the sim2real calibration axes (5 deg homing, 10 deg IMU rotation) were
+    # NOT gated and stood at full width from step 0. Full sensor adversity, zero dynamics
+    # randomisation, zero efficiency regularisation, and a fake 12 Hz drive: the worst of both
+    # worlds, with the only exit gated on the thing it could not do. This is the SAME failure the
+    # _teleop comment above already documents ("measurably BACKFIRED", eff_scale pinned at 0) --
+    # the gate was re-introduced here anyway.
+    #
+    # Three changes, all pointed at that one mechanism:
+    #   (a) warm-start from walk_fwd_easy_s0, which FINISHED the drive curriculum and holds
+    #       ep_len 4938 (peak 6833) at the real 0.8 Hz -> start above any sane gate instead of
+    #       under it, and start on the real drive rather than needing to ramp onto it.
+    #   (b) drive curriculum OFF (start_hz=0) -- the parent already lives at 0.8 Hz, so re-easing
+    #       to 12 Hz would only teach it a drive that does not exist.
+    #   (c) gates 1600 -> 400, so the ramps advance from step 0 at the parent's competence and
+    #       retreat (retreat_frac 0.7 -> floor 280) if it collapses. The ramp is the safety, not
+    #       the gate.
+    # Paired with SensorNoise.scale (domain_rand.py): homing/IMU/dropout/sag now ride dr_scale.
+    # Order inverted on purpose: learn the hard PLANT first, then add adversity.
+    "walk_fwd2": lambda: _walk_fwd(
+        drive_bandwidth_start_hz=0.0, drive_curriculum_steps=0,
+        curriculum_gate_ep_len=400.0, jitter_curriculum_gate_ep_len=400.0),
 })
 
 

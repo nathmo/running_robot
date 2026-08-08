@@ -251,6 +251,13 @@ class SensorNoise:
         self.nu = nu
         self.control_dt = float(control_dt)      # sets the IMU stale-window length in steps
         self.enabled = bool(cfg.obs_noise_enable)
+        # 0..1 curriculum on the SIM2REAL calibration axes (homing zero, IMU mount rotation, IMU
+        # dropout). Driven by env.set_dr_scale so they share the dynamics ramp instead of standing
+        # at full width from step 0. walk_fwd measured the cost of not doing this: with 5 deg of
+        # homing error and 10 deg of IMU rotation live from the first step, two seeds sat at
+        # ep_len ~500 for 530 M steps and never opened any gate. The white-noise channels below
+        # are NOT scaled -- they are small, always-on, and were never the blocker.
+        self.scale = 1.0
         self.reset(np.random.default_rng(0))
 
     def reset(self, rng):
@@ -279,14 +286,15 @@ class SensorNoise:
         # HOMING error: one wrong zero per joint, held for the whole episode. Read by the env for
         # the COMMAND side too -- see the dr_joint_zero_deg note in config.py for why obs-only is
         # not merely incomplete but wrong.
-        self.zero_offset = (np.radians(c.dr_joint_zero_deg) * rng.uniform(-1.0, 1.0, n)
+        s = float(np.clip(self.scale, 0.0, 1.0))
+        self.zero_offset = (s * np.radians(c.dr_joint_zero_deg) * rng.uniform(-1.0, 1.0, n)
                             if c.dr_joint_zero_deg > 0 else z.copy())
         # IMU MOUNTING rotation: a real rotation matrix, applied to gravity and gyro alike.
         self.imu_R = np.eye(3)
         if c.dr_imu_rot_deg > 0:
             ax = rng.normal(size=3)
             ax /= max(np.linalg.norm(ax), 1e-9)
-            th = np.radians(c.dr_imu_rot_deg) * rng.uniform(-1.0, 1.0)
+            th = s * np.radians(c.dr_imu_rot_deg) * rng.uniform(-1.0, 1.0)
             K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
             self.imu_R = np.eye(3) + np.sin(th) * K + (1 - np.cos(th)) * (K @ K)   # Rodrigues
         self._stale_left = 0
@@ -327,7 +335,7 @@ class SensorNoise:
                 self._stale_left -= 1
                 if self._stale_frame is not None:
                     g, gyro = self._stale_frame
-            elif rng.random() < c.dr_imu_dropout_prob:
+            elif rng.random() < c.dr_imu_dropout_prob * float(np.clip(self.scale, 0.0, 1.0)):
                 self._stale_left = max(1, int(c.dr_imu_dropout_s / self.control_dt))
                 self._stale_frame = (g.copy(), gyro.copy())
         return motor_pos, motor_vel, motor_trq, g, gyro

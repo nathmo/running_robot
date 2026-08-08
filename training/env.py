@@ -577,7 +577,7 @@ class DashEnv(gym.Env):
         p_ref = float(np.sum(self._orig_forcerange[:self.nu, 1])) * 5.0    # ~peak torque x a brisk rate
         a = self.control_dt / max(c.dr_torque_sag_tau_s, 1e-6)
         self._sag_state += a * (min(p / max(p_ref, 1e-9), 1.0) - self._sag_state)
-        self._sag_scale = 1.0 - c.dr_torque_sag * self._sag_state
+        self._sag_scale = 1.0 - c.dr_torque_sag * self._dr.scale * self._sag_state
         self._apply_torque_limit()
 
     def _apply_ankle_torque_speed(self):
@@ -753,6 +753,10 @@ class DashEnv(gym.Env):
         pushes, trips and sensor noise combined, and unlike all of those it had no curriculum.
         A policy cannot learn to be robust to a plant it cannot stand up on."""
         self._dr.scale = float(np.clip(s, 0.0, 1.0))
+        # The measured sim2real calibration axes (homing zero, IMU mount rotation, IMU dropout,
+        # bus sag) ride the SAME ramp -- see SensorNoise.scale for why they must not stand at full
+        # width from step 0.
+        self._noise.scale = self._dr.scale
 
     def set_cmd_scale(self, s):
         """0..1 command-RANGE curriculum: interpolates the sampled command box from
