@@ -112,13 +112,25 @@ function applyState(st) {
   if (window.onSysidState) window.onSysidState(st);      // system-ID panels (sysid.js)
 }
 
+/** Has the slow guided move (Home / ⌖ Centre) reached what it was sent to? The move stays armed
+ *  after arrival — it keeps holding the pose — so "arrived" has to be measured, and against the
+ *  PUBLISHED targets: ⌖ Centre drives to the max-room pose, which is not the zero pose.
+ *  Shared with sysid.js, which reports the same move in the system-ID panel. */
+function atManualTarget(man) {
+  const tgt = (man && man.targets) || {};
+  return MOTORS.every((n) => S.latest[n] && S.latest[n].pos_norm !== null &&
+                             Math.abs(S.latest[n].pos_norm - (tgt[n] || 0)) < 1.0);
+}
+
 /* homing banner + keep the override checkbox in sync with the daemon */
 function updateManualStatus(st) {
   const man = st.manual || {};
   if (man.homing) {
-    const atHome = MOTORS.every((n) => S.latest[n] && S.latest[n].pos_norm !== null &&
-                                       Math.abs(S.latest[n].pos_norm) < 1.0);
-    $("home-status").textContent = atHome ? "🏠 at home ✓ (holding zero)" : "🏠 homing… (slow)";
+    const centring = man.homing_kind === "center";
+    const arrived = atManualTarget(man);
+    $("home-status").textContent = centring
+      ? (arrived ? "⌖ centred ✓ (most room around this pose)" : "⌖ centring… (slow)")
+      : (arrived ? "🏠 at home ✓ (holding zero)" : "🏠 homing… (slow)");
   } else {
     $("home-status").textContent = "";
   }
@@ -508,6 +520,11 @@ $("btn-hold").onclick = async () => {
 $("btn-home").onclick = async () => {
   await api("/api/manual/home", { json: { slew_dps: +$("inp-home-slew").value } });
   setBanner("homing to the zero pose (slow)…", "", 4000);
+};
+$("btn-center").onclick = async () => {
+  const d = await api("/api/manual/center", { json: { slew_dps: +$("inp-home-slew").value } });
+  if (window.onCenterResult) window.onCenterResult(d);       // system-ID panel trims its amplitudes
+  setBanner("centring both legs on the safest pose (slow)…", "", 4000);
 };
 $("btn-release").onclick = () => api("/api/manual/release", { method: "POST" });
 $("chk-override").onchange = () => {

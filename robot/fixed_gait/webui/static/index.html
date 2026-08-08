@@ -85,6 +85,161 @@
     <div id="motor-cards" class="motor-cards"></div>
   </section>
 
+  <!-- ============================ Sense HAT (B) ============================ -->
+  <section class="panel" id="panel-sensors">
+    <h2>Sense HAT (B)
+      <span class="hint">Waveshare 9-DOF IMU + air + light + analog, on the Pi's I2C bus — live</span>
+      <span id="sns-status" class="hint"></span></h2>
+
+    <div id="sns-down" class="sns-down hidden"></div>
+
+    <div id="sns-body" class="sns-wrap">
+      <div class="sns-att">
+        <canvas id="sns-horizon" width="230" height="230"></canvas>
+        <div class="sns-att-vals">
+          <span>roll <b id="sns-roll">—</b>°</span>
+          <span>pitch <b id="sns-pitch">—</b>°</span>
+          <span>yaw <b id="sns-yaw">—</b>°</span>
+        </div>
+        <div class="row small">
+          <button id="btn-gyro-bias" class="btn small" title="Average the gyro's zero-rate offset.
+The robot must stand completely still for ~1.5 s — the attitude filter restarts from level
+afterwards.">⌖ Zero gyro (hold still)</button>
+        </div>
+        <div id="sns-bias" class="hint"></div>
+        <div id="sns-mount" class="hint"></div>
+      </div>
+
+      <div class="sns-cols">
+        <div class="sns-group">
+          <div class="sns-gh">Accelerometer <span class="hint">g</span></div>
+          <div class="sns-grid" id="sns-acc"></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Gyroscope <span class="hint">°/s, bias-corrected</span></div>
+          <div class="sns-grid" id="sns-gyr"></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Magnetometer <span class="hint">µT — uncalibrated, and the motors
+            move it; NOT fused into the attitude</span></div>
+          <div class="sns-grid" id="sns-mag"></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Air <span class="hint">SHTC3 + LPS22HB</span></div>
+          <div class="sns-grid" id="sns-air"></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Light <span class="hint">TCS34725</span></div>
+          <div class="sns-grid" id="sns-light"></div>
+          <div class="row small"><span class="hint">colour</span><i id="sns-swatch" class="sns-swatch"></i></div>
+        </div>
+        <div class="sns-group">
+          <div class="sns-gh">Analog in <span class="hint">ADS1015, V — cycled one channel at a time</span></div>
+          <div class="sns-grid" id="sns-adc"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------------- IMU mount calibration ---------------- -->
+    <div class="step" id="sns-mountcal">
+      <div class="step-h">IMU mount &amp; frame
+        <span class="hint">the HAT is bolted UNDER the robot — until this is done, every value
+          above is in the chip's own axes, not the robot's</span></div>
+
+      <div class="sns-cal-grid">
+        <div class="sns-cal-steps">
+          <div class="sns-cal-step">
+            <b>1 — Upright reference</b>
+            <span class="hint">Hang the robot on the test rig in its upright pose and let it settle.
+              This captures the direction of gravity in chip axes, which fixes the tilt — and
+              absorbs both mount misalignment and accelerometer bias into one reference. Its
+              repeatability is the accuracy ceiling of everything below.</span>
+            <div class="row small">
+              <button id="btn-cap-level" class="btn small primary">📍 Capture upright</button>
+              <span id="cap-level-status" class="hint"></span>
+            </div>
+          </div>
+
+          <div class="sns-cal-step">
+            <b>2 — Fore-aft axis</b>
+            <span class="hint">Gravity cannot see rotation <i>about</i> the vertical — the DOF that
+              separates <b>pitch from roll</b>. Fix it either by tipping the robot nose-down
+              10–20° and capturing (the angle itself does not matter, only the direction), or by
+              declaring which chip axis points forward. Do both and they cross-check each other:
+              a large disagreement means the HAT is not bolted on square.</span>
+            <div class="row small">
+              <button id="btn-cap-forward" class="btn small">📐 Capture nose-down tilt</button>
+              <label>declared forward
+                <select id="sns-fwd-axis" class="txt small">
+                  <option value="">— none —</option>
+                  <option value="+x">chip +X</option><option value="-x">chip −X</option>
+                  <option value="+y">chip +Y</option><option value="-y">chip −Y</option>
+                </select></label>
+            </div>
+            <div id="cap-fwd-status" class="hint"></div>
+            <div id="sns-crosscheck" class="hint"></div>
+          </div>
+
+          <div class="sns-cal-step">
+            <b>3 — Lever arm <span class="hint">IMU position relative to the base centre, metres</span></b>
+            <span class="hint">An IMU offset from the base also measures α×r + ω×(ω×r) whenever the
+              body rotates — zero at rest, but a bias on roll/pitch exactly while running. Type the
+              CAD vector, and/or fit one by rocking the robot. <b>The fit is relative to the point
+              the rocking rotated about</b> (the hang point on the rig), not the base centre — the
+              two agree only insofar as those coincide.</span>
+            <div class="row small">
+              <label>CAD x <input type="number" id="lev-x" class="num small" step="0.001"></label>
+              <label>y <input type="number" id="lev-y" class="num small" step="0.001"></label>
+              <label>z <input type="number" id="lev-z" class="num small" step="0.001"></label>
+              <button id="btn-lever-save" class="btn small">Save CAD vector</button>
+            </div>
+            <div class="row small">
+              <button id="btn-lever-fit" class="btn small">⟳ Fit by rocking…</button>
+              <span id="lever-fit-status" class="hint"></span>
+            </div>
+            <div id="lever-compare" class="hint"></div>
+            <div class="row small">
+              <label>compensate using
+                <select id="sns-lever-use" class="txt small">
+                  <option value="cad">CAD vector</option>
+                  <option value="fit">fitted vector</option>
+                  <option value="none">nothing</option>
+                </select></label>
+              <span class="spacer"></span>
+              <button id="btn-mount-reset" class="btn small">Reset mount calibration</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sns-cal-view">
+          <canvas id="sns-frame-canvas" width="380" height="330"></canvas>
+          <div class="row small">
+            <label><input type="checkbox" id="frame-showmesh" checked> base mesh</label>
+            <label><input type="checkbox" id="frame-showlive" checked> live up-vector</label>
+            <span class="spacer"></span>
+            <span class="hint">drag to orbit, wheel to zoom</span>
+          </div>
+          <div id="sns-frame-legend" class="hint"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="chart-legend">
+      <span><i class="sw" style="background:#4da3ff"></i>pitch °</span>
+      <span><i class="sw dash" style="background:#f2f2f2"></i>roll °</span>
+      <span><i class="sw" style="background:#e0a020"></i>|ω| °/s</span>
+      <span><i class="sw" style="background:#2c9e3f"></i>|a| g</span>
+      <span><i class="sw" style="background:#e04545"></i>air °C</span>
+      <span class="hint">last 60 s, auto-scaled</span>
+    </div>
+    <div class="sns-charts">
+      <div class="sns-chart"><span>attitude</span><canvas id="sns-c-att" width="300" height="46"></canvas></div>
+      <div class="sns-chart"><span>rotation rate</span><canvas id="sns-c-gyr" width="300" height="46"></canvas></div>
+      <div class="sns-chart"><span>acceleration</span><canvas id="sns-c-acc" width="300" height="46"></canvas></div>
+      <div class="sns-chart"><span>temperature</span><canvas id="sns-c-temp" width="300" height="46"></canvas></div>
+    </div>
+  </section>
+
   <!-- ============================ manual control ============================ -->
   <section class="panel" id="panel-manual">
     <h2>Manual control <span class="hint">sliders track the live motor position — grab one to jog
@@ -92,6 +247,9 @@
     <div class="row">
       <button id="btn-hold" class="btn primary">Hold pose (enter manual)</button>
       <button id="btn-home" class="btn">🏠 Home (slow → zero pose)</button>
+      <button id="btn-center" class="btn" title="Slew both legs to the centre of the largest safe
+box in the workspace — the pose with the most room in every direction. Same slow guided move as
+Home, and like Home it works from a pose outside the safe region.">⌖ Centre (max room)</button>
       <span id="home-status" class="hint"></span>
       <button id="btn-release" class="btn">Release → limp</button>
       <span class="spacer"></span>
@@ -400,10 +558,20 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
       <div class="step-h"><span class="step-n">1</span> Excitation
         <span class="hint">— per-joint amplitude &amp; frequency sweep; the whole path is
           workspace-checked before it can start</span></div>
-      <p class="step-note">The chirp is centred on the leg's <b>current pose</b>, so
-        <b>🏠 Home the robot first</b> (Manual control): from a pose near a hard limit — or outside
-        the drawn workspace — every amplitude is refused and the run simply never starts. The reason
-        for a refusal appears in red next to the buttons below.</p>
+      <p class="step-note">The chirp is centred on the leg's <b>current pose</b>: from a pose near a
+        hard limit — or outside the drawn workspace — every amplitude is refused and the run never
+        starts. Hit <b>⌖ Centre legs</b> to park both legs where the safe workspace leaves the most
+        room in every direction; the amplitudes below are then trimmed to what fits. The reason for
+        any refusal appears in red next to the buttons.</p>
+      <div class="row">
+        <button id="btn-meas-center" class="btn" title="Slew both legs to the centre of the largest
+safe box in the workspace — the pose that leaves the most excitation room on every joint. Works
+even when a leg is currently parked outside the safe region.">⌖ Centre legs (max room)</button>
+        <button id="btn-meas-fit" class="btn" title="Size the excitation to this pose: 80% of the safe
+travel each joint has here, and the chirp frequency that puts that sine at 80% of the motor's no-load
+speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range costs frequency.">⤢ Fit excitation (80%)</button>
+        <span id="meas-room" class="hint"></span>
+      </div>
       <table class="meas-grid">
         <thead><tr><th>joint</th><th>amplitude °</th><th>start Hz</th><th>end Hz (chirp)</th></tr></thead>
         <tbody id="meas-joint-rows"></tbody>
@@ -519,6 +687,16 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
       <button id="btn-mock-sweep-left" class="btn small">auto-sweep left leg</button>
       <button id="btn-mock-stop" class="btn small">stop sweeps</button>
     </div>
+    <div class="row">
+      <span class="hint">simulated IMU pose — the three motions the mount calibration asks for
+        (the mock mounts the HAT at a known rotation and lever arm, so the procedure can be checked
+        against the answer it should find):</span>
+    </div>
+    <div class="row">
+      <button id="btn-mock-still" class="btn small">upright &amp; still</button>
+      <button id="btn-mock-tilt" class="btn small">nose-down tilt</button>
+      <button id="btn-mock-rock" class="btn small">rock (two axes)</button>
+    </div>
   </section>
 
 </main>
@@ -526,5 +704,6 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
 <script src="/static/app.js"></script>
 <script src="/static/inertia3d.js"></script>
 <script src="/static/sysid.js"></script>
+<script src="/static/sensors.js"></script>
 </body>
 </html>

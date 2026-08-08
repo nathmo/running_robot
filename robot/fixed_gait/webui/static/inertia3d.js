@@ -59,6 +59,7 @@ class Inertia3D {
     this.ok = !!this.gl;
     this.az = 0.7; this.el = 0.5; this.dist = 0.4; this.center = [0, 0, 0];
     this.mesh = null; this.ellipsoids = []; this.showMesh = true; this.align = null;
+    this.segments = null;
     if (!this.ok) return;
     const g = this.gl;
     this.prog = this._program(VS, FS);
@@ -112,6 +113,44 @@ class Inertia3D {
     this.dist = Math.max(Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 1.6, 0.05);
   }
   clearMesh() { this.mesh = null; }
+
+  /** Line segments in world (model) coordinates: [{a:[x,y,z], b:[x,y,z], color:[r,g,b]}].
+   *  Used for coordinate-frame triads and vectors. Grouped by colour because the colour is a
+   *  uniform — one draw call per distinct colour, not per segment. */
+  setSegments(segs) {
+    if (!this.ok) return;
+    segs = segs || [];
+    this.segments = null;
+    if (!segs.length) return;
+    const byColor = new Map();
+    for (const s of segs) {
+      const k = (s.color || [1, 1, 1]).join(",");
+      if (!byColor.has(k)) byColor.set(k, { color: s.color || [1, 1, 1], pts: [] });
+      byColor.get(k).pts.push(...s.a, ...s.b);
+    }
+    const pos = [], groups = [];
+    for (const g of byColor.values()) {
+      groups.push({ color: g.color, first: pos.length / 3, count: g.pts.length / 3 });
+      pos.push(...g.pts);
+    }
+    const arr = new Float32Array(pos);
+    // The shader lights every fragment by dot(normal, light); feeding the light direction back in
+    // as the "normal" makes that dot 1, so a line draws at its flat colour.
+    const nrm = new Float32Array(arr.length);
+    for (let i = 0; i < nrm.length; i += 3) { nrm[i] = 0.4; nrm[i + 1] = 0.7; nrm[i + 2] = 0.6; }
+    this.segments = { pos: this._buf(arr), nrm: this._buf(nrm), groups };
+    if (!this.mesh) this._frameTo(arr);
+  }
+
+  /** Centre and zoom the orbit camera on a flat [x,y,z,...] point list. */
+  _frameTo(arr) {
+    if (!arr.length) return;
+    const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+    for (let i = 0; i < arr.length; i += 3)
+      for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], arr[i + k]); hi[k] = Math.max(hi[k], arr[i + k]); }
+    this.center = [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2);
+    this.dist = Math.max(Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 1.8, 0.05);
+  }
   // ell: [{semi:[a,b,c], R:flat9(row-major), com:[x,y,z], color:[r,g,b]}]
   setEllipsoids(ell) { this.ellipsoids = ell || [];
     if (!this.mesh && this.ellipsoids.length) {
@@ -149,6 +188,17 @@ class Inertia3D {
     if (this.mesh && this.showMesh) {
       this._drawBuf(this.mesh.pos, this.mesh.nrm, this.mesh.n, VP, M4.rot3to4(null),
         [0.55, 0.6, 0.68], 1.0, false);
+    }
+    if (this.segments) {
+      const ident = M4.rot3to4(null);
+      this._bindAttr(this.segments.pos, this.segments.nrm);
+      g.uniformMatrix4fv(this.loc.uMVP, false, VP);
+      g.uniformMatrix4fv(this.loc.uNormal, false, ident);
+      g.uniform1f(this.loc.uAlpha, 1.0);
+      for (const grp of this.segments.groups) {
+        g.uniform3fv(this.loc.uColor, grp.color);
+        g.drawArrays(g.LINES, grp.first, grp.count);
+      }
     }
     g.enable(g.BLEND); g.blendFunc(g.SRC_ALPHA, g.ONE_MINUS_SRC_ALPHA); g.depthMask(false);
     for (const e of this.ellipsoids) {

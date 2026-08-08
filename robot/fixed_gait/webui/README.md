@@ -16,8 +16,9 @@ What it does (one page):
 | Panel | Function |
 |---|---|
 | Telemetry | live raw/normalized position, current, temperature per motor + strip charts |
+| Sense HAT (B) | live 9-DOF IMU (attitude horizon, accel/gyro/mag), air temperature/humidity/pressure, ambient light/colour, 4 analog inputs, and the **IMU mount calibration** (upright + tilt captures, lever arm, 3D frame view) — see below |
 | Calibration wizard | **blocks all motion after boot** until zero pose + direction check are done |
-| Manual control | per-actuator slider that **tracks the live motor position** (grab to jog) + exact-angle box; **🏠 Home** slowly returns every joint to the zero pose; per-actuator sine (start↔stop **preset to 70% of the safe range**, frequency); workspace-override checkbox |
+| Manual control | per-actuator slider that **tracks the live motor position** (grab to jog) + exact-angle box; **🏠 Home** slowly returns every joint to the zero pose and **⌖ Centre** parks both legs where the safe workspace leaves the most room in every direction (the largest inscribed box — the pose to excite from); per-actuator sine (start↔stop **preset to 70% of the safe range**, frequency); workspace-override checkbox |
 | Safe workspace | abduction bar + (cam, thigh) pixel editor — draw/erase/flood-fill, undo, save/export/import |
 | Gait trajectory | hand-**draw** a path, or **teach** by backdriving (record takes), smooth + save |
 | EE animation | live linkage + workspace + gait + zero in foot (end-effector) space, per leg |
@@ -99,16 +100,126 @@ Two consequences worth remembering when reading identification data:
   (gravity torque / gain). That is a systematic bias in a quasi-static run, not noise.
 * **Abduction is ~3x stiffer** than the sagittal axes (kp 0.009 vs 0.003), so it droops ~3x less.
 
+## Sense HAT (B) — the sensor panel
+
+The Waveshare **Sense HAT (B)** sits on the Pi's 40-pin header and answers on **I2C bus 1**. The
+chips are read by background threads of their own (`sensehat.py`), never by the Flask handlers and
+never by the CAN daemon — an I2C stall must not be able to delay a motor command.
+
+**Two threads, split by timescale.** The IMU polls at `--imu-hz` (200 by default, matching the
+control loop); the air/pressure/light/ADC chips run at 1-5 Hz on a second thread. That split is not
+tidiness: those drivers spend nearly all their time *asleep* waiting for a conversion (the SHTC3
+alone sleeps 15 ms), which inline cost the fast loop ~43 ms every second — about 8 missed ticks —
+and capped it at ~192 Hz. Out of the way, the IMU thread holds **199.5 Hz**.
+
+| Address | Chip | Published |
+|---|---|---|
+| 0x68 | ICM-20948 | accel (g), gyro (deg/s), die temperature; magnetometer via the AK09916 at 0x0C |
+| 0x70 | SHTC3 | air temperature, relative humidity |
+| 0x5C | LPS22HB | barometric pressure + its own die temperature |
+| 0x29 | TCS34725 | ambient light (lux), correlated colour temperature, raw RGBC |
+| 0x48 | ADS1015 | AIN0..AIN3, volts (one channel per tick) |
+
+Measured on the robot (100 kHz I2C, at rest, DLPF cfg 3):
+
+| | accel | gyro |
+|---|---|---|
+| range / resolution | ±4 g, 0.1221 mg/LSB | ±1000 dps, 0.0305 dps/LSB |
+| 3 dB bandwidth | 50.4 Hz | 51.2 Hz |
+| noise (RMS) | 1.8 mg (~218 µg/√Hz) | 0.08 dps (~0.0096 dps/√Hz) |
+| bias | scale error −0.03% | turn-on ~1 dps; 0.011 dps/s in-run |
+
+Quantisation sits ~15x below the noise floor on both, so widening the ranges costs nothing real if
+footfall impacts start clipping ±4 g. Sensor ODR is 225 Hz (`SMPLRT_DIV` derived from `ODR_HZ`); an
+accel+gyro burst costs 1.68 ms and the magnetometer ~1 ms, hence the mag's decimation to 25 Hz.
+The panel publishes the rate the IMU thread actually achieves, not the one it was asked for.
+
+```
+python robot/fixed_gait/webui/sensehat.py          # CLI self-test: one live line per second
+python robot/fixed_gait/webui/sensehat.py --mock   # synthetic values, no hardware
+python robot/fixed_gait/webui/server.py --no-sensors   # do not touch I2C at all
+```
+
+Things worth knowing before trusting a number here:
+
+* **Roll and pitch are absolute** (a 6-axis Madgwick filter references them to gravity); **yaw is
+  gyro-integrated and drifts.** The magnetometer is deliberately *not* fused into the attitude —
+  it sits centimetres from two brushless motors and the battery, so its heading is published as an
+  advisory number only.
+* **Zero the gyro** (button under the horizon) with the robot standing still: it averages the
+  zero-rate offset for 1.5 s and refuses if the robot moved (it says so rather than storing a bad
+  bias).
+* **Values are in the IMU chip's own frame until the mount is calibrated** (below), and in robot
+  body axes after. The HAT is bolted UNDER the robot — it reads gravity on chip −Z — so the two
+  frames are nowhere near each other and the difference is not cosmetic.
+* Missing HAT, missing `smbus2`, or I2C disabled → the panel shows the reason and the rest of the
+  UI is unaffected. Per-chip failures are counted and shown, not silent.
+
+### Mount calibration — where the IMU is and which way it faces
+
+`mountcal.py`, persisted to `data/sensehat_mount.json`, panel block "IMU mount & frame".
+
+**Step 1 — upright reference.** Hang the robot on the test rig in its upright pose and capture.
+This measures the direction of gravity in chip axes, which fixes the tilt. It does *not* separate
+accelerometer bias from mount misalignment — a robot tilted 1° and a sensor with a 17 mg cross-axis
+bias read identically — and it does not need to: both are absorbed into the frame in which the
+reference pose reads roll = pitch = 0. (A true per-axis bias+scale calibration needs a
+6-orientation tumble; not happening with a 15 kg robot, and pointless for a sensor already within
+1% of 1 g.) **The repeatability of that pose is the accuracy ceiling of everything downstream.**
+
+**Step 2 — fore-aft axis.** Gravity fixes only *two* of the three rotation DOF: rotation about the
+vertical is invisible to an accelerometer at rest, and that is exactly the DOF separating **pitch
+from roll**. Fix it by tipping the robot nose-down 10–20° and capturing (only the direction is
+used, never the angle), and/or by declaring which chip axis points forward. With both, the panel
+reports the angle between them — a large disagreement means the HAT is not bolted on square. The
+*measured* axis is the one used.
+
+**Step 3 — lever arm.** The IMU sits below the base, so while the body rotates it also measures
+`α×r + ω×(ω×r)`. Zero at rest, but a bias on roll/pitch exactly while running. Type the CAD vector
+(base centre → IMU, metres) and/or fit one by rocking the robot by hand.
+
+> **What the fit is relative to.** A single IMU *cannot* observe its position relative to the base
+> centre — `a_base` in the rigid-body relation is unknown, so `r` is not separable. It becomes
+> identifiable only for rotation about a fixed pivot, where the fit returns `r_pivot→IMU`. Hung on
+> the rig, that pivot is the hang point: the fit matches the CAD vector only insofar as the base
+> centre sits at the pivot, and otherwise differs by exactly the pivot offset. The panel labels the
+> fit with the point it is about, and reports the CAD-vs-fit gap rather than implying they must
+> agree.
+
+Rock about **two clearly different axes** — a single-axis rock leaves the fit unconstrained along
+that axis and returns a number that looks fine and means nothing. The panel reports second-axis
+coverage and flags a weak excitation.
+
+The 3D view shows the base mesh, the body triad at the base centre, and the IMU's own axes at the
+lever arm, plus the live measured up-vector — the visual check that the calibration says what you
+think it does.
+
+Two things this machinery gets right that are easy to get wrong, both verified in `--mock` against
+a simulated HAT with a known mount and lever (mock-tools panel poses it: upright / nose-down /
+rocking):
+
+* **Changing the mount resets the attitude filter.** A filter's quaternion is expressed in the
+  frame it was integrated in and is meaningless the moment that frame moves — and a near-antipodal
+  Madgwick error sits on a saddle where the correction vanishes, so it never converges out on its
+  own. Without the reset, finishing the wizard left the attitude stuck ~165° wrong.
+* **The ω in the lever terms is the same low-passed ω that α is differentiated from.** Pairing a
+  raw ω with a filtered-ω derivative mismatches their phase and biases the fit.
+
+End-to-end in mock: mount rotation recovered to <0.01, lever arm to ~3 mm, and enabling the
+compensation cuts attitude error during hard rocking by ~77% (2.0° → 0.5° mean).
+
 ## Install on the Pi (offline)
 
 ```
 # on the desktop (internet):
-pip download flask -d wheels/
+pip download flask smbus2 -d wheels/
 scp -r wheels nemo@<pi>:running_robot/
 
 # on the Pi:
 pip install -r requirements-rpi.txt          # if not already there (numpy, python-can)
-pip install --no-index --find-links wheels/ flask
+pip install --no-index --find-links wheels/ flask smbus2
+# smbus2 is pure Python, so if Raspberry Pi OS already ships it system-wide you can instead just
+# drop it into the venv:  cp -r /usr/lib/python3/dist-packages/smbus2 .venv/lib/python3*/site-packages/
 sudo ip link set can0 up type can bitrate 1000000
 sudo ip link set can1 up type can bitrate 1000000
 python robot/fixed_gait/webui/server.py
@@ -196,5 +307,10 @@ journalctl -u dash01-webui -f               # live logs
   `joint_limits.py`, `trajectory.py` (files stay compatible with the CLI tools).
 - `fklut.py` — pure-numpy LUT runtime + the sign-map verifier.
 - `canio.py` — real socketcan or `--mock` simulated motors (random boot offsets included).
+- `sensehat.py` — Sense HAT (B) I2C drivers + its own poll thread (100 Hz IMU / 20 Hz logged);
+  `--mock` is a rigid-body IMU simulator with a known mount and lever arm. Publishes a snapshot +
+  a `ScalarRing`, same read-by-sequence contract as motor telemetry.
+- `mountcal.py` — IMU mount rotation + lever arm: the capture maths, the lever least-squares and
+  its diagnostics, persisted to `data/sensehat_mount.json`. No I2C, no threads of its own.
 - `static/` — vanilla JS, no CDN. `server.py` — thin Flask routes.
 - Runtime data lives in `webui/data/` (git-ignored, machine-local).

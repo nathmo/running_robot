@@ -32,6 +32,7 @@ import dynstore
 import fklut
 import gaitstore
 import measurestore
+import sensehat
 import workspace
 
 # pure-numpy identification helpers (safe to import on the Pi; the heavy estimator is imported
@@ -49,6 +50,7 @@ STATE = {
     "wstore": None,          # workspace.WorkspaceStore
     "fk": None,              # fklut.FkLut
     "dyn": None,             # dynstore.DynConfig (weighed masses, drive PID, Kt)
+    "sense": None,           # sensehat.SenseHat (I2C poll thread; None if --no-sensors)
     "interface": "socketcan",
     "mock": False,
     "ctl": {"token": None, "ts": 0.0},
@@ -172,8 +174,97 @@ def api_telemetry():
     return jsonify(out)
 
 
-def _nan_list(a):
-    return [None if not np.isfinite(v) else round(float(v), 2) for v in a]
+def _nan_list(a, nd=2):
+    return [None if not np.isfinite(v) else round(float(v), nd) for v in a]
+
+
+# ===================================================================== Sense HAT (B) sensors
+@app.get("/api/sensors")
+def api_sensors():
+    """Latest Sense HAT values + new ring samples since `since` (same seq contract as telemetry).
+
+    Always 200, even with no HAT: the panel renders the reason from `available`/`error` rather than
+    the client having to treat a missing board as a failed request."""
+    sh = STATE["sense"]
+    if sh is None:
+        return jsonify({"available": False, "error": "sensors disabled (--no-sensors)", "seq": 0,
+                        "t": [], "series": {}})
+    out = sh.snapshot() or {"available": False, "error": sh.error}
+    since = int(request.args.get("since", 0))
+    seq, t, data = sh.ring.read_since(since)
+    out["seq"] = seq
+    out["t"] = np.round(t, 3).tolist()
+    out["series"] = {f: _nan_list(data[f], 3) for f in sh.ring.fields}
+    return jsonify(out)
+
+
+def _sense():
+    sh = STATE["sense"]
+    return (sh, None) if sh is not None else (None, "sensors disabled (--no-sensors)")
+
+
+@app.post("/api/sensors/capture")
+def api_sensors_capture():
+    """Start a still-robot average: `gyro` (zero-rate bias), `level` (the upright reference on the
+    rig) or `forward` (the nose-down tilt that pins the fore-aft axis). The robot must hold still."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
+    r = sh.start_capture(b.get("kind", "gyro"))
+    return _ok() if r.get("ok") else _err(r.get("error", "capture failed"))
+
+
+@app.post("/api/sensors/mount")
+def api_sensors_mount():
+    """Edit the parts of the mount calibration that are typed rather than measured: the declared
+    forward axis, the CAD lever arm, and which lever source feeds the live compensation."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
+    m = sh.mount
+    if "forward_axis" in b:
+        ok, why = m.set_declared(b["forward_axis"])
+        if not ok:
+            return _err(why)
+    if "lever_cad" in b:
+        ok, why = m.set_lever_cad(b["lever_cad"])
+        if not ok:
+            return _err(why)
+    if "lever_use" in b:
+        ok, why = m.set_lever_use(b["lever_use"])
+        if not ok:
+            return _err(why)
+    return _ok(mount=m.snapshot())
+
+
+@app.post("/api/sensors/mount/reset")
+def api_sensors_mount_reset():
+    """Forget the measured mount rotation (and the fitted lever) — values go back to chip axes."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    sh.mount.reset()
+    return _ok(mount=sh.mount.snapshot())
+
+
+@app.post("/api/sensors/lever")
+def api_sensors_lever():
+    """`start` begins recording a rocking excitation, `stop` fits the lever arm from it."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
+    action = b.get("action", "start")
+    if action == "start":
+        r = sh.lever_start()
+    elif action == "stop":
+        r = sh.lever_stop()
+    else:
+        return _err(f"unknown lever action '{action}'")
+    return _ok(mount=sh.mount.snapshot(), fit=r.get("fit")) if r.get("ok") \
+        else _err(r.get("error", "lever-arm fit failed"))
 
 
 # ===================================================================== e-stop / mode
@@ -289,6 +380,24 @@ def api_manual_home():
         return _err(err, 409)
     ok, why = _dm().home(slew_dps=b.get("slew_dps"))
     return _ok(token=token) if ok else _err(why)
+
+
+@app.post("/api/manual/center")
+def api_manual_center():
+    """Slew both legs to the pose with the most room around it (the inscribed-square centre of the
+    safe workspace). Returns the room each joint has there, which is the excitation amplitude the
+    system-ID panel can use without being refused."""
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    targets, info, why = _dm().center(slew_dps=b.get("slew_dps"))
+    if why:
+        return _err(why)
+    return _ok(token=token, targets=targets, legs=info)
 
 
 @app.post("/api/manual/sine_defaults")
@@ -605,6 +714,20 @@ def api_playback_stop():
 
 
 # ===================================================================== system-ID: MEASURE capture
+@app.post("/api/measure/defaults")
+def api_measure_defaults():
+    """Excitation preset for the CURRENT pose: 80% of the safe travel each joint has here, and the
+    chirp frequency that puts the resulting sine at 80% of the motor's no-load speed."""
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    out, err = _dm().measure_defaults(leg=b.get("leg", "right"),
+                                      profile=b.get("profile", "dynamic"),
+                                      frac=float(b.get("frac", daemon_mod.MEASURE_FRAC)))
+    return _ok(defaults=out) if out else _err(err)
+
+
 @app.post("/api/measure/start")
 def api_measure_start():
     why = _require_calibrated()
@@ -843,8 +966,25 @@ def api_mock_drag():
     return _ok() if ok else _err("unknown motor or not mock")
 
 
+@app.post("/api/mock/sensors")
+def api_mock_sensors():
+    """Pose the simulated IMU (still / tilt / rock) so the mount calibration can be walked through
+    end to end without the robot."""
+    if not STATE["mock"]:
+        return _err("mock mode only", 403)
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
+    r = sh.mock_pose(b.get("pose", "still"))
+    return _ok() if r.get("ok") else _err(r.get("error", "mock pose failed"))
+
+
 # ===================================================================== lifecycle
 def _shutdown():
+    sh = STATE.get("sense")
+    if sh is not None:
+        sh.stop()
     d = STATE.get("daemon")
     if d is None:
         return
@@ -862,7 +1002,19 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--interface", default="socketcan")
     ap.add_argument("--mock", action="store_true", help="simulated motors (no CAN needed)")
+    ap.add_argument("--no-sensors", action="store_true",
+                    help="do not touch the Sense HAT (B) / I2C bus at all")
+    ap.add_argument("--i2c-bus", type=int, default=sensehat.I2C_BUS,
+                    help="I2C bus the Sense HAT (B) sits on (default %(default)s)")
+    ap.add_argument("--imu-hz", type=float, default=sensehat.IMU_HZ,
+                    help="IMU read/AHRS rate in Hz (default %(default)s, matching the control loop)")
     args = ap.parse_args()
+
+    # Python hands the GIL between threads at most every `switchinterval` seconds — 5 ms by
+    # default, which is exactly the 200 Hz CAN loop's period, so one thread could hold it across a
+    # whole control tick. Measured on the robot: dropping it takes the daemon's late ticks from
+    # ~10% back to well under 1% once the IMU thread also runs at 200 Hz.
+    sys.setswitchinterval(0.0005)
 
     STATE["interface"] = args.interface
     STATE["mock"] = args.mock
@@ -875,6 +1027,13 @@ def main():
     STATE["daemon"] = d
     d.start()
     d._started_ok.wait(5.0)
+
+    # Sense HAT (B) on I2C — its own thread, started after the daemon so a wedged I2C bus can never
+    # delay motor bring-up. In --mock it synthesises values so the panel works off the robot.
+    if not args.no_sensors:
+        sh = sensehat.SenseHat(bus_num=args.i2c_bus, mock=args.mock, imu_hz=args.imu_hz)
+        STATE["sense"] = sh
+        sh.start()
     atexit.register(_shutdown)
 
     print(f"\nDASH-01 web UI: http://{args.host}:{args.port}/  "

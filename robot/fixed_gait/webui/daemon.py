@@ -104,6 +104,42 @@ MEASURE_DEFAULTS = dict(
 )
 MEASURE_ENVELOPE_SAMPLES = 480          # trajectory samples validated before a run may start
 
+# No-load OUTPUT speed per role, deg/s: abduction is an AK60-39 (10.3 rad/s), cam and thigh are
+# AKE90-8 (22 rad/s) — the same 1261 deg/s the PERIOD_MIN argument above is built on.
+NO_LOAD_DPS = {"abd": 590.0, "cam": 1261.0, "thigh": 1261.0}
+
+# What a DEFAULT excitation should claim of the hardware, on both axes at once: `frac` of the safe
+# travel the leg actually has around its current pose, and `frac` of the motor's no-load speed.
+# Amplitude and frequency are not independent — a sine of amplitude A at f Hz peaks at 2*pi*f*A
+# deg/s — so the two couple, and asking for more range costs you frequency. Measurements taken at
+# 0.6 Hz / 9 deg put only 0.7-4.8% of the drive current into the qddot column (the rest was Coulomb
+# friction), which is why the identified inertia was garbage: excitation, not estimator.
+MEASURE_FRAC = 0.8
+MEASURE_F_MAX = 3.0                     # ceiling from _merge_measure_spec's clamp
+MEASURE_F_STATIC = 0.03                 # quasi-static: velocity ~ 0, every sample is gravity
+
+# Measured closed-loop response of the drive's POSITION loop (swept-sine on all six joints,
+# 2026-08-05 measure_*_dyn_2.npz). It is a first-order roll-off at 0.8 Hz plus ~25 ms of transport
+# delay, and it is the same on both legs to two decimals -- 0.71 gain / -48 deg at 0.8 Hz, 0.50/-71
+# at 1.4, 0.37/-86 at 2.0, 0.28/-104 at 2.9. This is the REAL ceiling on excitation: above ~1 Hz the
+# commanded chirp is mostly not executed, and the un-executed part IS the tracking error.
+POS_LOOP_BW_HZ = 0.8
+POS_LOOP_DELAY_S = 0.025
+# Keep predicted tracking error to this fraction of max_track_err. The trip is latching and costs a
+# whole run, so leave real headroom: a 32.4 deg abduction sweep reached 30.0 deg of error at 1.2 Hz
+# and e-stopped the right leg mid-run.
+MEASURE_TRACK_FRAC = 0.55
+
+
+def _pos_loop_error_ratio(f):
+    """|1 - G(f)| for the position loop: the fraction of a commanded sine amplitude that shows up as
+    tracking error. ~0 when the drive tracks, ->1 once it has given up and stopped following."""
+    if f <= 0.0:
+        return 0.0
+    g = 1.0 / np.hypot(1.0, f / POS_LOOP_BW_HZ)
+    phi = -np.arctan2(f, POS_LOOP_BW_HZ) - 2.0 * np.pi * f * POS_LOOP_DELAY_S
+    return float(abs(1.0 - g * np.exp(1j * phi)))
+
 
 class RobotDaemon(threading.Thread):
     def __init__(self, interface="socketcan", mock=False, calib=None, wstore=None, fklut=None):
@@ -124,7 +160,9 @@ class RobotDaemon(threading.Thread):
         self._manual_targets = {}          # name -> desired normalized deg
         self._manual_override = False
         self._slew_dps = DEFAULT_SLEW_DPS
-        self._home_active = False           # slow return-to-zero engaged (feasibility-net checked)
+        self._home_active = False           # slow guided move engaged (feasibility-net checked)
+        self._home_kind = "zero"            # "zero" (Home) or "center" (max-room pose) — label only
+        self._home_relax = False            # guided move started from a pose the band net rejects
         self._home_slew = 20.0
         self._sine = {n: dict(enabled=False, a=-10.0, b=10.0, freq=0.3, _blend0=None)
                       for n in paths.MOTOR_NAMES}
@@ -293,6 +331,20 @@ class RobotDaemon(threading.Thread):
             self._req_mode = "MANUAL"
         return True, ""
 
+    def _pose_rejected_by_band(self):
+        """Does the CURRENT pose already fail the assembly-band net? A guided move that starts here
+        has to be allowed to leave it (see _tick_manual), or the robot is pinned where it stands."""
+        if self.fklut is None or not self.fklut.available or not self.by_name:
+            return False
+        if any(m.pos is None for m in self.motors):
+            return False
+        pose = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items()}
+        for side in paths.SIDES:
+            ok, _ = self.fklut.feasible_check(side, pose[f"{side}.cam"], pose[f"{side}.thigh"])
+            if not ok:
+                return True
+        return False
+
     def home(self, slew_dps=None):
         """Slowly drive every joint back to the URDF zero pose (normalized 0 = the stance we
         manually zero to). Trusts the CAD zero: it slews under the physical-feasibility net (like
@@ -303,14 +355,105 @@ class RobotDaemon(threading.Thread):
             with self.lock:
                 self._last_reject = why
             return False, why
+        relax = self._pose_rejected_by_band()
         with self.lock:
             self._manual_targets = {n: 0.0 for n in paths.MOTOR_NAMES}
             self._home_active = True
+            self._home_kind = "zero"
+            self._home_relax = relax
             self._home_slew = float(np.clip(slew_dps if slew_dps else 20.0, 5.0, 120.0))
             for s in self._sine.values():
                 s["enabled"] = False
             self._req_mode = "MANUAL"
         return True, ""
+
+    # ---------------------------------------------------------------- centering (max room around)
+    @staticmethod
+    def _largest_safe_square(grid, res, cam_origin, thigh_origin):
+        """Centre of the LARGEST axis-aligned square of safe (cam, thigh) cells, as
+        (cam_deg, thigh_deg, half_width_deg), or None if the grid holds no safe cell.
+
+        A square (not a disc) because the thing that has to fit inside is a box: the excitation
+        moves cam and thigh independently, so the swept set is [c±A_cam] x [t±A_thigh], and the
+        half-width returned here is exactly the amplitude that is guaranteed to stay safe on both
+        axes at once. Integral image, no scipy (this runs on the Pi). Ties go to the square nearest
+        the zero pose, so the leg travels as little as possible to get there."""
+        g = np.asarray(grid, bool)
+        h, w = g.shape
+        integ = np.zeros((h + 1, w + 1), np.int64)
+        integ[1:, 1:] = g.cumsum(0).cumsum(1)
+        hits, half = None, 0
+        for r in range(min(h, w) // 2 + 1):
+            n = 2 * r + 1
+            # block sum over every n x n window, indexed by its top-left cell
+            blocks = integ[n:, n:] - integ[:-n, n:] - integ[n:, :-n] + integ[:-n, :-n]
+            found = np.argwhere(blocks == n * n)
+            if not len(found):
+                break
+            hits, half = found, r
+        if hits is None:
+            return None
+        # cell centres: a safe cell is safe across its whole width (the check floors into the grid),
+        # so the room around the centre of the middle cell is (half + 0.5) cells on every side
+        cam = cam_origin + (hits[:, 0] + half + 0.5) * res
+        thigh = thigh_origin + (hits[:, 1] + half + 0.5) * res
+        k = int(np.argmin(np.hypot(cam, thigh)))
+        return float(cam[k]), float(thigh[k]), float((half + 0.5) * res)
+
+    def workspace_center(self, sides=None):
+        """Per-leg pose with the MOST room around it, as ({name: deg}, {side: info}).
+
+        This is the pose a system-ID chirp is most likely to fit in: near a hard limit or a
+        workspace edge every amplitude is refused at t=0, which is the usual reason a measurement
+        will not start. `room` is the symmetric amplitude each joint can take FROM that pose:
+        cam/thigh share the inscribed-square half-width (both move at once), abduction is half its
+        safe range. A leg with no workspace falls back to the zero pose, like Home."""
+        targets, info = {}, {}
+        for side in (sides or paths.SIDES):
+            leg = self.wstore.legs.get(side) if self.wstore else None
+            got = None
+            if leg is not None and leg.get("knee_grid") is not None:
+                got = self._largest_safe_square(leg["knee_grid"], leg["knee_grid_deg"],
+                                                leg["knee_cam_origin"], leg["knee_thigh_origin"])
+            if got is None:
+                for role in paths.ROLES:
+                    targets[f"{side}.{role}"] = 0.0
+                info[side] = dict(source="zero pose (no workspace for this leg)",
+                                  room={r: HARD_CLAMP[r] for r in paths.ROLES})
+                continue
+            cam, thigh, room = got
+            lo, hi = leg["abd_safe"]
+            abd = 0.5 * (lo + hi)
+            targets[f"{side}.abd"] = round(abd, 1)
+            targets[f"{side}.cam"] = round(cam, 1)
+            targets[f"{side}.thigh"] = round(thigh, 1)
+            info[side] = dict(source="workspace centre",
+                              room=dict(abd=round(min(abd - lo, hi - abd), 1),
+                                        cam=round(room, 1), thigh=round(room, 1)))
+        return targets, info
+
+    def center(self, sides=None, slew_dps=None):
+        """Slew to workspace_center(). Uses the same guided move as home(): the feasibility net
+        rather than the eroded polygon, so it also works when the leg is currently parked OUTSIDE
+        the safe region — which is exactly when you reach for this button.
+        Returns (targets, info, "") or (None, None, reason)."""
+        ok, why = self._motion_allowed()
+        if not ok:
+            with self.lock:
+                self._last_reject = why
+            return None, None, why
+        targets, info = self.workspace_center(sides)
+        relax = self._pose_rejected_by_band()
+        with self.lock:
+            self._manual_targets.update(targets)
+            self._home_active = True
+            self._home_kind = "center"
+            self._home_relax = relax
+            self._home_slew = float(np.clip(slew_dps if slew_dps else 20.0, 5.0, 120.0))
+            for s in self._sine.values():
+                s["enabled"] = False
+            self._req_mode = "MANUAL"
+        return targets, info, ""
 
     def sine_defaults(self, frac=0.7):
         """Per-actuator sine endpoints = `frac` of the contiguous SAFE travel around the CURRENT
@@ -332,6 +475,76 @@ class RobotDaemon(threading.Thread):
                           center=round(c, 1), room_up=round(room_up, 1),
                           room_down=round(room_dn, 1))
         return out, ""
+
+    def measure_defaults(self, leg="right", profile="dynamic", frac=MEASURE_FRAC):
+        """Excitation sized to what the hardware actually offers from the CURRENT pose.
+
+        Per role: amplitude = `frac` of the contiguous safe travel (the smaller of the two
+        directions — the chirp is a sine centred on the pose, so it needs symmetric room), and the
+        chirp's end frequency = the one whose peak sine velocity 2*pi*f*A reaches `frac` of that
+        motor's no-load speed at that amplitude, capped at MEASURE_F_MAX.
+
+        Per-role room does NOT compose: cam and thigh share the 4-bar assembly band, so three
+        individually-safe amplitudes can still leave the workspace when swept together. The whole
+        envelope is therefore validated here and the amplitudes backed off uniformly until it fits,
+        which is the same check measure_start will apply. Returns ({amp, f0, f1, room}, "") or
+        (None, reason)."""
+        if not self.by_name or any(m.pos is None for m in self.motors):
+            return None, "not all motors are reporting yet"
+        if leg not in paths.SIDES:
+            return None, f"leg must be right|left (got {leg})"
+        frac = float(np.clip(frac, 0.05, 0.98))
+        pose = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items()}
+        room = {}
+        for role in paths.ROLES:
+            n = f"{leg}.{role}"
+            c = pose[n]
+            lo, hi = self._hard_bounds(leg, role)
+            room[role] = min(self._safe_room(pose, n, +1.0, hi - c),
+                             self._safe_room(pose, n, -1.0, c - lo))
+
+        def freq_for(role, a):
+            if profile == "quasi_static" or a < 0.1:
+                return MEASURE_F_STATIC
+            return min(MEASURE_F_MAX, frac * NO_LOAD_DPS[role] / (2.0 * np.pi * a))
+
+        def size(role, a_room):
+            """Trade amplitude against frequency until BOTH the no-load speed and the position
+            loop's tracking error are satisfied. A and f fight each other -- peak speed is 2*pi*f*A,
+            and error is A*|1-G(f)| -- so solve by iterating rather than in closed form. Quasi-static
+            is untouched: at 0.03 Hz the loop tracks perfectly and amplitude is free."""
+            a = a_room
+            for _ in range(6):
+                f = freq_for(role, a)
+                room_for_err = MEASURE_TRACK_FRAC * meas["max_track_err"]
+                a_track = room_for_err / max(_pos_loop_error_ratio(f), 1e-6)
+                a_new = min(a_room, a_track)
+                if abs(a_new - a) < 0.05:
+                    a = a_new
+                    break
+                a = a_new
+            return round(a, 1), round(freq_for(role, a), 2)
+
+        meas = self._merge_measure_spec(dict(leg=leg, profile=profile))
+        meas["base"] = pose
+        scale, amp, f0, f1 = 1.0, {}, {}, {}
+        for _ in range(12):
+            sized = {r: size(r, frac * room[r] * scale) for r in paths.ROLES}
+            amp = {r: sized[r][0] for r in paths.ROLES}
+            f1 = {r: sized[r][1] for r in paths.ROLES}
+            f0 = {r: (MEASURE_F_STATIC if profile == "quasi_static"
+                      else MEASURE_DEFAULTS["f0"][r]) for r in paths.ROLES}
+            meas["amp"], meas["f0"], meas["f1"] = amp, f0, f1
+            T = meas["duration"]
+            if all(self._validate_pose(self._measure_pose(meas, T * k / (MEASURE_ENVELOPE_SAMPLES - 1)),
+                                       meas["override"])[0]
+                   for k in range(MEASURE_ENVELOPE_SAMPLES)):
+                break
+            scale *= 0.8
+        else:
+            return None, "no excitation amplitude fits here — centre the leg first"
+        return dict(amp=amp, f0=f0, f1=f1, frac=frac, scale=round(scale, 3),
+                    room={r: round(room[r], 1) for r in paths.ROLES}), ""
 
     def _safe_room(self, pose, name, direction, max_reach):
         """Largest contiguous safe displacement of `name` from its current value in `direction`
@@ -753,15 +966,29 @@ class RobotDaemon(threading.Thread):
                 self._last_reject = reason
                 self._held = held_before                   # do NOT advance through refused space
                 return                                     # hold previous commands, don't send
-        elif self.fklut is not None and self.fklut.available:
+        note = ""
+        if override and self.fklut is not None and self.fklut.available:
+            bad = ""
             for side in paths.SIDES:                       # physically-assemblable band net
                 ok, reason = self.fklut.feasible_check(side, targets_norm[f"{side}.cam"],
                                                        targets_norm[f"{side}.thigh"])
                 if not ok:
-                    self._last_reject = reason
-                    self._held = held_before
-                    return
-        self._last_reject = ""
+                    bad = reason
+                    break
+            if not bad:
+                self._home_relax = False                   # back in the band: re-arm the net
+            elif not (homing and self._home_relax):
+                self._last_reject = bad
+                self._held = held_before
+                return
+            else:
+                # The move STARTED from a pose the band net rejects, so enforcing it here would
+                # pin the robot in that pose forever — and getting out of it is the whole point of
+                # Home / ⌖ Centre. The destination was validated before the move was accepted, the
+                # slew is slow, and the hard clamps, the tracking-error trip and the E-STOP all
+                # still apply. The net re-arms the moment the leg is back inside the band (above).
+                note = f"recovering toward a checked target — {bad}"
+        self._last_reject = note
 
         for n, m in self.by_name.items():
             raw = self.calib.raw(n, targets_norm[n])
@@ -1079,7 +1306,8 @@ class RobotDaemon(threading.Thread):
                                 err=int(err[i]))
                         for i, n in enumerate(paths.MOTOR_NAMES)},
                 manual=dict(targets=manual_targets, override=override, slew_dps=self._slew_dps,
-                            sine=sine_pub, homing=self._home_active),
+                            sine=sine_pub, homing=self._home_active,
+                            homing_kind=self._home_kind),
                 playback=(None if self._pb is None else dict(
                     running=self.mode == "PLAYBACK", phase=round(self._pb.get("phase", 0.0), 3),
                     period=self._pb["period"], mode=self._pb["mode"], sides=self._pb["sides"],

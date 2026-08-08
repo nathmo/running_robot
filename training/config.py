@@ -203,6 +203,34 @@ class Config:
     # which the real robot will not be either) turns the bias into something the policy must cancel
     # from the yaw-rate error every episode instead of a constant it can bake in. 0 = off.
     dr_loop_site: float = 0.0015        # +-1.5 mm, ~the size of the as-built asymmetry
+    # ----- MEASURED-ON-ROBOT sim2real axes (2026-08-06) -----------------------------------------
+    # HOMING ERROR. noise_encoder_offset (0.01 rad = 0.57 deg) is the encoder's own zero jitter and
+    # is far too small for what actually happens: the user re-homes before every run and calibrates
+    # to 1-2 deg, so 5 deg is the safe envelope. Crucially this is NOT just an observation error --
+    # a wrong zero means you READ theta-delta and the drive parks at theta+delta, so it must be
+    # applied to the COMMAND as well, which noise_encoder_offset never was. Only the pair is
+    # physically right; obs-only would teach the policy a bias that does not exist in the plant.
+    # NOTE only ~45% of the (cam,thigh) box is mechanically assemblable, so a large homing error can
+    # push commands out of the band on the real robot -- this trains for it, it does not fix it.
+    dr_joint_zero_deg: float = 0.0
+    # IMU MOUNTING ROTATION. noise_grav_bias adds a vector offset to gravity and renormalises, which
+    # approximates a small tilt but leaves the GYRO untouched -- physically impossible, a rotated
+    # IMU rotates both. This applies one per-episode random rotation to gravity AND angular velocity
+    # together. Distinct from dr_gravity_tilt, which rotates the WORLD (a slope): there the robot
+    # really is tilted, here it is level and the sensor lies.
+    dr_imu_rot_deg: float = 0.0
+    # IMU DROPOUT. Freeze the IMU channels for a window -- stale frames, a hung driver, or the
+    # tethered rig where the reading stops reflecting free-body dynamics. The point is NOT to make
+    # the policy IMU-blind (for a free-base biped the IMU is the only balance sensor, and blind
+    # means it can never reject a disturbance); it is to stop it LUNGING when the IMU goes
+    # uninformative. The gait generator is feedforward, so the legs should keep cycling.
+    dr_imu_dropout_prob: float = 0.0    # per-step probability of entering a stale window
+    dr_imu_dropout_s: float = 0.25      # how long a stale window lasts
+    # BUS-VOLTAGE SAG. dr_torque is a per-EPISODE constant; a real pack droops as current is drawn
+    # and recovers when it is not. First-order droop on delivered power. The EVE 50PL cells are not
+    # expected to sag much -- this is insurance, and it costs nothing.
+    dr_torque_sag: float = 0.0          # peak fractional torque loss at sustained full power
+    dr_torque_sag_tau_s: float = 2.0    # droop/recovery time constant
 
     # ----- sensor noise (see domain_rand.SensorNoise) --------------------------------------------
     # Per-episode CONSTANTS (calibration you get wrong once and live with) + per-step white noise.
@@ -313,9 +341,44 @@ class Config:
     #   "active"       policy-driven ankle servo, NO spring (k=0). Needs the +2-actuator plant
     #                  (model/dash01_active.xml) -- action/obs widen, own lineage.
     #   "active_spring" policy-driven ankle servo IN PARALLEL with the spring (parallel-elastic).
+    #   "bar"          NO spring. A rigid TENSION-ONLY strut (2026-08-05, user's v2 candidate):
+    #                  it takes unlimited load in traction, so it is a hard stop at the flat-foot
+    #                  angle in the direction the ground loads it; in compression it BUCKLES past
+    #                  ankle_bar_buckle_nm and carries nothing more. Removes the 249 g spring
+    #                  assembly from each shin (see ankle_spring_mass_kg) -- distal mass being the
+    #                  axis the speed ceiling is most sensitive to.
     # NOTE "rigid" needs the lock_ankle equalities and the active modes need the 8-actuator model;
     # env.py raises if model_path lacks them, rather than silently running the wrong arm.
     ankle_mode: str = "passive"
+    # PRELOAD. The shipped spring is preloaded ~14.3 N*m at stance (springref -+0.7 vs a standing
+    # ankle at -+0.20), and _setup_ankle's k-change is preload-PRESERVING by default: raising k
+    # alone balloons that preload and flips the robot (verified 2026-07-24). "zero" instead puts
+    # springref AT the flat-foot standing angle, so the spring makes no torque on an unloaded flat
+    # foot and only resists deflection from it -- the physically-real "spring with no preload".
+    # This is a much WEAKER ankle than the same k with preload, so the two are separate arms.
+    ankle_preload: str = "preserve"     # "preserve" | "zero"
+    # Compressive torque the tension-only strut carries before it buckles ("bar" mode). The user's
+    # spec is a 10 N buckling FORCE; the plant has no spring geometry at all (build_model.py models
+    # the spring as pure joint stiffness -- the preload breakaway is an explicit TODO there), so
+    # there is no lever arm to convert it. Realistic ankle lever arms of 20-60 mm put 10 N at
+    # 0.2-0.6 N*m, and the foot's own gravity torque is ~0.13 N*m, so the strut holds the foot near
+    # flat through swing across that whole band -- the conclusion is insensitive to the lever arm.
+    # Swept rather than guessed; see the ankle2 study arms.
+    ankle_bar_buckle_nm: float = 0.4
+    # Mass REMOVED from each shin (LegLeft/RightNCS-v1) when the spring assembly is deleted, with
+    # that body's inertia tensor scaled by the mass ratio -- the same approximation
+    # apply_measured_masses.py makes. The measured shin is 573 g = 324 g of link + 249 g of spring
+    # hardware folded in (they are parallel and very close), so 0.249 restores the bare shin.
+    # 0 = keep the plant as built. Distal mass costs ~0.93 m/s per kg, so this is not a detail.
+    ankle_spring_mass_kg: float = 0.0
+    # Re-settle the `stand` keyframe against THIS arm's ankle law before training (env
+    # ._resettle_keyframe). The shipped keyframe is an equilibrium of the k=28.65 PRELOADED spring,
+    # so a softer/preload-free/strut ankle starts off equilibrium and lurches at every reset -- a
+    # handicap falling on exactly the arms under test, and a bias in _stand_torque and
+    # height_target too. Default OFF so every m1..m7 / slow / sym / wskill / ankle-study preset is
+    # bit-for-bit unchanged; the 2026-08-05 arms all turn it on, INCLUDING their k350 control, so
+    # every arm in that comparison gets identical treatment.
+    ankle_resettle: bool = False
     # Damping as a DAMPING RATIO instead of an absolute number. The 2026-07-24 sweep hand-picked
     # ankle_damping per arm (1.6 at k=350 = ~9% of critical) and the resulting spring ring became
     # the m7 6 Hz cadence bug -- i.e. the k-curve was measured with damping varying independently
@@ -376,6 +439,39 @@ class Config:
     action_scale: float = 0.5           # normalization for the action_rate term's motor_cmd units
     action_filter: float = 0.2          # EMA smoothing of targets (0 = off); helps sim2real
     action_delay_steps: int = 1         # fixed actuation delay in control steps (Pi+CAN plant truth)
+    # ----- THE MEASURED DRIVE (2026-08-05 swept-sine Bode, identical on both legs) ---------------
+    # The plant models the motors as <position kp=200 kv=5>, a critically damped servo at ~13 Hz.
+    # The REAL drive's internal cascaded position loop is a first-order roll-off at 0.8 Hz plus a
+    # ~25 ms transport delay:
+    #       f Hz   0.8   1.1   1.4   2.0   2.5   2.9
+    #       gain  0.71  0.60  0.53  0.38  0.30  0.28
+    #       lag    -48   -61   -71   -86   -94  -104
+    # (0.71 at -48 deg IS a first-order corner, so one pole fits it.) That is a >10x bandwidth
+    # mismatch against a gait_freq_hz range topping out at 4 Hz, where the drive executes ~1/4 of
+    # the commanded amplitude ~100 deg late. Every policy trained before this assumed authority the
+    # hardware cannot deliver.
+    #
+    # Set drive_bandwidth_hz and the env DERIVES action_filter from the control rate as
+    # exp(-control_dt / tau), tau = 1/(2*pi*f). That is the point of expressing it in Hz rather than
+    # as a filter coefficient: the same PHYSICAL drive maps to 0.975 at 200 Hz and 0.904 at 50 Hz,
+    # so a 50 Hz and a 200 Hz arm are the same robot rather than two different ones. Likewise
+    # drive_delay_ms converts to whole control steps. 0 = legacy (use the raw coefficients above),
+    # so every m1..m7 / slow / sym / wskill / ankle-study preset is bit-for-bit unchanged.
+    drive_bandwidth_hz: float = 0.0
+    drive_delay_ms: float = 0.0
+    # DRIVE-BANDWIDTH CURRICULUM. Going from the stack's effective ~35 Hz target filter to the
+    # measured 0.8 Hz in one step is the largest plant change in this project, and it MEASURABLY
+    # destroys a warm start: teleop_v5 ran at ep_len 1448 / reward +511, and walk_fwd_easy -- same
+    # policy, no DR, no sensor noise, no pushes, ONLY the ankle and drive changed -- collapsed to
+    # 251 / -78. Same failure family as DR-at-full-width-from-step-0, which is what pinned
+    # teleop_v3 until dr_curriculum_steps was added.
+    # Ramps in LOG10(Hz), not Hz: the filter coefficient is wildly nonlinear in frequency
+    # (alpha 0.4 -> 35 Hz, 0.6875 -> 11.9 Hz, 0.975 -> 0.8 Hz), so a linear-in-Hz ramp would do
+    # almost nothing for most of its length and then fall off a cliff at the end.
+    # 0 = no curriculum (start at drive_bandwidth_hz immediately), so every existing preset is
+    # bit-for-bit unchanged.
+    drive_bandwidth_start_hz: float = 0.0
+    drive_curriculum_steps: int = 0
     # ----- motor velocity / acceleration limits (2026-07-24; sim2real + cadence) -----
     # The position servos have NO velocity or acceleration cap in the model (only kv damping + a
     # SOFT w_motor_vel reward), so the 200 Hz policy can crank the legs arbitrarily fast -> the k350
@@ -1501,6 +1597,240 @@ def _mk_wskill(m):
 
 
 PRESETS.update({f"{m}_wskill_gait": _mk_wskill(m) for m in LOCKS})
+
+
+# ================================================================================================
+# ANKLE-2 STUDY (2026-08-05) -- can the REAL ankle, or no ankle spring at all, be stabilised?
+# ================================================================================================
+# The whole m1..m7 record was obtained on a k=350 ankle spring that WILL NOT BE BUILT, and the
+# 2026-08-04 force map showed the real spring is 8x short of the 3.5 BW running requirement. So the
+# open question is no longer "which k is best" -- it is a MECHANICAL DESIGN decision with exactly
+# two candidates the user can actually build:
+#
+#   Q1  the real spring: k = 41.4 N*m/rad (user-measured, replaces the 28.65 spec) with NO preload.
+#       Can any controller keep the robot from falling on that?
+#   Q2  no spring at all: a rigid TENSION-ONLY strut (unlimited in traction, buckles past 10 N in
+#       compression), which also deletes the 249 g spring assembly from each shin. Can that
+#       stabilise? Distal mass costs ~0.93 m/s per kg, so this arm is cheaper AND lighter if it
+#       works.
+#
+# Everything except the ankle is _WSKILL_PLANT, identical in every arm: the sym stack (Fourier,
+# freq (0.5,4.0), contact-switch 0.20, duty-symmetry 8.0) PLUS workspace_kill. The kill is on at
+# the user's call because this is a build decision and a false pass is expensive -- without it an
+# arm can "succeed" one-legged with a foot parked outside the real robot's reachable box, which is
+# a sim exploit, not a stable robot.
+#
+# Every arm sets ankle_resettle: the shipped keyframe is an equilibrium of the PRELOADED 28.65
+# spring, so without it the soft arms would start every episode out of equilibrium and be measured
+# against a stance they cannot hold. The k350 control gets it too, so the treatment is identical.
+_ANKLE2_PLANT = {k: v for k, v in _WSKILL_PLANT.items()
+                 if k not in ("ankle_stiffness", "ankle_damping")}
+_ANKLE2_PLANT.update(ankle_zeta=0.7, ankle_resettle=True)
+
+SHIN_SPRING_KG = 0.249      # spring assembly folded into the measured 573 g shin (bare shin 324 g)
+
+ANKLE2_ARMS = {
+    # --- controls, so a failure below can be read ------------------------------------------------
+    # the known-good, unbuildable spring. If THIS fails on the corrected plant (144.5 N*m torque,
+    # measured masses, workspace_kill) then the whole screen is uninterpretable and nothing else
+    # here means anything. It is the first curve to look at.
+    "k350":     dict(ankle_mode="passive", ankle_stiffness=350.0),
+    # today's robot as modelled: the 28.65 spec spring, preload preserved.
+    "k28_65":   dict(ankle_mode="passive", ankle_stiffness=28.65),
+    # welded ankle, spring mass still aboard. Upper bound on stiffness, and the reference the
+    # tension strut is measured against -- bar vs rigid isolates the cost of being UNILATERAL.
+    "rigid":    dict(ankle_mode="rigid"),
+    # --- Q1: the real spring -----------------------------------------------------------------
+    # real k, preload PRESERVED. Not the question, but it separates "k is too low" from "removing
+    # the preload is what kills it" -- without this arm a k41_4_np failure is unattributable.
+    "k41_4":    dict(ankle_mode="passive", ankle_stiffness=41.4),
+    # THE Q1 ARM: real k, no preload.
+    "k41_4_np": dict(ankle_mode="passive", ankle_stiffness=41.4, ankle_preload="zero"),
+    # --- Q2: the tension-only strut ----------------------------------------------------------
+    # THE Q2 ARM: strut + the shin lightened by the deleted spring assembly.
+    "bar":      dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG),
+    # strut with the shin mass left on: separates "the strut works" from "the lighter shin works".
+    "bar_heavy": dict(ankle_mode="bar"),
+    # buckling-load sensitivity. The user's spec is a 10 N buckling FORCE and the plant carries no
+    # spring geometry to convert it (build_model.py models the spring as pure joint stiffness), so
+    # the lever arm is unknown to within 20-60 mm = 0.2-0.6 N*m. These two bracket it. If they
+    # agree, the lever arm does not matter and the answer is robust; if they disagree, the user
+    # needs to tape-measure the ankle lever arm before believing either.
+    "bar_lo":   dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG,
+                     ankle_bar_buckle_nm=0.2),
+    "bar_hi":   dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG,
+                     ankle_bar_buckle_nm=0.6),
+    # 2026-08-06: `rigid` (welded BOTH ways) completes the 57 m dash at 2.55 m/s in 5 of 6 greedy
+    # episodes while `bar` (tension-only) manages 0.6 m and stands one-legged -- and the ONLY
+    # difference between them is that the strut gives way in compression past 0.4 N*m. So the
+    # tension-only-ness may be the whole cost, not the ankle compliance. This arm is a strut that
+    # also takes real COMPRESSION (5 N*m before buckling = a proper link rather than a thin rod),
+    # bracketing bar -> rigid. If it recovers rigid's performance, the build answer changes from
+    # "tension-only strut" to "just make it a stiff link", which is a trivial mechanical change.
+    "bar_comp": dict(ankle_mode="bar", ankle_spring_mass_kg=SHIN_SPRING_KG,
+                     ankle_bar_buckle_nm=5.0),
+}
+
+
+def _ankle2(m, arm, **kw):
+    if arm not in ANKLE2_ARMS:
+        raise KeyError(f"unknown ankle2 arm {arm!r}; have {sorted(ANKLE2_ARMS)}")
+    return _react(m, **{**_ANKLE2_PLANT, **ANKLE2_ARMS[arm], **kw})
+
+
+# m3 (pitch free) is the screen: the cheapest rung that is still ankle-sensitive, and where every
+# prior ankle result lives. m6 (all six base DOF free) is what "does not fall down" really means and
+# is deliberately NOT chained -- which arms earn it is a human call on the m3 curves.
+PRESETS.update({f"ankle2_m3_{a}": (lambda a=a: _ankle2("m3", a)) for a in ANKLE2_ARMS})
+PRESETS.update({f"ankle2_m6_{a}": (lambda a=a: _ankle2("m6", a)) for a in ANKLE2_ARMS})
+
+# ----- the same arms THROUGH THE MEASURED DRIVE -------------------------------------------------
+# The arms above run against the plant's <position kp=200 kv=5> servo (~13 Hz) behind an
+# action_filter whose equivalent bandwidth is 34.7 Hz. The real drive is 0.8 Hz + 25 ms. Which
+# ankle is best is one question; whether ANY of them can be stabilised through the actuator that
+# exists is a different and more decisive one, and it is the one the build decision rests on.
+#
+# Run at BOTH control rates on purpose. Because drive_bandwidth_hz is specified in Hz and converted
+# at the control rate, the 200 Hz and 50 Hz arms are the SAME PHYSICAL ROBOT -- so the pair
+# isolates "does the control rate matter" from "does the drive matter". If they tie, 200 Hz buys
+# nothing through this drive and the Pi only ever needs 50 Hz; if 200 Hz wins, the rate is real and
+# the drive is the thing to fix. Compute is not the constraint either way: the policy is a 275->64
+# ->64->24 MLP (46 kFLOP, 9.3 MFLOP/s at 200 Hz, ~0.1% of a Pi 4) and CAN is 26% of a 1 Mbps bus.
+_DRIVE = dict(drive_bandwidth_hz=0.8, drive_delay_ms=25.0)
+
+PRESETS.update({
+    f"ankle2drv_m3_{a}": (lambda a=a: _ankle2("m3", a, **_DRIVE))
+    for a in ("k350", "bar", "k28_65")})
+def _at_50hz(c):
+    """Take a 200 Hz preset back to 50 Hz *at equal ROBOT TIME*, not equal step count.
+
+    _HZ200 multiplied every step-denominated schedule by 4 when the control rate went 50 -> 200 Hz,
+    and set gamma to 0.99^(1/4) to hold the ~2 s horizon. Running those same numbers at 50 Hz would
+    make every curriculum advance 4x slower in seconds-of-robot, and shorten the discount horizon to
+    0.5 s -- so a 50 Hz arm would lose to a 200 Hz arm for reasons that have nothing to do with the
+    control rate, which is the one thing the pair exists to measure. Everything counted in control
+    steps has to come back down by 4, including the ep_len competence GATES (1600 steps is 8 s at
+    200 Hz but 32 s at 50 Hz, which nothing ever reaches, so the gated curricula would never open).
+
+    action_filter / action_delay_steps are deliberately NOT touched: drive_bandwidth_hz and
+    drive_delay_ms re-derive them from the control rate, which is the whole point of specifying the
+    drive in Hz."""
+    c.control_decimation = 20
+    c.gamma = 0.99                                   # 0.9975^4 — same ~2 s horizon
+    c.ent_gate_air_time = 0.02                       # per-step mean of an event term scales with dt
+    for f in ("total_steps", "gait_curriculum_steps", "efficiency_ramp_steps",
+              "sprint_curriculum_steps", "ent_anneal_steps", "ent_anneal_deadline_steps",
+              "jitter_curriculum_steps", "dr_curriculum_steps", "pitch_armature_ramp_steps"):
+        v = getattr(c, f, 0)
+        if v:
+            setattr(c, f, int(v // 4))
+    for f in ("curriculum_gate_ep_len", "jitter_curriculum_gate_ep_len"):
+        v = getattr(c, f, 0.0)
+        if v:
+            setattr(c, f, float(v) / 4.0)
+    return c
+
+
+PRESETS.update({
+    f"ankle2drv50_m3_{a}": (lambda a=a: _at_50hz(_ankle2("m3", a, **_DRIVE)))
+    for a in ("k350", "bar", "k28_65")})
+
+
+# ================================================================================================
+# walk_fwd (2026-08-06) -- THE UNTETHERED-WALKING TARGET
+# ================================================================================================
+# Goal: walk forward, untethered, on a real floor. Not a speed record, not teleop -- steering is
+# deferred but PROVISIONED (see below).
+#
+# This is an ADAPTATION run, not a from-scratch one. teleop_v5 reached 321 M steps as an m6
+# walking policy with the full sim2real package, and none of the changes below touch obs or action
+# width, so that checkpoint loads directly. Growing a walker from zero would not fit the schedule;
+# adapting one does.
+#
+# What changes vs teleop_v5, all of it measured on the actual robot rather than assumed:
+#   ankle       -> the `bar_comp` strut: the ankle2 screen's winner (ep_len 2307 at 29 M vs the
+#                  tension-only strut's 0.6 m dash) AND 249 g/leg lighter. Note the user's as-built
+#                  3 mm PETG rod buckles at 0.27 N, ~35x below spec -- this arm assumes the carbon
+#                  replacement.
+#   drive       -> the MEASURED 0.8 Hz + 25 ms position loop, in place of a fictional ~35 Hz filter.
+#   friction    -> (0.35, 0.60). Measured slip angle was 40 deg = mu 0.84; training well below it
+#                  is deliberate, since the failure mode is planting a foot that then slides.
+#   homing      -> 5 deg per-joint zero error on BOTH obs and command (user calibrates to 1-2 deg
+#                  and re-records the safe workspace each run, so 5 is the safety envelope).
+#   IMU         -> 10 deg mounting rotation on gravity AND gyro, plus stale-frame dropout.
+#   voltage     -> within-episode torque droop.
+#
+# STEERING IS PROVISIONED, NOT ENABLED: steer_enable stays True so the action keeps its 26 dims and
+# every checkpoint in this lineage stays loadable, but cmd_yaw_max = 0 so nothing is asked of it
+# yet. Turning steering on later is then a curriculum widening rather than a reshape that orphans
+# the run. Enabling it later WITHOUT this would break every checkpoint -- the reason it is here.
+#
+# The drive bandwidth rides the DR curriculum rather than being switched on at step 0. Going from a
+# ~35 Hz filter to 0.8 Hz is the largest single plant change in this project's history and would
+# otherwise destroy the warm start on contact.
+def _walk_fwd(**kw):
+    base = dict(
+        # --- the ankle2 winner ---
+        ankle_mode="bar", ankle_bar_buckle_nm=5.0, ankle_spring_mass_kg=SHIN_SPRING_KG,
+        ankle_resettle=True, ankle_damping=0.0, ankle_zeta=0.0,
+        # --- the measured drive ---
+        drive_bandwidth_hz=0.8, drive_delay_ms=25.0,
+        # ease in from an optimistic drive; applying 0.8 Hz at step 0 measurably destroys the
+        # teleop_v5 warm start (ep_len 1448 -> 251 with nothing else changed)
+        drive_bandwidth_start_hz=12.0, drive_curriculum_steps=120_000_000,
+        # --- measured sim2real ---
+        dr_friction=1.0, dr_friction_range=(0.35, 0.60),
+        dr_joint_zero_deg=5.0,
+        dr_imu_rot_deg=10.0, dr_imu_dropout_prob=0.0015, dr_imu_dropout_s=0.25,
+        dr_torque_sag=0.15, dr_torque_sag_tau_s=2.0,
+        # --- forward only, steering provisioned ---
+        cmd_v_fwd_max=1.0, cmd_v_back_max=0.3, cmd_yaw_max=0.0,
+        # --- keep the v3 lessons: gated+retreating curricula, DR ramped not slammed ---
+        curriculum_retreat_frac=0.7, efficiency_target=0.35,
+        stance_ratio_start=0.70, stance_ratio_final=0.62,
+        dr_curriculum_steps=80_000_000,
+    )
+    base.update(kw)
+    return _teleop(**base)
+
+
+PRESETS.update({
+    "walk_fwd": lambda: _walk_fwd(),
+    # bring-up rig: base clamped, so balance is provided by the clamp and the IMU truthfully reads
+    # a constant. Short fine-tune off the same trunk so the rig has a policy that cycles its legs
+    # without needing to balance. NOT the deployment policy.
+    "walk_fwd_rig": lambda: _walk_fwd(push_interval_s=0.0, trip_prob=0.0, dr_imu_dropout_prob=0.0),
+    # diagnostic: no adversity at all. If walking does not survive the ankle+drive change HERE,
+    # the problem is the plant change, not the randomisation.
+    "walk_fwd_easy": lambda: _walk_fwd(
+        dr_enable=False, obs_noise_enable=False, push_interval_s=0.0, trip_prob=0.0,
+        ctrl_jitter_ms_final=0.0, ctrl_drop_prob_final=0.0),
+    # --- v2 (2026-08-08): walk_fwd DEADLOCKED. Measured, both seeds, 530 M steps ------------------
+    # walk_fwd_s0/s1 sat at ep_len ~500 with dr_scale EXACTLY 0.00 and drive_bw pinned at its 12 Hz
+    # start for the entire run. Cause: curriculum_gate_ep_len=1600 gates ALL SIX ramps at once
+    # (stance, drive_bw, eff, dr, jitter, drop), the policy never reached 1600, so no curriculum
+    # ever moved -- while the sim2real calibration axes (5 deg homing, 10 deg IMU rotation) were
+    # NOT gated and stood at full width from step 0. Full sensor adversity, zero dynamics
+    # randomisation, zero efficiency regularisation, and a fake 12 Hz drive: the worst of both
+    # worlds, with the only exit gated on the thing it could not do. This is the SAME failure the
+    # _teleop comment above already documents ("measurably BACKFIRED", eff_scale pinned at 0) --
+    # the gate was re-introduced here anyway.
+    #
+    # Three changes, all pointed at that one mechanism:
+    #   (a) warm-start from walk_fwd_easy_s0, which FINISHED the drive curriculum and holds
+    #       ep_len 4938 (peak 6833) at the real 0.8 Hz -> start above any sane gate instead of
+    #       under it, and start on the real drive rather than needing to ramp onto it.
+    #   (b) drive curriculum OFF (start_hz=0) -- the parent already lives at 0.8 Hz, so re-easing
+    #       to 12 Hz would only teach it a drive that does not exist.
+    #   (c) gates 1600 -> 400, so the ramps advance from step 0 at the parent's competence and
+    #       retreat (retreat_frac 0.7 -> floor 280) if it collapses. The ramp is the safety, not
+    #       the gate.
+    # Paired with SensorNoise.scale (domain_rand.py): homing/IMU/dropout/sag now ride dr_scale.
+    # Order inverted on purpose: learn the hard PLANT first, then add adversity.
+    "walk_fwd2": lambda: _walk_fwd(
+        drive_bandwidth_start_hz=0.0, drive_curriculum_steps=0,
+        curriculum_gate_ep_len=400.0, jitter_curriculum_gate_ep_len=400.0),
+})
 
 
 def get_config(name: str = "default") -> Config:

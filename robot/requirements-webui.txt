@@ -1,10 +1,16 @@
 # DASH-01 web control interface (fixed_gait/webui/) — adds Flask on top of the Pi runtime.
 #
 # On the Pi (which has no internet in the field), pre-download the wheels on a connected machine:
-#     pip download flask -d wheels/          # on the desktop
-#     scp -r wheels nemo@<pi>:               # copy over Tailscale/SSH
-#     pip install --no-index --find-links wheels/ flask     # on the Pi
+#     pip download flask smbus2 -d wheels/      # on the desktop
+#     scp -r wheels nemo@<pi>:                  # copy over Tailscale/SSH
+#     pip install --no-index --find-links wheels/ flask smbus2     # on the Pi
 #
 # Base runtime (numpy, python-can) comes from requirements-rpi.txt.
 -r requirements-rpi.txt
 flask>=3.0
+
+# Sense HAT (B) sensors over I2C (fixed_gait/webui/sensehat.py). Pure Python, so Raspberry Pi OS's
+# system copy can simply be dropped into the venv when there is no network:
+#     cp -r /usr/lib/python3/dist-packages/smbus2 .venv/lib/python3*/site-packages/
+# Optional: without it the web UI runs exactly as before and the sensor panel says why it is empty.
+smbus2>=0.4            # tested 0.5.0

@@ -85,7 +85,12 @@ def add_ankle_locks(path=BASE):
     """Add lock_ankle_L/R equality joint constraints (inactive) -> the RIGID arm.
 
     Pinned at the settled LOADED stance angle, so activating the lock does not teleport the foot.
-    Same tight solref/solimp as the existing base-DOF locks."""
+
+    solref 0.002 (NOT the 0.005 the base-DOF locks use). At 0.005 the weld holds on MuJoCo 3.7 but
+    GIVES WAY on 3.3.7 -- measured on the cluster, the ankle drifts 0.858 rad over a 60-step
+    rollout, i.e. the "rigid" arm is silently a compliant one there, and the smoke gate fails and
+    aborts every queued job. At 0.002 the drift is 0.005 rad on 3.3.7. Local dev is on 3.7.0 and the
+    cluster venv on 3.3.7, so anything solver-marginal has to be tuned against the OLDER one."""
     txt = _read(path)
     if 'name="lock_ankle_L"' in txt:
         print("ankle locks already present")
@@ -99,7 +104,7 @@ def add_ankle_locks(path=BASE):
         q = float(qpos[ANKLE_QADR[side]])
         eqs.append(f'    <joint name="lock_ankle_{side}" joint1="{j}" '
                    f'polycoef="{q:.9g} 0 0 0 0" active="false" '
-                   f'solref="0.005 1" solimp="0.95 0.99 0.001" />\n')
+                   f'solref="0.002 1" solimp="0.999 0.9999 0.0001" />\n')
         print(f"lock_ankle_{side}: pinning {j} at {q:+.4f} rad")
 
     txt = txt.replace("  </equality>", "".join(eqs) + "  </equality>", 1)

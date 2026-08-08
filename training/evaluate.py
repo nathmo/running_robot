@@ -92,6 +92,16 @@ def build(run: Path, preset, checkpoint):
         # its training distribution, and will look far worse than it is.
         if "cmd_scale" in d:
             raw.set_cmd_scale(d["cmd_scale"])
+        # FOURTH instance, and the most damaging one yet: drive_bandwidth_start_hz is resolved by
+        # DashEnv.__init__ into a fixed action_filter, so a run with a drive curriculum is REBUILT
+        # AT ITS START VALUE (12 Hz) no matter how far the curriculum actually got. walk_fwd_easy_s0
+        # trained down to the real 0.8 Hz and logs ep_len 4938; evaluated without this line it reads
+        # 126 -- a 39x understatement, and exactly the kind of number that gets a good policy thrown
+        # away. The curriculum value is the ground truth; resolved_config only holds the start.
+        if "drive_bw_log10" in d:
+            raw.set_drive_bandwidth_log10(d["drive_bw_log10"])
+            print(f"[eval] drive bandwidth restored to {10 ** d['drive_bw_log10']:.2f} Hz "
+                  f"(resolved_config start was {cfg.drive_bandwidth_start_hz:.1f} Hz)")
     venv = DummyVecEnv([lambda: raw])
     model_path = pick_model(run, checkpoint)
     vn = pick_vecnormalize(run, model_path)

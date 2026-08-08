@@ -31,13 +31,14 @@ def _predict(model, dset, params, loop):
 def cross_validate(model, datasets, masses=None, kt=None, holdout=0.3):
     """Fit on the first (1-holdout) of each run, predict the held-out tail, report residual RMS and
     the normalized RMS (residual / measured-torque RMS) per joint."""
+    SCALARS = ("act_dof", "fs", "loop_resid", "leg", "hold_other")   # per-run, never sliced
     train, test = [], []
     for d in datasets:
         n = len(d["t"]); cut = int(n * (1 - holdout))
         train.append({k: (v[:cut] if hasattr(v, "__len__") and getattr(v, "ndim", 1) and
-                           k not in ("act_dof", "fs", "loop_resid") else v) for k, v in d.items()})
+                           k not in SCALARS else v) for k, v in d.items()})
         test.append({k: (v[cut:] if hasattr(v, "__len__") and getattr(v, "ndim", 1) and
-                          k not in ("act_dof", "fs", "loop_resid") else v) for k, v in d.items()})
+                          k not in SCALARS else v) for k, v in d.items()})
     params = mujoco_id.identify(model, train, masses=masses, kt=kt)
     loop = (ds.loop_sites(model), ds.loop_dof(model))
     saved = ktc.set_masses(model, masses)
@@ -46,12 +47,15 @@ def cross_validate(model, datasets, masses=None, kt=None, holdout=0.3):
         rms, nrms = {}, {}
         for d in test:
             pred, _ = _predict(model, d, params, loop)
-            meas = np.array([[params["kt"].get(jm[j], np.nan) for j in ds.ACT_JOINTS]]) * d["cur"]
             for k, jname in enumerate(ds.ACT_JOINTS):
                 m = jm[jname]
-                r = pred[:, k] - meas[:, k]
-                rms.setdefault(m, []).append(r)
-                nrms.setdefault(m, []).append(meas[:, k])
+                # score a joint only on runs that actually moved it, and only if it was identified
+                if m not in params["kt"] or (d.get("hold_other", True)
+                                             and m.split(".")[0] != d.get("leg")):
+                    continue
+                meas = params["kt"][m] * d["cur"][:, k]
+                rms.setdefault(m, []).append(pred[:, k] - meas)
+                nrms.setdefault(m, []).append(meas)
     finally:
         for bid, mm in saved.items():
             model.body_mass[bid] = mm

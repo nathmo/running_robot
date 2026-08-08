@@ -9,6 +9,7 @@ const SID = {
   meshCache: {}, dynInit: false, runningWas: false,
   masses: null, massesKey: null,   // own copy: the limbs list must not depend on poll ordering
   measError: "",                   // last refused start/save, shown in-panel until the next attempt
+  room: null, roomSeen: false,     // leg -> {abd, cam, thigh} amplitude that fits, from ⌖ Centre
 };
 const ROLES3 = ["abd", "cam", "thigh"];
 const PROFILES = {
@@ -39,6 +40,8 @@ function applyProfile(name) {
     tr.querySelector(".m-f0").value = p.f0;
     tr.querySelector(".m-f1").value = p.f1;
   });
+  trimAmplitudes();          // static fallback if the daemon cannot answer
+  fitExcitation(true);       // then size it to what this pose actually affords (80% preset)
   $("meas-prof-dyn").classList.toggle("primary", name === "dynamic");
   $("meas-prof-static").classList.toggle("primary", name === "quasi_static");
   const base = SID.leg === "right" ? "measure_right" : "measure_left";
@@ -57,8 +60,68 @@ function measSpec() {
     override: $("meas-override").checked, amp, f0, f1 };
 }
 
+/* ---- centring: park the legs where the workspace leaves the most room, then fit the amplitudes.
+ * The daemon's `room` is the half-width of the largest safe box around that pose, i.e. exactly the
+ * amplitude the envelope check will accept; 0.5 deg comes off for the drive's own tracking error. */
+function roomFor(leg) {
+  const r = SID.room && SID.room[leg || SID.leg];
+  return (r && r.room) || null;
+}
+function trimAmplitudes() {
+  const room = roomFor();
+  if (!room) return [];
+  const cut = [];
+  document.querySelectorAll("#meas-joint-rows tr").forEach((tr) => {
+    const inp = tr.querySelector(".m-amp");
+    const max = Math.max(0, Math.round((room[tr.dataset.role] - 0.5) * 10) / 10);
+    if (+inp.value > max) { cut.push(`${tr.dataset.role} ${+inp.value}→${max}`); inp.value = max; }
+  });
+  return cut;
+}
+/* ---- 80% preset: ask the daemon what this pose actually affords. The server owns the hardware
+ * numbers (safe travel + no-load speed) and validates the whole swept envelope, so amplitude and
+ * frequency come back already consistent with each other and with the workspace. */
+async function fitExcitation(quiet) {
+  try {
+    const d = await api("/api/measure/defaults",
+                        { json: { leg: SID.leg, profile: SID.profile } });
+    const f = d && d.defaults;
+    if (!f) return;
+    document.querySelectorAll("#meas-joint-rows tr").forEach((tr) => {
+      const r = tr.dataset.role;
+      tr.querySelector(".m-amp").value = f.amp[r];
+      tr.querySelector(".m-f0").value = f.f0[r];
+      tr.querySelector(".m-f1").value = f.f1[r];
+    });
+    const backed = f.scale < 0.999 ? ` (backed off to ${Math.round(f.scale * 100)}% — the cam/thigh
+      band does not fit all three at once)` : "";
+    if (!quiet) setBanner(`excitation set to ${Math.round(f.frac * 100)}% of travel and no-load
+      speed${backed}`, "", 6000);
+  } catch (e) { if (!quiet) measSetError(e); }
+}
+
+async function centerLegs() {
+  measSetError("");
+  $("meas-room").textContent = "⌖ centring…";
+  try {
+    const d = await api("/api/manual/center", { json: { slew_dps: 30 } });
+    onCenterResult(d);
+  } catch (e) { $("meas-room").textContent = ""; measSetError(e); }
+}
+/* also called from app.js when the Manual panel's ⌖ Centre button is used */
+window.onCenterResult = function (d) {
+  if (!d || !d.legs) return;
+  SID.room = d.legs;
+  SID.roomSeen = false;              // armed on the first poll that reports the move (renderRoom)
+  const cut = trimAmplitudes();
+  if (cut.length) setBanner("amplitudes trimmed to fit the centred pose: " + cut.join(", "), "", 6000);
+  fitExcitation(true);       // centring freed up room — take 80% of the new envelope
+};
+
 function wireMeasure() {
   buildMeasRows();
+  $("btn-meas-center").onclick = centerLegs;
+  $("btn-meas-fit").onclick = () => fitExcitation(false);
   $("meas-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
     $("meas-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
     b.classList.add("active"); SID.leg = b.dataset.leg; applyProfile(SID.profile);
@@ -129,6 +192,23 @@ function renderMeasStatus(m) {
     : m.done ? `captured ${m.n_samples} samples — save it below` : "") : "";
 }
 
+/** Live progress of the centring move + how much room the excited leg ends up with. Driven off the
+ *  state poll (not a timer), so it is right whoever started the move — this panel or Manual.
+ *  The room figures describe ONE pose, so they are dropped as soon as the robot leaves it (any jog,
+ *  Home or sine cancels the guided move): a stale "±11°" would be exactly the kind of number that
+ *  gets a run refused again. */
+function renderRoom(st) {
+  const man = st.manual || {};
+  const centring = !!(man.homing && man.homing_kind === "center");
+  if (centring) SID.roomSeen = true;
+  else if (SID.roomSeen) { SID.room = null; SID.roomSeen = false; }
+  const room = roomFor();
+  $("meas-room").textContent = !room ? ""
+    : atManualTarget(man)
+      ? `centred — this pose fits abd ±${room.abd}°, cam ±${room.cam}°, thigh ±${room.thigh}°`
+      : "⌖ centring… (slow)";
+}
+
 function updateMeasureUI(st) {
   const m = st.measure;
   const running = !!(m && m.running);
@@ -136,6 +216,7 @@ function updateMeasureUI(st) {
   $("btn-meas-start").disabled = running;
   if (running) SID.measError = "";        // it started — the last rejection is history
   renderMeasStatus(m);
+  renderRoom(st);
   // saved runs
   const runs = st.measurements || [];
   const box = $("meas-runs");

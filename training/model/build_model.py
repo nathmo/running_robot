@@ -75,9 +75,24 @@ MESHDIR = "../../robotCADdescription/MJCF_OPEN_MUJOCO_B/dash01"  # relative to O
 # mass/inertia: the CAD part inertials OMIT the actuators (~7.1 kg of motors on a ~5.7 kg CAD
 # model), so each motor is welded onto its stator body as a point mass at the joint anchor.
 # inertia is a rough solid-cylinder estimate; replace with measured values with the rest.
-AKE90 = dict(kp=200, kv=5.0, forcerange=170, armature=0.0216,   # cam + thigh (propulsion)
+# forcerange is the DELIVERED peak joint torque, not the datasheet's. The datasheet quotes torque at
+# an ideal Kt; the gearbox does not deliver it. Measured 2026-08-05 with a known 1.552 kg mass on the
+# shin (robot/identification, measure_*_static_1552g_*.npz): effective joint Kt came out 82-89% of
+# the AKE90-8 datasheet 0.272 Nm/A x 8:1 = 2.176, i.e. a gearbox at ~85% efficiency. Peak torque
+# scales with Kt for the same peak current, so both drop by the same factor.
+#   AKE90-8:  170 -> 144.5 Nm   (0.85, MEASURED)
+#   AK60-39:   72 ->  61.2 Nm   (0.85 TRANSFERRED, not measured -- no datasheet Kt is published for
+#                                the AK60-39 to compare a fit against. If anything optimistic: 39:1
+#                                needs more gear stages than 8:1, so its efficiency is likely lower.)
+# Residual uncertainty is geometric, not physical: the test mass was clamped by hand, and Kt/gravity
+# trade off steeply against its position (~1.9%/cm of lever arm, plus a 5-10 cm perpendicular
+# standoff known only approximately). Across that box Kt spans 82-98% of datasheet. 0.85 is the
+# centre of the standoff-corrected reading. To tighten it, re-run the known-mass test with the mass
+# on the shin CENTRELINE at a distance measured to +-1 cm.
+GEARBOX_EFF = 0.85
+AKE90 = dict(kp=200, kv=5.0, forcerange=144.5, armature=0.0216,  # cam + thigh (propulsion)
              mass=1.40, inertia=0.002)
-AK60 = dict(kp=120, kv=4.0, forcerange=72, armature=0.046,      # hip-roll (lateral)
+AK60 = dict(kp=120, kv=4.0, forcerange=61.2, armature=0.046,     # hip-roll (lateral)
             mass=0.75, inertia=0.001)
 
 # --- Per-joint setup. range=None => unlimited. act => actuator (motor spec). ---

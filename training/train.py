@@ -15,6 +15,7 @@ logs, progress.csv, training_plots.png.  Watch:  python -m tensorboard.main --lo
 """
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -656,7 +657,13 @@ def main():
             # the source stage's ent_coef is typically fully annealed (0.002) — a new milestone
             # needs its exploration back; the EntropyCallback re-anneals once competent again.
             model.ent_coef = cfg.ent_coef
-            print(f"[train] warm-started weights <- {warm_ckpt} (ent_coef reset to {cfg.ent_coef})")
+            # PPO.load restores the SOURCE run's seed out of the checkpoint, so --seed never
+            # reached a warm-started run: walk_fwd_s0 and _s1 produced bit-identical curves for
+            # 100 rollouts (measured 2026-08-06), i.e. a seed replicate was silently a duplicate
+            # and half the compute bought nothing. Re-seed explicitly after loading.
+            model.set_random_seed(cfg.seed)
+            print(f"[train] warm-started weights <- {warm_ckpt} (ent_coef reset to {cfg.ent_coef}, "
+                  f"reseeded to {cfg.seed})")
         else:
             venv = fresh_vecnorm()
             lr = lambda p: cfg.lr_final + p * (cfg.learning_rate - cfg.lr_final)  # p: 1 -> 0
@@ -696,6 +703,20 @@ def main():
             cb_list.append(RampCallback("stance_ratio", "set_stance_ratio",
                                         cfg.stance_ratio_start, cfg.stance_ratio_final,
                                         cfg.gait_curriculum_steps, run))
+    # DRIVE BANDWIDTH: ease the target filter from an optimistic drive down to the measured one.
+    # Applied at full strength from step 0 this collapses a warm start (measured: teleop_v5's
+    # ep_len 1448 -> 251 with nothing else changed). Gated + retreating where a gate exists, so it
+    # only tightens while the policy is coping and backs off when it is not.
+    if cfg.drive_bandwidth_hz > 0 and cfg.drive_bandwidth_start_hz > 0             and cfg.drive_curriculum_steps > 0:
+        _lo, _hi = math.log10(cfg.drive_bandwidth_start_hz), math.log10(cfg.drive_bandwidth_hz)
+        if gate > 0:
+            cb_list.append(GatedRampCallback("drive_bw_log10", "set_drive_bandwidth_log10",
+                                             _lo, _hi, cfg.drive_curriculum_steps, run, gate,
+                                             retreat_frac=rf))
+        else:
+            cb_list.append(RampCallback("drive_bw_log10", "set_drive_bandwidth_log10",
+                                        _lo, _hi, cfg.drive_curriculum_steps, run))
+
     if cfg.efficiency_ramp_steps > 0:
         if gate > 0:
             cb_list.append(GatedRampCallback("eff_scale", "set_efficiency_scale",

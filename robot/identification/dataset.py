@@ -54,16 +54,27 @@ def _sid(model, name):
     return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
 
 
+# The model mirrors the right leg's sagittal axes (Y vs -Y), but the webui's FK map is fitted per
+# leg in that leg's OWN frame, so it reports the same cam/thigh signs for both sides. The mirror is a
+# property of the model, not of the drive, so it belongs here — in the norm->model conversion — and
+# not in fklut. Without it the right leg's reconstructed pose walks out of the 4-bar assembly band
+# and loop closure sticks at ~0.78 m (measured on three separate runs; 1e-8 with the mirror).
+# Abduction does not need it: right.abd's identified Kt lands within 6% of left.abd's as-is.
+MODEL_SAGITTAL_MIRROR = {"left": 1.0, "right": -1.0}
+
+
 def joint_map_from_meta(meta):
     """Per motor: (sign, offset_deg) for  model_deg = sign*norm_deg + offset_deg. cam/thigh come from
-    the run's saved FK map (model_map); abduction defaults to identity (captured zero == model zero)."""
+    the run's saved FK map (model_map), mirrored into the model frame for the right leg; abduction
+    defaults to identity (captured zero == model zero)."""
     mm = meta.get("model_map") or {}
     out = {}
     for motor in MOTOR_TO_JOINT:
         side, role = motor.split(".")
         m = mm.get(side, {})
         if role in ("cam", "thigh"):
-            out[motor] = (float(m.get(role, 1)), float(m.get(f"{role}_off_deg", 0.0)))
+            out[motor] = (float(m.get(role, 1)) * MODEL_SAGITTAL_MIRROR[side],
+                          float(m.get(f"{role}_off_deg", 0.0)))
         else:                                        # abduction: no FK entry — assume identity
             out[motor] = (1.0, 0.0)
     return out
@@ -133,10 +144,15 @@ def loop_sites(model):
     return [(_sid(model, LOOP[s]["s1"]), _sid(model, LOOP[s]["s2"])) for s in ("L", "R")]
 
 
-def loop_jacobian(model, data, sites, d_dof, act_dof, damp=1e-3):
+def loop_jacobian(model, data, sites, d_dof, act_dof, damp=1e-6):
     """G = dq_passive/dq_actuated (4x6) from the connect constraint, damped near the 4-bar
     singularity so it stays bounded. Assumes data.qpos is set and kinematics fresh-ish (recomputes).
-    Used to express loop-coupled gravity/torque in the actuated (reduced) coordinates."""
+    Used to express loop-coupled gravity/torque in the actuated (reduced) coordinates.
+
+    `damp` was 1e-3, which is far more than this constraint needs away from the singularity —
+    cond(Jd'Jd) is ~157 over a normal measurement sweep, and that damping shrank G enough to inflate
+    the identified gravity torque by ~20%. Results converge for damp <= 1e-5; 1e-6 keeps a margin
+    against the singular poses while leaving the well-conditioned ones untouched."""
     mujoco.mj_kinematics(model, data)
     mujoco.mj_comPos(model, data)
     Jc = np.zeros((6, model.nv)); j1 = np.zeros((3, model.nv)); j2 = np.zeros((3, model.nv))
@@ -174,15 +190,21 @@ def build(model, run, meta, cutoff_hz=12.0, decimate=1):
     motors = list(meta.get("motor_names") or
                   ["right.abd", "right.cam", "right.thigh", "left.abd", "left.cam", "left.thigh"])
 
-    # remap the 6 measured motor columns into ACT_JOINTS order, converting deg->model rad
+    # remap the 6 measured motor columns into ACT_JOINTS order, converting deg->model rad.
+    # Torque and angle must share a frame: pos_norm is already in the CALIBRATED frame (the webui
+    # applied calibration.sign when normalizing) and `sign` then takes it to the model frame, but
+    # `cur` is raw motor-frame. So current needs BOTH signs to become a model-frame torque. Getting
+    # this wrong flips the sign of every identified Kt.
+    cal_motors = ((meta.get("calibration") or {}).get("motors") or {})
     q_act = np.zeros((len(t), 6))
     cur = np.zeros((len(t), 6))
     for k, jname in enumerate(ACT_JOINTS):
         motor = next(m for m, j in MOTOR_TO_JOINT.items() if j == jname)
         col = motors.index(motor)
         sign, off = jm[motor]
+        cal_sign = float((cal_motors.get(motor) or {}).get("sign", 1.0))
         q_act[:, k] = np.radians(sign * np.asarray(run["pos_norm"])[:, col] + off)
-        cur[:, k] = np.asarray(run["cur"])[:, col]
+        cur[:, k] = cal_sign * sign * np.asarray(run["cur"])[:, col]
 
     q_f = _lowpass(q_act, fs, cutoff_hz)
     qd = np.gradient(q_f, 1.0 / fs, axis=0)
@@ -201,5 +223,6 @@ def build(model, run, meta, cutoff_hz=12.0, decimate=1):
     out = dict(t=t[sl], q_act=q_f[sl], qd_act=qd[sl], qdd_act=qdd[sl], cur=cur[sl],
                qpos=qpos[sl], qvel=qvel[sl], qacc=qacc[sl], act_dof=act_dof, fs=fs,
                loop_resid=float(loop_resid),
+               leg=meta.get("leg"), hold_other=bool(meta.get("hold_other", True)),
                moving=(np.abs(qd[sl]) > np.radians(2.0)))
     return out

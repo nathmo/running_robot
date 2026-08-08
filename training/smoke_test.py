@@ -11,6 +11,7 @@ clip / kwargs back-compat and its kick-arrest on the m3 plant; the angular-momen
 the VecNormalize warm-start rejuvenation; curriculum setters reach the env.
 Exits non-zero on the first failure (safe to gate an sbatch on it).
 """
+import inspect
 import sys
 from pathlib import Path
 
@@ -887,6 +888,169 @@ def test_ankle_study():
     check("all study presets build", not bad, "; ".join(bad[:3]))
 
 
+def test_ankle2():
+    """The 2026-08-05 arms: the REAL spring with no preload (Q1) and the tension-only strut (Q2)."""
+    import numpy as np
+    from config import ANKLE2_ARMS, PRESETS, get_config
+    from env import DashEnv
+
+    bad = []
+    for a in ANKLE2_ARMS:
+        for m in ("m3", "m6"):
+            try:
+                PRESETS[f"ankle2_{m}_{a}"]()
+            except Exception as exc:                    # noqa: BLE001
+                bad.append(f"ankle2_{m}_{a}: {exc}")
+    check("all ankle2 presets build", not bad, "; ".join(bad[:3]))
+
+    # ----- preload ------------------------------------------------------------------------------
+    e = DashEnv(get_config("ankle2_m3_k41_4"))
+    ref_pre = e.model.qpos_spring[e._ankle_qpos].copy()
+    e.close()
+    e = DashEnv(get_config("ankle2_m3_k41_4_np"))
+    check("no-preload puts springref AT the flat-foot angle",
+          np.allclose(e.model.qpos_spring[e._ankle_qpos], e._bar_q0, atol=1e-9))
+    check("no-preload makes ZERO spring torque at the flat foot",
+          abs(e.ankle_k * float(e.model.qpos_spring[e._ankle_qpos][0] - e._bar_q0[0])) < 1e-9)
+    check("preload-preserving and zero-preload are DIFFERENT springrefs",
+          not np.allclose(ref_pre, e.model.qpos_spring[e._ankle_qpos]))
+    # the whole point of Q1: same k, but removing the preload collapses the stance
+    sag_np = e.settle_sag_m
+    e.close()
+    e = DashEnv(get_config("ankle2_m3_k41_4"))
+    # measured 2026-08-05: 145 mm vs 19 mm = 7.6x. The preload, not the stiffness, is doing almost
+    # all the work in the shipped ankle -- which is the whole reason Q1 is a separate arm from k41_4.
+    check("removing the preload costs >5x the stance sag at the SAME k",
+          sag_np > 5 * e.settle_sag_m, f"{sag_np*1000:.0f} mm vs {e.settle_sag_m*1000:.0f} mm")
+    e.close()
+
+    # ----- the tension-only strut ---------------------------------------------------------------
+    e = DashEnv(get_config("ankle2_m3_bar"))
+    check("bar has no spring", e.ankle_k == 0.0)
+    j = [int(jj) for jj in range(e.model.njnt)
+         if e.model.jnt_qposadr[jj] in list(e._ankle_qpos)]
+    one_sided = all(
+        (abs(e.model.jnt_range[jj][1] - e._bar_q0[i]) < 1e-9) if e._bar_sign[i] > 0
+        else (abs(e.model.jnt_range[jj][0] - e._bar_q0[i]) < 1e-9)
+        for i, jj in enumerate(j))
+    check("bar limit is ONE-SIDED, taut at the flat-foot angle", one_sided)
+    check("bar limit is stiff (not MuJoCo's default rubber)",
+          all(e.model.jnt_solref[jj][0] <= 0.005 for jj in j))
+    # traction: rigid. It must not be pushed past the stop by body weight.
+    check("bar holds the stance within 0.2 deg of taut",
+          np.degrees(np.max(e._bar_sign * (e.settle_ankle - e._bar_q0))) < 0.2)
+    # compression: saturates at the buckling load, and that load beats the foot's own gravity
+    # torque -- which is why the foot does not flop to the joint stop in swing.
+    e.data.qpos[e._ankle_qpos] = e._bar_q0 - e._bar_sign * 0.5      # deep on the compression side
+    e._apply_ankle_bar()
+    tau = e.data.qfrc_applied[e._ankle_dof]
+    check("bar compression SATURATES at the buckling load",
+          np.allclose(np.abs(tau), e.cfg.ankle_bar_buckle_nm, rtol=1e-9))
+    check("bar compression pushes back TOWARD taut",
+          np.all(e._bar_sign * tau > 0))
+    check("buckling load exceeds the foot's own gravity torque (no swing flop)",
+          e.cfg.ankle_bar_buckle_nm > 0.15, f"{e.cfg.ankle_bar_buckle_nm} N*m")
+    check("bar sheds the 249 g spring assembly from each shin",
+          abs(e.shin_mass - 0.324) < 1e-6, f"{e.shin_mass:.3f} kg")
+    e.close()
+    e = DashEnv(get_config("ankle2_m3_bar_heavy"))
+    check("bar_heavy KEEPS the spring mass (isolates strut from mass)",
+          abs(e.shin_mass - 0.573) < 1e-3, f"{e.shin_mass:.3f} kg")
+    e.close()
+
+    # ----- guards ------------------------------------------------------------------------------
+    from config import Config
+    for kw, why in ((dict(ankle_mode="passive", ankle_spring_mass_kg=0.249),
+                     "removing spring mass from an arm that still HAS a spring"),
+                    (dict(ankle_mode="bar", ankle_spring_mass_kg=99.0),
+                     "removing more mass than the shin has")):
+        try:
+            DashEnv(Config(**kw)); ok = False
+        except ValueError:
+            ok = True
+        check(f"rejects {why}", ok)
+
+    # ----- the study's own integrity ------------------------------------------------------------
+    # every arm re-settles, including the controls -- otherwise the soft arms are handicapped by
+    # starting off an equilibrium the stiff ones start on.
+    check("every ankle2 arm re-settles its stance",
+          all(get_config(f"ankle2_m3_{a}").ankle_resettle for a in ANKLE2_ARMS))
+    check("ankle2 keeps workspace_kill on",
+          all(get_config(f"ankle2_m3_{a}").workspace_kill for a in ANKLE2_ARMS))
+    # and the legacy lineages must be untouched by all of the above
+    c = get_config("m3_sym_gait")
+    check("legacy presets do NOT re-settle (bit-for-bit unchanged)",
+          not c.ankle_resettle and c.ankle_preload == "preserve"
+          and c.ankle_spring_mass_kg == 0.0)
+
+
+def test_walk_fwd2():
+    """The sim2real calibration axes must RIDE the dr_scale curriculum, and no preset may put a
+    competence gate above what the ramps can plausibly reach.
+
+    walk_fwd measured what happens otherwise: curriculum_gate_ep_len=1600 gated all six ramps,
+    ep_len plateaued at ~500, so dr_scale sat at EXACTLY 0.00 for 530 M steps while the ungated
+    5 deg homing error and 10 deg IMU rotation ran at full width from step 0. Two seeds, half a
+    billion steps, no curriculum ever moved.
+    """
+    print("\n== walk_fwd2 / sim2real curriculum ==")
+    c = get_config("walk_fwd2")
+    check("drive starts AT the measured 0.8 Hz (parent already trained there)",
+          c.drive_bandwidth_hz == 0.8 and c.drive_bandwidth_start_hz == 0.0
+          and c.drive_curriculum_steps == 0)
+    check("gate is below the parent's competence, not above it",
+          0 < c.curriculum_gate_ep_len <= 600 and 0 < c.jitter_curriculum_gate_ep_len <= 600)
+    check("ramps still retreat if it collapses", c.curriculum_retreat_frac > 0)
+    check("dr ramp is on (the axes ride it)", c.dr_enable and c.dr_curriculum_steps > 0)
+
+    env = DashEnv(c)
+    rng = np.random.default_rng(0)
+    # the drive must be the real one from step 0, not an optimistic start value
+    hz = -np.log(env.cfg.action_filter) / (2 * np.pi * env.control_dt)
+    check("action_filter really encodes 0.8 Hz at construction", abs(hz - 0.8) < 0.02,
+          f"{hz:.3f} Hz")
+    check("25 ms drive delay -> 5 steps at 200 Hz", env.cfg.action_delay_steps == 5)
+
+    def axes(s):
+        env.set_dr_scale(s)
+        env._noise.reset(rng)
+        R = env._noise.imu_R
+        return (np.degrees(np.abs(env._noise.zero_offset)).max(),
+                np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
+    z0, r0 = axes(0.0)
+    check("dr_scale=0 -> NO homing error and NO IMU rotation", z0 == 0.0 and r0 < 1e-9,
+          f"zero {z0:.3f} deg, imu {r0:.3f} deg")
+    check("set_dr_scale drives the sensor axes too", env._noise.scale == env._dr.scale)
+    # sample the width: over many draws the max must grow with the scale and respect the cap
+    def width(s, n=60):
+        env.set_dr_scale(s)
+        zs, rs = [], []
+        for _ in range(n):
+            a, b = axes(s)
+            zs.append(a); rs.append(b)
+        return max(zs), max(rs)
+    zq, rq = width(0.25)
+    zf, rf = width(1.0)
+    check("axes scale with the curriculum (quarter width < full width)", zq < zf and rq < rf,
+          f"0.25: {zq:.2f}/{rq:.2f} deg   1.0: {zf:.2f}/{rf:.2f} deg")
+    check("full width respects the MEASURED caps (5 deg homing, 10 deg IMU)",
+          zf <= c.dr_joint_zero_deg + 1e-6 and rf <= c.dr_imu_rot_deg + 1e-6,
+          f"{zf:.2f} deg / {rf:.2f} deg")
+    check("bus sag also rides the ramp",
+          "_dr.scale" in inspect.getsource(DashEnv._update_torque_sag))
+    # and the diagnostic arm must stay genuinely clean
+    e2 = DashEnv(get_config("walk_fwd_easy"))
+    check("warm-start dims match the parent (its checkpoint still loads)",
+          e2.observation_space.shape == env.observation_space.shape
+          and e2.action_space.shape == env.action_space.shape,
+          f"{env.observation_space.shape} / {env.action_space.shape}")
+    e2.set_dr_scale(1.0)
+    e2._noise.reset(rng)
+    check("walk_fwd_easy stays clean even at dr_scale=1 (obs_noise off)",
+          float(np.abs(e2._noise.zero_offset).max()) == 0.0
+          and np.allclose(e2._noise.imu_R, np.eye(3)))
+
+
 if __name__ == "__main__":
     test_fourier_gait()
     test_cpg_gait()
@@ -911,5 +1075,7 @@ if __name__ == "__main__":
     test_curriculum_setters()
     test_m1_rail()
     test_ankle_study()
+    test_ankle2()
+    test_walk_fwd2()
     print(f"\n{'ALL OK' if FAIL == 0 else f'{FAIL} FAILURES'}")
     sys.exit(1 if FAIL else 0)
