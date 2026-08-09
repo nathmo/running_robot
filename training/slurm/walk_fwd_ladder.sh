@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # THE walk_fwd BASE-DOF LADDER (2026-08-09).
 #
-#   bash training/slurm/walk_fwd_ladder.sh                 # m3 -> m4 -> m5 -> m6, seed 0
+#   bash training/slurm/walk_fwd_ladder.sh                 # m2 -> m3 -> m4 -> m5 -> m6, seed 0
 #   DRY=1 bash training/slurm/walk_fwd_ladder.sh           # print, submit nothing
 #   SEED=1 STAGES="m5 m6" bash training/slurm/walk_fwd_ladder.sh
 #
@@ -20,7 +20,12 @@
 # (izar_train.sbatch resolves a dir to its newest checkpoint, so a stage killed by its wall clock
 # still hands off). Stage k+1 depends on `afterany` of stage k's LAST link.
 #
-#   m3  y/roll/yaw locked - sagittal, the configuration that has actually worked
+#   m2  x,z free, y/roll/PITCH/yaw locked - it cannot fall, so the only thing to learn is how
+#       the gait converts into forward speed. That is the measured deficit: the m6 policy tops
+#       out at 0.14 m/s against a 0.6 m/s command and survives 0/12 episodes at +0.40. Kept
+#       SHORT on purpose (STEPS_m2/LINKS_m2) -- with pitch locked a policy can lunge with no
+#       consequence, and m2 -> m3 is the hard transition in this project's history.
+#   m3  + pitch. y/roll/yaw locked - sagittal, the configuration that has actually worked
 #   m4  + lateral translation
 #   m5  + ROLL          <- THE RUNG TO WATCH. The CPG A/B walled here at matched budget.
 #   m6  + yaw           == walk_fwd3 exactly, so it is a clean comparison against the control run
@@ -30,20 +35,25 @@
 set -euo pipefail
 
 SB=training/slurm/izar_train.sbatch
-STAGES="${STAGES:-m3 m4 m5 m6}"
+STAGES="${STAGES:-m2 m3 m4 m5 m6}"
 SEED="${SEED:-0}"
 NENVS="${NENVS:-18}"
 STEPS="${STEPS:-80000000}"          # per stage; ankle2_m3_rigid reached 15.5 s in 73 M
 LINKS="${LINKS:-3}"                 # 4 h each -> 12 h of container per stage; a stage that hits
                                     # STEPS early just exits and its spare links exit immediately
 TIME="${TIME:-4:00:00}"
+# Per-stage overrides: STEPS_m2=40000000 etc. m2 is deliberately SHORT -- it is a speed prior, and
+# with pitch locked a policy can lunge with no consequence, so a long m2 buys a gait that m3 then
+# has to unlearn (m2 -> m3 is the hard transition in this project's history).
+STEPS_m2="${STEPS_m2:-40000000}"
+LINKS_m2="${LINKS_m2:-2}"
 # the 0.8 Hz walker: 340 M steps, completed the drive curriculum, ep_len 4938 / best 6833
 WARM0="${WARM0:-training/runs/walk_fwd_easy_warm}"
 DRY="${DRY:-}"
 
 echo "=== walk_fwd ladder, seed $SEED ==="
 echo "    stages: $STAGES"
-echo "    ${LINKS}x${TIME} per stage, ${STEPS} steps, ${NENVS} envs"
+echo "    default ${LINKS}x${TIME} per stage, ${STEPS} steps, ${NENVS} envs (m2: ${LINKS_m2}x, ${STEPS_m2})"
 echo "    rung 1 warm-starts from $WARM0"
 echo
 
@@ -53,14 +63,17 @@ for m in $STAGES; do
     preset="walk_fwd_${m}"
     name="ladder_${m}_s${SEED}"
     warm="${prev_run:-$WARM0}"
-    export_str="ALL,PRESET=${preset},STEPS=${STEPS},NENVS=${NENVS},SEED=${SEED},NAME=${name},WARM=${warm}"
+    # per-stage budget, e.g. STEPS_m2 / LINKS_m2, falling back to the global default
+    eval "steps=\${STEPS_${m}:-$STEPS}"
+    eval "links=\${LINKS_${m}:-$LINKS}"
+    export_str="ALL,PRESET=${preset},STEPS=${steps},NENVS=${NENVS},SEED=${SEED},NAME=${name},WARM=${warm}"
 
     dep=""
     [ -n "$prev_last" ] && dep="--dependency=afterany:${prev_last}"
 
-    echo "--- $name   (preset $preset, warm <- $warm)"
+    echo "--- $name   (preset $preset, warm <- $warm, ${links}x${TIME}, ${steps} steps)"
     if [ -n "$DRY" ]; then
-        echo "    sbatch --job-name=$name --time=$TIME $dep --export=$export_str $SB   x$LINKS"
+        echo "    sbatch --job-name=$name --time=$TIME $dep --export=$export_str $SB   x$links"
         prev_last="<dry:${name}>"
         prev_run="training/runs/${name}"
         continue
@@ -69,7 +82,7 @@ for m in $STAGES; do
     jid=$(sbatch --parsable --job-name="$name" --time="$TIME" $dep \
                  --export="$export_str" "$SB")
     echo "    link 1: $jid${dep:+  ($dep)}"
-    for i in $(seq 2 "$LINKS"); do
+    for i in $(seq 2 "$links"); do
         jid=$(sbatch --parsable --job-name="$name" --time="$TIME" \
                      --dependency=afterany:"$jid" --export="$export_str" "$SB")
         echo "    link $i: $jid (afterany)"

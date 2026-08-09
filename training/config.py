@@ -1878,7 +1878,14 @@ PRESETS.update({
     # Each rung differs from the next by base_lock and NOTHING else, so the reward, obs (550) and
     # action (26) are identical all the way up and every stage warm-starts the one below. m5 is the
     # rung to watch: it frees ROLL, and the CPG A/B walled there at matched budget.
-    "walk_fwd_m3": lambda: _walk_fwd3(base_lock=LOCKS["m3"]),   # y/roll/yaw locked — sagittal
+    # m2 is the SPEED prior: x and z free, y/roll/pitch/yaw locked, so the robot cannot fall and
+    # the only thing left to learn is how the gait converts into forward velocity — the exact
+    # deficit measured on the m6 policy (0.14 m/s achieved against a 0.6 m/s command, and 0/12
+    # survival at +0.40). Deliberately kept SHORT: with pitch locked a policy can lunge with no
+    # consequence, and m2 -> m3 is the historically hard transition here (the whole m3 anti-topple
+    # sweep). We want a gait prior, not a policy overfitted to a plant that cannot topple.
+    "walk_fwd_m2": lambda: _walk_fwd3(base_lock=LOCKS["m2"]),   # x,z free — cannot fall
+    "walk_fwd_m3": lambda: _walk_fwd3(base_lock=LOCKS["m3"]),   # + pitch — y/roll/yaw locked
     "walk_fwd_m4": lambda: _walk_fwd3(base_lock=LOCKS["m4"]),   # + lateral translation
     "walk_fwd_m5": lambda: _walk_fwd3(base_lock=LOCKS["m5"]),   # + ROLL  <- the known wall
     "walk_fwd_m6": lambda: _walk_fwd3(base_lock=LOCKS["m6"]),   # + yaw = walk_fwd3 exactly
