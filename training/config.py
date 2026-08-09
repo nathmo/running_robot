@@ -1863,7 +1863,32 @@ PRESETS.update({
     # NOT changed, deliberately: cmd_v_back_max stays non-zero. The measurement says backing up is
     # the one thing this policy is good at, so removing it would delete a working skill to fix a
     # problem it does not have -- which is exactly what the first hypothesis here would have done.
-    "walk_fwd3": lambda: _walk_fwd(
+    "walk_fwd3": lambda: _walk_fwd3(),
+    # --- THE LADDER (2026-08-09) ----------------------------------------------------------------
+    # The whole teleop -> walk_fwd lineage trains at m6, ALL SIX base DOFs free, from step 0 --
+    # verified across every resolved_config in the archive: teleop, teleop_easy, v2, v3, v5,
+    # walk_fwd, walk_fwd_easy, walk_fwd2 are all base_lock (0,0,0,0,0,0). It is the one lineage in
+    # this project that skipped the base-DOF ladder, and the one that will not converge: three
+    # plateaus, ~1.4 G steps, dr_scale self-limiting at 0.27.
+    #
+    # Everything that ever worked on this robot used the ladder -- 97 archived runs sit at m3, and
+    # the only controller to reach 2.55 m/s on the MEASURED plant (ankle2_m3_rigid) was m3, with
+    # roll and yaw locked. It got there in 73 M steps; m6 has spent 300 M going nowhere.
+    #
+    # Each rung differs from the next by base_lock and NOTHING else, so the reward, obs (550) and
+    # action (26) are identical all the way up and every stage warm-starts the one below. m5 is the
+    # rung to watch: it frees ROLL, and the CPG A/B walled there at matched budget.
+    "walk_fwd_m3": lambda: _walk_fwd3(base_lock=LOCKS["m3"]),   # y/roll/yaw locked — sagittal
+    "walk_fwd_m4": lambda: _walk_fwd3(base_lock=LOCKS["m4"]),   # + lateral translation
+    "walk_fwd_m5": lambda: _walk_fwd3(base_lock=LOCKS["m5"]),   # + ROLL  <- the known wall
+    "walk_fwd_m6": lambda: _walk_fwd3(base_lock=LOCKS["m6"]),   # + yaw = walk_fwd3 exactly
+})
+
+
+def _walk_fwd3(**kw):
+    """walk_fwd2 + the three 2026-08-09 fixes. Every ladder rung is this, with only base_lock
+    changed, so a stage's checkpoint always loads into the stage above it."""
+    base = dict(
         drive_bandwidth_start_hz=0.0, drive_curriculum_steps=0,
         curriculum_gate_ep_len=400.0, jitter_curriculum_gate_ep_len=400.0,
         adversity_curriculum=True,
@@ -1875,8 +1900,10 @@ PRESETS.update({
         # disabled" was in fact steering-commanded from step 0. This is an internal-consistency
         # fix (start must not exceed max), NOT a measured win -- unlike (1) and (2) above.
         cmd_yaw_start=0.0,
-        cmd_curriculum_gate_ep_len=400.0),
-})
+        cmd_curriculum_gate_ep_len=400.0,
+    )
+    base.update(kw)
+    return _walk_fwd(**base)
 
 
 def get_config(name: str = "default") -> Config:
