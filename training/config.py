@@ -1864,6 +1864,26 @@ PRESETS.update({
     # the one thing this policy is good at, so removing it would delete a working skill to fix a
     # problem it does not have -- which is exactly what the first hypothesis here would have done.
     "walk_fwd3": lambda: _walk_fwd3(),
+    # STANDING STILL OUT-SCORES WALKING, measured on ladder_m2_s0 at 10 M steps: it reached
+    # ep_len 10796 (54.0 s) and reward +9752 without locomoting -- both feet grounded 86-99% of
+    # the time, 7.6 footfalls/s of chatter, 0.2-1.2 m covered in a MINUTE (~0.01 m/s). At 12 Hz
+    # drive with a ZERO command it moves 0.207 m/s and falls, so it had learned to emit large
+    # actions and use the 0.8 Hz filter as a brake.
+    #
+    # The arithmetic, at cmd +0.30 m/s (w_track_lin 4.0, sigma_min 0.2, w_alive 0.5, fall 100):
+    #     stand still, survive 60 s   0.922/step  ->  ~2766 per episode
+    #     track perfectly, fall at 5s 4.500/step  ->   1125 - 100 = 1025
+    # Standing wins by 2.7x. Two causes, both fixed here:
+    #   * sigma_min 0.2 pays 0.42 for ZERO velocity against a 0.3 command -- partial credit for
+    #     doing nothing. 0.15 cuts that to 0.07 while keeping a usable gradient (e=2, not e=3:
+    #     tightening further zeroes the gradient too and the policy simply never learns to move).
+    #   * w_alive 0.5 is a survival wage payable for idling. The sprint lineage that actually ran
+    #     at 2.55 m/s kept w_alive=0 and paid a CLOCK COST instead. A clock cost is wrong for a
+    #     command objective (standing is the correct response to cmd=0), so just drop the wage.
+    # Suicide-safe without it: step_reward_floor bounds per-step loss at -0.25 (dt-scaled) while
+    # dying costs fall_penalty 100, so living always out-values diving.
+    # Applied to the LADDER only -- walk_fwd3 keeps the old reward so it stays a clean control.
+    # That does mean walk_fwd_m6 is no longer byte-identical to walk_fwd3.
     # --- THE LADDER (2026-08-09) ----------------------------------------------------------------
     # The whole teleop -> walk_fwd lineage trains at m6, ALL SIX base DOFs free, from step 0 --
     # verified across every resolved_config in the archive: teleop, teleop_easy, v2, v3, v5,
@@ -1884,12 +1904,15 @@ PRESETS.update({
     # survival at +0.40). Deliberately kept SHORT: with pitch locked a policy can lunge with no
     # consequence, and m2 -> m3 is the historically hard transition here (the whole m3 anti-topple
     # sweep). We want a gait prior, not a policy overfitted to a plant that cannot topple.
-    "walk_fwd_m2": lambda: _walk_fwd3(base_lock=LOCKS["m2"]),   # x,z free — cannot fall
-    "walk_fwd_m3": lambda: _walk_fwd3(base_lock=LOCKS["m3"]),   # + pitch — y/roll/yaw locked
-    "walk_fwd_m4": lambda: _walk_fwd3(base_lock=LOCKS["m4"]),   # + lateral translation
-    "walk_fwd_m5": lambda: _walk_fwd3(base_lock=LOCKS["m5"]),   # + ROLL  <- the known wall
-    "walk_fwd_m6": lambda: _walk_fwd3(base_lock=LOCKS["m6"]),   # + yaw = walk_fwd3 exactly
+    "walk_fwd_m2": lambda: _walk_fwd3(base_lock=LOCKS["m2"], **_LADDER_RWD),  # x,z free — cannot fall
+    "walk_fwd_m3": lambda: _walk_fwd3(base_lock=LOCKS["m3"], **_LADDER_RWD),  # + pitch
+    "walk_fwd_m4": lambda: _walk_fwd3(base_lock=LOCKS["m4"], **_LADDER_RWD),  # + lateral translation
+    "walk_fwd_m5": lambda: _walk_fwd3(base_lock=LOCKS["m5"], **_LADDER_RWD),  # + ROLL <- the wall
+    "walk_fwd_m6": lambda: _walk_fwd3(base_lock=LOCKS["m6"], **_LADDER_RWD),  # + yaw
 })
+
+
+_LADDER_RWD = dict(w_alive=0.0, track_sigma_min=0.15)
 
 
 def _walk_fwd3(**kw):
