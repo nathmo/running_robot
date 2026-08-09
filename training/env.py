@@ -1253,14 +1253,19 @@ class DashEnv(gym.Env):
         self._residual_rate_sq = float(np.sum((residual - self._prev_residual) ** 2))
         self._prev_residual = residual.copy()
 
-        # gentle random shove BEFORE the physics runs (free translational axes only)
+        # gentle random shove BEFORE the physics runs (free translational axes only).
+        # Scaled by the DR curriculum: measured on the walk_fwd_easy walker with paired seeds,
+        # pushes alone take it from 3/12 surviving episodes to 0/12 -- the same cost as full-width
+        # plant DR, which HAS a ramp. Leaving them at full width from step 0 is what pinned
+        # walk_fwd2 at 2 s for 300 M steps.
+        adv = self._dr.scale if self.cfg.adversity_curriculum else 1.0
         self._push_countdown -= 1
         if self._push_countdown <= 0:
             ang = self.np_random.uniform(0.0, 2.0 * np.pi)
             if not self.base_lock[0]:
-                self.data.qvel[self._base_x_dadr] += c.push_dv * np.cos(ang)
+                self.data.qvel[self._base_x_dadr] += adv * c.push_dv * np.cos(ang)
             if not self.base_lock[1]:
-                self.data.qvel[self._base_y_dadr] += c.push_dv * np.sin(ang)
+                self.data.qvel[self._base_y_dadr] += adv * c.push_dv * np.sin(ang)
             self._push_countdown = self._next_push_in()
 
         # TRIP: a swinging toe catches something that isn't in the map. Modelled as a brief force
@@ -1273,7 +1278,7 @@ class DashEnv(gym.Env):
         if self._trip_left > 0:
             self.data.xfrc_applied[self._trip_body, 0] = self._trip_force
             self._trip_left -= 1
-        elif c.trip_prob > 0.0 and self.np_random.random() < c.trip_prob:
+        elif c.trip_prob > 0.0 and self.np_random.random() < adv * c.trip_prob:
             air = ~(self._foot_contacts() | (self._toe_heights() < c.grounded_h))
             cand = np.flatnonzero(air)
             if cand.size:

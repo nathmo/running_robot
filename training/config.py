@@ -231,6 +231,13 @@ class Config:
     # expected to sag much -- this is insurance, and it costs nothing.
     dr_torque_sag: float = 0.0          # peak fractional torque loss at sustained full power
     dr_torque_sag_tau_s: float = 2.0    # droop/recovery time constant
+    # Put pushes and trips on the dr_scale ramp as well. OFF by default so every existing preset
+    # trains bit-identically. Measured on walk_fwd_easy_s0 (paired seeds, 12 episodes, clean 0.8 Hz
+    # plant): the walker survives 3/12 episodes clean, and 0/12 with pushes alone, 0/12 with trips
+    # alone -- each as expensive as full-width plant DR, which already had a ramp. Those two were
+    # the last adversity axes still applied at full width from step 0, and walk_fwd2 sat at 2.0 s
+    # for 300 M steps because of it.
+    adversity_curriculum: bool = False
 
     # ----- sensor noise (see domain_rand.SensorNoise) --------------------------------------------
     # Per-episode CONSTANTS (calibration you get wrong once and live with) + per-step white noise.
@@ -1830,6 +1837,45 @@ PRESETS.update({
     "walk_fwd2": lambda: _walk_fwd(
         drive_bandwidth_start_hz=0.0, drive_curriculum_steps=0,
         curriculum_gate_ep_len=400.0, jitter_curriculum_gate_ep_len=400.0),
+    # --- v3 (2026-08-09): walk_fwd2 plateaued at 2.0 s for 300 M steps ---------------------------
+    # The curricula were all moving this time, so it was not another deadlock. Two paired-seed
+    # ablations on the walk_fwd_easy_s0 walker (12 episodes, common random numbers, clean 0.8 Hz
+    # plant -- unpaired samples are worthless here, outcomes are bimodal and a 5-episode draw of
+    # the SAME condition gave 35.6 s and 1.8 s) found two separate causes:
+    #
+    # (1) COMMANDS THE PLANT CANNOT DELIVER. Survival vs the forced command:
+    #        -0.10 m/s  39.3 s med  5/12      +0.00 m/s  27.4 s med  2/12
+    #        +0.20 m/s  24.9 s med  3/12      +0.40 m/s   3.1 s med  0/12
+    #        -0.20 m/s   2.7 s med  5/12      +0.60 m/s   1.5 s med  0/12
+    #     Backward is FINE -- it is the best case. Forward above ~0.3 m/s is fatal, and the policy
+    #     only ever achieves ~0.14 m/s anyway. But cmd_v_fwd_start is 0.6, so the EASIEST command
+    #     the curriculum can ask for at cmd_scale=0 is already 2-3x beyond the plant, and cmd_scale
+    #     sat at 0.0 (its 1200-step gate never opened) so the box never narrowed. That value was
+    #     inherited from the teleop lineage, whose drive was effectively instantaneous; it was never
+    #     re-tuned when the drive dropped to the measured 0.8 Hz. Start at 0.25 m/s -- inside what
+    #     the robot demonstrably does -- and let cmd_scale earn its way up to 1.0.
+    #
+    # (2) PUSHES AND TRIPS AT FULL WIDTH FROM STEP 0. Each takes the walker from 3/12 surviving
+    #     episodes to 0/12, the same cost as full-width plant DR, which already had a ramp. They
+    #     were the last two adversity axes without one. adversity_curriculum=True puts them on
+    #     dr_scale with everything else.
+    #
+    # NOT changed, deliberately: cmd_v_back_max stays non-zero. The measurement says backing up is
+    # the one thing this policy is good at, so removing it would delete a working skill to fix a
+    # problem it does not have -- which is exactly what the first hypothesis here would have done.
+    "walk_fwd3": lambda: _walk_fwd(
+        drive_bandwidth_start_hz=0.0, drive_curriculum_steps=0,
+        curriculum_gate_ep_len=400.0, jitter_curriculum_gate_ep_len=400.0,
+        adversity_curriculum=True,
+        cmd_v_fwd_start=0.25, cmd_v_back_start=0.10,
+        # (3) cmd_yaw_start was 0.3 while cmd_yaw_max is 0.0, so the yaw "curriculum" ramped DOWN
+        # and at cmd_scale=0 -- where it sat for every run in this lineage -- the policy was being
+        # commanded +/-0.3 rad/s of steering the whole time. walk_fwd_easy_s0's curriculum.json
+        # records cmd_yaw 0.3, so the run described as "forward only, steering provisioned but
+        # disabled" was in fact steering-commanded from step 0. This is an internal-consistency
+        # fix (start must not exceed max), NOT a measured win -- unlike (1) and (2) above.
+        cmd_yaw_start=0.0,
+        cmd_curriculum_gate_ep_len=400.0),
 })
 
 

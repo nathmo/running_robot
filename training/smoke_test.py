@@ -1038,6 +1038,56 @@ def test_walk_fwd2():
           f"{zf:.2f} deg / {rf:.2f} deg")
     check("bus sag also rides the ramp",
           "_dr.scale" in inspect.getsource(DashEnv._update_torque_sag))
+
+    # --- pushes and trips must ride the ramp too, and ONLY where asked -----------------------
+    # These were the last adversity axes at full width from step 0. Paired-seed measurement on
+    # walk_fwd_easy_s0: 3/12 episodes survive clean, 0/12 with pushes alone, 0/12 with trips
+    # alone -- each as costly as full-width plant DR, which already had a ramp.
+    src = inspect.getsource(DashEnv.step) if hasattr(DashEnv, "step") else ""
+    ca = get_config("walk_fwd")
+    ca.adversity_curriculum, ca.dr_enable = True, True
+    ea = DashEnv(ca)
+
+    def trip_steps(scale, n=4000):
+        ea.set_dr_scale(scale)
+        ea.reset(seed=0)
+        hits = 0
+        for _ in range(n):
+            ea.step(np.zeros(ea.action_dim, np.float32))
+            hits += int(ea._trip_left > 0)
+        return hits
+    t0, t1 = trip_steps(0.0), trip_steps(1.0)
+    check("dr_scale=0 fires NO trips", t0 == 0, f"{t0} trip-active steps")
+    check("dr_scale=1 fires trips at full rate", t1 > 0, f"{t1} trip-active steps")
+    check("push magnitude scales with the ramp",
+          "adv * c.push_dv" in inspect.getsource(DashEnv.step))
+    check("trip probability scales with the ramp",
+          "adv * c.trip_prob" in inspect.getsource(DashEnv.step))
+    # opt-in only: every preset that predates the flag must train bit-identically
+    legacy = [n for n in ("teleop_v5", "m3_sym_gait", "m2_reactive", "walk_fwd", "walk_fwd_easy")
+              if n in PRESETS]
+    check("adversity_curriculum is OFF for every legacy preset",
+          all(not get_config(n).adversity_curriculum for n in legacy), ", ".join(legacy))
+
+    # --- walk_fwd3: ask the plant for speeds it can actually reach --------------------------
+    c3 = get_config("walk_fwd3")
+    check("forward command STARTS inside what the robot does (~0.2 m/s), not 3x beyond it",
+          c3.cmd_v_fwd_start <= 0.3, f"{c3.cmd_v_fwd_start:.2f} m/s")
+    check("backward kept — the measurement says it is the best case",
+          c3.cmd_v_back_start > 0.0, f"{c3.cmd_v_back_start:.2f} m/s")
+    check("pushes/trips ride the ramp in walk_fwd3", c3.adversity_curriculum)
+    check("command curriculum can actually open", c3.cmd_curriculum_gate_ep_len <= 600)
+    # a command curriculum that ramps DOWN is always a mistake: at cmd_scale=0 the policy gets the
+    # START value, so start > max means the "disabled" axis is the one it is trained on hardest.
+    for name in sorted(PRESETS):
+        c = get_config(name)
+        bad = [f"{k} {s:.2f}>{m:.2f}" for k, s, m in
+               (("fwd", c.cmd_v_fwd_start, c.cmd_v_fwd_max),
+                ("back", c.cmd_v_back_start, c.cmd_v_back_max),
+                ("yaw", c.cmd_yaw_start, c.cmd_yaw_max)) if s > m]
+        if name == "walk_fwd3":
+            check("walk_fwd3 command box never ramps DOWN", not bad, ", ".join(bad))
+
     # and the diagnostic arm must stay genuinely clean
     e2 = DashEnv(get_config("walk_fwd_easy"))
     check("warm-start dims match the parent (its checkpoint still loads)",
