@@ -37,7 +37,10 @@ set -euo pipefail
 SB=training/slurm/izar_train.sbatch
 STAGES="${STAGES:-m2 m3 m4 m5 m6}"
 SEED="${SEED:-0}"
-NENVS="${NENVS:-18}"
+# Full node: Izar is 40 cores / 2 GPUs, and the old 20-core booking measured 3% GPU use at load
+# 8-10. NSTEPS moves with NENVS so the PPO rollout stays 18432 and only throughput changes.
+NENVS="${NENVS:-36}"
+NSTEPS="${NSTEPS:-512}"
 STEPS="${STEPS:-80000000}"          # per stage; ankle2_m3_rigid reached 15.5 s in 73 M
 LINKS="${LINKS:-3}"                 # 4 h each -> 12 h of container per stage; a stage that hits
                                     # STEPS early just exits and its spare links exit immediately
@@ -59,11 +62,15 @@ LINKS_m2="${LINKS_m2:-4}"
 # The ladder only works in the UP direction: cold at the bottom, each rung warm-starting the one
 # below it. Set WARM0=<dir> to override.
 WARM0="${WARM0:-}"
+# DEP=<jobid>: make rung 1 wait on an existing job. Used to graft later rungs onto a stage that
+# is ALREADY RUNNING (resource changes only take effect on newly submitted jobs -- SLURM snapshots
+# the batch script at submit time, so re-submitting is the only way to apply a new core count).
+DEP="${DEP:-}"
 DRY="${DRY:-}"
 
 echo "=== walk_fwd ladder, seed $SEED ==="
 echo "    stages: $STAGES"
-echo "    default ${LINKS}x${TIME} per stage, ${STEPS} steps, ${NENVS} envs (m2: ${LINKS_m2}x, ${STEPS_m2})"
+echo "    default ${LINKS}x${TIME} per stage, ${STEPS} steps, ${NENVS} envs x ${NSTEPS} n_steps (m2: ${LINKS_m2}x, ${STEPS_m2})"
 echo "    rung 1: ${WARM0:-COLD (from scratch)}"
 echo
 
@@ -76,11 +83,15 @@ for m in $STAGES; do
     # per-stage budget, e.g. STEPS_m2 / LINKS_m2, falling back to the global default
     eval "steps=\${STEPS_${m}:-$STEPS}"
     eval "links=\${LINKS_${m}:-$LINKS}"
-    export_str="ALL,PRESET=${preset},STEPS=${steps},NENVS=${NENVS},SEED=${SEED},NAME=${name}"
+    export_str="ALL,PRESET=${preset},STEPS=${steps},NENVS=${NENVS},NSTEPS=${NSTEPS},SEED=${SEED},NAME=${name}"
     [ -n "$warm" ] && export_str="${export_str},WARM=${warm}"
 
     dep=""
-    [ -n "$prev_last" ] && dep="--dependency=afterany:${prev_last}"
+    if [ -n "$prev_last" ]; then
+        dep="--dependency=afterany:${prev_last}"
+    elif [ -n "$DEP" ]; then
+        dep="--dependency=afterany:${DEP}"
+    fi
 
     echo "--- $name   (preset $preset, warm <- ${warm:-COLD}, ${links}x${TIME}, ${steps} steps)"
     if [ -n "$DRY" ]; then

@@ -533,6 +533,12 @@ def main():
     ap.add_argument("--steps", type=int, default=None,
                     help="TOTAL timesteps for the run (also the target when resuming)")
     ap.add_argument("--n-envs", type=int, default=None)
+    ap.add_argument("--n-steps", type=int, default=None,
+                    help="PPO rollout length PER ENV; overrides cfg.n_steps. Pair with --n-envs to "
+                         "hold n_steps*n_envs (the rollout size) CONSTANT while adding workers: "
+                         "18x1024 and 36x512 are both 18432, same minibatches and same policy "
+                         "updates per environment step, so extra cores buy throughput and nothing "
+                         "else changes. Doubling n_envs alone would halve the updates per step.")
     ap.add_argument("--subproc", action="store_true", help="use SubprocVecEnv (true parallelism)")
     ap.add_argument("--resume", default=None,
                     help="continue THIS run: a checkpoint .zip, or 'auto' = newest checkpoint in "
@@ -561,6 +567,8 @@ def main():
         n_envs = args.n_envs or cfg.n_envs
         total = args.steps or cfg.total_steps
         default_name = args.preset
+    if args.n_steps is not None:
+        cfg.n_steps = int(args.n_steps)
     if args.seed is not None:
         cfg.seed = int(args.seed)
     name = args.name or default_name
