@@ -42,19 +42,29 @@ STEPS="${STEPS:-80000000}"          # per stage; ankle2_m3_rigid reached 15.5 s 
 LINKS="${LINKS:-3}"                 # 4 h each -> 12 h of container per stage; a stage that hits
                                     # STEPS early just exits and its spare links exit immediately
 TIME="${TIME:-4:00:00}"
-# Per-stage overrides: STEPS_m2=40000000 etc. m2 is deliberately SHORT -- it is a speed prior, and
-# with pitch locked a policy can lunge with no consequence, so a long m2 buys a gait that m3 then
-# has to unlearn (m2 -> m3 is the hard transition in this project's history).
-STEPS_m2="${STEPS_m2:-40000000}"
-LINKS_m2="${LINKS_m2:-2}"
-# the 0.8 Hz walker: 340 M steps, completed the drive curriculum, ep_len 4938 / best 6833
-WARM0="${WARM0:-training/runs/walk_fwd_easy_warm}"
+# Per-stage overrides: STEPS_m2 / LINKS_m2 etc. m2 is COLD and has to learn a gait from nothing,
+# so it gets the largest budget of any rung. The counter-pressure is real -- with pitch locked a
+# policy can lunge with no consequence, and m2 -> m3 is the hard transition in this project's
+# history (the whole m3 anti-topple sweep) -- so this is a budget worth revisiting once we see
+# where m2 saturates.
+STEPS_m2="${STEPS_m2:-100000000}"
+LINKS_m2="${LINKS_m2:-4}"
+# Rung 1 trains COLD by default. Warm-starting the m6 walker DOWN into m2 was measured to be
+# strictly harmful -- same walk_fwd_easy_s0 policy, only base_lock changed, 8 paired episodes:
+#     m6 (as trained) 8.5 s median, 3/8 full   m5 2.5 s, 0/8
+#     m4 1.1 s, 0/8   m3 1.1 s, 0/8            m2 1.0 s, 0/8
+# Every "easier" rung is HARDER for it, monotonically. The policy balances using the DOFs the
+# lower rungs remove, so locking them is a distribution shift, not a simplification: at m2 it does
+# not topple (it cannot) -- it sinks, base z 1.010 -> 0.451 against a 0.45 term_height, in ~1 s.
+# The ladder only works in the UP direction: cold at the bottom, each rung warm-starting the one
+# below it. Set WARM0=<dir> to override.
+WARM0="${WARM0:-}"
 DRY="${DRY:-}"
 
 echo "=== walk_fwd ladder, seed $SEED ==="
 echo "    stages: $STAGES"
 echo "    default ${LINKS}x${TIME} per stage, ${STEPS} steps, ${NENVS} envs (m2: ${LINKS_m2}x, ${STEPS_m2})"
-echo "    rung 1 warm-starts from $WARM0"
+echo "    rung 1: ${WARM0:-COLD (from scratch)}"
 echo
 
 prev_last=""        # last job id of the previous stage
@@ -62,16 +72,17 @@ prev_run=""         # previous stage's run dir, the warm start for this one
 for m in $STAGES; do
     preset="walk_fwd_${m}"
     name="ladder_${m}_s${SEED}"
-    warm="${prev_run:-$WARM0}"
+    warm="${prev_run:-$WARM0}"   # empty on rung 1 unless WARM0 is set = COLD
     # per-stage budget, e.g. STEPS_m2 / LINKS_m2, falling back to the global default
     eval "steps=\${STEPS_${m}:-$STEPS}"
     eval "links=\${LINKS_${m}:-$LINKS}"
-    export_str="ALL,PRESET=${preset},STEPS=${steps},NENVS=${NENVS},SEED=${SEED},NAME=${name},WARM=${warm}"
+    export_str="ALL,PRESET=${preset},STEPS=${steps},NENVS=${NENVS},SEED=${SEED},NAME=${name}"
+    [ -n "$warm" ] && export_str="${export_str},WARM=${warm}"
 
     dep=""
     [ -n "$prev_last" ] && dep="--dependency=afterany:${prev_last}"
 
-    echo "--- $name   (preset $preset, warm <- $warm, ${links}x${TIME}, ${steps} steps)"
+    echo "--- $name   (preset $preset, warm <- ${warm:-COLD}, ${links}x${TIME}, ${steps} steps)"
     if [ -n "$DRY" ]; then
         echo "    sbatch --job-name=$name --time=$TIME $dep --export=$export_str $SB   x$links"
         prev_last="<dry:${name}>"
