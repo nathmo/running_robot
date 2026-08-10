@@ -744,10 +744,29 @@ class Config:
     ent_final: float = 0.002
     ent_anneal_steps: int = 20_000_000
     ent_gate_air_time: float = 0.02
+    # SCALE-FREE competence gate (preferred; 0 = disabled, use the air_time term above).
+    #
+    # ent_gate_air_time keys off reward_terms/air_time, which is a WEIGHTED, dt-SCALED per-step mean
+    # -- so its numeric scale moves whenever w_air_time or the control rate moves, and the gate
+    # silently stops meaning what it meant. It has already drifted twice: once at the 50->200 Hz
+    # move (0.02 -> 0.005, see the m7 note below) and again since. MEASURED on m2drv_d3_s0, a policy
+    # that unmistakably walks (20.75 m at 0.69 m/s, right foot airborne 0.32 s at a time) produced
+    # reward_terms/air_time = 0.0002 against a 0.005 gate -- 25x short. The gate could never open,
+    # ent_coef sat at 0.01 for the whole 60 M run, and log_std stayed pinned at exactly 1.000.
+    #
+    # swing_frac is the physical thing the gate was always trying to ask: the fraction of feet off
+    # the ground, averaged over the rollout. Standing is 0.0; a walking gait is 0.3-0.4. It is
+    # invariant to reward weights, to dt and to the control rate, so it cannot drift like this.
+    ent_gate_swing_frac: float = 0.0
     ent_anneal_deadline_steps: int = 0  # hard fallback: begin the ent_coef anneal by this many env
     #                                     steps even if the air_time competence gate never opens
     #                                     (num_timesteps-based; 0 = disabled, gate-only). Without it
     #                                     a stuck gate pins std at max_log_std forever (m3 deadlock).
+    # A deadline or an anneal span LONGER THAN THE RUN is the same failure with extra steps: the
+    # walk_fwd lineage carries deadline 100 M and ent_anneal_steps 80 M (sized for the preset's
+    # nominal total_steps=800 M) while the ladder actually trains 60 M stages, so neither could ever
+    # fire. train.py now scales both against the REAL budget and says so -- see _size_entropy_schedule.
+    ent_schedule_autoscale: bool = True
     max_log_std: float = 0.0            # std <= 1.0: beyond the clipped range is pure farming
     seed: int = 0
     policy_hidden: List[int] = field(default_factory=lambda: [256, 256])
@@ -1965,7 +1984,18 @@ PRESETS.update({
 # positions the physical 4-bar cannot produce, and its characteristic failure (sinking) is exactly
 # the shape an out-of-workspace exploit would take. The 2.55 m/s runner (ankle2_m3_rigid) had it ON.
 # Needs ankle_resettle (already set) so _ws_ref is re-referenced to THIS arm's settled stance.
-_LADDER_RWD = dict(w_alive=0.0, track_sigma_min=0.15, workspace_kill=True)
+# The ladder grades entropy competence on the PHYSICAL per-foot airborne fraction (WORSE foot), not
+# on the weighted air_time term whose scale drifted 25x out from under the old gate.
+# 0.13 is set from the measured bracket, sampling actions the way training does:
+#     d08 (shuffles, never walks)          min-foot 0.019   -> shut, 7x margin
+#     d12 (parks a leg: 0.092/0.582)       min-foot 0.092   -> shut, correctly rejected
+#     d3  (walks 20.75 m at 0.69 m/s)      min-foot 0.184   -> OPEN, 1.4x margin
+# Taking the WORSE foot is what rejects d12: its mean swing is the HIGHEST of the three purely
+# because it folds one leg up until workspace_kill fires. A mean-based gate would have opened for
+# the one arm that cannot walk.
+# Every one of those reads "shut" on the old air_time gate, including the walker -- which is the bug.
+_LADDER_RWD = dict(w_alive=0.0, track_sigma_min=0.15, workspace_kill=True,
+                   ent_gate_swing_frac=0.13)
 
 
 def _walk_fwd3(**kw):

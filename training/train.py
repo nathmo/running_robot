@@ -383,6 +383,34 @@ class CommandCurriculumCallback(BaseCallback):
                   f"(top-range err {err:.3f} m/s, ep_len {ep_len:.0f})")
 
 
+def _size_entropy_schedule(cfg, budget):
+    """Fit the entropy deadline and anneal span inside the run we are ACTUALLY about to train.
+
+    Both numbers live in the preset and are sized against its nominal total_steps. The walk_fwd
+    lineage carries deadline 100 M / anneal 80 M against total_steps=800 M, but the ladder trains
+    60 M stages -- so the deadline never arrives and the anneal, even if it opened at step 0, could
+    not finish. The result is ent_coef frozen at its initial value and log_std pinned at the clamp
+    for the whole run, which is not a subtle bias: the m2drv bracket's d12 arm reported ep_len 38 s
+    from its stochastic rollouts while the greedy policy it would actually deploy fell in 1.3 s.
+
+    Deadline at 40% of the budget leaves 60% to anneal over; the anneal span is then capped at half
+    the budget so it completes with room to settle. Returns the values in force and prints them,
+    because a schedule silently rewritten is how this class of bug survives.
+    """
+    deadline, anneal = int(cfg.ent_anneal_deadline_steps), int(cfg.ent_anneal_steps)
+    if not getattr(cfg, "ent_schedule_autoscale", True) or not budget:
+        return deadline, anneal
+    new_deadline = deadline
+    if deadline > 0 and deadline >= budget:
+        new_deadline = max(1, int(0.40 * budget))
+    new_anneal = min(anneal, max(1, int(0.50 * budget))) if anneal > 0 else anneal
+    if (new_deadline, new_anneal) != (deadline, anneal):
+        print(f"[train] entropy schedule rescaled to the {budget:,}-step budget: "
+              f"deadline {deadline:,} -> {new_deadline:,}, anneal {anneal:,} -> {new_anneal:,} "
+              f"(the preset's values are sized for total_steps={cfg.total_steps:,})")
+    return new_deadline, new_anneal
+
+
 class EntropyCallback(BaseCallback):
     """Two jobs, both per rollout:
     1. Clamp log_std at cfg.max_log_std — the entropy bonus of a CLIPPED Gaussian keeps paying as
@@ -391,7 +419,7 @@ class EntropyCallback(BaseCallback):
        reward_terms/air_time > gate for `patience` consecutive rollouts), then anneal linearly to
        cfg.ent_final over cfg.ent_anneal_steps. A clock-driven anneal kills exploration on
        schedule even if stepping hasn't been found."""
-    def __init__(self, cfg, run_dir=None, patience=5):
+    def __init__(self, cfg, run_dir=None, patience=5, budget=None):
         super().__init__()
         self.cfg = cfg
         self.run_dir = run_dir
@@ -400,6 +428,8 @@ class EntropyCallback(BaseCallback):
         self._anneal_from = None
         self._anneal_base = None
         self._air_sum, self._air_n = 0.0, 0
+        self._swing_sum, self._swing_n = np.zeros(2), 0
+        self.deadline, self.anneal_steps = _size_entropy_schedule(cfg, budget)
 
     def _on_training_start(self) -> None:
         # requeue persistence: restore the gate state so a resumed cluster job continues the
@@ -420,6 +450,10 @@ class EntropyCallback(BaseCallback):
             if terms and "air_time" in terms:
                 self._air_sum += float(terms["air_time"])
                 self._air_n += 1
+            fa = info.get("foot_air")
+            if fa is not None:
+                self._swing_sum = self._swing_sum + np.asarray(fa, float)
+                self._swing_n += 1
         return True
 
     def _on_rollout_start(self) -> None:
@@ -433,14 +467,30 @@ class EntropyCallback(BaseCallback):
         with torch.no_grad():
             self.model.policy.log_std.clamp_(max=self.cfg.max_log_std)
         air = self._air_sum / max(self._air_n, 1)
+        # per-foot airborne fraction over the rollout; the gate reads the WORSE foot, so a policy
+        # that parks one leg up and hops on the other cannot open it
+        per_foot = np.asarray(self._swing_sum, float) / max(self._swing_n, 1)
+        have_swing = self._swing_n > 0          # capture BEFORE the reset below
+        swing = float(per_foot.min()) if have_swing else 0.0
         self._air_sum, self._air_n = 0.0, 0
+        self._swing_sum, self._swing_n = np.zeros(2), 0
+        if have_swing:
+            self.logger.record("curriculum/swing_frac_min", swing)
+            self.logger.record("curriculum/swing_frac_mean", float(per_foot.mean()))
         if self._anneal_from is None:
-            self._streak = self._streak + 1 if air > self.cfg.ent_gate_air_time else 0
+            # prefer the scale-free physical gate when the preset sets one; fall back to the
+            # weighted reward term otherwise so every legacy preset keeps its exact behaviour
+            gate_swing = float(getattr(self.cfg, "ent_gate_swing_frac", 0.0))
+            if gate_swing > 0.0 and have_swing:
+                competent = swing > gate_swing
+            else:
+                competent = air > self.cfg.ent_gate_air_time
+            self._streak = self._streak + 1 if competent else 0
             gate_open = self._streak >= self.patience
             # hard fallback: if the competence gate never opens (air_time stuck below the gate
             # keeps std pinned at max_log_std forever — the m3_speed_v2 deadlock), start the anneal
             # anyway once ent_anneal_deadline_steps is reached, so exploration can finally collapse.
-            deadline = self.cfg.ent_anneal_deadline_steps
+            deadline = self.deadline
             deadline_hit = deadline > 0 and self.num_timesteps >= deadline
             if gate_open or deadline_hit:
                 self._anneal_from = self.num_timesteps
@@ -449,12 +499,13 @@ class EntropyCallback(BaseCallback):
                     _persist_curriculum(self.run_dir, "ent_anneal_from", self._anneal_from)
                     _persist_curriculum(self.run_dir, "ent_anneal_base", self._anneal_base)
                 reason = "competence gate" if gate_open else "hard deadline"
-                print(f"[train] entropy anneal opened via {reason} (air_time={air:.3f}) at "
+                print(f"[train] entropy anneal opened via {reason} "
+                      f"(swing_frac={swing:.3f}, air_time={air:.4f}) at "
                       f"{self.num_timesteps} steps -> ent_coef "
                       f"{self._anneal_base} -> {self.cfg.ent_final}")
         if self._anneal_from is not None and self._anneal_base > self.cfg.ent_final:
             frac = min(1.0, (self.num_timesteps - self._anneal_from)
-                       / max(self.cfg.ent_anneal_steps, 1))
+                       / max(self.anneal_steps, 1))
             self.model.ent_coef = (self._anneal_base
                                    + frac * (self.cfg.ent_final - self._anneal_base))
         self.logger.record("curriculum/ent_coef", float(self.model.ent_coef))
@@ -691,7 +742,9 @@ def main():
                            name_prefix="ppo", save_vecnormalize=True),
         RewardTermCallback(),
         AnkleTelemetryCallback(),
-        EntropyCallback(cfg, run_dir=run),
+        # `total` (this run's whole target), not the post-resume remainder: the deadline and the
+        # anneal are measured in num_timesteps, which keeps counting across a resumed chain
+        EntropyCallback(cfg, run_dir=run, budget=total),
         PlotCallback(run, every_steps=500_000),
     ]
     if cfg.objective == "sprint" and cfg.sprint_curriculum_steps > 0 \

@@ -1402,6 +1402,21 @@ class DashEnv(gym.Env):
         _lim = self.model.actuator_forcerange[:self.nu, 1]
         info["torque_util"] = float(np.mean(
             np.abs(self.data.actuator_force[:self.nu]) / np.maximum(_lim, 1e-6)))
+        # PER-FOOT airborne flag. Raw physics, not a reward term: the entropy competence gate keys
+        # off this precisely so it cannot drift when a reward weight or the control rate changes
+        # (see ent_gate_swing_frac in config.py).
+        #
+        # Per-foot, not a mean, because the mean cannot tell an alternating gait from a leg parked
+        # in the air: MEASURED, m2drv_d12_s0 scores a higher mean swing fraction (0.47) than the arm
+        # that actually walks (d3, 0.34) purely by folding one leg up until workspace_kill fires.
+        # The gate takes the MIN across feet, so both feet have to leave the ground to open it.
+        # Airborne uses the SAME definition as the air_time term above -- contact OR a toe below
+        # grounded_h. _foot_contacts() alone only watches the toe sphere, so a foot resting on its
+        # heel reads as airborne: in the settled m2 keyframe that misreports one foot as off the
+        # ground while the base has not moved a millimetre.
+        _air = ~(self._foot_contacts() | (self._toe_heights() < c.grounded_h))
+        info["foot_air"] = _air.astype(np.float64)
+        info["swing_frac"] = float(_air.mean())          # logged for continuity, not gated on
         if c.objective == "sprint":
             info["sprint"] = self._sprint_info(finished)
         info.update(self._ankle_info())

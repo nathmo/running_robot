@@ -984,6 +984,63 @@ def test_ankle2():
           and c.ankle_spring_mass_kg == 0.0)
 
 
+def test_entropy_schedule():
+    """The entropy anneal must be able to OPEN and to FINISH inside the run we actually train.
+
+    On m2drv_d3_s0 it did neither: the air_time gate wanted 0.005 and a policy walking at 0.69 m/s
+    produced 0.0002, while the deadline (100 M) and the anneal span (80 M) both exceeded the 60 M
+    budget. ent_coef sat at 0.01 for the whole run and log_std stayed pinned at exactly 1.000, so
+    every training curve described a policy nobody would deploy.
+    """
+    import numpy as np
+    from train import _size_entropy_schedule
+    print("entropy schedule + scale-free competence gate:")
+
+    c = get_config("walk_fwd_m2_d3")
+    check("ladder sets the scale-free gate", c.ent_gate_swing_frac > 0)
+
+    # the exact numbers that broke it: an 800 M-sized schedule inside a 60 M stage
+    dl, an = _size_entropy_schedule(c, 60_000_000)
+    check("deadline is reachable inside the budget", 0 < dl < 60_000_000, f"{dl:,}")
+    check("anneal can finish inside the budget", 0 < an <= 30_000_000, f"{an:,}")
+    check("anneal has room after the deadline", dl + an <= 60_000_000, f"{dl + an:,}")
+    # a run long enough for the preset's own numbers must keep them untouched
+    dl2, an2 = _size_entropy_schedule(c, 800_000_000)
+    check("a full-length run keeps the preset schedule",
+       (dl2, an2) == (c.ent_anneal_deadline_steps, c.ent_anneal_steps))
+    # opt-out stays exact
+    c_off = get_config("walk_fwd_m2_d3")
+    c_off.ent_schedule_autoscale = False
+    check("autoscale can be switched off",
+       _size_entropy_schedule(c_off, 60_000_000)
+       == (c_off.ent_anneal_deadline_steps, c_off.ent_anneal_steps))
+
+    # the env must publish the PER-FOOT signal the gate reads
+    env = DashEnv(c)
+    env.reset(seed=0)
+    _, _, _, _, info = env.step(np.zeros(env.action_space.shape[0], np.float32))
+    check("env publishes per-foot airborne flags", "foot_air" in info
+       and np.asarray(info["foot_air"]).shape == (2,))
+    # a standing robot must score ZERO on the gate. Note the settled m2 keyframe genuinely holds
+    # one toe clear of the floor, so the per-foot MAX is 1 -- which is exactly why the gate reads
+    # the MIN. Asserting the min is asserting the thing the gate actually does.
+    for _ in range(60):
+        _, _, _, _, info = env.step(np.zeros(env.action_space.shape[0], np.float32))
+    check("standing scores zero on the gate (min foot)",
+          float(np.asarray(info["foot_air"]).min()) == 0.0)
+
+    # measured separation from the bracket (see _LADDER_RWD): the threshold has to sit between the
+    # best shuffler and the walker, or it either never opens or opens for a robot that cannot walk
+    check("gate is above the measured shuffler", c.ent_gate_swing_frac > 0.019)
+    check("gate is below the measured walker", c.ent_gate_swing_frac < 0.184)
+    check("gate rejects the parked-leg exploit", c.ent_gate_swing_frac > 0.092)
+
+    # legacy presets must keep the old term-based gate exactly
+    check("legacy presets keep the air_time gate",
+       all(get_config(p).ent_gate_swing_frac == 0.0
+           for p in ("m3_speed", "m2_sprint", "walk_fwd_easy")))
+
+
 def test_walk_fwd2():
     """The sim2real calibration axes must RIDE the dr_scale curriculum, and no preset may put a
     competence gate above what the ramps can plausibly reach.
@@ -1127,5 +1184,6 @@ if __name__ == "__main__":
     test_ankle_study()
     test_ankle2()
     test_walk_fwd2()
+    test_entropy_schedule()
     print(f"\n{'ALL OK' if FAIL == 0 else f'{FAIL} FAILURES'}")
     sys.exit(1 if FAIL else 0)
