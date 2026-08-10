@@ -19,6 +19,7 @@ import pytest
 import blackbox
 import blackbox_read
 import calibration
+import canio
 import daemon as daemon_mod
 import dynstore
 import paths
@@ -469,6 +470,58 @@ def test_trip_raises_an_event_and_a_dump(robot):
         t = blackbox.read_header(os.path.join(bdir, f))["trigger"]
         covered += [t["reason"]] + (t.get("also") or [])
     assert "trip" in covered
+
+
+# ===================================================================== CAN bus down
+class _DeadBus(canio.MockBus):
+    """A bus whose sends fail the way socketcan does when nothing on the wire ACKs: the 10-frame
+    TX queue fills and send() raises ENOBUFS. This is what the Pi does at boot with the motor
+    power off — measured 2026-08-10, first run of the daemon under systemd."""
+
+    def send(self, msg):
+        raise OSError(105, "No buffer space available")
+
+    def recv(self, timeout=0.0):
+        return None                      # unpowered drives broadcast nothing either
+
+
+def test_a_bus_that_will_not_take_frames_does_not_kill_the_daemon(tmp_path, monkeypatch):
+    """It used to: an unhandled ENOBUFS inside _setup()'s preflight took the whole daemon thread
+    down, leaving no control loop and — before the black box — no record of why."""
+    monkeypatch.setattr(canio, "MockBus", _DeadBus)
+    canio._send_errors.clear()
+    cal = calibration.Calibration()
+    cal.save = lambda *a, **k: None
+    b = blackbox.BlackBox(directory=str(tmp_path), heartbeat_s=1.0, post_trigger_s=0.3,
+                          space_check_s=1.0)
+    blackbox.install(b)
+    b.start()
+    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=b)
+    d.start()
+    try:
+        assert d._started_ok.wait(6.0), "the daemon must survive setup on a dead bus"
+        time.sleep(1.5)
+        snap = d.get_snapshot()
+        assert snap["daemon_alive"] is True, "the control loop must keep running"
+        assert snap["loop_error"] is None
+        assert sum(snap["can_errors"].values()) > 0, "the failures must be counted, not swallowed"
+        assert d.get_snapshot()["mode"] == "LIMP"
+        # ...and motion is still refused: with no frames going out nothing reports back, so no
+        # motor is alive and there is nothing to calibrate against either
+        assert all(m.pos is None for m in d.motors)
+        ok, why = d._motion_allowed()
+        assert not ok and why
+    finally:
+        d.stop_event.set()
+        d.join(2.0)
+        b.stop()
+        blackbox.install(None)
+        canio._send_errors.clear()
+
+    evs = events_of(str(tmp_path), "can.error")
+    assert evs, "a bus that will not take frames must be on the timeline"
+    assert evs[0]["kind"] == "can.error" and "105" in str(evs[0]["error"])
+    assert not events_of(str(tmp_path), "daemon.crash")
 
 
 # ===================================================================== ACCEPTANCE

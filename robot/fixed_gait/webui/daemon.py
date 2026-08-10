@@ -263,6 +263,10 @@ class RobotDaemon(threading.Thread):
         self._was_homing = False
         self._warn_last = {}               # warn-level trigger debounce
         self._bb_status = {"alive": False}
+        self._can_err_seen = 0             # canio send-failure counter, sampled per tick
+        self._can_err_last = ("", "")
+        self._can_err_logged = -1e9
+        self._can_bad_ticks = 0
 
     # ================================================================= web-facing API
     def request_mode(self, mode):
@@ -809,9 +813,13 @@ class RobotDaemon(threading.Thread):
                 snap = dict(self.snapshot)
                 snap["daemon_alive"] = False
                 snap["loop_error"] = self.loop_error
+                snap["blackbox"] = (self.bb.status() if self.bb is not None
+                                    else {"alive": False, "error": "not configured"})
+                snap["can_errors"] = canio.send_errors()
                 self.snapshot = snap
 
     def _setup(self):
+        canio.install_send_error_hook(self._can_error)
         channels = sorted(set(paths.SIDE_CHANNEL.values()))
         self.buses = canio.open_buses(self.interface, channels, mock=self.mock)
         for side in paths.SIDES:
@@ -972,12 +980,12 @@ class RobotDaemon(threading.Thread):
         return True, ""
 
     # ================================================================= black box
-    def _bb_event(self, kind, **fields):
+    def _bb_event(self, kind, /, **fields):
         bb = self.bb
         if bb is not None:
             bb.log_event(kind, **fields)
 
-    def _bb_dump(self, reason, cooldown_s=None, **fields):
+    def _bb_dump(self, reason, /, cooldown_s=None, **fields):
         bb = self.bb
         return bb.trigger_dump(reason, cooldown_s=cooldown_s, **fields) if bb is not None else None
 
@@ -1015,6 +1023,7 @@ class RobotDaemon(threading.Thread):
 
         self._watch_continuity(t_mono, dt_actual, pr, sp)
         self._watch_warnings(t_mono, pr, cr, sp, tp, er)
+        self._can_watch(t_mono)
 
     def _watch_continuity(self, t_mono, dt_actual, pr, sp):
         """Did a driver board's multi-turn origin move on its own? (question 5 of the brief)
@@ -1055,6 +1064,35 @@ class RobotDaemon(threading.Thread):
                                 "the encoder origin moved, the joint did not. The calibration is "
                                 "now stale and the pre-move guard will refuse to leave LIMP.")
             self._bb_dump("raw_origin_jump", motor=n, delta_deg=d)
+
+    def _can_error(self, channel, exc):
+        """canio's send-failure hook. Called from the control thread, so it does nothing but count
+        and (rarely) log — the escalation decision is made in _can_watch, once per tick."""
+        self._can_err_last = (channel, f"{type(exc).__name__}: {exc}")
+        t = time.monotonic()
+        if t - self._can_err_logged > 30.0:
+            self._can_err_logged = t
+            self._bb_event("can.error", channel=channel, error=str(exc),
+                           exc_type=type(exc).__name__, mode=self.mode,
+                           total=canio.send_errors(),
+                           note="the bus would not accept the frame. With the motor power off "
+                                "nothing ACKs, socketcan's TX queue fills and every send fails — "
+                                "expected at boot, a fault if it happens mid-motion")
+
+    def _can_watch(self, t_mono):
+        """A bus that will not take frames is survivable while we are commanding nothing, and a
+        fault the moment we are. Never a daemon death: the telemetry loop and the recorder have to
+        keep running so the operator can see WHY the robot is not responding."""
+        total = sum(canio.send_errors().values())
+        grew = total > self._can_err_seen
+        self._can_err_seen = total
+        self._can_bad_ticks = self._can_bad_ticks + 1 if grew else 0
+        if (self._can_bad_ticks > 0.5 * TICK_HZ
+                and self.mode in ("MANUAL", "PLAYBACK", "MEASURE")):
+            ch, err = self._can_err_last
+            self._trip(f"CAN bus {ch} is not accepting frames ({err}) — commands are not "
+                       f"reaching the drives")
+            self._can_bad_ticks = 0
 
     def _watch_warnings(self, t_mono, pr, cr, sp, tp, er):
         """Warn levels sit BELOW the trip thresholds so a dump catches the approach, not only the
@@ -1703,6 +1741,7 @@ class RobotDaemon(threading.Thread):
                 estop=dict(latched=self.mode == "ESTOPPED", reason=self.estop_reason),
                 loop=dict(hz=TICK_HZ, slip=self._slip_count),
                 loop_error=self.loop_error,
+                can_errors=canio.send_errors(),
                 last_reject=self._last_reject,
                 # the recorder's own health, so a dead writer thread is visible in the UI rather
                 # than being discovered after the next incident

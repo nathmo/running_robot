@@ -263,20 +263,22 @@ class BlackBox:
         self._sq.append((self._dropped, row))
         return True
 
-    def log_event(self, kind, **fields):
+    def log_event(self, kind, /, **fields):
         """Queue one Tier C event. Safe from any thread, including the control loop."""
         if len(self._eq) >= EVENT_QUEUE_MAX:
             self._dropped_events += 1
             return False
         t_mono = time.monotonic()
-        self._eq.append({"kind": str(kind), "t_mono": round(t_mono, 6), "t_wall": time.time(),
+        # `kind`/`t_mono`/... win over anything in **fields: the schema a reader relies on must not
+        # be overwritable by a caller that happened to pass a field of the same name.
+        self._eq.append({**{k: _jsonable(v) for k, v in fields.items()},
+                         "kind": str(kind), "t_mono": round(t_mono, 6), "t_wall": time.time(),
                          "uptime_s": round(t_mono - self.t0_mono, 3),
                          "boot_id": self.boot_id, "session_id": self.session_id,
-                         "wall_trusted": _wall_trusted(),
-                         **{k: _jsonable(v) for k, v in fields.items()}})
+                         "wall_trusted": _wall_trusted()})
         return True
 
-    def trigger_dump(self, reason, cooldown_s=None, **fields):
+    def trigger_dump(self, reason, /, cooldown_s=None, **fields):
         """Ask for a Tier B dump of the whole 200 Hz ring (pre-trigger history included).
 
         Returns the filename it will be written to, or None if it was coalesced into a dump already
@@ -853,13 +855,13 @@ def get():
     return _BB
 
 
-def log_event(kind, **fields):
+def log_event(kind, /, **fields):
     bb = _BB
     if bb is not None:
         bb.log_event(kind, **fields)
 
 
-def trigger_dump(reason, **fields):
+def trigger_dump(reason, /, **fields):
     bb = _BB
     return bb.trigger_dump(reason, **fields) if bb is not None else None
 

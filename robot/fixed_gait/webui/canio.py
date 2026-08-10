@@ -48,18 +48,62 @@ def _make_msg(arb_id, data):
     return _Msg(arb_id, data)
 
 
+# ---- send failures are NOT fatal -------------------------------------------------------------
+# Measured on the robot 2026-08-10, the first time the daemon came up under systemd at boot: with
+# the motor power off, nothing on the bus ACKs, socketcan's 10-frame TX queue fills in one tick and
+# send() raises ENOBUFS. That killed the whole daemon thread inside _setup()'s preflight — an
+# unhandled exception in a background thread, previously visible only in a terminal nobody kept.
+#
+# Running the daemon at boot makes "the motors are not powered yet" the NORMAL startup case, so a
+# send that cannot go out has to be an event, not a death. Counted here, surfaced through the hook,
+# and escalated by the daemon into a trip if it persists while we are actually commanding motion —
+# see RobotDaemon._can_watch. Sends never raise past this module.
+_send_errors = {}
+_on_send_error = None
+_hook_errors = 0
+
+
+def install_send_error_hook(fn):
+    global _on_send_error
+    _on_send_error = fn
+
+
+def send_errors():
+    return dict(_send_errors)
+
+
+def _send(bus, msg):
+    """True if the frame went out. Never raises: a dead bus must not kill the control thread."""
+    try:
+        bus.send(msg)
+        return True
+    except Exception as e:
+        ch = getattr(bus, "channel", "?")
+        _send_errors[ch] = _send_errors.get(ch, 0) + 1
+        hook = _on_send_error
+        if hook is not None:
+            try:
+                hook(ch, e)
+            except Exception as hook_err:      # a broken hook must not kill the control thread...
+                global _hook_errors            # ...but it must not be invisible either
+                _hook_errors += 1
+                if _hook_errors == 1:
+                    print(f"!! canio send-error hook raised: {hook_err!r}")
+        return False
+
+
 def set_pos(bus, cid, pos_deg):
     """Position command: deg * 10000, big-endian int32 (run_hardware.py:63-67)."""
     val = int(round(pos_deg * 10_000.0))
     val = max(-2_147_483_648, min(2_147_483_647, val))
-    bus.send(_make_msg(cid | (CAN_PACKET_SET_POS << 8), struct.pack(">i", val)))
+    return _send(bus, _make_msg(cid | (CAN_PACKET_SET_POS << 8), struct.pack(">i", val)))
 
 
 def set_current(bus, cid, amps):
     """Current command: A * 1000, big-endian int32 (run_hardware.py:70-71)."""
     val = int(round(amps * 1000.0))
     val = max(-2_147_483_648, min(2_147_483_647, val))
-    bus.send(_make_msg(cid | (CAN_PACKET_SET_CURRENT << 8), struct.pack(">i", val)))
+    return _send(bus, _make_msg(cid | (CAN_PACKET_SET_CURRENT << 8), struct.pack(">i", val)))
 
 
 def parse_status(data):
