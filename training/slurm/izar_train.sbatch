@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# DASH-01 sprint training on SCITAS Izar (1 node, 1x V100, 20 cores).
+# DASH-01 sprint training on SCITAS Izar (1 node, 1x V100 = HALF a node: 20 cores, 94 GB).
 #
 # Submit:            sbatch training/slurm/izar_train.sbatch
 # With overrides:    sbatch --export=ALL,PRESET=m2_sprint,STEPS=240000000,NENVS=18 \
@@ -11,8 +11,8 @@
 #SBATCH --job-name=dash-sprint
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=40
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=94G
 #SBATCH --gres=gpu:1
 #SBATCH --time=2-23:30:00
 #SBATCH --output=%x-%j.out
@@ -27,13 +27,17 @@ source "${VENV:-$HOME/venvs/dash}/bin/activate"
 REPO="${REPO:-$HOME/running_robot}"
 PRESET="${PRESET:-m2_sprint}"
 STEPS="${STEPS:-240000000}"
-# Izar nodes are 40 cores / 192 GB / 2x V100. We used to book 20 cores + 1 GPU and MEASURED
-# 3% GPU utilisation with a load average of 8-10 -- i.e. half a node reserved, a quarter of it
-# used, and the GPU idle. Book the cores we actually need instead.
+# Izar nodes are 40 cores / 192 GB / 2x V100, so ONE GPU is half a node: 20 cores / 94 GB. Asking
+# for 40 cores + 1 GPU strands the node's second GPU -- nobody can be scheduled onto it -- and the
+# job then has to wait for a WHOLE free node, which is slower for us too. SCITAS asked us to stop
+# doing this (Nicolas, 2026-08-10, re job 3105610) and they are right on both counts.
+# We had gone wide because a 20-core booking MEASURED 3% GPU utilisation at load 8-10; the answer to
+# an idle GPU is to leave it for someone else, not to book the cores around it.
 # NSTEPS moves with NENVS to hold the PPO rollout (n_steps*n_envs) CONSTANT: 18x1024 and 36x512
-# are both 18432, so this is a pure throughput change and the learning dynamics are untouched.
-NENVS="${NENVS:-36}"          # leave ~4 of the 40 cores for the learner + OS
-NSTEPS="${NSTEPS:-512}"       # 36*512 == the old 18*1024
+# are both 18432, so this is a pure throughput change and the learning dynamics are untouched --
+# which is what makes it safe to apply to the PENDING links of an already-running chain.
+NENVS="${NENVS:-18}"          # leave ~2 of the 20 cores for the learner + OS
+NSTEPS="${NSTEPS:-1024}"      # 18*1024 == 36*512, the same rollout
 NAME="${NAME:-$PRESET}"
 WARM="${WARM:-}"              # optional: checkpoint to warm-start a NEW milestone stage from,
                               # e.g. WARM=training/runs/m1_sprint/final_model.zip
