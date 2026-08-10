@@ -24,8 +24,9 @@ import time
 import numpy as np
 
 import paths
+import blackbox
 
-ARRAYS = ("t", "cmd_norm", "pos_norm", "pos_raw", "spd", "cur")
+ARRAYS =("t", "cmd_norm", "pos_norm", "pos_raw", "spd", "cur")
 
 
 def _path(name):
@@ -48,6 +49,8 @@ def save(name, run, meta):
             raise ValueError(f"measurement run missing '{k}' array")
     n = len(run["t"])
     if n < 5:
+        blackbox.log_event("measure.save.refused", name=name, n_samples=int(n),
+                           reason="too few samples")
         raise ValueError(f"measurement too short ({n} samples) — nothing to save")
     p = _path(name)
     meta = dict(meta, name=os.path.basename(p), n_samples=int(n),
@@ -56,6 +59,9 @@ def save(name, run, meta):
     np.savez(p, meta_json=json.dumps(meta), **{k: np.asarray(run[k], np.float32) for k in ARRAYS})
     with open(os.path.splitext(p)[0] + ".json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
+    blackbox.log_event("measure.finish", name=meta["name"], n_samples=meta["n_samples"],
+                       duration_s=meta["duration_s"], leg=meta.get("leg"),
+                       profile=meta.get("profile"))
     return meta
 
 
@@ -93,10 +99,12 @@ def delete(name):
     p = _path(name)
     if not os.path.exists(p):
         raise FileNotFoundError(f"measurement '{name}' not found")
+    size = os.path.getsize(p)
     os.remove(p)
     side = os.path.splitext(p)[0] + ".json"
     if os.path.exists(side):
         os.remove(side)
+    blackbox.log_event("measure.delete", name=os.path.basename(p), bytes=size)
     return os.path.basename(p)
 
 

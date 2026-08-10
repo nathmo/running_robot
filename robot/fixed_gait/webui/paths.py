@@ -22,6 +22,7 @@ DATA = os.path.join(WEBUI, "data")
 TRAJ_DIR = os.path.join(DATA, "trajectories")
 WORKSPACE_DIR = os.path.join(DATA, "workspaces")
 MEASURE_DIR = os.path.join(DATA, "measurements")      # high-rate system-ID capture runs (.npz+.json)
+BLACKBOX_DIR = os.path.join(DATA, "blackbox")          # flight recorder: Tier A/B segments + events.jsonl
 IDENT_DIR = os.path.join(DATA, "identification")       # estimator outputs (identified_params.json)
 CALIB_FILE = os.path.join(DATA, "session_calibration.json")
 MODEL_MAP_FILE = os.path.join(DATA, "model_map.json")
@@ -40,7 +41,7 @@ _MESH_CANDIDATES = [
 MESH_DIR = next((d for d in _MESH_CANDIDATES if os.path.isdir(d)), _MESH_CANDIDATES[0])
 MESH_SCALE = 0.001                      # STLs are in mm; the model scales them by 0.001
 
-for d in (DATA, TRAJ_DIR, WORKSPACE_DIR, MEASURE_DIR, IDENT_DIR):
+for d in (DATA, TRAJ_DIR, WORKSPACE_DIR, MEASURE_DIR, IDENT_DIR, BLACKBOX_DIR):
     os.makedirs(d, exist_ok=True)
 
 # ---- global motor naming / ordering (matches telemetry columns everywhere) ----

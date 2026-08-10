@@ -105,6 +105,11 @@ class _MockMotor:
         self.t0 = time.time()
         self.drag_target = None     # raw target the "hand" pulls toward when limp
         self.spd = 0.0              # deg/s (converted to fake ERPM in frames)
+        # The 2026-08-10 failure mode. The board renumbers its own multi-turn origin: every
+        # reported and commanded angle shifts by this, while the SHAFT DOES NOT MOVE — so the
+        # reported speed stays zero, which is exactly what makes it invisible to a naive check.
+        # `self.raw` remains the true mechanical angle; only the frame the board speaks moves.
+        self.origin_shift = 0.0
 
     def step(self, dt, now):
         prev = self.raw
@@ -123,7 +128,7 @@ class _MockMotor:
 
     def status_frame(self, now):
         temp = self.temp_base + 3.0 * math.sin((now - self.t0) / 30.0) + abs(self.cur)
-        pos_i = int(np.clip(round(self.raw * 10.0), -32768, 32767))
+        pos_i = int(np.clip(round((self.raw + self.origin_shift) * 10.0), -32768, 32767))
         spd_erpm = self.spd / 360.0 * 60.0 * 21         # fake pole-pair scaling, just plausible
         spd_i = int(np.clip(round(spd_erpm / 10.0), -32768, 32767))
         cur_i = int(np.clip(round(self.cur * 100.0), -32768, 32767))
@@ -184,7 +189,9 @@ class MockBus:
             if m is None:
                 return
             if cmd == CAN_PACKET_SET_POS:
-                m.target = struct.unpack(">i", bytes(msg.data[:4]))[0] / 10_000.0
+                # the command is in the BOARD's frame, so an origin shift silently redirects it
+                m.target = (struct.unpack(">i", bytes(msg.data[:4]))[0] / 10_000.0
+                            - m.origin_shift)
                 m.limp = False
             elif cmd == CAN_PACKET_SET_CURRENT:
                 amps = struct.unpack(">i", bytes(msg.data[:4]))[0] / 1000.0
@@ -209,3 +216,13 @@ class MockBus:
         with self._lock:
             if cid in self.motors:
                 self.motors[cid].drag_target = None
+
+    def shift_origin(self, cid, delta_deg):
+        """Reproduce a driver board renumbering its multi-turn origin (2026-08-10): reported and
+        commanded angles all move by delta_deg, the shaft does not move and reports no speed."""
+        with self._lock:
+            if cid in self.motors:
+                m = self.motors[cid]
+                m.origin_shift += float(delta_deg)
+                if m.target is not None:
+                    m.target -= float(delta_deg)   # the old command now means somewhere else

@@ -25,6 +25,7 @@ import threading
 import time
 
 import paths
+import blackbox
 
 # The 13 rigid bodies of the CAD model (mesh/body names), grouped for the UI. Torso is base-fixed
 # (mass weighable, but its inertia is NOT identifiable from joint torques — see the plan).
@@ -155,6 +156,7 @@ class DynConfig:
 
     # ------------------------------------------------------------------ mutators
     def set_mass(self, body, kg):
+        before = self.masses.get(body)
         if kg is None or kg == "":
             # blanking the field reverts to the weighed default, not to "unmeasured"
             with self._lock:
@@ -165,27 +167,49 @@ class DynConfig:
         else:
             kg = float(kg)
             if not 0.0 < kg < 100.0:
+                blackbox.log_event("dyn.set_mass.refused", body=body, value=kg,
+                                   reason="out of sane range")
                 return False, f"mass {kg} kg out of a sane range (0, 100)"
             with self._lock:
                 self.masses[body] = kg
         self.save()
+        self._mutated("mass", body, before, self.masses.get(body))
         return True, ""
 
     def set_pid(self, motor, kp=None, ki=None, kd=None):
         if motor not in self.pid:
+            blackbox.log_event("dyn.set_pid.refused", motor=motor, reason="unknown motor")
             return False, f"unknown motor {motor}"
+        before = dict(self.pid[motor])
         with self._lock:
             g = self.pid[motor]
             for key, val in (("kp", kp), ("ki", ki), ("kd", kd)):
                 if val is not None:
                     g[key] = float(val)
+            after = dict(g)
         self.save()
+        self._mutated("pid", motor, before, after)
         return True, ""
 
     def set_kt(self, kt_by_motor):
+        before = dict(self.kt)
         with self._lock:
             self.kt.update({k: float(v) for k, v in kt_by_motor.items() if k in paths.MOTOR_NAMES})
+            after = dict(self.kt)
         self.save()
+        self._mutated("kt", "*", before, after)
+
+    @staticmethod
+    def _mutated(field, key, before, after):
+        """Every dynstore write is Tier C evidence (old -> new) and triggers a Tier B dump.
+
+        Not because masses are dangerous — they are offline estimator inputs and change nothing on
+        the robot — but because a config write is exactly the kind of thing that happened next to
+        the 2026-08-10 failure, and a postmortem needs to see it on the same timeline as the
+        motion. `drive_gains` is board firmware config and rides along in the config snapshot."""
+        blackbox.log_event("dyn.set", field=field, key=key, before=before, after=after)
+        blackbox.note_config_change(f"dynstore.{field}")
+        blackbox.trigger_dump(f"dynstore_write_{field}")
 
     # ------------------------------------------------------------------ views
     def as_dict(self):

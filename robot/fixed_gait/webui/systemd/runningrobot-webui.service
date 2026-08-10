@@ -1,0 +1,47 @@
+# DASH-01 web control UI + flight recorder, as a boot service.
+#
+# WHY THIS FILE EXISTS: on 2026-08-10 a joint destroyed itself and the only surviving record was a
+# terminal that happened to still be open. A hand-started process has no journal, no restart, and
+# no record of when it died. Under systemd, stdout lands in the journal, the daemon comes back
+# after a crash, and `journalctl -u runningrobot-webui` is a second, independent timeline to cross-
+# check the black box against.
+#
+# Install (on the Pi):
+#     sudo cp robot/fixed_gait/webui/systemd/runningrobot-webui.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now runningrobot-webui
+#     journalctl -u runningrobot-webui -f
+#
+# The unit deliberately does NOT depend on the black box succeeding: if the recorder cannot write,
+# the daemon still runs (see blackbox.py). The robot must never be stopped by its own logging.
+
+[Unit]
+Description=DASH-01 web control UI (CAN daemon + flight recorder)
+Documentation=file:/home/nemo/running_robot/robot/fixed_gait/webui/README.md
+After=network.target can-up.service
+Wants=can-up.service
+# never fight a boot loop forever: 5 restarts in 60 s and it stays down, visibly, rather than
+# power-cycling the motors over and over. (These are [Unit] directives on systemd >= 230.)
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=nemo
+WorkingDirectory=/home/nemo/running_robot
+ExecStart=/home/nemo/running_robot/.venv/bin/python robot/fixed_gait/webui/server.py --port 8080
+# unbuffered, or the journal only sees the daemon's prints when the pipe buffer happens to flush —
+# which is exactly the wrong moment for a crash to lose its last lines
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=2
+# SIGINT so atexit runs: the daemon streams 0 A to every motor and the recorder flushes and writes
+# its clean daemon.stop record — the absence of which is how a postmortem infers a power cut.
+KillSignal=SIGINT
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dash01
+
+[Install]
+WantedBy=multi-user.target

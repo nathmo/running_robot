@@ -208,6 +208,98 @@ rocking):
 End-to-end in mock: mount rotation recovered to <0.01, lever arm to ~3 mm, and enabling the
 compensation cuts attitude error during hard rocking by ~77% (2.0° → 0.5° mean).
 
+## Black box (flight recorder) — `blackbox.py` / `blackbox_read.py`
+
+On 2026-08-10 a joint destroyed itself and the investigation was impossible: the only telemetry
+that existed was a 4096-sample RAM ring at 20 Hz, of which the HTTP API can only ever hand out the
+last 512 (25.6 s), and nothing on disk. By the time anyone looked the window had rolled past.
+
+Everything now lands in `data/blackbox/`, always on, in three tiers — because 200 Hz x 6 motors
+streamed continuously is 35 kB/s, 3 GB/day, and that kills the SD card:
+
+| tier | what | rate | file |
+|---|---|---|---|
+| A | continuous history, every field | 20 Hz | `A_<session>_<n>_<stamp>.bbseg` (rotated, budgeted) |
+| B | the actual black box: the full-rate RAM ring dumped on a trigger, **pre-trigger history included** | 200 Hz, 40 s ring + 3 s tail | `B_<session>_<n>_<reason>.bbdump` |
+| C | one JSON line per event, `fsync`ed, never deleted without archiving | — | `events.jsonl` |
+
+Tier B triggers: every `_trip()`, e-stop, mode transition, a *warn*-level tracking error / speed /
+temperature (below the trip thresholds, so the dump catches the approach and not only the fall),
+any motor error code, any calibration or `dynstore` write, an encoder-origin jump, and the manual
+"dump now" endpoint. A dump carries the calibration + drive gains + dynamics live at that instant,
+with a content hash, so it is self-describing without external context.
+
+**The control loop is not touched.** The 200 Hz thread only appends a tuple to a bounded deque (no
+lock, ~2 us); a separate writer thread owns every file. A full queue **drops and counts**, and the
+count is stamped into the next accepted record — a black box that lies about its own gaps is worse
+than none. If the writer thread dies the robot keeps running and `state.blackbox.alive` goes false
+in the UI.
+
+**Time.** The Pi has no RTC and serves an AP with no guaranteed internet, so `t_wall` can be years
+wrong. Every record carries `t_mono` (the primary base), `t_wall`, `wall_trusted`, a per-boot
+`boot_id` and a per-run `session_id`. A `clock.step` event records the jump when NTP finally syncs,
+so earlier stamps can be retro-corrected. **Power-off is inferred from the last heartbeat** (every
+8 s) before a gap — the process that dies with the power cannot log its own death.
+
+**Disk.** A global byte budget (default 1.2 GB, `--blackbox-budget-mb`) plus a free-space floor.
+Oldest Tier A segments are deleted first; Tier B dumps and the event log are the evidence and go
+last. Every deletion is logged. A full SD card can never stop the robot.
+
+### Reading it back
+
+```
+python robot/fixed_gait/webui/blackbox_read.py --postmortem      # the five questions, answered
+python robot/fixed_gait/webui/blackbox_read.py --list
+python robot/fixed_gait/webui/blackbox_read.py --timeline 80
+python robot/fixed_gait/webui/blackbox_read.py --dump B_xxx.bbdump --csv out.csv
+```
+
+`--postmortem` answers, from disk alone: when the Pi booted and when it last lost power; what
+`pos_raw` was at the last zero capture versus now; commanded vs reported position per motor at
+200 Hz for >= 10 s *before* a trip; which calibration / drive PID gains / dynamics were live at
+that instant; and whether `pos_raw` ever moved while the robot was LIMP and untouched.
+
+Over HTTP: `GET /api/blackbox/list`, `GET /api/blackbox/download?name=`,
+`POST /api/blackbox/mark` (operator annotation — it lands on the same timeline) and
+`POST /api/blackbox/dump`. Downloads are plain reads of append-only files, so they never block the
+daemon.
+
+### The pre-move guard
+
+The 2026-08-10 damage was a full-authority absolute slew against a calibration whose raw origin had
+moved underneath it. Four mechanisms now bound that, and **none of them adds a step to the normal
+zero -> Home workflow** — homing straight after a capture is the correct operator action, because
+the legs are limp and sagging and homing is what catches them:
+
+a. **Hold before moving.** The first CAN command after leaving LIMP is `set_pos(pos_raw measured
+   right now)`, held for 0.35 s. It never consults the offsets, so it is safe even against a
+   completely wrong zero, and it stops the sag immediately.
+b. **Raw-at-rest.** `pos_raw` is compared against the fingerprint captured at the last zero.
+   Decisive when we cannot vouch for continuity ourselves — a calibration restored from disk and
+   never re-captured in this process, i.e. after a power cycle, where the drives re-randomise their
+   raw origin. Within a live session the continuity watchdog is used instead, because gravity sag
+   legitimately moves the joints and must not be mistaken for an origin jump. Plus a range-sanity
+   check that is decisive in every case: 678 deg on a +-88 deg axis is refused.
+c. **A tighter tracking threshold while homing** (8 deg, not the 25 deg playback value): a slow
+   guided slew should track well, so a stale zero shows up within the first few degrees.
+d. **A per-joint travel budget** as the backstop: a guided move that has swept more than 1.3x the
+   joint's own range without arriving is stopped. `left.cam` reached ~1.9 output turns on
+   2026-08-10; this cuts it at ~0.6 of a turn whatever the calibration claims.
+
+A refusal is latched, surfaced in `state.premove` with both raw poses, logged, and dumped.
+
+### Tests
+
+```
+python -m pytest robot/fixed_gait/webui/tests -v
+```
+
+MockBus only, no hardware. The last test reproduces the 2026-08-10 incident shape end to end:
+capture a zero, move the raw origin underneath the daemon (`MockBus.shift_origin`, which shifts the
+reported *and* commanded frame while the shaft stays put and reports zero speed), command an
+absolute move — and asserts the guard refuses it, the event carries both raw poses, the dump holds
+>= 10 s of pre-trigger 200 Hz data, and `--postmortem` states what happened.
+
 ## Install on the Pi (offline)
 
 ```
@@ -249,33 +341,29 @@ ExecStart=/sbin/ip link set can1 up type can bitrate 1000000
 WantedBy=multi-user.target
 ```
 
-**2. Web UI — `/etc/systemd/system/dash01-webui.service`** (runs as `nemo`, waits for CAN):
+**2. Web UI — ship the unit that is in the repo**, `systemd/runningrobot-webui.service`. It is
+version-controlled precisely because the only surviving record of 2026-08-10 was a terminal that
+happened to still be open; a hand-started process has no journal and no restart.
 
 ```
-[Unit]
-Description=DASH-01 web control UI
-After=network.target can-up.service
-Wants=can-up.service
-
-[Service]
-User=nemo
-WorkingDirectory=/home/nemo/running_robot
-ExecStart=/home/nemo/running_robot/.venv/bin/python robot/fixed_gait/webui/server.py --port 8080
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
+sudo cp robot/fixed_gait/webui/systemd/runningrobot-webui.service /etc/systemd/system/
 ```
+
+It runs as `nemo`, waits for `can-up.service`, sets `PYTHONUNBUFFERED=1` so the journal never loses
+the last lines before a crash, restarts always (bounded to 5 restarts / 60 s so a boot loop stays
+down visibly instead of power-cycling the motors), and stops with `SIGINT` so `atexit` runs — that
+is what streams 0 A to every motor and lets the black box write its clean `daemon.stop` record,
+whose ABSENCE is how a postmortem infers a power cut.
 
 Note `ExecStart` uses the venv's Python by absolute path — systemd runs no shell, so it won't
 find `python` on `PATH` or activate a venv. Enable both:
 
 ```
 sudo systemctl daemon-reload
-sudo systemctl enable --now can-up.service dash01-webui.service
+sudo systemctl enable --now can-up.service runningrobot-webui.service
 ip -details link show can0                     # confirm state UP, bitrate 1000000
-systemctl status dash01-webui               # confirm active (running)
-journalctl -u dash01-webui -f               # live logs
+systemctl status runningrobot-webui         # confirm active (running)
+journalctl -u runningrobot-webui -f         # live logs
 ```
 
 > Don't put `ip link set` in the webui unit's `ExecStartPre`: that step would run as `nemo` and

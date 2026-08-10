@@ -24,6 +24,7 @@ import time
 import numpy as np
 
 import paths
+import blackbox
 
 # Measured-correct direction-check signs (booth calibration, 2026-07-14): saves re-flipping every
 # card each session. Physical motor wiring can still invert across a power cycle — the wizard
@@ -43,6 +44,15 @@ class Calibration:
         self.stage = "none"                    # none | zero_set | complete
         self.created = None
         self.restored_from_disk = False        # UI shows a "re-zero if unsure" banner when True
+        # RAW-AT-REST FINGERPRINT: exactly the pos_raw of all six at the moment of the last
+        # successful zero capture. It is numerically the same as `offsets`, but it is kept and
+        # persisted separately because it means something different: offsets is a conversion
+        # constant, this is EVIDENCE about where the encoders read when the robot was known to be
+        # in the zero pose. daemon._premove_guard compares live pos_raw against it — that is the
+        # check that would have caught 2026-08-10. `zero_epoch` bumps on every capture so the
+        # daemon can tell "we have not moved since this zero" from "we have".
+        self.zero_raw = {}
+        self.zero_epoch = 0
 
     # ------------------------------------------------------------------ persistence
     @classmethod
@@ -60,8 +70,21 @@ class Calibration:
                 c.stage = d.get("stage", "none")
                 c.created = d.get("created")
                 c.restored_from_disk = c.stage != "none"
+                c.zero_epoch = int(d.get("zero_epoch", 0))
+                c.zero_raw = {n: float(v) for n, v in (d.get("zero_raw") or {}).items()
+                              if n in c.offsets}
+                if not c.zero_raw and c.stage != "none":
+                    # a file written before the fingerprint existed: offsets ARE that raw pose
+                    c.zero_raw = dict(c.offsets)
             except (ValueError, OSError) as e:
                 print(f"(could not read {path}: {e} — starting uncalibrated)")
+        blackbox.log_event("calib.load", stage=c.stage, created=c.created,
+                           zero_epoch=c.zero_epoch, zero_raw=c.zero_raw,
+                           offsets=c.offsets, signs=c.signs,
+                           restored_from_disk=c.restored_from_disk,
+                           note="restored from disk: the drives re-randomise their raw origin on "
+                                "every power cycle, so this zero is only valid if the boards have "
+                                "not been power-cycled since it was captured")
         return c
 
     def save(self, path=paths.CALIB_FILE):
@@ -69,6 +92,8 @@ class Calibration:
             d = {
                 "created": self.created,
                 "stage": self.stage,
+                "zero_epoch": self.zero_epoch,
+                "zero_raw": dict(self.zero_raw),
                 "motors": {n: {"offset_deg": self.offsets[n], "sign": int(self.signs[n]),
                                "confirmed": self.confirmed[n]} for n in paths.MOTOR_NAMES},
             }
@@ -76,6 +101,9 @@ class Calibration:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, indent=2)
         os.replace(tmp, path)
+        blackbox.log_event("calib.save", stage=d["stage"], created=d["created"],
+                           zero_epoch=d["zero_epoch"], path=os.path.basename(path))
+        blackbox.note_config_change("calibration")
 
     # ------------------------------------------------------------------ conversion
     @property
@@ -99,24 +127,43 @@ class Calibration:
         """raw_positions: {motor_name: raw_deg} for ALL motors (refuse partial capture)."""
         missing = [n for n in paths.MOTOR_NAMES if raw_positions.get(n) is None]
         if missing:
+            blackbox.log_event("calib.set_zero.refused", missing=missing,
+                               raw=raw_positions, reason="partial capture")
             return False, f"no position from {', '.join(missing)} — cannot set zero"
+        before = dict(self.offsets)
+        before_raw = dict(self.zero_raw)
         with self._lock:
             for n in paths.MOTOR_NAMES:
                 self.offsets[n] = float(raw_positions[n])
                 self.confirmed[n] = False
+            self.zero_raw = {n: float(raw_positions[n]) for n in paths.MOTOR_NAMES}
+            self.zero_epoch += 1
             self.stage = "zero_set"
             self.created = time.strftime("%Y-%m-%dT%H:%M:%S")
             self.restored_from_disk = False
         self.save()
+        blackbox.log_event(
+            "calib.set_zero", zero_epoch=self.zero_epoch, created=self.created,
+            offsets_before=before, offsets_after=dict(self.offsets),
+            raw_at_last_zero_before=before_raw, raw_captured=dict(self.zero_raw),
+            moved_since_last_zero={n: round(float(raw_positions[n]) - before_raw[n], 3)
+                                   for n in paths.MOTOR_NAMES if n in before_raw},
+            note="raw_captured IS the raw-at-rest fingerprint the pre-move guard compares against")
+        blackbox.trigger_dump("calibration_zero_capture")
         return True, ""
 
     def set_sign(self, name, sign):
         if name not in self.signs:
             return False, f"unknown motor {name}"
         with self._lock:
+            before = self.signs[name]
             self.signs[name] = 1.0 if sign >= 0 else -1.0
+            after = self.signs[name]
             self.confirmed[name] = False
         self.save()
+        blackbox.log_event("calib.set_sign", motor=name, before=before, after=after)
+        if before != after:
+            blackbox.trigger_dump("calibration_sign_flip")
         return True, ""
 
     def confirm(self, name):
@@ -128,7 +175,9 @@ class Calibration:
             self.confirmed[name] = True
             if all(self.confirmed.values()):
                 self.stage = "complete"
+            stage = self.stage
         self.save()
+        blackbox.log_event("calib.confirm", motor=name, stage=stage)
         return True, ""
 
     def complete_now(self):
@@ -140,16 +189,46 @@ class Calibration:
         with self._lock:
             self.stage = "complete"
         self.save()
+        blackbox.log_event("calib.complete", zero_epoch=self.zero_epoch,
+                           raw_at_last_zero=self.raw_at_rest(), signs=dict(self.signs))
         return True, ""
 
     def reset(self):
+        before = dict(self.offsets)
         with self._lock:
             self.offsets = {n: 0.0 for n in paths.MOTOR_NAMES}
             self.signs = {n: DEFAULT_SIGNS.get(n, 1.0) for n in paths.MOTOR_NAMES}
             self.confirmed = {n: False for n in paths.MOTOR_NAMES}
             self.stage = "none"
             self.restored_from_disk = False
+            self.zero_raw = {}
+            self.zero_epoch += 1
         self.save()
+        blackbox.log_event("calib.reset", offsets_before=before, zero_epoch=self.zero_epoch)
+
+    # ------------------------------------------------------------------ raw-at-rest comparison
+    def raw_at_rest(self):
+        """{name: pos_raw at the last successful zero capture}, or {} if never zeroed."""
+        with self._lock:
+            return dict(self.zero_raw)
+
+    def compare_raw(self, raw_now):
+        """Compare live pos_raw against the raw-at-rest fingerprint.
+
+        Returns {name: {"then", "now", "delta"}} for every motor present in both. `delta` is only
+        meaningful while the robot has NOT been commanded to move since that capture — the daemon
+        decides that (see daemon._premove_guard); this method just does the arithmetic so the guard,
+        the snapshot and any postmortem all read the same numbers.
+        """
+        then = self.raw_at_rest()
+        out = {}
+        for n in paths.MOTOR_NAMES:
+            a, b = then.get(n), raw_now.get(n)
+            if a is None or b is None:
+                continue
+            out[n] = {"then": round(float(a), 3), "now": round(float(b), 3),
+                      "delta": round(float(b) - float(a), 3)}
+        return out
 
     def snapshot(self):
         with self._lock:
@@ -157,6 +236,8 @@ class Calibration:
                 "stage": self.stage,
                 "created": self.created,
                 "restored_from_disk": self.restored_from_disk,
+                "zero_epoch": self.zero_epoch,
+                "raw_at_last_zero": {n: round(v, 3) for n, v in self.zero_raw.items()},
                 "motors": {n: {"offset_deg": round(self.offsets[n], 2),
                                "sign": int(self.signs[n]),
                                "confirmed": self.confirmed[n]} for n in paths.MOTOR_NAMES},

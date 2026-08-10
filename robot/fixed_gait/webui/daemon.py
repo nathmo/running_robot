@@ -23,6 +23,7 @@ import traceback
 import numpy as np
 
 import paths
+import blackbox
 import canio
 import ringbuffer
 
@@ -30,6 +31,8 @@ import play_trajectory as pt              # fixed_gait/ — Motor, drain, recons
 import trajectory as traj                 # fixed_gait/
 
 MODES = ("LIMP", "MANUAL", "RECORD_GAIT", "RECORD_WS", "PLAYBACK", "MEASURE", "ESTOPPED")
+MODE_CODE = {m: i for i, m in enumerate(MODES)}
+blackbox.register_modes(MODES)            # so a recorded mode byte is decodable offline
 TICK_HZ = 200.0
 TELEMETRY_DIV = 10                        # ring/snapshot update every Nth tick (=> 20 Hz)
 MAX_TEMP_C = 80                           # run_hardware.py:102
@@ -42,6 +45,49 @@ DEFAULT_SLEW_DPS = 60.0
 # net to the demonstrated envelope (+10 deg) whenever a workspace is loaded for that leg.
 HARD_CLAMP = {"abd": 48.0, "cam": 88.0, "thigh": 62.0}
 HARD_WIDEN_DEG = 10.0
+
+# ===================================================================== pre-move safety (2026-08-10)
+# On 2026-08-10 a joint destroyed itself: left.cam was commanded absolutely against a calibration
+# whose raw origin had moved underneath it, and the drive happily wound the joint to ~678 deg
+# normalized (~1.9 output turns) on a +-88 deg axis. Four independent mechanisms now bound that,
+# and NONE of them adds a step to the normal zero -> home workflow (see BLACKBOX_TASK.md #4).
+#
+# (a) HOLD BEFORE MOVING. The first CAN command after leaving LIMP is set_pos(pos_raw as measured
+#     right now) for HOLD_BEFORE_MOVE_S. It never consults calibration.offsets, so it is correct
+#     even if the zero is nonsense, and it catches the legs sagging under gravity immediately —
+#     which is what the operator actually wants after a capture. Only then do we slew anywhere.
+HOLD_BEFORE_MOVE_S = 0.35
+# (b) RAW-AT-REST. Compare live pos_raw against the fingerprint captured at the last successful
+#     zero. Decisive only when we cannot vouch for continuity ourselves (a calibration restored
+#     from disk, never re-captured in this process) — after a power cycle the drives re-randomise
+#     their raw origin, so a stale file is exactly the trap. Within a live session the continuity
+#     watchdog below is used instead, because gravity sag legitimately moves the joints between the
+#     capture and the move and must not be mistaken for an origin jump.
+RAW_AT_REST_TOL_DEG = 10.0
+# ...and the sanity check that is decisive in every case: does calibration + reported raw imply a
+# pose the joint can physically be in? 678 deg on a 88 deg axis fails this by 7x.
+RANGE_SANITY_SLACK_DEG = 30.0
+# (c) Homing is a slow guided slew and should track well, so the 25 deg playback threshold is far
+#     too loose for it — a stale zero shows up as tracking error within the first few degrees.
+MAX_TRACK_ERR_HOMING_DEG = 8.0
+# (d) TRAVEL BUDGET, the backstop for when everything else has been fooled: a guided move that has
+#     travelled this multiple of a joint's own range without arriving is not going to arrive.
+TRAVEL_BUDGET_FACTOR = 1.3
+TRAVEL_ARRIVED_DEG = 2.0
+
+# Continuity watchdog: pos_raw stepping this fast while the joint is LIMP and the drive itself
+# reports it is not turning is not motion — it is the driver board's multi-turn origin moving on
+# its own (the open question from 2026-08-10). Rate-based, not per-tick, because the loop slips
+# ~12% and a doubled dt must not read as a jump.
+RAW_JUMP_DEG = 4.0
+RAW_JUMP_DPS = 800.0
+RAW_JUMP_SPD_MAX = 200.0                  # |ERPM| under which we believe "not turning"
+
+# Warn levels: BELOW the trip thresholds, so a Tier B dump catches the approach and not only the
+# fall. These never stop the robot — they only ask the black box to preserve the window.
+WARN_TRACK_ERR_DEG = 12.0
+WARN_SPD_ERPM = 12000.0
+WARN_TEMP_C = 70
 
 # Playback cycle period, seconds. Two independent reasons for the floor:
 #
@@ -142,13 +188,17 @@ def _pos_loop_error_ratio(f):
 
 
 class RobotDaemon(threading.Thread):
-    def __init__(self, interface="socketcan", mock=False, calib=None, wstore=None, fklut=None):
+    def __init__(self, interface="socketcan", mock=False, calib=None, wstore=None, fklut=None,
+                 bb=None):
         super().__init__(daemon=True, name="RobotDaemon")
         self.interface = interface
         self.mock = mock
         self.calib = calib
         self.wstore = wstore
         self.fklut = fklut
+        # The flight recorder. None is a fully supported configuration: every call site goes
+        # through the tiny _bb_* helpers below, so the robot runs identically without it.
+        self.bb = bb
 
         self.lock = threading.Lock()
         self.estop_event = threading.Event()
@@ -194,6 +244,25 @@ class RobotDaemon(threading.Thread):
         self.ring = ringbuffer.TelemetryRing()
         self.snapshot = {"daemon_alive": False, "mode": "LIMP"}
         self._started_ok = threading.Event()
+
+        # -------- black box + pre-move guard state --------
+        self._bb_prev_mono = None
+        self._bb_buf = [[0.0] * paths.N_MOTORS for _ in range(8)]   # reused: zero alloc per tick
+        self._zero_epoch_at_start = getattr(calib, "zero_epoch", 0) if calib else 0
+        self._cmd_zero_epoch = None        # zero_epoch in force when we last commanded absolutely
+        self._raw_prev = [None] * paths.N_MOTORS      # continuity watchdog
+        self._raw_jumps = []               # discontinuities seen since the last zero capture
+        self._jump_epoch = self._zero_epoch_at_start
+        self._hold_until = 0.0             # (a) hold-before-move deadline
+        self._hold_raw = {}                # raw pose measured at the instant we left LIMP
+        self._travel = {}                  # (d) |raw| travelled since the guided move started
+        self._travel_prev = {}
+        self._guard_latched = ""           # why the last activation was refused (UI + snapshot)
+        self._guard_detail = {}
+        self._guard_logged = (None, -1e9)
+        self._was_homing = False
+        self._warn_last = {}               # warn-level trigger debounce
+        self._bb_status = {"alive": False}
 
     # ================================================================= web-facing API
     def request_mode(self, mode):
@@ -350,7 +419,7 @@ class RobotDaemon(threading.Thread):
         manually zero to). Trusts the CAD zero: it slews under the physical-feasibility net (like
         override) rather than the eroded gait polygon, so it can still reach 0 when 0 sits a
         degree or so outside the hand-drawn safe region."""
-        ok, why = self._motion_allowed()
+        ok, why = self._activation_allowed()
         if not ok:
             with self.lock:
                 self._last_reject = why
@@ -437,7 +506,7 @@ class RobotDaemon(threading.Thread):
         rather than the eroded polygon, so it also works when the leg is currently parked OUTSIDE
         the safe region — which is exactly when you reach for this button.
         Returns (targets, info, "") or (None, None, reason)."""
-        ok, why = self._motion_allowed()
+        ok, why = self._activation_allowed()
         if not ok:
             with self.lock:
                 self._last_reject = why
@@ -660,7 +729,7 @@ class RobotDaemon(threading.Thread):
         Returns (ok, reason). Refuses if any point of the planned trajectory (or the current pose)
         leaves the safe set — the run can never start into unsafe space (mirrors sine_update's
         both-endpoints pre-check, extended to the whole chirp)."""
-        ok, why = self._motion_allowed()
+        ok, why = self._activation_allowed()
         if not ok:
             return False, why
         if not self.by_name or any(m.pos is None for m in self.motors):
@@ -730,7 +799,11 @@ class RobotDaemon(threading.Thread):
         except Exception:
             self.loop_error = traceback.format_exc()
             print(f"!! RobotDaemon crashed:\n{self.loop_error}")
+            self._bb_event("daemon.crash", traceback=self.loop_error, mode=self.mode)
+            self._bb_dump("daemon_crash")
         finally:
+            self._bb_event("daemon.loop_exit", mode=self.mode, ticks=self._tick_count,
+                           slip=self._slip_count, loop_error=self.loop_error)
             self._release_and_close()
             with self.lock:
                 snap = dict(self.snapshot)
@@ -759,8 +832,17 @@ class RobotDaemon(threading.Thread):
             pt.drain(self.buses, self.motors_by_bus, 0.0)
             time.sleep(0.005)
         silent = [self._name_of[id(m)] for m in self.motors if m.pos is None]
+        raw = {n: m.pos for n, m in self.by_name.items()}
+        self._bb_event("daemon.preflight", mock=self.mock, interface=self.interface,
+                       silent=silent, raw=raw,
+                       calibration=self.calib.snapshot() if self.calib else None,
+                       raw_vs_last_zero=self.calib.compare_raw(raw) if self.calib else None,
+                       note="raw_vs_last_zero with the robot untouched answers 'does pos_raw "
+                            "still match the last zero capture'")
         if silent:
             print(f"!! preflight: no status from {silent} — motion blocked until they report")
+            self._bb_event("can.silent", motors=silent,
+                           note="no status frames — the bus, the wiring or the drives are down")
 
     def _release_and_close(self):
         for m in self.motors:
@@ -780,12 +862,16 @@ class RobotDaemon(threading.Thread):
     def _loop(self):
         dt = 1.0 / TICK_HZ
         next_t = time.time()
+        prev_mono = time.monotonic()
         while not self.stop_event.is_set():
             now = time.time()
+            t_mono = time.monotonic()
+            dt_actual = t_mono - prev_mono
+            prev_mono = t_mono
 
             # 1) e-stop first — latch (limp is streamed by the mode body below)
             if self.estop_event.is_set() and self.mode != "ESTOPPED":
-                self.mode = "ESTOPPED"
+                self._set_mode("ESTOPPED", self.estop_reason or "e-stop latched")
                 self._pb = None
                 if self._meas:
                     self._meas["running"] = False       # keep the partial log; stop exciting
@@ -820,7 +906,10 @@ class RobotDaemon(threading.Thread):
                 elif m.temp >= MAX_TEMP_C:
                     self._trip(f"{self._name_of[id(m)]} temp {m.temp}C >= {MAX_TEMP_C}")
 
-            # 6) telemetry + snapshot at 20 Hz
+            # 6) black box: EVERY tick at the full rate (a bounded deque append, no I/O)
+            self._bb_tick(t_mono, now, dt_actual)
+
+            # 7) telemetry + snapshot at 20 Hz
             self._tick_count += 1
             if self._tick_count % TELEMETRY_DIV == 0:
                 self._publish(now)
@@ -833,12 +922,39 @@ class RobotDaemon(threading.Thread):
                 self._slip_count += 1
                 next_t = time.time()
 
+    def _set_mode(self, mode, reason, **fields):
+        """The ONE place the mode changes, so every transition is on the timeline with its reason
+        and gets a Tier B dump of the 200 Hz window around it."""
+        old = self.mode
+        self.mode = mode
+        if old == mode:
+            return
+        for i in range(paths.N_MOTORS):
+            self._raw_prev[i] = None            # continuity chains do not span a mode change
+        raw = {n: m.pos for n, m in self.by_name.items()}
+        self._bb_event("mode", **{"from": old, "to": mode, "reason": reason, "raw": raw,
+                                  "raw_vs_last_zero": self.calib.compare_raw(raw),
+                                  "zero_epoch": self.calib.zero_epoch,
+                                  "slip": self._slip_count, **fields})
+        self._bb_dump(f"mode_{old}_to_{mode}", why=reason)
+
     def _trip(self, reason):
         if not self.estop_event.is_set():
             with self.lock:
                 self.estop_reason = reason
             self.estop_event.set()
             print(f"!! SAFETY STOP: {reason}")
+            self._bb_event("trip", reason=reason, mode=self.mode,
+                           raw={n: m.pos for n, m in self.by_name.items()},
+                           cmd_raw=dict(self._last_cmd_raw),
+                           norm={n: (None if m.pos is None else round(self.calib.norm(n, m.pos), 3))
+                                 for n, m in self.by_name.items()},
+                           temp={n: m.temp for n, m in self.by_name.items()},
+                           err={n: m.err for n, m in self.by_name.items()},
+                           cur={n: m.cur for n, m in self.by_name.items()},
+                           spd={n: m.spd for n, m in self.by_name.items()},
+                           slip=self._slip_count, homing=self._home_active)
+            self._bb_dump("trip", why=reason)
 
     def _stream_limp(self):
         for m in self.motors:
@@ -852,6 +968,197 @@ class RobotDaemon(threading.Thread):
         if silent:
             return False, f"motor(s) silent: {', '.join(silent)} — never commanding blind"
         return True, ""
+
+    # ================================================================= black box
+    def _bb_event(self, kind, **fields):
+        bb = self.bb
+        if bb is not None:
+            bb.log_event(kind, **fields)
+
+    def _bb_dump(self, reason, **fields):
+        bb = self.bb
+        return bb.trigger_dump(reason, **fields) if bb is not None else None
+
+    def _bb_tick(self, t_mono, t_wall, dt_actual):
+        """One 200 Hz sample into the recorder, plus the two watchdogs that need every tick.
+
+        Everything here is O(6) arithmetic on preallocated lists and one deque append — no locks,
+        no allocation beyond the outgoing tuple, no file I/O. The tick already slips ~12%; this
+        must not make that worse.
+        """
+        pr, pn, cr, cn, sp, cu, tp, er = self._bb_buf
+        calib, nan = self.calib, float("nan")
+        for i, n in enumerate(paths.MOTOR_NAMES):
+            m = self.by_name[n]
+            p = m.pos
+            if p is None:
+                pr[i] = pn[i] = sp[i] = cu[i] = tp[i] = nan
+                er[i] = 0.0
+            else:
+                pr[i] = p
+                pn[i] = calib.norm(n, p)
+                sp[i], cu[i], tp[i], er[i] = m.spd, m.cur, m.temp, m.err
+            c = self._last_cmd_raw.get(n)
+            if c is None:
+                cr[i] = cn[i] = nan
+            else:
+                cr[i] = c
+                cn[i] = calib.norm(n, c)
+
+        bb = self.bb
+        if bb is not None:
+            bb.push_sample((t_mono, t_wall, dt_actual, MODE_CODE.get(self.mode, 0),
+                            1.0 if self.mode == "ESTOPPED" else 0.0, self._slip_count,
+                            *pr, *pn, *cr, *cn, *sp, *cu, *tp, *er))
+
+        self._watch_continuity(t_mono, dt_actual, pr, sp)
+        self._watch_warnings(t_mono, pr, cr, sp, tp, er)
+
+    def _watch_continuity(self, t_mono, dt_actual, pr, sp):
+        """Did a driver board's multi-turn origin move on its own? (question 5 of the brief)
+
+        Only meaningful while we are commanding nothing: then any change in pos_raw is either the
+        joint physically moving — which the drive reports as speed — or the encoder origin being
+        rewritten underneath us, which it does not. A jump with the drive claiming standstill is
+        the latter, and it invalidates the calibration instantly. This lives in the daemon rather
+        than in blackbox.py because the pre-move guard must keep working even if the recorder dies.
+        """
+        if self.calib.zero_epoch != self._jump_epoch:      # a fresh zero starts a fresh history
+            self._jump_epoch = self.calib.zero_epoch
+            self._raw_jumps = []
+        prev = self._raw_prev
+        if self.mode not in ("LIMP", "ESTOPPED", "RECORD_GAIT", "RECORD_WS"):
+            for i in range(paths.N_MOTORS):
+                prev[i] = None
+            return
+        thr = max(RAW_JUMP_DEG, RAW_JUMP_DPS * dt_actual)
+        for i in range(paths.N_MOTORS):
+            p, q = pr[i], prev[i]
+            prev[i] = None if p != p else p                # NaN (silent motor) breaks the chain
+            if q is None or p != p:
+                continue
+            d = p - q
+            if abs(d) <= thr or abs(sp[i]) >= RAW_JUMP_SPD_MAX:
+                continue
+            n = paths.MOTOR_NAMES[i]
+            self._raw_jumps.append({"motor": n, "t_mono": round(t_mono, 4),
+                                    "before": round(q, 3), "after": round(p, 3),
+                                    "delta": round(d, 3), "spd": round(sp[i], 1),
+                                    "mode": self.mode})
+            del self._raw_jumps[:-64]
+            self._bb_event("raw.jump", motor=n, before=q, after=p, delta_deg=d, spd=sp[i],
+                           mode=self.mode, dt=dt_actual, threshold_deg=thr,
+                           zero_epoch=self.calib.zero_epoch,
+                           note="pos_raw stepped while limp and the drive reported no motion — "
+                                "the encoder origin moved, the joint did not. The calibration is "
+                                "now stale and the pre-move guard will refuse to leave LIMP.")
+            self._bb_dump("raw_origin_jump", motor=n, delta_deg=d)
+
+    def _watch_warnings(self, t_mono, pr, cr, sp, tp, er):
+        """Warn levels sit BELOW the trip thresholds so a dump catches the approach, not only the
+        fall. These never stop the robot."""
+        if self.bb is None:
+            return
+        for i in range(paths.N_MOTORS):
+            n = paths.MOTOR_NAMES[i]
+            hit = None
+            if cr[i] == cr[i] and pr[i] == pr[i] and abs(pr[i] - cr[i]) > WARN_TRACK_ERR_DEG:
+                hit = ("track", f"{n} tracking error {pr[i] - cr[i]:+.1f} deg "
+                                f"(warn {WARN_TRACK_ERR_DEG})")
+            elif abs(sp[i]) > WARN_SPD_ERPM:
+                hit = ("speed", f"{n} speed {sp[i]:.0f} ERPM (warn {WARN_SPD_ERPM:.0f})")
+            elif tp[i] == tp[i] and tp[i] >= WARN_TEMP_C:
+                hit = ("temp", f"{n} temp {tp[i]:.0f}C (warn {WARN_TEMP_C})")
+            elif er[i]:
+                hit = ("err", f"{n} drive error code {int(er[i])}")
+            if hit is None:
+                continue
+            key = f"{hit[0]}:{n}"
+            if t_mono - self._warn_last.get(key, -1e9) < 30.0:
+                continue
+            self._warn_last[key] = t_mono
+            self._bb_event("warn", kind=hit[0], motor=n, message=hit[1], mode=self.mode,
+                           pos_raw=pr[i], cmd_raw=cr[i], spd=sp[i], temp=tp[i], err=int(er[i]))
+            self._bb_dump(f"warn_{hit[0]}", motor=n, message=hit[1])
+
+    # ================================================================= pre-move guard
+    def _premove_guard(self):
+        """Is it safe to command absolute positions right now? (ok, reason, detail) — pure.
+
+        Three checks, none of which fires on the normal zero -> home workflow:
+
+          (i)   RANGE SANITY, always decisive. calibration + the reported raw must imply a pose the
+                joint can physically be in. On 2026-08-10 left.cam implied 678 deg on a +-88 deg
+                axis; this alone would have refused the move.
+          (ii)  CONTINUITY, decisive whenever we have watched every tick since the zero capture. A
+                logged origin jump means the calibration is stale, full stop.
+          (iii) RAW-AT-REST, decisive only when we CANNOT vouch for continuity — a calibration
+                restored from disk and never re-captured in this process. The drives re-randomise
+                their raw origin on every power cycle, so a stale file is precisely the trap; and
+                since gravity sag also moves the joints while we were dead, a mismatch is
+                genuinely ambiguous and must be resolved by a re-zero rather than by guessing.
+        """
+        raw_now = {n: m.pos for n, m in self.by_name.items()}
+        detail = {"raw_now": {n: (None if v is None else round(v, 3)) for n, v in raw_now.items()},
+                  "raw_at_last_zero": self.calib.raw_at_rest(),
+                  "compare": self.calib.compare_raw(raw_now),
+                  "zero_epoch": self.calib.zero_epoch,
+                  "zeroed_this_session": self.calib.zero_epoch != self._zero_epoch_at_start,
+                  "moved_since_zero": self._cmd_zero_epoch == self.calib.zero_epoch,
+                  "origin_jumps_since_zero": list(self._raw_jumps)}
+
+        # (i) range sanity
+        for n, m in self.by_name.items():
+            if m.pos is None:
+                continue
+            side, role = paths.split_name(n)
+            lo, hi = self._hard_bounds(side, role)
+            norm = self.calib.norm(n, m.pos)
+            if not (lo - RANGE_SANITY_SLACK_DEG <= norm <= hi + RANGE_SANITY_SLACK_DEG):
+                return False, (f"{n}: calibration says this joint is at {norm:+.1f} deg, but its "
+                               f"range is [{lo:.0f}, {hi:.0f}] — the raw origin and the zero do "
+                               f"not agree. Re-zero before moving."), detail
+
+        # (ii) an origin jump seen with our own eyes since the last capture
+        if self._raw_jumps:
+            j = self._raw_jumps[-1]
+            return False, (f"{j['motor']}: pos_raw jumped {j['delta']:+.1f} deg while LIMP and not "
+                           f"turning ({j['before']:.1f} -> {j['after']:.1f}) — the encoder origin "
+                           f"moved, so the zero is stale. Re-zero before moving."), detail
+
+        # (iii) raw-at-rest, when continuity is unknowable
+        if not detail["zeroed_this_session"] and detail["raw_at_last_zero"]:
+            off = {n: c for n, c in detail["compare"].items()
+                   if abs(c["delta"]) > RAW_AT_REST_TOL_DEG}
+            if off:
+                worst = max(off, key=lambda n: abs(off[n]["delta"]))
+                return False, (
+                    f"{worst}: pos_raw is {off[worst]['now']:.1f} but the last zero capture "
+                    f"recorded {off[worst]['then']:.1f} ({off[worst]['delta']:+.1f} deg, "
+                    f"{len(off)} joint(s) off). This calibration was restored from disk and has "
+                    f"not been re-captured since — the drives re-randomise their raw origin on "
+                    f"every power cycle. Re-zero before moving."), detail
+        return True, "", detail
+
+    def _activation_allowed(self):
+        """_motion_allowed() plus the pre-move guard. Every transition out of LIMP goes through
+        here; refusals are latched, logged with BOTH raw poses, and dumped."""
+        ok, why = self._motion_allowed()
+        if not ok:
+            return False, why
+        ok, why, detail = self._premove_guard()
+        if ok:
+            self._guard_latched, self._guard_detail = "", {}
+            return True, ""
+        self._guard_latched, self._guard_detail = why, detail
+        self._last_reject = why
+        last_why, last_t = self._guard_logged
+        now = time.monotonic()
+        if why != last_why or (now - last_t) > 30.0:      # do not spam on a polling UI
+            self._guard_logged = (why, now)
+            self._bb_event("premove.refused", reason=why, mode=self.mode, **detail)
+            self._bb_dump("premove_guard_refused", why=why)
+        return False, why
 
     # ----------------------------------------------------------------- requests
     def _consume_requests(self, now):
@@ -874,8 +1181,10 @@ class RobotDaemon(threading.Thread):
         if clear and self.mode == "ESTOPPED":
             self.estop_event.clear()
             with self.lock:
+                was = self.estop_reason
                 self.estop_reason = ""
-            self.mode = "LIMP"
+            self._bb_event("estop.clear", previous_reason=was)
+            self._set_mode("LIMP", "e-stop cleared by operator")
 
         if self.mode == "ESTOPPED":
             return                                          # latched: ignore everything else
@@ -884,18 +1193,21 @@ class RobotDaemon(threading.Thread):
             self._handle_record_cmd(cmd, leg, kind, now)
 
         if pb_req is not None:
-            ok, why = self._motion_allowed()
+            ok, why = self._activation_allowed()
             if ok:
                 self._start_playback(pb_req, now)
             else:
                 self._last_reject = why
+
         if pb_patch is not None and self._pb is not None:
             self._apply_playback_patch(pb_patch, now)
 
         if meas_stop and self._meas is not None:
             self._meas["running"] = False               # user-ended; keep the log for saving
+            self._bb_event("measure.stop", leg=self._meas.get("leg"),
+                           n_samples=len(self._meas.get("buf_t", [])))
         if meas_req is not None:
-            ok, why = self._motion_allowed()
+            ok, why = self._activation_allowed()
             if ok:
                 self._start_measure(meas_req, now)
             else:
@@ -903,15 +1215,16 @@ class RobotDaemon(threading.Thread):
 
         if req_mode and req_mode != self.mode:
             if req_mode == "LIMP":
-                self.mode = "LIMP"
                 self._pb = None
                 self._meas = None                          # finished/aborted run is cleared here
                 self._end_active_record()
+                self._enter_hold(None)
                 with self.lock:
                     self._manual_targets = {}
                     self._manual_override = False          # override never survives a mode change
+                self._set_mode("LIMP", "operator requested LIMP")
             elif req_mode == "MANUAL":
-                ok, why = self._motion_allowed()
+                ok, why = self._activation_allowed()
                 if ok:
                     if self.mode != "MANUAL":
                         # enter without a jump: hold the current pose; keep targets that were
@@ -923,9 +1236,28 @@ class RobotDaemon(threading.Thread):
                                 self._manual_targets.setdefault(n, v)
                             for s in self._sine.values():
                                 s["enabled"] = False
-                    self.mode = "MANUAL"
+                        self._enter_hold(now)
+                    self._set_mode("MANUAL", "operator requested MANUAL")
                 else:
                     self._last_reject = why
+
+    def _enter_hold(self, now):
+        """(a) hold-before-move: latch the raw pose to hold, and reset the travel budget.
+
+        `now is None` cancels it (going limp). The held raw is the MEASURED encoder value, not
+        anything derived from the calibration, which is what makes this safe when the zero is
+        wrong: whatever the offsets say, set_pos(where you already are) cannot slew anywhere."""
+        if now is None:
+            self._hold_until, self._hold_raw = 0.0, {}
+            self._travel, self._travel_prev = {}, {}
+            return
+        self._hold_raw = {n: m.pos for n, m in self.by_name.items() if m.pos is not None}
+        self._hold_until = now + HOLD_BEFORE_MOVE_S
+        self._travel = {n: 0.0 for n in self._hold_raw}
+        self._travel_prev = dict(self._hold_raw)
+        self._bb_event("premove.hold", hold_s=HOLD_BEFORE_MOVE_S, raw=self._hold_raw,
+                       note="first command after enable is set_pos(current raw) — "
+                            "calibration-independent, stops the sag, cannot slew")
 
     # ----------------------------------------------------------------- MANUAL (hold + sine)
     def _tick_manual(self, now, dt):
@@ -933,6 +1265,22 @@ class RobotDaemon(threading.Thread):
         if not ok:
             self._trip(why)
             return
+
+        # (a) hold-before-move. For the first HOLD_BEFORE_MOVE_S after enabling we command each
+        # joint to the raw angle it was measured at — NOT through the calibration. This catches
+        # the sag instantly and is safe even against a completely wrong zero; only after it do we
+        # start slewing toward absolute targets.
+        if now < self._hold_until:
+            for n, m in self.by_name.items():
+                raw = self._hold_raw.get(n)
+                if raw is None:
+                    continue
+                canio.set_pos(m.bus, m.cid, raw)
+                self._last_cmd_raw[n] = raw
+            self._held = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items()
+                          if m.pos is not None}
+            return
+
         with self.lock:
             desired = dict(self._manual_targets)
             homing = self._home_active
@@ -990,15 +1338,61 @@ class RobotDaemon(threading.Thread):
                 note = f"recovering toward a checked target — {bad}"
         self._last_reject = note
 
+        # (c) homing is a slow guided slew and should track well — a stale zero shows up as
+        # tracking error within the first few degrees, long before the 25 deg playback threshold.
+        if homing and not self._was_homing:              # each new guided move: fresh budget
+            self._travel, self._travel_prev = {}, {}
+        self._was_homing = homing
+        track_lim = MAX_TRACK_ERR_HOMING_DEG if homing else MAX_TRACK_ERR_DEG
+        self._cmd_zero_epoch = self.calib.zero_epoch     # we are commanding ABSOLUTE positions now
         for n, m in self.by_name.items():
             raw = self.calib.raw(n, targets_norm[n])
             canio.set_pos(m.bus, m.cid, raw)
             self._last_cmd_raw[n] = raw
-            if abs(m.pos - raw) > MAX_TRACK_ERR_DEG:
-                self._trip(f"{n} tracking error {m.pos - raw:+.1f} deg (> {MAX_TRACK_ERR_DEG})")
+            if abs(m.pos - raw) > track_lim:
+                self._trip(f"{n} tracking error {m.pos - raw:+.1f} deg (> {track_lim}"
+                           f"{' while homing' if homing else ''})")
                 return
+        if homing and self._over_travel_budget(desired):
+            return
 
     # ----------------------------------------------------------------- PLAYBACK
+    def _over_travel_budget(self, desired):
+        """(d) the backstop. A guided move that has swept more than TRAVEL_BUDGET_FACTOR times a
+        joint's own range without arriving is not going to arrive — something between the command
+        and the joint is lying, and the only safe thing left is to stop.
+
+        Scoped to guided moves (Home / Centre) because only there is "arriving" well defined; free
+        manual sliding legitimately accumulates unlimited travel. On 2026-08-10 left.cam reached
+        ~1.9 output turns on a +-88 deg joint: this cuts that at ~0.6 of a turn whatever the
+        calibration claims.
+        """
+        for n, m in self.by_name.items():
+            if m.pos is None:
+                continue
+            prev = self._travel_prev.get(n)
+            self._travel_prev[n] = m.pos
+            if prev is None:
+                self._travel[n] = 0.0
+                continue
+            self._travel[n] = self._travel.get(n, 0.0) + abs(m.pos - prev)
+            side, role = paths.split_name(n)
+            lo, hi = self._hard_bounds(side, role)
+            budget = TRAVEL_BUDGET_FACTOR * (hi - lo)
+            if self._travel[n] <= budget:
+                continue
+            want = desired.get(n)
+            # `desired` is the FINAL target of the guided move, never the per-tick slew step —
+            # comparing against the step would make every joint look permanently "arrived".
+            if want is None or abs(self.calib.norm(n, m.pos) - want) <= TRAVEL_ARRIVED_DEG:
+                self._travel[n] = 0.0                    # arrived; a fresh move gets a fresh budget
+                continue
+            self._trip(f"{n} travel budget: swept {self._travel[n]:.0f} deg without arriving "
+                       f"(> {budget:.0f} = {TRAVEL_BUDGET_FACTOR}x its {hi - lo:.0f} deg range) — "
+                       f"the commanded target does not correspond to a reachable pose")
+            return True
+        return False
+
     def _start_playback(self, req, now):
         data = req["data"]
         sides = [s for s in (("right", "left") if req["legs"] == "both" else (req["legs"],))
@@ -1016,7 +1410,12 @@ class RobotDaemon(threading.Thread):
                         track_err_peak=0.0, track_err_worst=None, track_err_over=False,
                         start_pos={id(m): self.calib.norm(self._name_of[id(m)], m.pos)
                                    for m in self.motors})
-        self.mode = "PLAYBACK"
+        # no _enter_hold here: playback already ramps out of start_pos, whose first command is
+        # calib.raw(calib.norm(pos)) == pos exactly, i.e. it holds where the robot already is.
+        self._set_mode("PLAYBACK", "playback started", period=req.get("period"),
+                       mode_law=req.get("mode"), sides=list(sides),
+                       max_track_err=req.get("max_track_err"),
+                       track_err_estop=req.get("track_err_estop"))
 
     def _apply_playback_patch(self, patch, now):
         pb = self._pb
@@ -1045,12 +1444,13 @@ class RobotDaemon(threading.Thread):
     def _tick_playback(self, now, dt):
         pb = self._pb
         if pb is None:
-            self.mode = "LIMP"
+            self._set_mode("LIMP", "playback state vanished")
             return
         ok, why = self._motion_allowed()
         if not ok:
             self._trip(why)
             return
+        self._cmd_zero_epoch = self.calib.zero_epoch    # commanding absolute positions
         # === re-implementation of play_trajectory.py:286-373 in the normalized frame ===
         elapsed = now - pb["t0"]
         ramp = min(1.0, elapsed / pb["ramp"]) if pb["ramp"] > 0 else 1.0
@@ -1120,12 +1520,13 @@ class RobotDaemon(threading.Thread):
             meas[k] = []
         self._meas = meas
         self._last_reject = ""
-        self.mode = "MEASURE"
+        self._set_mode("MEASURE", "measurement excitation started", leg=meas["leg"],
+                       profile=meas["profile"], duration=meas["duration"], base=dict(meas["base"]))
 
     def _tick_measure(self, now, dt):
         meas = self._meas
         if meas is None:
-            self.mode = "LIMP"
+            self._set_mode("LIMP", "measurement state vanished")
             return
         if not meas["running"]:
             self._stream_limp()                     # completed/stopped: hold limp until saved+cleared
@@ -1134,6 +1535,7 @@ class RobotDaemon(threading.Thread):
         if not ok:
             self._trip(why)
             return
+        self._cmd_zero_epoch = self.calib.zero_epoch    # commanding absolute positions
         t = now - meas["t0"]
         if t >= meas["duration"]:
             meas["running"] = False
@@ -1212,7 +1614,8 @@ class RobotDaemon(threading.Thread):
                 self._last_reject = why
                 return
             r["kind"] = kind
-            self.mode = "RECORD_GAIT" if kind == "gait" else "RECORD_WS"
+            self._set_mode("RECORD_GAIT" if kind == "gait" else "RECORD_WS",
+                           f"recording mode: {kind}")
             self._pb = None
         elif cmd == "take_start" and not r["active"]:
             r.update(active=True, leg=leg, buf_t=[], buf_p=[], t0=now)
@@ -1284,6 +1687,8 @@ class RobotDaemon(threading.Thread):
         cmd_norm = self.calib.norm_array(cmd_raw)
         self.ring.push(now, dict(pos_raw=raw, pos_norm=norm, spd=spd, cur=cur, temp=temp, err=err,
                                  cmd_raw=cmd_raw, cmd_norm=cmd_norm))
+        self._bb_status = self.bb.status() if self.bb is not None else {"alive": False,
+                                                                       "error": "not configured"}
 
         r = self._rec
         with self.lock:
@@ -1297,6 +1702,16 @@ class RobotDaemon(threading.Thread):
                 loop=dict(hz=TICK_HZ, slip=self._slip_count),
                 loop_error=self.loop_error,
                 last_reject=self._last_reject,
+                # the recorder's own health, so a dead writer thread is visible in the UI rather
+                # than being discovered after the next incident
+                blackbox=self._bb_status,
+                # the pre-move guard: why the last activation was refused, with both raw poses
+                premove=dict(refused=self._guard_latched,
+                             raw_now=self._guard_detail.get("raw_now"),
+                             raw_at_last_zero=self._guard_detail.get("raw_at_last_zero"),
+                             compare=self._guard_detail.get("compare"),
+                             origin_jumps=len(self._raw_jumps),
+                             holding=now < self._hold_until),
                 motors={n: dict(alive=self.by_name[n].pos is not None,
                                 pos_raw=None if np.isnan(raw[i]) else round(float(raw[i]), 2),
                                 pos_norm=None if np.isnan(norm[i]) else round(float(norm[i]), 2),

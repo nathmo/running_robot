@@ -25,6 +25,7 @@ import numpy as np
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
 import paths
+import blackbox
 import calibration
 import canio
 import daemon as daemon_mod
@@ -51,6 +52,7 @@ STATE = {
     "fk": None,              # fklut.FkLut
     "dyn": None,             # dynstore.DynConfig (weighed masses, drive PID, Kt)
     "sense": None,           # sensehat.SenseHat (I2C poll thread; None if --no-sensors)
+    "bb": None,              # blackbox.BlackBox (flight recorder; writer thread)
     "interface": "socketcan",
     "mock": False,
     "ctl": {"token": None, "ts": 0.0},
@@ -785,6 +787,65 @@ def api_measure_export():
                      mimetype="application/octet-stream")
 
 
+# ===================================================================== black box (flight recorder)
+def _bb():
+    return STATE["bb"]
+
+
+@app.get("/api/blackbox/list")
+def api_blackbox_list():
+    """What is on disk right now, plus the recorder's own health. Reads the directory and each
+    file's header only — never the bulk data — so polling this can never disturb the 200 Hz loop."""
+    bb = _bb()
+    if bb is None:
+        return jsonify({"ok": False, "error": "black box not running", "files": [], "status": {}})
+    return jsonify({"ok": True, "status": bb.status(), "files": bb.list_files(),
+                    "events_file": blackbox.EVENTS_NAME})
+
+
+@app.get("/api/blackbox/download")
+def api_blackbox_download():
+    """Download one recording. Segments are append-only and never rewritten, so a download taken
+    while the daemon is running is simply a consistent prefix — no locking, nothing to block."""
+    bb = _bb()
+    if bb is None:
+        return _err("black box not running", 404)
+    try:
+        blob, fname = bb.read_bytes(request.args.get("name", ""))
+    except (FileNotFoundError, OSError) as e:
+        return _err(e, 404)
+    return send_file(io.BytesIO(blob), download_name=fname, as_attachment=True,
+                     mimetype="application/octet-stream")
+
+
+@app.post("/api/blackbox/mark")
+def api_blackbox_mark():
+    """Operator annotation — 'it made that noise again'. Lands on the same timeline as the
+    machine's own events and pulls a dump of the 200 Hz window around it."""
+    bb = _bb()
+    if bb is None:
+        return _err("black box not running", 404)
+    b = request.get_json(force=True, silent=True) or {}
+    text = str(b.get("text", "")).strip()
+    if not text:
+        return _err("mark needs a 'text'")
+    name = bb.mark(text, mode=_dm().get_snapshot().get("mode"))
+    return _ok(marked=text, dump=name)
+
+
+@app.post("/api/blackbox/dump")
+def api_blackbox_dump():
+    """Dump now. The file appears POST_TRIGGER_S later (the tail is still being recorded), which is
+    why the name is returned immediately rather than the bytes."""
+    bb = _bb()
+    if bb is None:
+        return _err("black box not running", 404)
+    b = request.get_json(force=True, silent=True) or {}
+    name = bb.trigger_dump(str(b.get("reason", "manual")) or "manual", manual=True,
+                           mode=_dm().get_snapshot().get("mode"))
+    return _ok(dump=name, ready_in_s=bb.post_trigger_s)
+
+
 @app.post("/api/measure/delete")
 def api_measure_delete():
     b = request.get_json(force=True, silent=True) or {}
@@ -986,13 +1047,16 @@ def _shutdown():
     if sh is not None:
         sh.stop()
     d = STATE.get("daemon")
-    if d is None:
-        return
-    d.stop_event.set()
-    d.join(2.0)
-    if d.is_alive():
-        print("!! daemon did not stop — firing zero-current fallback")
-        _estop_fallback()
+    if d is not None:
+        d.stop_event.set()
+        d.join(2.0)
+        if d.is_alive():
+            print("!! daemon did not stop — firing zero-current fallback")
+            _estop_fallback()
+    bb = STATE.get("bb")
+    if bb is not None:
+        bb.log_event("server.stop", clean=True)
+        bb.stop()          # LAST: it must outlive whatever it is recording the death of
 
 
 def main():
@@ -1008,6 +1072,10 @@ def main():
                     help="I2C bus the Sense HAT (B) sits on (default %(default)s)")
     ap.add_argument("--imu-hz", type=float, default=sensehat.IMU_HZ,
                     help="IMU read/AHRS rate in Hz (default %(default)s, matching the control loop)")
+    ap.add_argument("--no-blackbox", action="store_true",
+                    help="do not record anything to disk (you will regret this)")
+    ap.add_argument("--blackbox-budget-mb", type=float, default=blackbox.BUDGET_BYTES / 1e6,
+                    help="total disk the flight recorder may use, MB (default %(default).0f)")
     args = ap.parse_args()
 
     # Python hands the GIL between threads at most every `switchinterval` seconds — 5 ms by
@@ -1018,12 +1086,28 @@ def main():
 
     STATE["interface"] = args.interface
     STATE["mock"] = args.mock
+
+    # The flight recorder comes up FIRST so the calibration/dynamics load below is already on the
+    # timeline — "which calibration was live at boot" is one of the five questions it must answer.
+    bb = None
+    if not args.no_blackbox:
+        bb = blackbox.BlackBox(budget_bytes=int(args.blackbox_budget_mb * 1e6))
+        blackbox.install(bb)
+        bb.start()
+    STATE["bb"] = bb
+
     STATE["calib"] = calibration.Calibration.load_or_new()
     STATE["wstore"] = workspace.WorkspaceStore()
     STATE["fk"] = fklut.FkLut()
     STATE["dyn"] = dynstore.DynConfig.load_or_new()
+    if bb is not None:
+        # config provenance: every Tier B dump references the hash of exactly this
+        bb.set_config_provider(lambda: {"calibration": STATE["calib"].snapshot(),
+                                        "dynamics": STATE["dyn"].as_dict()})
+        bb.note_config_change("boot")
     d = daemon_mod.RobotDaemon(interface=args.interface, mock=args.mock,
-                               calib=STATE["calib"], wstore=STATE["wstore"], fklut=STATE["fk"])
+                               calib=STATE["calib"], wstore=STATE["wstore"], fklut=STATE["fk"],
+                               bb=bb)
     STATE["daemon"] = d
     d.start()
     d._started_ok.wait(5.0)
