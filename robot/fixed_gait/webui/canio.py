@@ -58,16 +58,26 @@ def _make_msg(arb_id, data):
 # send that cannot go out has to be an event, not a death. Counted here, surfaced through the hook,
 # and escalated by the daemon into a trip if it persists while we are actually commanding motion —
 # see RobotDaemon._can_watch. Sends never raise past this module.
-# ...and a bus that is failing EVERY send must be backed off, not hammered. MEASURED on the robot
-# 2026-08-10 with the left leg disconnected: three failing sends per tick cost ~11 ms, against a
-# 5 ms tick budget — the 200 Hz loop ran at 60 Hz with 34% late ticks. A failing socketcan send is
-# not free; it is roughly a thousand times more expensive than a successful one.
+# ...and a bus that is failing EVERY send is backed off rather than hammered: after
+# CHANNEL_BACKOFF_AFTER consecutive failures a channel is retried at 1/CHANNEL_BACKOFF_S, and one
+# successful send puts it straight back to full rate.
 #
-# So after CHANNEL_BACKOFF_AFTER consecutive failures a channel is only retried at
-# 1/CHANNEL_BACKOFF_S, and the ONE successful send puts it straight back to full rate. On a healthy
-# bus this costs exactly nothing — the counter never leaves zero — and the safety story is
-# unchanged: motors on a dead bus report nothing, so _motion_allowed refuses motion, and
-# RobotDaemon._can_watch trips within half a second if it happens while commanding.
+# HONEST NOTE ON WHY. This was first written to fix a loop rate of 60 Hz measured with the left leg
+# disconnected, on the theory that three failing sends per tick were eating the 5 ms budget. That
+# theory was WRONG and the A/B says so: with the backoff disabled (3.00 failing sends per tick) the
+# loop runs at 188.9 Hz, with it enabled (0.03/tick) 188.5 Hz. A failing socketcan send costs
+# nothing measurable. The 60 Hz reading was the measurement disturbing the measured — scp,
+# py_compile, journalctl and HTTP polling all running on the Pi 3B at the time.
+#
+# It is kept because it is still right in the small: it drops ~600 pointless syscalls a second when
+# a leg is unplugged, and it makes "we did not try" distinguishable from "we tried and it failed",
+# which a postmortem needs. It is NOT a performance fix, and nobody should later find a slow loop
+# and assume this already handled it. (Steady state with everything running: 188 Hz, 5.30 ms/tick,
+# 3% late — the recorder itself costs -0.01 ms/tick, i.e. nothing.)
+#
+# The safety story is unchanged either way: motors on a dead bus report nothing, so
+# _motion_allowed refuses motion, and RobotDaemon._can_watch trips within half a second if a bus
+# starts refusing frames while we are commanding.
 CHANNEL_BACKOFF_AFTER = 10
 CHANNEL_BACKOFF_S = 0.2
 

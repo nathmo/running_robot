@@ -525,9 +525,12 @@ def test_a_bus_that_will_not_take_frames_does_not_kill_the_daemon(tmp_path, monk
 
 
 def test_a_dead_bus_is_backed_off_not_hammered(monkeypatch):
-    """MEASURED on the robot 2026-08-10: three failing sends per tick cost ~11 ms against a 5 ms
-    budget, and the 200 Hz loop ran at 60 Hz. A failing socketcan send is enormously more expensive
-    than a successful one, so a channel that fails every time must be retried slowly."""
+    """A channel that fails every send is retried slowly instead of every tick.
+
+    Not a performance fix — the A/B on the robot says a failing send costs nothing measurable
+    (188.9 Hz hammering vs 188.5 Hz backed off). It is here to drop ~600 pointless syscalls a
+    second when a leg is unplugged, and so that "we skipped it" stays distinguishable from "we
+    tried and it failed". See the note in canio.py."""
     monkeypatch.setattr(canio, "MockBus", _DeadBus)
     canio._send_errors.clear()
     canio._send_state.clear()

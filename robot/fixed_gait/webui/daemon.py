@@ -1740,7 +1740,10 @@ class RobotDaemon(threading.Thread):
             self.snapshot = dict(
                 daemon_alive=True, mode=self.mode, mock=self.mock,
                 estop=dict(latched=self.mode == "ESTOPPED", reason=self.estop_reason),
-                loop=dict(hz=TICK_HZ, slip=self._slip_count),
+                # ticks is here so the ACTUAL loop rate is observable without the recorder.
+                # The 2026-08-10 lesson twice over: nothing measured the tick period, so a
+                # loop running at a third of its rate looked exactly like a healthy one.
+                loop=dict(hz=TICK_HZ, slip=self._slip_count, ticks=self._tick_count),
                 loop_error=self.loop_error,
                 can_errors=canio.send_errors(), can_bus=canio.send_stats(),
                 last_reject=self._last_reject,
