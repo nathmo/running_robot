@@ -1933,6 +1933,25 @@ PRESETS.update({
     # survival at +0.40). Deliberately kept SHORT: with pitch locked a policy can lunge with no
     # consequence, and m2 -> m3 is the historically hard transition here (the whole m3 anti-topple
     # sweep). We want a gait prior, not a policy overfitted to a plant that cannot topple.
+    # --- DRIVE-BANDWIDTH BRACKET on m2 (2026-08-10) ---------------------------------------------
+    # Is the 0.8 Hz drive what stops it walking? A first-order lag keeps, of commanded amplitude:
+    #     0.5 Hz gait 85%   0.8 Hz 71%   1.5 Hz 47%   3.8 Hz 21%
+    # and the finished m2 policy runs a 3.8 Hz gait (7.6 footfalls/s), so only a FIFTH of the
+    # commanded swing survives the drive, 78 deg late. That is a very plausible reason the feet
+    # never leave the ground. It cannot be settled by replaying a 0.8 Hz-trained policy at higher
+    # bandwidth (tried: it moves faster and falls) -- the policy has to be TRAINED there.
+    #
+    # Three cold m2 arms, identical but for drive_bandwidth_hz, all keeping the measured 25 ms
+    # transport delay and with workspace_kill ON. d08 re-runs the baseline because the original
+    # ladder_m2_s0 predates workspace_kill and is no longer a fair control.
+    #   d08  the measured robot
+    #   d3   above walking cadence, below the policy's preferred 3.8 Hz limit cycle
+    #   d12  effectively unlimited -- the regime the 2.55 m/s runner trained in
+    # If d3/d12 walk and d08 does not, the drive is the binding constraint and the fix is
+    # HARDWARE (control mode / bandwidth), not more training.
+    "walk_fwd_m2_d08": lambda: _walk_fwd3(base_lock=LOCKS["m2"], drive_bandwidth_hz=0.8, **_LADDER_RWD),
+    "walk_fwd_m2_d3":  lambda: _walk_fwd3(base_lock=LOCKS["m2"], drive_bandwidth_hz=3.0, **_LADDER_RWD),
+    "walk_fwd_m2_d12": lambda: _walk_fwd3(base_lock=LOCKS["m2"], drive_bandwidth_hz=12.0, **_LADDER_RWD),
     "walk_fwd_m2": lambda: _walk_fwd3(base_lock=LOCKS["m2"], **_LADDER_RWD),  # x,z free — cannot fall
     "walk_fwd_m3": lambda: _walk_fwd3(base_lock=LOCKS["m3"], **_LADDER_RWD),  # + pitch
     "walk_fwd_m4": lambda: _walk_fwd3(base_lock=LOCKS["m4"], **_LADDER_RWD),  # + lateral translation
