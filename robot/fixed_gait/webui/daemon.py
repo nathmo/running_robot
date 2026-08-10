@@ -936,7 +936,9 @@ class RobotDaemon(threading.Thread):
                                   "raw_vs_last_zero": self.calib.compare_raw(raw),
                                   "zero_epoch": self.calib.zero_epoch,
                                   "slip": self._slip_count, **fields})
-        self._bb_dump(f"mode_{old}_to_{mode}", why=reason)
+        # routine, so a long cooldown: an operator toggling LIMP/MANUAL must not evict the
+        # continuous Tier A history one 1.7 MB dump at a time
+        self._bb_dump(f"mode_{old}_to_{mode}", cooldown_s=blackbox.ROUTINE_COOLDOWN_S, why=reason)
 
     def _trip(self, reason):
         if not self.estop_event.is_set():
@@ -975,9 +977,9 @@ class RobotDaemon(threading.Thread):
         if bb is not None:
             bb.log_event(kind, **fields)
 
-    def _bb_dump(self, reason, **fields):
+    def _bb_dump(self, reason, cooldown_s=None, **fields):
         bb = self.bb
-        return bb.trigger_dump(reason, **fields) if bb is not None else None
+        return bb.trigger_dump(reason, cooldown_s=cooldown_s, **fields) if bb is not None else None
 
     def _bb_tick(self, t_mono, t_wall, dt_actual):
         """One 200 Hz sample into the recorder, plus the two watchdogs that need every tick.

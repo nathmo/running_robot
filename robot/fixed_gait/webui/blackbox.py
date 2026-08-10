@@ -91,6 +91,10 @@ RING_SECONDS = 40.0              # Tier B RAM ring (brief demands >= 30 s)
 RING_HZ = 200.0
 POST_TRIGGER_S = 3.0             # keep recording this long after a trigger, then close the file
 DUMP_COOLDOWN_S = 10.0           # a storm of triggers must not write a storm of 1.7 MB files
+# ...and routine triggers (a mode toggle) get a much longer one. One dump is ~1.7 MB, Tier A
+# history is what gets deleted to make room, and an operator toggling LIMP/MANUAL for a minute
+# must not cost the last day of continuous recording.
+ROUTINE_COOLDOWN_S = 120.0
 HEARTBEAT_S = 8.0                # power-off is inferred from the last heartbeat before a gap
 WRITER_PERIOD_S = 0.10
 SAMPLE_QUEUE_MAX = 4000          # 20 s of 200 Hz backlog before we start dropping
@@ -232,6 +236,7 @@ class BlackBox:
         self._degraded = False            # Tier A stopped for space
         self._n_written = 0
         self._n_seen = 0
+        self._bytes_used = 0              # refreshed by _enforce_space, not by every status publish
 
         # published status (rebuilt wholesale by the writer, read by HTTP threads — dict swap is
         # atomic under the GIL, so readers never see a half-updated dict and never take a lock)
@@ -271,7 +276,7 @@ class BlackBox:
                          **{k: _jsonable(v) for k, v in fields.items()}})
         return True
 
-    def trigger_dump(self, reason, **fields):
+    def trigger_dump(self, reason, cooldown_s=None, **fields):
         """Ask for a Tier B dump of the whole 200 Hz ring (pre-trigger history included).
 
         Returns the filename it will be written to, or None if it was coalesced into a dump already
@@ -284,6 +289,7 @@ class BlackBox:
         name = f"B_{self.short}_{self._dump_idx:04d}_{_slug(reason)}{DUMP_EXT}"
         self._tq.append({"name": name, "reason": str(reason), "t_trig": time.monotonic(),
                          "fields": {k: _jsonable(v) for k, v in fields.items()},
+                         "cooldown": DUMP_COOLDOWN_S if cooldown_s is None else float(cooldown_s),
                          "manual": bool(fields.get("manual"))})
         self.log_event("dump.trigger", reason=str(reason), file=name, **fields)
         return name
@@ -512,9 +518,10 @@ class BlackBox:
             # The cooldown is PER REASON. A repeating trigger (a warn re-arming, a jittering
             # origin) must not write the same 40 s window over and over — but a NEW kind of
             # trigger always gets its own file, because that is the one nobody has evidence for.
-            if not t["manual"] and (now - self._last_dump_end.get(t["reason"], -1e9)) < DUMP_COOLDOWN_S:
+            if not t["manual"] and (now - self._last_dump_end.get(t["reason"], -1e9)) < t["cooldown"]:
                 self.log_event("dump.suppressed", reason=t["reason"], file=t["name"],
-                               note=f"a dump for this same reason closed <{DUMP_COOLDOWN_S:.0f}s "
+                               cooldown_s=t["cooldown"],
+                               note=f"a dump for this same reason closed <{t['cooldown']:.0f}s "
                                     f"ago and already contains this window")
                 continue
             t["also"] = []
@@ -671,6 +678,7 @@ class BlackBox:
         triggered dumps are the evidence and go last. A full SD card must never stop the robot."""
         files = self._files()
         total = sum(s for _, s, _ in files)
+        self._bytes_used = total
         try:
             free = shutil.disk_usage(self.dir).free
         except OSError:
@@ -700,6 +708,7 @@ class BlackBox:
                     free += size
             files = [f for f in files if f[0] not in removed]
         if removed:
+            self._bytes_used = total
             self.log_event("space.dropped", removed=removed, n=len(removed),
                            bytes_used=total, disk_free=free, budget=self.budget_bytes,
                            note="oldest recordings deleted to stay inside the budget — these "
@@ -739,7 +748,7 @@ class BlackBox:
             "dropped": self._dropped, "dropped_events": self._dropped_events,
             "queued": len(self._sq), "queue_max": self.sample_queue_max,
             "ring_s": round(min(self._ring_seq, len(self._ring)) / RING_HZ, 1),
-            "bytes_used": self._dir_bytes(), "budget_bytes": self.budget_bytes,
+            "bytes_used": self._bytes_used, "budget_bytes": self.budget_bytes,
             "degraded": self._degraded, "segment": self._seg_name,
             "dumps": self._dump_idx, "dir": self.dir,
         }
