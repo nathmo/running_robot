@@ -1340,11 +1340,11 @@ class RobotDaemon(threading.Thread):
                 note = f"recovering toward a checked target — {bad}"
         self._last_reject = note
 
-        # (c) homing is a slow guided slew and should track well — a stale zero shows up as
-        # tracking error within the first few degrees, long before the 25 deg playback threshold.
-        if homing and not self._was_homing:              # each new guided move: fresh budget
+        if homing and not self._was_homing:              # (d) each new guided move: fresh budget
             self._travel, self._travel_prev = {}, {}
         self._was_homing = homing
+        # (c) homing is a slow guided slew and should track well — a stale zero shows up as
+        # tracking error within the first few degrees, long before the 25 deg playback threshold.
         track_lim = MAX_TRACK_ERR_HOMING_DEG if homing else MAX_TRACK_ERR_DEG
         self._cmd_zero_epoch = self.calib.zero_epoch     # we are commanding ABSOLUTE positions now
         for n, m in self.by_name.items():
