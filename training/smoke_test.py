@@ -984,6 +984,84 @@ def test_ankle2():
           and c.ankle_spring_mass_kg == 0.0)
 
 
+def test_asym_critic():
+    """Asymmetric critic + velocity estimator + duty-sym (the three 2026-08-10 joystick fixes).
+
+    The contract that must hold: the privileged tail exists ONLY for ladder presets, carries
+    ground truth (not the sensor model's corrupted copy), the actor's network never reads it, and
+    PPO's gradients never train the estimator.
+    """
+    import numpy as np
+    import torch as th
+    print("asymmetric critic + velocity estimator + duty-sym:")
+
+    c = get_config("walk_fwd_m2")
+    check("ladder preset turns the privileged critic on", c.obs_privileged_critic)
+    check("anti-limp duty-sym is on", c.w_duty_sym == 8.0 and c.w_contact_switch == 0.20)
+    env = DashEnv(c)
+    n_priv = DashEnv.PRIV_DIM
+    check("obs = history + privileged tail",
+          env.observation_space.shape[0] == env.frame_dim * c.history_len + n_priv,
+          f"{env.observation_space.shape[0]}")
+    check("legacy presets keep their obs width",
+          DashEnv(get_config("walk_fwd_easy")).priv_dim == 0)
+
+    # the tail must be GROUND TRUTH: noise on, run a while, tail[0:3] still equals _vel_body
+    env.reset(seed=0)
+    obs = None
+    for _ in range(30):
+        obs, _, term, trunc, _ = env.step(env.action_space.sample())
+        if term or trunc:
+            obs, _ = env.reset()
+    tail = obs[-n_priv:]
+    true_v = env._vel_body() * c.obs_scales["base_vel"]
+    check("tail[0:3] is the TRUE base velocity (noise cannot touch it)",
+          np.allclose(tail[0:3], true_v, atol=1e-5), f"{tail[0:3]} vs {true_v}")
+    check("tail[3:5] are contact flags", set(np.unique(tail[3:5])) <= {0.0, 1.0})
+
+    # policy wiring: actor blind to the tail, PPO gradients blind to the estimator
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    from asym_policy import AsymmetricACPolicy, EST_OUT
+    n_actor = env.observation_space.shape[0] - n_priv
+    model = PPO(AsymmetricACPolicy, DummyVecEnv([lambda: env]), n_steps=8, batch_size=8,
+                policy_kwargs=dict(net_arch=list(c.policy_hidden),
+                                   n_actor_obs=n_actor, n_priv=n_priv), device="cpu")
+    ex = model.policy.mlp_extractor
+    o = th.randn(4, env.observation_space.shape[0])
+    # actor ignores the tail: perturb ONLY the tail, the action latent must not move
+    o2 = o.clone(); o2[:, n_actor:] += 100.0
+    check("actor is blind to the privileged tail",
+          th.allclose(ex.forward_actor(o), ex.forward_actor(o2)))
+    check("critic is NOT blind to it",
+          not th.allclose(ex.forward_critic(o), ex.forward_critic(o2)))
+    # PPO's actor loss must leave the estimator untouched (detached consumption)
+    ex.zero_grad()
+    ex.forward_actor(o).sum().backward()
+    grads = [p.grad for p in ex.estimator.parameters()]
+    check("PPO gradients cannot reach the estimator",
+          all(g is None or th.all(g == 0) for g in grads))
+    # and the supervised loss must reach ONLY the estimator
+    ex.zero_grad()
+    ex.estimator_loss(o).backward()
+    check("supervised loss reaches the estimator",
+          any(p.grad is not None and th.any(p.grad != 0) for p in ex.estimator.parameters()))
+    check("supervised loss does not touch the actor",
+          all(p.grad is None or th.all(p.grad == 0) for p in ex.policy_net.parameters()))
+    # the estimator can actually learn its target
+    opt = th.optim.Adam(ex.estimator.parameters(), lr=1e-2)
+    data = th.randn(256, env.observation_space.shape[0])
+    data[:, n_actor:n_actor + EST_OUT] = data[:, :EST_OUT] * 0.5      # a learnable mapping
+    l0 = float(ex.estimator_loss(data))
+    for _ in range(60):
+        loss = ex.estimator_loss(data)
+        opt.zero_grad(); loss.backward(); opt.step()
+    check("estimator learns (loss drops >5x on a toy target)",
+          float(ex.estimator_loss(data)) < l0 / 5, f"{l0:.3f} -> {float(ex.estimator_loss(data)):.3f}")
+    check("estimated_velocity readout has shape (3,)",
+          model.policy.estimated_velocity(obs[None]).shape == (1, EST_OUT))
+
+
 def test_entropy_schedule():
     """The entropy anneal must be able to OPEN and to FINISH inside the run we actually train.
 
@@ -1185,5 +1263,6 @@ if __name__ == "__main__":
     test_ankle2()
     test_walk_fwd2()
     test_entropy_schedule()
+    test_asym_critic()
     print(f"\n{'ALL OK' if FAIL == 0 else f'{FAIL} FAILURES'}")
     sys.exit(1 if FAIL else 0)

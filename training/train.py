@@ -383,6 +383,49 @@ class CommandCurriculumCallback(BaseCallback):
                   f"(top-range err {err:.3f} m/s, ep_len {ep_len:.0f})")
 
 
+class EstimatorCallback(BaseCallback):
+    """Supervised training for the velocity-estimator head (asym_policy.AsymExtractor.estimator).
+
+    Runs AFTER each PPO rollout on that rollout's own observations: a few Adam epochs of MSE
+    against the privileged tail's true base velocity, touching ONLY the estimator's parameters.
+    Deliberately NOT folded into the PPO loss (no PPO.train() surgery): the estimator is a
+    supervised problem with its own optimum, and the actor consumes it detached, so there is no
+    gradient path that needs them trained jointly.
+
+    The estimator's weights live inside the policy and ride every checkpoint; this callback's Adam
+    moments do NOT survive a resume, which costs a few warm-up updates and nothing else.
+    Logs est/vel_rmse in VecNormalize units (obs-normalized space, like everything the nets see).
+    """
+
+    def __init__(self, epochs=2, batch_size=4096, lr=1e-3):
+        super().__init__()
+        self.epochs, self.batch_size, self.lr = epochs, batch_size, lr
+        self._opt = None
+
+    def _on_training_start(self) -> None:
+        self._opt = torch.optim.Adam(self.model.policy.mlp_extractor.estimator.parameters(),
+                                  lr=self.lr)
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        buf = self.model.rollout_buffer
+        obs = torch.as_tensor(buf.observations.reshape(-1, buf.observations.shape[-1]),
+                           dtype=torch.float32, device=self.model.device)
+        ex = self.model.policy.mlp_extractor
+        last = None
+        for _ in range(self.epochs):
+            for i in torch.randperm(obs.shape[0], device=obs.device).split(self.batch_size):
+                loss = ex.estimator_loss(obs[i])
+                self._opt.zero_grad(set_to_none=True)
+                loss.backward()
+                self._opt.step()
+                last = float(loss.detach())
+        if last is not None:
+            self.logger.record("est/vel_rmse", float(np.sqrt(last)))
+
+
 def _size_entropy_schedule(cfg, budget):
     """Fit the entropy deadline and anneal span inside the run we are ACTUALLY about to train.
 
@@ -726,12 +769,25 @@ def main():
         else:
             venv = fresh_vecnorm()
             lr = lambda p: cfg.lr_final + p * (cfg.learning_rate - cfg.lr_final)  # p: 1 -> 0
+            policy = "MlpPolicy"
+            policy_kwargs = dict(net_arch=list(cfg.policy_hidden))
+            if cfg.obs_privileged_critic:
+                # asymmetric actor-critic + velocity-estimator head; the actor's slice of the obs
+                # is everything BEFORE the privileged tail (see DashEnv.PRIV_DIM)
+                from asym_policy import AsymmetricACPolicy
+                policy = AsymmetricACPolicy
+                n_obs = venv.observation_space.shape[0]
+                policy_kwargs.update(n_actor_obs=n_obs - DashEnv.PRIV_DIM,
+                                     n_priv=DashEnv.PRIV_DIM)
+                print(f"[train] asymmetric critic: actor sees {n_obs - DashEnv.PRIV_DIM}, "
+                      f"critic sees {n_obs} (+{DashEnv.PRIV_DIM} privileged), "
+                      f"estimator head supervised on true base velocity")
             model = PPO(
-                "MlpPolicy", venv,
+                policy, venv,
                 n_steps=cfg.n_steps, batch_size=cfg.batch_size, n_epochs=cfg.n_epochs,
                 gamma=cfg.gamma, gae_lambda=cfg.gae_lambda, learning_rate=lr,
                 clip_range=cfg.clip_range, ent_coef=cfg.ent_coef, target_kl=cfg.target_kl,
-                policy_kwargs=dict(net_arch=list(cfg.policy_hidden)),
+                policy_kwargs=policy_kwargs,
                 seed=cfg.seed, verbose=1,
             )
 
@@ -747,6 +803,8 @@ def main():
         EntropyCallback(cfg, run_dir=run, budget=total),
         PlotCallback(run, every_steps=500_000),
     ]
+    if cfg.obs_privileged_critic:
+        cb_list.append(EstimatorCallback())
     if cfg.objective == "sprint" and cfg.sprint_curriculum_steps > 0 \
             and cfg.sprint_dist_m > cfg.sprint_dist_start_m:
         cb_list.append(RampCallback("sprint_dist_m", "set_sprint_dist",

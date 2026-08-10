@@ -154,6 +154,17 @@ class Config:
     # never seen the signal it will actually be handed. With it off, velocity has to be inferred
     # from the strided history below — which is why that history gets longer at the same time.
     obs_base_vel: bool = True
+    # ASYMMETRIC actor-critic (2026-08-10). Appends DashEnv.PRIV_DIM (=6) sim-only ground-truth
+    # entries after the history block: true body-frame base velocity (3), per-foot contact (2),
+    # height error (1). Only the CRITIC and the supervised velocity-estimator target read them —
+    # the actor's input is the slice obs[:frame_dim*history_len], enforced by asym_policy.py.
+    # Rationale: obs_base_vel=False is right for the ACTOR (the hardware has no velocimeter) but
+    # SB3 shares one observation between actor and critic, so it also blinded the VALUE FUNCTION
+    # of a velocity-tracking task to velocity. Every SOTA velocity-command stack (Rudin et al.,
+    # RMA, DreamWaQ) gives the critic privileged state; the critic never runs on the robot.
+    # Changes the obs contract (550 -> 556): orphans every earlier checkpoint, which is why it
+    # ships with the cold 2026-08-10 ladder and not before.
+    obs_privileged_critic: bool = False
     # History STRIDE: expose every k-th of the last (history_len-1)*k+1 frames. At 200 Hz a
     # contiguous 5-frame history spans 25 ms, far too short to infer body velocity from leg
     # kinematics; len=10 x stride=4 spans 200 ms for the same obs width. 1 = contiguous (legacy).
@@ -2053,7 +2064,16 @@ _SHIN_TUBE_REMOVAL_KG = SHIN_SPRING_KG - _ANKLE_TUBE_KG      # 0.209
 
 _LADDER_RWD = dict(w_alive=0.0, track_sigma_min=0.15, workspace_kill=True,
                    ent_gate_swing_frac=0.13, motor_vel_limit=_NOLOAD_RADS,
-                   ankle_spring_mass_kg=_SHIN_TUBE_REMOVAL_KG)
+                   ankle_spring_mass_kg=_SHIN_TUBE_REMOVAL_KG,
+                   # asymmetric critic + velocity-estimator head (see obs_privileged_critic)
+                   obs_privileged_critic=True,
+                   # anti-limp: the d3 walker measured duty 0.64 L / 0.31 R. w_duty_sym is the
+                   # purpose-built counter-term (a foot that never bears load is expensive) and it
+                   # was sitting at 0. Values from the sym_gait lineage, which was built against
+                   # exactly this failure: 8.0 paired with contact_switch 0.20, because duty
+                   # symmetry alone can be met by both feet CHATTERING fast — the switch penalty
+                   # keeps it slow.
+                   w_duty_sym=8.0, w_contact_switch=0.20)
 
 
 def _walk_fwd3(**kw):

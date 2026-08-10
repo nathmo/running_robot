@@ -52,6 +52,10 @@ def _resolve(p):
 
 class DashEnv(gym.Env):
     metadata = {"render_modes": ["rgb_array"]}
+    # width of the privileged critic tail (see obs_privileged_critic in __init__). A class
+    # constant because train.py and asym_policy.py must agree with the env on where the actor's
+    # slice of the observation ends, and three hardcoded 6s is how that stops being true.
+    PRIV_DIM = 6
 
     def __init__(self, cfg: Config = None, render_mode: str = None):
         self.cfg = cfg or Config()
@@ -256,6 +260,19 @@ class DashEnv(gym.Env):
         self.frame_dim = (3 * self.nu + 3 + 3 + (3 if self.obs_base_vel else 0)
                           + self.phase_obs_dim + self.task_dim + self.action_dim)
         obs_dim = self.frame_dim * self.cfg.history_len
+        # PRIVILEGED CRITIC TAIL (asymmetric actor-critic, standard in the SOTA velocity-command
+        # stacks): sim-only ground truth appended AFTER the history block, so the ACTOR's slice is
+        # simply obs[:frame_dim*history_len] and the tail never has to exist on hardware. The value
+        # function is estimating the return of a velocity-TRACKING task; without this it does so
+        # while blind to velocity (R^2 0.807 recoverable from history — the remaining ~20% is pure
+        # variance in every advantage estimate). The tail is ground truth on purpose: no noise, no
+        # delay — the critic never runs on the robot. Layout (PRIV_DIM entries):
+        #   [0:3] true base linear velocity, body frame, * obs_scales.base_vel
+        #         (doubles as the supervised TARGET for the velocity-estimator head)
+        #   [3:5] per-foot ground contact (toe OR heel), {0,1}
+        #   [5]   base height error vs the settled stance (m)
+        self.priv_dim = self.PRIV_DIM if self.cfg.obs_privileged_critic else 0
+        obs_dim += self.priv_dim
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
         # strided history: keep (history_len-1)*stride+1 raw frames but expose only every stride-th,
         # so a fixed obs width can span a much longer window. At 200 Hz, len=10 x stride=4 = 200 ms,
@@ -944,7 +961,16 @@ class DashEnv(gym.Env):
         return np.concatenate(parts).astype(np.float32)
 
     def _obs(self):
-        return self._history[self._hist_idx].reshape(-1).astype(np.float32)
+        hist = self._history[self._hist_idx].reshape(-1)
+        if not self.priv_dim:
+            return hist.astype(np.float32)
+        # critic-only ground truth; layout documented at the priv_dim definition in __init__
+        tail = np.empty(self.PRIV_DIM)
+        tail[0:3] = self._vel_body() * self.cfg.obs_scales["base_vel"]
+        tail[3:5] = (self._foot_contacts()
+                     | (self._toe_heights() < self.cfg.grounded_h)).astype(float)
+        tail[5] = float(self.data.qpos[2]) - self.height_target
+        return np.concatenate([hist, tail]).astype(np.float32)
 
     def _push_frame(self, frame):
         """Append a measurement to the history, optionally after a fixed sensor delay (staleness
