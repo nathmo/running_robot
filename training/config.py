@@ -1941,7 +1941,12 @@ PRESETS.update({
 })
 
 
-_LADDER_RWD = dict(w_alive=0.0, track_sigma_min=0.15)
+# workspace_kill ON: terminate when a toe leaves the MEASURED reachable box. walk_fwd inherited
+# it OFF from _teleop, so nothing has been enforcing reachability -- the policy was free to use toe
+# positions the physical 4-bar cannot produce, and its characteristic failure (sinking) is exactly
+# the shape an out-of-workspace exploit would take. The 2.55 m/s runner (ankle2_m3_rigid) had it ON.
+# Needs ankle_resettle (already set) so _ws_ref is re-referenced to THIS arm's settled stance.
+_LADDER_RWD = dict(w_alive=0.0, track_sigma_min=0.15, workspace_kill=True)
 
 
 def _walk_fwd3(**kw):
