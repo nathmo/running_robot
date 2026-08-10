@@ -16,6 +16,7 @@ logs, progress.csv, training_plots.png.  Watch:  python -m tensorboard.main --lo
 import argparse
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -34,6 +35,14 @@ from stable_baselines3.common.utils import safe_mean
 
 from config import Config, config_from_dict, config_to_dict, get_config, PRESETS
 from env import DashEnv
+
+# CPU-cluster learner threads (jed). The sbatch exports OMP_NUM_THREADS=1 so that 64 SubprocVecEnv
+# workers don't each spawn a full BLAS thread pool on a 72-core node (64 x 72 threads = the node
+# grinds to a halt) -- but that same variable would confine the LEARNER's torch to one thread, and
+# the PPO update is the one part of the cycle that parallelises well. Workers never run torch
+# (env.py doesn't import it), so giving the main process its own thread count is safe.
+if not torch.cuda.is_available():
+    torch.set_num_threads(int(os.environ.get("LEARNER_THREADS", "8")))
 
 
 def make_env(cfg):
