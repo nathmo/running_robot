@@ -416,6 +416,35 @@ class Config:
     # impossible actuator wins. peak_nm lives in the model's forcerange; these two shape the curve
     # and the reporting.
     ankle_motor_noload_rads: float = 22.0   # output-side no-load speed (AKE90-8). 0 = no speed limit
+    # BACK-EMF on the six GAIT actuators: joint-side no-load speed per actuator, in the model's
+    # actuator order (hip_roll_L, cam_L, thigh_L, hip_roll_R, cam_R, thigh_R). Empty = disabled,
+    # which is what every preset before 2026-08-10 trained with -- a flat forcerange delivering
+    # peak torque at any speed, which no motor does. Only the optional ANKLE motor ever had a
+    # torque-speed curve, because the ankle study needed it to avoid "an impossible actuator wins".
+    #
+    # Measured/derived at the robot's 48 V bus:
+    #   AK60-39 V3.0, KV80, 39:1 (hip-roll)  -> 80 rpm/V x 48 V = 3840 rpm motor
+    #                                        -> 402 rad/s / 39 = 10.31 rad/s at the joint
+    #   AKE90-8, 8:1 (cam + thigh)           -> 22.0 rad/s at the joint (same spec the ankle
+    #                                           study uses; implies motor KV ~35 rpm/V at 48 V)
+    # A real drive is CURRENT-limited at low speed and only VOLTAGE-limited past the corner:
+    #     tau(w) = min( tau_peak ,  Kt_j * (V_bus - Kt_j*w_joint) / R )
+    # (back-EMF at the joint is Kt_j*w_joint exactly, because Kt_motor = Kt_j/G and w_motor = w*G).
+    # The linear-from-zero derate the ANKLE uses is the wrong shape for this: it ignores the flat
+    # branch and under-reports torque precisely where the robot operates.
+    #
+    # At the robot's 48 V bus the corner sits far above anything reached so far:
+    #     hip_roll  corner 4.7-10.2 rad/s (R 2.0 -> 0.05) vs 1.48 observed
+    #     cam/thigh corner 6.8-20.5 rad/s (R 0.5 -> 0.05) vs 5.40 observed
+    # and R is bounded by tau_peak being reachable at all: R <= Kt_j*V/tau_peak = 0.72 ohm (AKE90),
+    # 3.65 ohm (AK60). So for ANY consistent R both motors sit in the flat branch and a constant
+    # forcerange is already correct. This exists for the fast-running case, where it will bite.
+    #
+    # Per actuator, model order (hip_roll_L, cam_L, thigh_L, hip_roll_R, cam_R, thigh_R).
+    # Leave motor_r_ohm empty to disable -- R is NOT measured on this robot yet.
+    motor_bus_volts: float = 48.0
+    motor_kt_joint: tuple = (4.655, 2.176, 2.176, 4.655, 2.176, 2.176)   # Nm/A, output side
+    motor_r_ohm: tuple = ()             # phase resistance; empty = torque-speed curve OFF
     ankle_motor_cont_nm: float = 55.0       # continuous rating; telemetry-only thermal proxy
     #                                         (fraction of time above it -> can it run continuously?)
     # ----- action mode: which gait generator turns the action into PD targets ---------------

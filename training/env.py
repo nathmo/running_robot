@@ -510,6 +510,15 @@ class DashEnv(gym.Env):
                              "both drive qfrc_applied on the ankle joints.")
         # torque-speed envelope: only meaningful when there IS a motor and a finite no-load speed
         self._ankle_ts_curve = bool(self.n_ankle_act and c.ankle_motor_noload_rads > 0.0)
+        # gait-actuator torque-speed curve: needs a measured phase resistance, so it stays OFF
+        # until motor_r_ohm is filled in (see the config note -- R is not measured on this robot)
+        self._motor_ts_curve = bool(c.motor_r_ohm) and c.motor_bus_volts > 0.0
+        if self._motor_ts_curve:
+            self._motor_kt = np.asarray(c.motor_kt_joint, float)[:self.nu]
+            self._motor_r = np.asarray(c.motor_r_ohm, float)[:self.nu]
+            if self._motor_kt.size != self.nu or self._motor_r.size != self.nu:
+                raise ValueError(f"motor_kt_joint/motor_r_ohm must have {self.nu} entries "
+                                 f"(got {self._motor_kt.size}/{self._motor_r.size})")
         self._ankle_peak_w = 0.0        # peak |ankle speed| this control step (substep-resolved)
 
     # nominal_ctrl is rebound at reset by the m1 ride-height LUT, so these stay views rather than
@@ -579,6 +588,32 @@ class DashEnv(gym.Env):
         self._sag_state += a * (min(p / max(p_ref, 1e-9), 1.0) - self._sag_state)
         self._sag_scale = 1.0 - c.dr_torque_sag * self._dr.scale * self._sag_state
         self._apply_torque_limit()
+
+    def _apply_motor_torque_speed(self):
+        """Real torque-speed envelope for the six GAIT actuators, re-evaluated every substep.
+
+        A brushless drive is CURRENT-limited at low speed and VOLTAGE-limited past the corner:
+
+            tau(w) = min( tau_peak,  Kt_j * (V_bus - Kt_j * w_joint) / R )
+
+        Back-EMF referred to the joint is exactly Kt_j*w_joint, since Kt_motor = Kt_j/G and
+        w_motor = w_joint*G. NOT the linear-from-zero derate the ankle uses -- that shape ignores
+        the flat branch and under-reports torque exactly where this robot operates. At 48 V the
+        corner is 4.7-10.2 rad/s (hip_roll) and 6.8-20.5 rad/s (cam/thigh) against observed peaks
+        of 1.48 and 5.40, so this is currently a no-op; it exists for the fast-running case.
+
+        Multiplies the same curriculum / DR / sag scaling _apply_torque_limit applies, so it
+        composes with the torque-budget curriculum instead of silently overwriting it.
+        """
+        w = np.abs(self.data.qvel[self.act_dadr])
+        kt = self._motor_kt
+        v_avail = np.maximum(self.cfg.motor_bus_volts - kt * w, 0.0)
+        tau_volt = kt * v_avail / self._motor_r
+        base = (self._orig_forcerange[:self.nu, 1] * self._torque_scale
+                * self._dr_torque_scale * self._sag_scale)
+        lim = np.minimum(base, tau_volt)
+        self.model.actuator_forcerange[:self.nu, 0] = -lim
+        self.model.actuator_forcerange[:self.nu, 1] = lim
 
     def _apply_ankle_torque_speed(self):
         """Clamp the ankle servos to a real motor's TORQUE-SPEED curve, re-evaluated every substep.
@@ -1168,6 +1203,8 @@ class DashEnv(gym.Env):
                 -self._ctrl_jitter_substeps, self._ctrl_jitter_substeps + 1)))
         contact_acc = np.zeros(2, bool)
         for _ in range(n):
+            if self._motor_ts_curve:
+                self._apply_motor_torque_speed()
             if self._ankle_ts_curve:
                 self._apply_ankle_torque_speed()
             if self._bar_active:
