@@ -122,18 +122,29 @@ def sessions(events):
             s["start"] = e
         elif k in ("daemon.stop", "server.stop"):
             s["clean_stop"] = True
-    for s in out.values():
+    order = list(out.values())
+    for s in order:
         hb = s["heartbeats"]
         s["hb_interval"] = (np.median(np.diff([h["t_mono"] for h in hb]))
                             if len(hb) > 2 else blackbox.HEARTBEAT_S)
         s["last_hb"] = hb[-1] if hb else None
+        # "no stop record" means a power cut ONLY if the session is over. The newest session may
+        # simply still be running — reading the log of a live robot is the normal case, and
+        # announcing a power loss that did not happen is exactly the kind of confident wrong answer
+        # this whole thing exists to avoid.
+        s["live"] = False
         # gaps INSIDE a session: the writer was alive on both sides, so something stalled it
         s["gaps"] = []
         for a, b in zip(hb, hb[1:]):
             d = b["t_mono"] - a["t_mono"]
             if d > 3 * s["hb_interval"]:
                 s["gaps"].append({"from": a, "to": b, "seconds": d})
-    return list(out.values())
+    if order:
+        newest = max(order, key=lambda x: (x["last"].get("t_wall") or 0))
+        gap = time.time() - (newest["last"].get("t_wall") or 0)
+        newest["live"] = (not newest["clean_stop"]
+                          and 0 <= gap < max(30.0, 4 * newest["hb_interval"]))
+    return order
 
 
 # ===================================================================== reports
@@ -231,6 +242,9 @@ def postmortem(d, events, files):
                       f"{g['to'].get('uptime_s'):.0f}s) — the writer was stalled, not dead")
             if s["clean_stop"]:
                 print("       ended: CLEAN SHUTDOWN (a daemon.stop/server.stop was written)")
+            elif s["live"]:
+                print("       STILL RUNNING — its last record is seconds old, so the missing stop "
+                      "record means 'not finished yet', not 'died'")
             elif s["last_hb"]:
                 hb = s["last_hb"]
                 print(f"       ended: NO CLEAN STOP RECORD -> POWER LOSS / KILL INFERRED at "
@@ -449,7 +463,7 @@ def _narrative(events, inc_hdr, ss):
         out.append("  Nothing dangerous is on record: no trip, no refused move, no origin jump.")
         out.append("  The recorder has been running and the timeline is continuous apart from any "
                    "gaps listed in section 1.")
-    unclean = [s for s in ss if not s["clean_stop"] and s["last_hb"]]
+    unclean = [s for s in ss if not s["clean_stop"] and s["last_hb"] and not s["live"]]
     if unclean:
         out.append(f"  {len(unclean)} session(s) ended without a clean stop — see section 1 for "
                    f"the inferred power-off times.")
