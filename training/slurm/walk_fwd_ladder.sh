@@ -37,10 +37,11 @@ set -euo pipefail
 SB=training/slurm/izar_train.sbatch
 STAGES="${STAGES:-m2 m3 m4 m5 m6}"
 SEED="${SEED:-0}"
-# Full node: Izar is 40 cores / 2 GPUs, and the old 20-core booking measured 3% GPU use at load
-# 8-10. NSTEPS moves with NENVS so the PPO rollout stays 18432 and only throughput changes.
-NENVS="${NENVS:-36}"
-NSTEPS="${NSTEPS:-512}"
+# HALF a node: Izar is 40 cores / 2 GPUs, so 1 GPU == 20 cores. Booking 40 cores + 1 GPU strands
+# the node's second GPU and makes the job wait for a whole free node (SCITAS, 2026-08-10).
+# NSTEPS moves with NENVS so the PPO rollout stays 18432 and only throughput changes.
+NENVS="${NENVS:-18}"
+NSTEPS="${NSTEPS:-1024}"
 STEPS="${STEPS:-80000000}"          # per stage; ankle2_m3_rigid reached 15.5 s in 73 M
 LINKS="${LINKS:-3}"                 # 4 h each -> 12 h of container per stage; a stage that hits
                                     # STEPS early just exits and its spare links exit immediately

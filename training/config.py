@@ -13,7 +13,7 @@ m4 = +Y, m5 = +roll, m6 = fully free. Warm-start each stage from the previous on
 base_lock does not change obs/action dims, so checkpoints load as-is.
 """
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, List
 
 
 @dataclass
@@ -517,7 +517,14 @@ class Config:
     # real moteus position-mode limits. 0 = off (plant byte-identical to before). NOTE 22 rad/s is
     # the MOTOR ceiling; the cam/thigh see it through the linkage reduction, so this is a loose upper
     # bound (only trims the worst spikes) -- the accel limit + cadence penalty do the real slowing.
-    motor_vel_limit: float = 0.0        # rad/s cap on commanded joint velocity (210 RPM motor=22)
+    # Scalar applies to all six; a 6-tuple is PER JOINT in actuator order
+    # (hip_roll_L, cam_L, thigh_L, hip_roll_R, cam_R, thigh_R). Per-joint matters here because the
+    # two motor families differ by more than 2x: no-load OUTPUT speed is 1261 deg/s = 22.01 rad/s
+    # for the AKE90-8 (cam, thigh) and 590 deg/s = 10.30 rad/s for the AK60-39 (hip-roll) -- the
+    # same pair of numbers the webui's excitation sizing already uses. A single scalar has to be
+    # wrong for one family or the other, and applying the AKE90's 22 rad/s to hip-roll hands the
+    # policy 2.1x the lateral speed the hardware has.
+    motor_vel_limit: Any = 0.0          # rad/s cap on commanded joint velocity (0 = off)
     motor_accel_limit: float = 0.0      # rad/s^2 cap on commanded joint acceleration (0 = off)
 
     # ----- sim2real control-timing randomization (2026-07-23; models the Pi inference loop) -----
@@ -1971,11 +1978,41 @@ PRESETS.update({
     "walk_fwd_m2_d08": lambda: _walk_fwd3(base_lock=LOCKS["m2"], drive_bandwidth_hz=0.8, **_LADDER_RWD),
     "walk_fwd_m2_d3":  lambda: _walk_fwd3(base_lock=LOCKS["m2"], drive_bandwidth_hz=3.0, **_LADDER_RWD),
     "walk_fwd_m2_d12": lambda: _walk_fwd3(base_lock=LOCKS["m2"], drive_bandwidth_hz=12.0, **_LADDER_RWD),
-    "walk_fwd_m2": lambda: _walk_fwd3(base_lock=LOCKS["m2"], **_LADDER_RWD),  # x,z free — cannot fall
-    "walk_fwd_m3": lambda: _walk_fwd3(base_lock=LOCKS["m3"], **_LADDER_RWD),  # + pitch
-    "walk_fwd_m4": lambda: _walk_fwd3(base_lock=LOCKS["m4"], **_LADDER_RWD),  # + lateral translation
-    "walk_fwd_m5": lambda: _walk_fwd3(base_lock=LOCKS["m5"], **_LADDER_RWD),  # + ROLL <- the wall
-    "walk_fwd_m6": lambda: _walk_fwd3(base_lock=LOCKS["m6"], **_LADDER_RWD),  # + yaw
+    # ----- THE LADDER, on the RETUNED drive and the REBUILT ankle (2026-08-10) --------------------
+    # ankle_mode "rigid", not "bar". The ankle has been rebuilt as a carbon tube: stiff, symmetric
+    # in push AND pull, with no buckling limit. "bar" models a TENSION-ONLY strut that saturates at
+    # ankle_bar_buckle_nm in compression, which is what the old 3 mm PETG rod was (measured to
+    # buckle at 0.27 N, 35x below spec). That asymmetry is now gone from the hardware, so carrying
+    # it in the plant would be modelling a part that no longer exists. "rigid" is also the arm that
+    # produced the only 2.55 m/s controller this project has ever had (ankle2_m3_rigid).
+    # The bracket above settled it: at the measured 0.8 Hz the robot cannot walk (d08, duty 1.00,
+    # falls), at 3 Hz it does (d3: 20.75 m at 0.69 m/s, per-foot air 0.269/0.184, 60 M steps), and
+    # 12 Hz is WORSE than 3 (d12 folds a leg into workspace_kill). So the fix was hardware, and it
+    # has been made: position-loop kp 0.003 -> 0.009 on the sagittal boards moved left.thigh
+    # 0.86 -> 3.35 Hz and left.cam 0.85 -> 2.88 Hz, with left.abd (untouched, 0.74 -> 0.76) as the
+    # in-run control. The ladder therefore trains at the drive that now exists, not the old one.
+    #
+    # ASSUMPTION, and the one to watch: 3.0 Hz UNIFORM across all six joints. Measured so far only
+    # on the LEFT cam+thigh. Abduction is a different actuator (AK60-39 at 39:1 vs AKE90-8 at 8:1)
+    # and at the same kp sits at 0.76 Hz; f_c ~ kp/gear predicts it needs kp ~ 0.036, which is an
+    # extrapolation ACROSS motor families and is not yet confirmed by a chirp. If abduction comes
+    # back short, this preset is optimistic exactly where roll matters -- m5 and m6 -- and those two
+    # rungs need re-baselining against a per-joint bandwidth. m2..m4 lock roll and are unaffected.
+    "walk_fwd_m2": lambda: _walk_fwd3(base_lock=LOCKS["m2"], drive_bandwidth_hz=3.0,
+                                      ankle_mode="rigid",
+                                      **_LADDER_RWD),  # x,z free — cannot fall
+    "walk_fwd_m3": lambda: _walk_fwd3(base_lock=LOCKS["m3"], drive_bandwidth_hz=3.0,
+                                      ankle_mode="rigid",
+                                      **_LADDER_RWD),  # + pitch
+    "walk_fwd_m4": lambda: _walk_fwd3(base_lock=LOCKS["m4"], drive_bandwidth_hz=3.0,
+                                      ankle_mode="rigid",
+                                      **_LADDER_RWD),  # + lateral translation
+    "walk_fwd_m5": lambda: _walk_fwd3(base_lock=LOCKS["m5"], drive_bandwidth_hz=3.0,
+                                      ankle_mode="rigid",
+                                      **_LADDER_RWD),  # + ROLL <- the wall
+    "walk_fwd_m6": lambda: _walk_fwd3(base_lock=LOCKS["m6"], drive_bandwidth_hz=3.0,
+                                      ankle_mode="rigid",
+                                      **_LADDER_RWD),  # + yaw
 })
 
 
@@ -1994,8 +2031,29 @@ PRESETS.update({
 # because it folds one leg up until workspace_kill fires. A mean-based gate would have opened for
 # the one arm that cannot walk.
 # Every one of those reads "shut" on the old air_time gate, including the walker -- which is the bug.
+# NO-LOAD OUTPUT SPEED per actuator, in actuator order. Until 2026-08-10 the position servos had
+# NO velocity cap at all (motor_vel_limit defaulted to 0 = off) for this whole lineage, so the
+# policy could crank a joint arbitrarily fast for free -- which is exactly what it did: the k350 m3
+# winner "balanced" by pattering ONE foot at ~11 Hz with peak thigh 23 rad/s, past the motor
+# ceiling. Torque was always capped; speed never was.
+#   AK60-39  (hip-roll)   590 deg/s = 10.30 rad/s
+#   AKE90-8  (cam, thigh) 1261 deg/s = 22.01 rad/s
+# Same numbers the webui excitation sizing uses. This slew-limits the COMMANDED target, i.e. models
+# a velocity-bounded position servo; it does not stop the joint being back-driven faster, which is
+# correct -- gravity can outrun a motor.
+_NOLOAD_RADS = (10.30, 22.01, 22.01, 10.30, 22.01, 22.01)
+
+# The rebuilt ankle is a 40 g CARBON TUBE. dash01.xml bakes the spring's 249 g into the measured
+# 573 g shin (bare shin 324 g), and ankle_spring_mass_kg is the amount REMOVED from that shin -- so
+# the tube is a NET removal of 249 - 40 = 209 g, leaving 364 g of shin. Not 40, and not 249.
+# This is the single most valuable number in the rebuild: distal leg mass costs ~9x what torso mass
+# costs on this robot, so 209 g off each shin is worth more than 1.8 kg off the base.
+_ANKLE_TUBE_KG = 0.040
+_SHIN_TUBE_REMOVAL_KG = SHIN_SPRING_KG - _ANKLE_TUBE_KG      # 0.209
+
 _LADDER_RWD = dict(w_alive=0.0, track_sigma_min=0.15, workspace_kill=True,
-                   ent_gate_swing_frac=0.13)
+                   ent_gate_swing_frac=0.13, motor_vel_limit=_NOLOAD_RADS,
+                   ankle_spring_mass_kg=_SHIN_TUBE_REMOVAL_KG)
 
 
 def _walk_fwd3(**kw):

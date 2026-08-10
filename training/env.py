@@ -286,7 +286,15 @@ class DashEnv(gym.Env):
         self._filt_target = self.nominal_ctrl.copy()
         # motor velocity/accel limiter state: the slew limiter in _run_physics tracks the previously
         # COMMANDED target position + velocity so it can cap joint velocity/acceleration.
-        self._vel_accel_limited = (self.cfg.motor_vel_limit > 0.0
+        # motor_vel_limit is a scalar OR a per-joint 6-tuple (the AKE90-8 cam/thigh and the
+        # AK60-39 hip-roll differ by 2.1x in no-load output speed, so one number cannot serve both).
+        # Broadcast either form to a per-actuator array once, here, so the hot path stays a clip.
+        _vl = np.broadcast_to(np.asarray(self.cfg.motor_vel_limit, float),
+                              (self.nu,)).astype(float).copy()
+        if _vl.size != self.nu:
+            raise ValueError(f"motor_vel_limit must be a scalar or {self.nu} values, got {_vl.size}")
+        self._motor_vel_limit = np.where(_vl > 0.0, _vl, np.inf)
+        self._vel_accel_limited = (bool(np.isfinite(self._motor_vel_limit).any())
                                    or self.cfg.motor_accel_limit > 0.0)
         self._prev_cmd_pos = self.nominal_ctrl.copy()
         self._prev_cmd_vel = np.zeros(self.nu)
@@ -1183,8 +1191,7 @@ class DashEnv(gym.Env):
             if c.motor_accel_limit > 0.0:
                 dv = c.motor_accel_limit * dt
                 v_des = np.clip(v_des, self._prev_cmd_vel - dv, self._prev_cmd_vel + dv)
-            if c.motor_vel_limit > 0.0:
-                np.clip(v_des, -c.motor_vel_limit, c.motor_vel_limit, out=v_des)
+            np.clip(v_des, -self._motor_vel_limit, self._motor_vel_limit, out=v_des)
             tgt = self._prev_cmd_pos + v_des * dt
             self._prev_cmd_vel = v_des
             self._prev_cmd_pos = tgt.copy()
