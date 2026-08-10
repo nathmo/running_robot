@@ -524,6 +524,39 @@ def test_a_bus_that_will_not_take_frames_does_not_kill_the_daemon(tmp_path, monk
     assert not events_of(str(tmp_path), "daemon.crash")
 
 
+def test_a_dead_bus_is_backed_off_not_hammered(monkeypatch):
+    """MEASURED on the robot 2026-08-10: three failing sends per tick cost ~11 ms against a 5 ms
+    budget, and the 200 Hz loop ran at 60 Hz. A failing socketcan send is enormously more expensive
+    than a successful one, so a channel that fails every time must be retried slowly."""
+    monkeypatch.setattr(canio, "MockBus", _DeadBus)
+    canio._send_errors.clear()
+    canio._send_state.clear()
+    bus = canio.MockBus("can1")
+    t0 = time.monotonic()
+    attempts_at_backoff = None
+    for i in range(2000):                                   # ~10 s of a 200 Hz loop
+        canio.set_current(bus, 104, 0.0)
+        if attempts_at_backoff is None and canio._send_errors.get("can1", 0) >= \
+                canio.CHANNEL_BACKOFF_AFTER:
+            attempts_at_backoff = i + 1
+    elapsed = time.monotonic() - t0
+    st = canio.send_stats()["can1"]
+    assert st["backoff"] is True
+    assert st["skipped"] > 1500, "most frames must be skipped, not attempted"
+    # attempts after the backoff engages are bounded by the retry rate, not by the call rate
+    max_expected = canio.CHANNEL_BACKOFF_AFTER + elapsed / canio.CHANNEL_BACKOFF_S + 2
+    assert st["errors"] <= max_expected, \
+        f"{st['errors']} attempts in {elapsed:.3f}s — the dead bus is still being hammered"
+
+    # ...and one success puts it straight back to full rate, so a healthy bus pays nothing
+    canio._send_state["can1"]["next_try"] = 0.0
+    monkeypatch.setattr(bus, "send", lambda msg: None)
+    assert canio.set_current(bus, 104, 0.0) is True
+    assert canio.send_stats()["can1"]["backoff"] is False
+    canio._send_errors.clear()
+    canio._send_state.clear()
+
+
 # ===================================================================== ACCEPTANCE
 @pytest.mark.slow
 def test_acceptance_reproduces_the_2026_08_10_incident(robot):

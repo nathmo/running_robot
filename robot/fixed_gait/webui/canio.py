@@ -58,7 +58,21 @@ def _make_msg(arb_id, data):
 # send that cannot go out has to be an event, not a death. Counted here, surfaced through the hook,
 # and escalated by the daemon into a trip if it persists while we are actually commanding motion —
 # see RobotDaemon._can_watch. Sends never raise past this module.
+# ...and a bus that is failing EVERY send must be backed off, not hammered. MEASURED on the robot
+# 2026-08-10 with the left leg disconnected: three failing sends per tick cost ~11 ms, against a
+# 5 ms tick budget — the 200 Hz loop ran at 60 Hz with 34% late ticks. A failing socketcan send is
+# not free; it is roughly a thousand times more expensive than a successful one.
+#
+# So after CHANNEL_BACKOFF_AFTER consecutive failures a channel is only retried at
+# 1/CHANNEL_BACKOFF_S, and the ONE successful send puts it straight back to full rate. On a healthy
+# bus this costs exactly nothing — the counter never leaves zero — and the safety story is
+# unchanged: motors on a dead bus report nothing, so _motion_allowed refuses motion, and
+# RobotDaemon._can_watch trips within half a second if it happens while commanding.
+CHANNEL_BACKOFF_AFTER = 10
+CHANNEL_BACKOFF_S = 0.2
+
 _send_errors = {}
+_send_state = {}                 # channel -> {"fails", "skipped", "next_try"}
 _on_send_error = None
 _hook_errors = 0
 
@@ -72,13 +86,33 @@ def send_errors():
     return dict(_send_errors)
 
 
+def send_stats():
+    """Per channel: total errors, frames we did not even attempt while backed off, and whether the
+    channel is backed off right now. The black box records this — 'we skipped it' and 'we tried and
+    it failed' are different facts and a postmortem needs both."""
+    return {ch: {"errors": _send_errors.get(ch, 0), "skipped": s["skipped"],
+                 "backoff": s["fails"] >= CHANNEL_BACKOFF_AFTER}
+            for ch, s in _send_state.items()}
+
+
 def _send(bus, msg):
     """True if the frame went out. Never raises: a dead bus must not kill the control thread."""
+    ch = getattr(bus, "channel", "?")
+    st = _send_state.get(ch)
+    if st is None:
+        st = _send_state[ch] = {"fails": 0, "skipped": 0, "next_try": 0.0}
+    if st["fails"] >= CHANNEL_BACKOFF_AFTER:
+        now = time.monotonic()
+        if now < st["next_try"]:
+            st["skipped"] += 1
+            return False
+        st["next_try"] = now + CHANNEL_BACKOFF_S
     try:
         bus.send(msg)
+        st["fails"] = 0                        # one success is enough: straight back to full rate
         return True
     except Exception as e:
-        ch = getattr(bus, "channel", "?")
+        st["fails"] += 1
         _send_errors[ch] = _send_errors.get(ch, 0) + 1
         hook = _on_send_error
         if hook is not None:

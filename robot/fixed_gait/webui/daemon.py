@@ -816,6 +816,7 @@ class RobotDaemon(threading.Thread):
                 snap["blackbox"] = (self.bb.status() if self.bb is not None
                                     else {"alive": False, "error": "not configured"})
                 snap["can_errors"] = canio.send_errors()
+                snap["can_bus"] = canio.send_stats()
                 self.snapshot = snap
 
     def _setup(self):
@@ -1074,7 +1075,7 @@ class RobotDaemon(threading.Thread):
             self._can_err_logged = t
             self._bb_event("can.error", channel=channel, error=str(exc),
                            exc_type=type(exc).__name__, mode=self.mode,
-                           total=canio.send_errors(),
+                           stats=canio.send_stats(),
                            note="the bus would not accept the frame. With the motor power off "
                                 "nothing ACKs, socketcan's TX queue fills and every send fails — "
                                 "expected at boot, a fault if it happens mid-motion")
@@ -1741,7 +1742,7 @@ class RobotDaemon(threading.Thread):
                 estop=dict(latched=self.mode == "ESTOPPED", reason=self.estop_reason),
                 loop=dict(hz=TICK_HZ, slip=self._slip_count),
                 loop_error=self.loop_error,
-                can_errors=canio.send_errors(),
+                can_errors=canio.send_errors(), can_bus=canio.send_stats(),
                 last_reject=self._last_reject,
                 # the recorder's own health, so a dead writer thread is visible in the UI rather
                 # than being discovered after the next incident
