@@ -107,11 +107,33 @@ can use it directly.
    every mode transition raising events and dumps. Must not change control behaviour.
 3. Wiring in `calibration.py` / `dynstore.py` / `measurestore.py` — mutations raise events with
    old → new values.
-4. **Pre-move safety guard** (the point of the exercise): on any transition out of LIMP, compare
-   each motor's `pos_raw` against the raw recorded at the last successful zero. If any joint differs
-   by more than a configurable threshold (default a few degrees), refuse the transition, latch a
-   clear reason, and dump. Also make the first move after a re-zero or reboot a small bounded one —
-   `center()`/`home()` must not be the first absolute command after either.
+4. **Make the first move safe — do not forbid it.** Homing right after a zero capture is the
+   correct and necessary operator action: the legs are limp and sagging under gravity, and homing
+   is what catches them. An earlier draft of this brief said `center()`/`home()` must not be the
+   first absolute command. That was wrong and is struck. Four mechanisms instead, none of which
+   add a step to the normal workflow:
+
+   a. **Hold before moving.** The very first CAN command after enabling must be
+      `set_pos(current_raw)` — hold each joint exactly where it is *now*. This is
+      calibration-independent: it never consults `offsets`, so it is safe even if the zero is
+      completely wrong, and it stops the sag immediately. Only then slew to the absolute target.
+
+   b. **Raw-at-rest check.** Before leaving LIMP, compare each motor's `pos_raw` against the raw
+      recorded at the last successful zero. Straight after a fresh capture this matches trivially
+      and homing proceeds with no friction — the check only bites when something moved the origin
+      *between* the zero and the move, which is exactly the 2026-08-10 case (a board config write
+      in between). On mismatch: refuse, latch a clear reason naming both raw poses, and dump.
+
+   c. **A tighter tracking-error threshold while homing.** Homing is a slow slew and should track
+      well, so the 25 deg playback threshold is far too loose for it; a stale zero shows up as
+      tracking error within the first degrees of travel. Make it separately configurable and
+      default it low (~8 deg).
+
+   d. **Per-joint travel budget — the backstop.** Abort if any joint accumulates more travel than
+      its range allows without arriving (say 1.3x its configured range). This is the check that
+      bounds the damage when everything else has been fooled: on 2026-08-10 `left.cam` reached
+      ~1.9 output turns on a joint with +/-86 deg of travel, and a travel budget would have cut it
+      at well under a quarter turn regardless of what the calibration said.
 5. HTTP: `GET /api/blackbox/list`, `GET /api/blackbox/download?name=`, `POST /api/blackbox/mark`
    (operator annotation), `POST /api/blackbox/dump`. Same `send_file` pattern as
    `/api/measure/export`. Downloads must work while the daemon is running and must never block it.
