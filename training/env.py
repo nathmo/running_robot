@@ -141,13 +141,28 @@ class DashEnv(gym.Env):
         self.foot_gids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col")
                           for s in "LR"]
         self.foot_gids_arr = np.array(self.foot_gids)
-        self._toe_r = float(self.model.geom_size[self.foot_gids[0]][0])
+        # geom_size[0] is the radius ONLY for a sphere. The foot-shape study (model/
+        # make_foot_variants.py) also runs a 30x100x10 mm plate and a 100 mm lateral cylinder, where
+        # size[0] is the fore-aft half-length (15 mm) and the cylinder radius respectively — reading
+        # it as "toe radius" would put the plate's sole 15 mm below where it is and mis-scale every
+        # clearance/air-time term. `_sole_offsets` is the true support point, orientation included.
+        # Needs a kinematics pass: a fresh MjData has geom_xmat all zeros, which would read every
+        # sole offset as 0 rather than raising.
+        mujoco.mj_forward(self.model, self.data)
+        self._toe_r = float(self._sole_offsets()[0])          # nominal-pose value, for reporting
         self._col_gids = {}
         for s in "LR":
             for kind in ("foot", "heel"):
                 g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"{kind}_{s}_col")
                 if g >= 0:
-                    self._col_gids[g] = float(self.model.geom_size[g][0])
+                    # penetration scale for _floor_violation: the SMALLEST half-extent, i.e. how
+                    # thick the part is in its thinnest direction. For the shipped spheres this is
+                    # the radius and nothing changes; for the 10 mm plate it is 5 mm, which is the
+                    # honest "driven through the ground" scale for a plate.
+                    n = {mujoco.mjtGeom.mjGEOM_SPHERE: 1, mujoco.mjtGeom.mjGEOM_CYLINDER: 2,
+                         mujoco.mjtGeom.mjGEOM_CAPSULE: 2, mujoco.mjtGeom.mjGEOM_BOX: 3}.get(
+                             int(self.model.geom_type[g]), 1)
+                    self._col_gids[g] = float(np.min(self.model.geom_size[g][:n]))
         self._air_time = np.zeros(2, np.float32)      # continuous seconds NOT grounded, per foot
         self._contact_time = np.zeros(2, np.float32)  # continuous seconds grounded, per foot
         self._grounded_prev = np.zeros(2, bool)
@@ -905,8 +920,33 @@ class DashEnv(gym.Env):
             c[fi] = bool(np.any(other == fg))
         return c
 
+    def _sole_offsets(self):
+        """Per foot, the distance from the collision geom's CENTRE down to its lowest point, in the
+        geom's current orientation. Constant (= the radius) for the shipped spheres; for the plate
+        and the blade it depends on how the foot is tilted right now, which is the whole point of
+        those variants — a plate on its edge is 15 mm from centre to floor, flat it is 5 mm."""
+        m, d = self.model, self.data
+        out = np.empty(2)
+        T = mujoco.mjtGeom
+        for i, g in enumerate(self.foot_gids):
+            a = d.geom_xmat[g].reshape(3, 3)[2, :]     # world-z row of the geom's rotation
+            s = m.geom_size[g]
+            t = int(m.geom_type[g])
+            if t == T.mjGEOM_SPHERE:
+                out[i] = s[0]
+            elif t == T.mjGEOM_BOX:
+                out[i] = abs(a[0]) * s[0] + abs(a[1]) * s[1] + abs(a[2]) * s[2]
+            elif t == T.mjGEOM_CYLINDER:
+                out[i] = s[0] * np.hypot(a[0], a[1]) + s[1] * abs(a[2])
+            elif t == T.mjGEOM_CAPSULE:
+                out[i] = s[0] + s[1] * abs(a[2])
+            else:
+                out[i] = m.geom_rbound[g]
+        return out
+
     def _toe_heights(self):
-        return self.data.geom_xpos[self.foot_gids_arr, 2] - self._toe_r
+        """Height of each foot's SOLE above the floor (0 = touching)."""
+        return self.data.geom_xpos[self.foot_gids_arr, 2] - self._sole_offsets()
 
     def _foot_lateral_sep(self):
         """Body-frame lateral separation of the toe spheres, sep = y_left - y_right (~0.40 m
@@ -1543,7 +1583,7 @@ class DashEnv(gym.Env):
         gait_on = cmd_speed >= c.gait_cmd_gate
         dt = self.control_dt
         toe_pos = self.data.geom_xpos[self.foot_gids_arr].copy()
-        heights = toe_pos[:, 2] - self._toe_r
+        heights = self._toe_heights()
         grounded = contact_acc | (heights < c.grounded_h)
         grounded_recent = grounded | self._grounded_prev
 

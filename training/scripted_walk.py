@@ -113,6 +113,7 @@ G = 9.81
 LEAD_LP_S = 0.05    # low-pass on the lead term's derivative (see the drive-inversion note below)
 LEAD_CLIP = 0.35    # hard cap on the lead contribution per joint (rad) -- see __call__
 HEIGHT_LP_S = 0.05  # low-pass on the kinematic ride-height measurement
+V_CMD_SLEW = 0.4    # m/s^2 slew on the speed command (stepped commands trip the gait)
 VIDEO_FPS = 50      # mp4 playback rate; control runs at 200 Hz, so frames are decimated 4:1
 
 # ----------------------------------------------------------------------------------------------
@@ -287,6 +288,7 @@ class ScriptedWalker:
         self._was_swing = np.zeros(2, bool)
         self.q_prev = self.nominal.copy()
         self.dq_filt = np.zeros(6)
+        self.v_eff = 0.0
         # ride-height reference: the standing height the plant actually settles at, captured on the
         # first call so it tracks per-episode plant draws rather than a hard-coded constant
         self.h_ref = float(-np.min(self._toes_body()[:, 2]))
@@ -351,7 +353,7 @@ class ScriptedWalker:
         pitches the robot over before the estimator has converged.
         """
         g = self.g
-        x = 0.5 * sweep + g["k_cap"] * (v_x - self.v_des) / self.omega + g["x_bias"]
+        x = 0.5 * sweep + g["k_cap"] * (v_x - self.v_eff) / self.omega + g["x_bias"]
         return float(np.clip(x, -g["dx_clip"], g["dx_clip"]))
 
     def _foot_xz(self, i, sweep):
@@ -386,6 +388,10 @@ class ScriptedWalker:
         # yank a foot out from under a standing robot ----
         ramp = 1.0 if self.start_ramp_s <= 0 else min(1.0, self.t / self.start_ramp_s)
         self.lift = ramp * g["clearance"]
+        # slew the speed command: a stepped v_des (the demo schedule's 0.25 -> 0 transition)
+        # yanks the sweep mid-stride — measured to fall 2.6 s after every fwd->stand switch
+        dv = V_CMD_SLEW * self.dt
+        self.v_eff = float(np.clip(self.v_des, self.v_eff - dv, self.v_eff + dv))
 
         # ---- ride-height loop. h is the base's height above the LOWEST stance toe, measured along
         # the body z axis -- pure encoder forward kinematics, no altimeter, so it is available on
@@ -403,8 +409,11 @@ class ScriptedWalker:
         z_cmd *= ramp        # fade the extension in rather than snapping the legs straight at t=0
 
         # ---- 2. foot placement, latched ONCE at swing entry ----
-        sgn = 1.0 if self.v_des >= 0 else -1.0
-        sweep = ramp * (g["k_sweep"] * self.v_des * self.T_stance + sgn * g["sweep0"])
+        v = self.v_eff
+        sgn = 1.0 if v >= 0 else -1.0
+        # sweep0 scales DOWN with |v|: it exists to keep weight shifting while walking slowly, but a
+        # fixed floor makes v_des=0 march at ~0.5 m/s (measured) — standing means stepping small
+        sweep = ramp * (g["k_sweep"] * v * self.T_stance + sgn * g["sweep0"] * min(1.0, abs(v) / 0.10))
         for i in (0, 1):
             sw = not self._in_stance(i)
             if sw and not self._was_swing[i]:                  # liftoff: choose the next foothold
@@ -469,7 +478,8 @@ class ScriptedWalker:
 # ----------------------------------------------------------------------------------------------
 # plant setup + rollout
 # ----------------------------------------------------------------------------------------------
-def make_env(milestone="m6", dr=0.0, pushes=False, episode_s=None, res_scale=1.5, drive_hz=None):
+def make_env(milestone="m6", dr=0.0, pushes=False, episode_s=None, res_scale=1.5, drive_hz=None,
+             model_path=None):
     """Build the measured-plant env (200 Hz, 0.8 Hz drive + 25 ms, bar ankle) with the gait
     generator DISABLED, so the scripted controller owns the 6 targets outright.
 
@@ -494,29 +504,47 @@ def make_env(milestone="m6", dr=0.0, pushes=False, episode_s=None, res_scale=1.5
         # separate "this controller cannot balance" from "no controller can balance through a
         # 0.8 Hz pole", and the same sweep applies to the RL policies for free.
         cfg.drive_bandwidth_hz = float(drive_hz)
+    if model_path:
+        # A/B the STANCE KEYFRAME (model/dash01_bal.xml): same robot, same everything, only
+        # key_ctrl re-solved so the toes start under the CoM instead of 9.2 cm ahead of them.
+        cfg.model_path = str(model_path)
     env = DashEnv(cfg)
     env.set_dr_scale(dr)                    # 0 = nominal plant + clean sensors
     return env
 
 
-def rollout(env, gains, seed, v_des=0.30, est="odom", record=False, on_step=None):
-    """One episode. Returns a metrics dict (+ per-step telemetry when record=True)."""
+def rollout(env, gains, seed, v_des=0.30, est="odom", record=False, on_step=None, schedule=None):
+    """One episode. Returns a metrics dict (+ per-step telemetry when record=True).
+    `schedule` = [(t_start, v_cmd), ...] overrides the constant v_des mid-episode (the
+    stand/forward/backward demo)."""
+    sched = sorted(schedule) if schedule else None
+    if sched:
+        v_des = sched[0][1]
     ctl = ScriptedWalker(env, gains, est=est, v_des=v_des)
     obs, _ = env.reset(seed=int(seed))
     if env.command_mode:
         env.set_command(v_des, 0.0)
     ctl.reset()
+    k_sched = 0
     x0 = float(env.data.qpos[0])
     tel = {k: [] for k in ("t", "vx", "vy", "vx_hat", "vy_hat", "pitch", "roll", "contact",
                            "stance", "dx", "dz", "x_td", "trim", "u_lat", "q_des", "q_act",
                            "phase", "base_z", "z_cmd", "h")}
+    tel["v_cmd"] = []
+    seg_err = {}
     n, v_err, terminated = 0, [], False
     while True:
+        if sched and k_sched + 1 < len(sched) and ctl.t >= sched[k_sched + 1][0]:
+            k_sched += 1
+            ctl.v_des = v_des = float(sched[k_sched][1])
+            if env.command_mode:
+                env.set_command(v_des, 0.0)
         act = ctl()
         if record:
             d = ctl.dbg
             v_true = env._vel_body()
             tel["t"].append(ctl.t)
+            tel["v_cmd"].append(v_des)
             tel["vx"].append(float(v_true[0])); tel["vy"].append(float(v_true[1]))
             tel["vx_hat"].append(float(d["v_hat"][0])); tel["vy_hat"].append(float(d["v_hat"][1]))
             tel["pitch"].append(d["pitch"]); tel["roll"].append(d["roll"])
@@ -528,7 +556,11 @@ def rollout(env, gains, seed, v_des=0.30, est="odom", record=False, on_step=None
             tel["q_act"].append(env.data.qpos[env.act_qadr].copy())
             tel["base_z"].append(float(env.data.qpos[2]))
         obs, r, terminated, truncated, info = env.step(act)
-        v_err.append(abs(float(env._vel_body()[0]) - v_des))
+        e_now = abs(float(env._vel_body()[0]) - v_des)
+        v_err.append(e_now)
+        if sched:
+            s = seg_err.setdefault(k_sched, [0.0, 0])
+            s[0] += e_now; s[1] += 1
         n += 1
         if on_step is not None:
             on_step()
@@ -539,6 +571,8 @@ def rollout(env, gains, seed, v_des=0.30, est="odom", record=False, on_step=None
     out = dict(t_alive=t_alive, dist=dist, fell=bool(terminated), steps=n, v_des=v_des,
                v_mean=dist / max(t_alive, 1e-9), v_err=float(np.mean(v_err)),
                survived=bool(not terminated))
+    if sched:
+        out["seg_err"] = [(sched[k][1], v[0] / max(v[1], 1)) for k, v in sorted(seg_err.items())]
     if record:
         out["tel"] = {k: np.array(v) for k, v in tel.items() if v}
     return out
@@ -571,13 +605,21 @@ def evaluate(gains, milestone, seeds, v_des, est, dr, pushes, episode_s, env=Non
 # ----------------------------------------------------------------------------------------------
 def tune(args):
     seeds = list(range(args.seeds))
-    env = make_env(args.milestone, dr=args.dr, pushes=args.pushes, episode_s=args.tune_seconds)
+    env = make_env(args.milestone, dr=args.dr, pushes=args.pushes,
+                   episode_s=args.tune_seconds, model_path=args.model)
     g = dict(GAINS)
     if args.start_gains:
         g.update(json.loads(Path(args.start_gains).read_text()))
 
+    # tune against the FULL mission: stand, then forward, then backward — a constant-v tune
+    # produced a gait that tracked 0.25 m/s beautifully and could not stand at all (marched at
+    # ~0.5 m/s through every v_cmd=0 segment)
+    T = args.tune_seconds
+    sched = [(0.0, 0.0), (T / 3, args.v_des), (2 * T / 3, -args.v_des * 0.6)]
+
     def sc(gv):
-        return score([rollout(env, gv, s, v_des=args.v_des, est=args.est) for s in seeds])
+        return score([rollout(env, gv, s, v_des=args.v_des, est=args.est, schedule=sched)
+                      for s in seeds])
 
     best = sc(g)
     print(f"[tune] milestone={args.milestone} seeds={args.seeds} ep={args.tune_seconds}s "
@@ -635,6 +677,8 @@ def plot_stats(tel, gains, path, title):
     a = ax[0, 0]
     a.plot(t, tel["vx"], lw=1.0, label="v_x true")
     a.plot(t, tel["vx_hat"], lw=1.0, label="v_x leg-odometry")
+    if "v_cmd" in tel and len(tel["v_cmd"]):
+        a.plot(t, tel["v_cmd"], "k--", lw=1.2, label="command")
     a.axhline(np.mean(tel["vx"]), ls=":", c="k", lw=0.8, label=f"mean {np.mean(tel['vx']):.2f}")
     a.set_ylabel("m/s"); a.set_title("forward speed + estimator"); a.legend(fontsize=8)
     a.grid(alpha=.3)
@@ -743,11 +787,15 @@ def main():
     ap.add_argument("--milestone", default="m6", choices=["m2", "m3", "m4", "m5", "m6"],
                     help="base-DOF rail: m2 = pitch+roll locked ... m6 = fully free")
     ap.add_argument("--v-des", type=float, default=0.30, help="commanded forward speed (m/s)")
+    ap.add_argument("--schedule", default=None, choices=[None, "demo"],
+                    help="demo = stand/fwd/stand/back/stand in one 35 s episode")
     ap.add_argument("--est", default="odom", choices=["odom", "truth"],
                     help="odom = onboard leg odometry (honest); truth = oracle ablation")
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--seconds", type=float, default=None, help="episode length override")
     ap.add_argument("--dr", type=float, default=0.0, help="domain-randomization width 0..1")
+    ap.add_argument("--model", default=None,
+                    help="model xml override, e.g. model/dash01_bal.xml (re-solved stance keyframe)")
     ap.add_argument("--pushes", action="store_true", help="enable shoves + trips")
     ap.add_argument("--gains", default=None, help="json gain file (default: scripted_gains.json)")
     ap.add_argument("--video", default=None)
@@ -773,7 +821,14 @@ def main():
         gains.update(json.loads(gf.read_text()))
         print(f"[scripted] gains from {gf}")
 
-    env = make_env(args.milestone, dr=args.dr, pushes=args.pushes, episode_s=args.seconds)
+    # stand -> fwd -> stand -> back -> stand; speeds sized to the plant (the RL d3 reference
+    # walks 0.69 m/s at m2, but backward gaits are slower everywhere)
+    sched = ([(0.0, 0.0), (5.0, args.v_des), (15.0, 0.0), (20.0, -args.v_des * 0.6), (30.0, 0.0)]
+             if args.schedule == "demo" else None)
+    if sched and args.seconds is None:
+        args.seconds = 35.0
+    env = make_env(args.milestone, dr=args.dr, pushes=args.pushes, episode_s=args.seconds,
+                   model_path=args.model)
     print(f"[scripted] {args.milestone}  drive {env.drive_bandwidth_hz:.2f} Hz "
           f"(action_filter {env.cfg.action_filter:.4f}, delay {env.cfg.action_delay_steps} steps) "
           f"control {1 / env.control_dt:.0f} Hz  dr={args.dr}")
@@ -819,12 +874,14 @@ def main():
     for ep in range(args.episodes):
         grab["on"] = (ep == 0 and writer is not None)
         r = rollout(env, gains, ep, v_des=args.v_des, est=args.est,
-                    record=(ep == 0), on_step=on_step)
+                    record=(ep == 0), on_step=on_step, schedule=sched)
         if ep == 0:
             tel = r.pop("tel", None)
         res.append(r)
         print(f"  ep{ep}: {r['t_alive']:6.2f} s  {r['dist']:6.2f} m  "
               f"{r['v_mean']:+.3f} m/s  {'FELL' if r['fell'] else 'survived'}")
+        for v_c, e_c in r.get("seg_err", []):
+            print(f"        segment v_cmd {v_c:+.2f}: mean |v err| {e_c:.3f} m/s")
     if writer is not None:
         writer.close()
         print(f"wrote {args.video} ({grab['n']} frames, "
@@ -832,8 +889,9 @@ def main():
     print_stats(res, tel, gains, args.est)
     if args.stats and tel is not None:
         plot_stats(tel, gains, args.stats,
-                   f"scripted walk — {args.milestone}, v_des={args.v_des} m/s, "
-                   f"0.8 Hz drive, est={args.est}, dr={args.dr}")
+                   f"scripted walk — {args.milestone}, "
+                   f"{'demo schedule' if sched else f'v_des={args.v_des} m/s'}, "
+                   f"{env.drive_bandwidth_hz:.1f} Hz drive, est={args.est}, dr={args.dr}")
 
 
 if __name__ == "__main__":

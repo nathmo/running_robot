@@ -30,6 +30,34 @@ FOOT_SPHERE_R = 0.025
 HEEL_SPHERE_R = 0.03
 
 
+def geom_bottom_z(model, data, gid):
+    """World z of a geom's LOWEST point, in its CURRENT orientation.
+
+    The settle below used `geom_xpos - geom_rbound`, the BOUNDING-SPHERE radius. That is exact for
+    a sphere and only for a sphere. On the flat-plate foot (30x100x10 mm) rbound is the half
+    DIAGONAL, 52 mm against a true 5 mm bottom offset — so the torso got dropped from 47 mm too
+    high and the "settle" started with a drop test. This is the support point along -z, exact for
+    the sphere / box / cylinder / capsule feet this model uses; anything else keeps the old
+    conservative rbound.
+    """
+    R = data.geom_xmat[gid].reshape(3, 3)
+    a = R[2, :]                      # world-z row: z_world(p_local) = xpos_z + a . p_local
+    s = model.geom_size[gid]
+    t = model.geom_type[gid]
+    T = mujoco.mjtGeom
+    if t == T.mjGEOM_SPHERE:
+        off = s[0]
+    elif t == T.mjGEOM_BOX:
+        off = abs(a[0]) * s[0] + abs(a[1]) * s[1] + abs(a[2]) * s[2]
+    elif t == T.mjGEOM_CYLINDER:     # radius s[0], half-length s[1] along the geom's LOCAL z
+        off = s[0] * float(np.hypot(a[0], a[1])) + s[1] * abs(a[2])
+    elif t == T.mjGEOM_CAPSULE:
+        off = s[0] + s[1] * abs(a[2])
+    else:
+        off = float(model.geom_rbound[gid])
+    return float(data.geom_xpos[gid][2] - off)
+
+
 def compute_standing_keyframe(model, init_ctrl):
     """Settle the init pose in the air (gravity off, base frozen) so the closed loop is
     consistent, drop the torso so the toes touch, then RE-SETTLE UNDER GRAVITY (base xy +
@@ -53,7 +81,7 @@ def compute_standing_keyframe(model, init_ctrl):
     mujoco.mj_forward(model, data)
     model.opt.gravity[:] = g
     foot_g = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col") for s in "LR"]
-    zmin = min(data.geom_xpos[gg][2] - model.geom_rbound[gg] for gg in foot_g)  # sphere bottom
+    zmin = min(geom_bottom_z(model, data, gg) for gg in foot_g)   # lowest point of either foot
     data.qpos[0:3] = [0, 0, 1.5 - zmin + 0.002]   # drop torso so feet just touch z=0
     data.qpos[3:6] = 0
     data.qvel[:] = 0

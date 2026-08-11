@@ -2026,6 +2026,39 @@ PRESETS.update({
                                       **_LADDER_RWD),  # + yaw
 })
 
+# ----- THE FOOT-SHAPE ARMS (2026-08-11) ----------------------------------------------------------
+# Every controller this project has produced walks on a 25 mm point toe, which has EXACTLY ZERO
+# centre-of-pressure authority: it can carry no ankle moment about the contact, so the only way to
+# arrest a lean is to move the foot, and moving the foot needs a step the 4-bar cannot deliver in
+# time. That is the measured shape of the m3 wall (feet planted ~8 cm BEHIND the CoM while falling
+# forward, 0.0 N on the swung foot through an entire fall -- [[m3-ankle-stiffness-foot-ahead]],
+# [[scripted-walk-controller]]). A foot with a FOOTPRINT changes that premise.
+#
+#   _blade  25 mm radius cylinder, 100 mm long, axis ACROSS the robot. The sagittal profile is
+#           bit-identical to the shipped ball -- it still rolls fore-aft carrying no pitch moment --
+#           and the point contact becomes a 100 mm line. Buys LATERAL CoP only. Also the running-
+#           blade geometry: curved in the sagittal plane, wide across it.
+#   _flat   30 x 100 x 10 mm plate, levelled at the stance. Lateral CoP +-50 mm as the blade, plus
+#           +-15 mm of SAGITTAL CoP the blade does not have.
+#
+# So the pair is a decomposition, not two goes at the same idea: sphere->blade isolates roll,
+# blade->flat isolates the pitch increment. Everything else -- reward, obs (550), action (26),
+# drive, ankle, curricula -- is the ladder rung it is named after, so ladder3_* IS the control and
+# each rung warm-starts the one below it exactly as before.
+#
+# The ANKLE is what makes the plate mean anything: ankle_mode "rigid" welds it, so a moment about
+# the contact patch is reacted into the shin instead of just folding the foot flat. On the shipped
+# passive spring a plate would be a floppy paddle and the study would measure the spring.
+_FOOT_MODEL = {"flat": "model/dash01_flat.xml", "blade": "model/dash01_blade.xml"}
+
+PRESETS.update({
+    f"walk_fwd_{_m}_{_k}": (
+        lambda _m=_m, _k=_k: _walk_fwd3(base_lock=LOCKS[_m], drive_bandwidth_hz=3.0,
+                                        ankle_mode="rigid", model_path=_FOOT_MODEL[_k],
+                                        **_LADDER_RWD))
+    for _m in ("m2", "m3", "m4", "m5", "m6") for _k in ("flat", "blade")
+})
+
 
 # workspace_kill ON: terminate when a toe leaves the MEASURED reachable box. walk_fwd inherited
 # it OFF from _teleop, so nothing has been enforcing reachability -- the policy was free to use toe
