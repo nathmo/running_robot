@@ -110,7 +110,14 @@ def build(run: Path, preset, checkpoint):
         venv.training = False
         venv.norm_reward = False
         print(f"[eval] using {Path(model_path).name} + {vn.name}")
-    model = PPO.load(model_path)
+    # Cluster checkpoints carry cloudpickled schedule LAMBDAS whose bytecode is the cluster
+    # Python's. Executing foreign bytecode on a version mismatch (3.11 checkpoint, 3.12 here) does
+    # not raise — it aborts the interpreter with a Windows fatal exception and no traceback.
+    # The schedules are training-only state, so replace them at deserialization time; evaluation
+    # never steps the optimizer and any constant is correct.
+    model = PPO.load(model_path, custom_objects={"learning_rate": 0.0,
+                                                 "lr_schedule": lambda _: 0.0,
+                                                 "clip_range": lambda _: 0.2})
     return model, venv, raw
 
 
