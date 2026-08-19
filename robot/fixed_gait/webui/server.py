@@ -253,10 +253,17 @@ def api_telemetry_raw():
             linkage[side] = {"nodes": nodes, "valid": valid, "cam": cam, "thigh": thigh}
         else:
             linkage[side] = None
+    # FLAT, not np.savez. savez builds a ZIP container -- 9 entries, each with its own header, on
+    # both write and read -- and measured at ~30 ms round trip it was a large part of why the proxy
+    # hop cost 300 ms. Two bare np.save calls into one buffer are a header and a memcpy each, and
+    # np.load reads them back sequentially from the same stream. Field order travels in X-Fields so
+    # the two sides cannot silently disagree.
     buf = io.BytesIO()
-    np.savez(buf, t=t, **{f: data[f] for f in d.ring.FIELDS})
+    np.save(buf, t)
+    np.save(buf, np.stack([data[f] for f in d.ring.FIELDS]))
     return Response(buf.getvalue(), mimetype="application/octet-stream",
                     headers={"X-Seq": str(seq), "X-Mode": str(snap.get("mode")),
+                             "X-Fields": json.dumps(list(d.ring.FIELDS)),
                              "X-Linkage": json.dumps(linkage)})
 
 
@@ -272,7 +279,8 @@ def api_sensors_raw():
     since = int(request.args.get("since", 0))
     seq, t, data = sh.ring.read_since(since)
     buf = io.BytesIO()
-    np.savez(buf, t=t, **{f: data[f] for f in sh.ring.fields})
+    np.save(buf, t)
+    np.save(buf, np.stack([data[f] for f in sh.ring.fields]) if sh.ring.fields else np.zeros(0))
     return Response(buf.getvalue(), mimetype="application/octet-stream",
                     headers={"X-Seq": str(seq), "X-Fields": json.dumps(list(sh.ring.fields)),
                              "X-Meta": json.dumps(meta)})

@@ -80,8 +80,18 @@ def _fetch(path, query=b"", method="GET", body=None, headers=None):
 
 
 def _nan_list(a, nd=2):
-    """Identical to server.py's, on purpose: this is the work that moved off the control process."""
-    return [None if not np.isfinite(v) else round(float(v), nd) for v in a]
+    """Same OUTPUT as server.py's version, but vectorised — this is the hot path of this process.
+
+    The original ran one Python iteration per element with np.isfinite() and round() inside, and a
+    telemetry response is 36 of these (6 fields x 6 motors). That per-element loop is what saturated
+    this interpreter's GIL once the work moved here: measured, an upstream call that takes 17 ms
+    from a standalone script took 191 ms from inside a request handler, purely from contention.
+    .tolist() and np.isfinite() are both C level, and the NaN fixups are usually zero elements."""
+    lst = np.round(a, nd).tolist()
+    bad = np.flatnonzero(~np.isfinite(a))
+    for i in bad:
+        lst[int(i)] = None
+    return lst
 
 
 @app.get("/")
@@ -98,11 +108,16 @@ def telemetry():
         return jsonify({"error": f"control process unreachable: {e}"}), 503
     if st != 200:
         return Response(body, status=st, mimetype="application/json")
-    z = np.load(io.BytesIO(body))
-    out = {"seq": int(hdrs.get("X-Seq", 0)), "t": np.round(z["t"], 3).tolist(), "motors": {}}
+    buf = io.BytesIO(body)
+    t = np.load(buf)                       # two flat arrays, read back in the order written
+    arr = np.load(buf)                     # (n_fields, n_samples, N_MOTORS)
+    fields = json.loads(hdrs.get("X-Fields", "[]"))
+    idx = {f: k for k, f in enumerate(fields)}
+    out = {"seq": int(hdrs.get("X-Seq", 0)), "t": np.round(t, 3).tolist(), "motors": {}}
     for i, n in enumerate(paths.MOTOR_NAMES):
-        out["motors"][n] = {f: _nan_list(z[f][:, i])
-                            for f in ("pos_norm", "pos_raw", "cmd_norm", "cur", "temp", "spd")}
+        out["motors"][n] = {f: _nan_list(arr[idx[f]][:, i])
+                            for f in ("pos_norm", "pos_raw", "cmd_norm", "cur", "temp", "spd")
+                            if f in idx}
     out["linkage"] = json.loads(hdrs.get("X-Linkage", "null"))
     out["mode"] = hdrs.get("X-Mode")
     return jsonify(out)
@@ -159,9 +174,12 @@ def sensors():
     if not body:                                  # sensors disabled upstream
         out.setdefault("t", []), out.setdefault("series", {})
         return jsonify(out)
-    z = np.load(io.BytesIO(body))
-    out["t"] = np.round(z["t"], 3).tolist()
-    out["series"] = {f: _nan_list(z[f], 3) for f in json.loads(hdrs.get("X-Fields", "[]"))}
+    buf = io.BytesIO(body)
+    t = np.load(buf)
+    arr = np.load(buf)
+    fields = json.loads(hdrs.get("X-Fields", "[]"))
+    out["t"] = np.round(t, 3).tolist()
+    out["series"] = {f: _nan_list(arr[k], 3) for k, f in enumerate(fields) if k < len(arr)}
     return jsonify(out)
 
 
@@ -173,16 +191,24 @@ def proxy(path):
     nothing, which is exactly why only the polling endpoints above were worth moving."""
     if request.method != "GET":
         _invalidate_cold()               # any write can change the cold half — never serve it stale
+    t_in = time.perf_counter()
+    data = request.get_data() or None
+    t_body = time.perf_counter()
     try:
         st, body, hdrs = _fetch("/" + path, request.query_string, request.method,
-                                request.get_data() or None, dict(request.headers))
+                                data, dict(request.headers))
     except (urllib.error.URLError, OSError) as e:
         return jsonify({"ok": False, "error": f"control process unreachable: {e}"}), 503
+    t_up = time.perf_counter()
     ct = hdrs.get("Content-Type", "application/json")
     resp = Response(body, status=st, mimetype=ct.split(";")[0])
     for k, v in hdrs.items():
         if k.lower() not in _DROP and k.lower() not in ("content-type",):
             resp.headers[k] = v
+    # where the time actually goes, per request — the proxy hop measured 280 ms against a 17 ms
+    # upstream and neither CPU nor nice explained it, so the split has to be visible from outside.
+    resp.headers["X-Proxy-Body-Ms"] = f"{(t_body - t_in) * 1000:.1f}"
+    resp.headers["X-Proxy-Upstream-Ms"] = f"{(t_up - t_body) * 1000:.1f}"
     return resp
 
 
