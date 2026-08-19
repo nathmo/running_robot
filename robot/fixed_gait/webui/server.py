@@ -142,6 +142,45 @@ def api_state():
     return jsonify(snap)
 
 
+@app.get("/api/state_hot")
+def api_state_hot():
+    """The part of /api/state that is FREE: live daemon state, already in memory.
+
+    Split out because /api/state was the last thing stalling the CAN loop after the process split.
+    It is polled ~1/s and every call ran measurestore.list_summaries(), which opens and reads the
+    metadata of EVERY saved run (18 files) off the SD card, plus two more directory listings —
+    disk I/O in the process with the 200 Hz deadline. None of that changes unless a human does
+    something. So: hot here, cold below, and uiproc.py caches the cold half.
+    /api/state is left exactly as it was; running server.py alone is still the rollback."""
+    d = _dm()
+    snap = d.get_snapshot()
+    snap["daemon_thread_alive"] = d.is_alive()
+    return jsonify(snap)
+
+
+@app.get("/api/state_cold")
+def api_state_cold():
+    """The disk-backed half of /api/state. Only changes when a human saves, deletes or calibrates —
+    every one of which is a non-GET request, so uiproc.py can drop its cache on any proxied write
+    and never serve a stale list."""
+    fk = STATE["fk"]
+    if not fk.available:
+        fk.try_reload()                 # hot-load a LUT scp'd in after server start
+    return jsonify({
+        "calibration": STATE["calib"].snapshot(),
+        "workspace": {"legs": sorted(STATE["wstore"].legs.keys()),
+                      "source": STATE["wstore"].source,
+                      "files": STATE["wstore"].list_files()},
+        "trajectories": gaitstore.list_files(),
+        "measurements": measurestore.list_summaries(),
+        "dynamics": STATE["dyn"].snapshot(),
+        "identified": os.path.exists(IDENT_PARAMS_FILE),
+        "fk": {"available": fk.available,
+               "verified": dict(fk.model_map["verified"]) if fk.available else {},
+               "model_map": {s: fk.model_map[s] for s in paths.SIDES} if fk.available else {}},
+    })
+
+
 @app.get("/api/telemetry")
 def api_telemetry():
     d = _dm()

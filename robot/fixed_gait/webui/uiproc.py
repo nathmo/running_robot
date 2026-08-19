@@ -39,6 +39,7 @@ import argparse
 import io
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -100,6 +101,43 @@ def telemetry():
     return jsonify(out)
 
 
+_cold = {"at": 0.0, "body": None}         # cached /api/state_cold
+COLD_TTL_S = 5.0
+
+
+def _invalidate_cold():
+    _cold["body"] = None
+
+
+@app.get("/api/state")
+def state():
+    """/api/state rebuilt from a cheap hot half + a CACHED cold half.
+
+    The cold half costs the control process 18 npz metadata reads off the SD card (every saved run)
+    plus two directory listings, and it was the last thing left stalling the 200 Hz CAN loop after
+    the process split. It only changes when a human saves, deletes or calibrates — all non-GET —
+    so proxy() below drops the cache on any write and the TTL is only a backstop for changes that
+    do not come through HTTP."""
+    try:
+        st, body, _ = _fetch("/api/state_hot")
+    except (urllib.error.URLError, OSError) as e:
+        return jsonify({"ok": False, "error": f"control process unreachable: {e}"}), 503
+    if st != 200:
+        return Response(body, status=st, mimetype="application/json")
+    out = json.loads(body)
+    now = time.monotonic()
+    if _cold["body"] is None or now - _cold["at"] > COLD_TTL_S:
+        try:
+            cst, cbody, _ = _fetch("/api/state_cold")
+            if cst == 200:
+                _cold["body"], _cold["at"] = json.loads(cbody), now
+        except (urllib.error.URLError, OSError):
+            pass                          # keep whatever we had; hot half is still fresh
+    if _cold["body"]:
+        out.update(_cold["body"])
+    return jsonify(out)
+
+
 @app.get("/api/sensors")
 def sensors():
     try:
@@ -126,6 +164,8 @@ def proxy(path):
 
     These are all human-rate (a click, a form) — a 20 ms stall when someone presses a button costs
     nothing, which is exactly why only the polling endpoints above were worth moving."""
+    if request.method != "GET":
+        _invalidate_cold()               # any write can change the cold half — never serve it stale
     try:
         st, body, hdrs = _fetch("/" + path, request.query_string, request.method,
                                 request.get_data() or None, dict(request.headers))
