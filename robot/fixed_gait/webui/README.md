@@ -387,6 +387,18 @@ journalctl -u runningrobot-webui -f         # live logs
 
 ## Architecture (for maintenance)
 
+**Two processes since 2026-08-19.** `server.py` (control, `:8081`) owns the daemon, CAN,
+calibration and the black box. `uiproc.py` (front end, `:8080`) serves the browser and proxies
+everything it does not build itself. They are separate *processes*, not threads, because the
+problem was the GIL: measured with candump, the motors' own status frames arrived at 200.1 Hz with
+0.04 ms jitter while the Pi's own transmit stream managed 156.6 Hz and dropped 21.6% of its slots —
+stalls of >10 ms at 9.16/s against a browser polling at 9.1/s, one per request. `setswitchinterval`
+was already 0.5 ms and `SCHED_FIFO` cannot preempt a thread holding the lock you need, so a second
+interpreter was the only fix. `uiproc.py` carries the full measurement in its docstring.
+
+Operator URL is unchanged (`:8080`). **If the front end dies, the whole UI including E-STOP is
+still on `:8081`.** Running `server.py --port 8080` alone is the rollback and needs no code change.
+
 - `daemon.py` — the only thread touching CAN (200 Hz; mirrors `play_trajectory.py`'s loop).
   Limp/e-stop = **streaming** `SET_CURRENT 0` (never just "stop sending"). All targets are
   workspace-checked as a full pose *before anything is sent*.

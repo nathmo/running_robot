@@ -29,7 +29,11 @@ StartLimitIntervalSec=60
 Type=simple
 User=nemo
 WorkingDirectory=/home/nemo/running_robot
-ExecStart=/home/nemo/running_robot/.venv/bin/python robot/fixed_gait/webui/server.py --port 8080
+# :8081, not :8080 — the operator-facing port now belongs to runningrobot-ui.service, which proxies
+# here. Bound to all interfaces on purpose: if the front end dies, the operator must still be able
+# to reach this process directly (E-STOP included). Running this alone on --port 8080 is the
+# rollback and needs no code change.
+ExecStart=/home/nemo/running_robot/.venv/bin/python robot/fixed_gait/webui/server.py --port 8081
 # unbuffered, or the journal only sees the daemon's prints when the pipe buffer happens to flush —
 # which is exactly the wrong moment for a crash to lose its last lines
 Environment=PYTHONUNBUFFERED=1

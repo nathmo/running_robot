@@ -1,0 +1,50 @@
+# DASH-01 operator web front end, as its own PROCESS (see uiproc.py for the measurement).
+#
+# WHY A SECOND UNIT: the UI used to run in the same interpreter as the 200 Hz CAN thread and was
+# costing it 21.6% of its transmit slots through the GIL — one stall per browser poll, 9.16/s
+# against 9.1 requests/s, 24.3% of wall-clock inside stalls over 10 ms. A second interpreter is the
+# only fix that works; sys.setswitchinterval was already at 0.5 ms and SCHED_FIFO cannot preempt a
+# thread holding the lock you need.
+#
+# Install (on the Pi):
+#     sudo cp robot/fixed_gait/webui/systemd/runningrobot-ui.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now runningrobot-ui
+#
+# ORDERING IS NOT A DEPENDENCY. This unit does not Require= the control unit: the robot must be
+# able to run headless, and the front end must come back on its own when the control process
+# restarts. It answers 503 with a readable reason while the control process is down.
+#
+# THE STOP BUTTON. The control unit binds 0.0.0.0:8081, not localhost, precisely so that if THIS
+# process is dead the operator can still reach the whole UI — E-STOP included — on :8081. Losing
+# the front end must never mean losing the ability to stop the robot.
+
+[Unit]
+Description=DASH-01 operator web UI (front end; control runs separately on :8081)
+Documentation=file:/home/nemo/running_robot/robot/fixed_gait/webui/uiproc.py
+After=network.target runningrobot-webui.service
+Wants=runningrobot-webui.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=nemo
+WorkingDirectory=/home/nemo/running_robot
+ExecStart=/home/nemo/running_robot/.venv/bin/python robot/fixed_gait/webui/uiproc.py \
+          --port 8080 --upstream http://127.0.0.1:8081
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=2
+# This process owns no hardware: nothing to release, so a plain SIGTERM is correct here (unlike the
+# control unit, which needs SIGINT so its atexit can stream 0 A to every motor).
+TimeoutStopSec=10
+# It must never win a scheduling contest against the control process. Positive nice = lower
+# priority; the control loop is what has a deadline.
+Nice=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dash01-ui
+
+[Install]
+WantedBy=multi-user.target

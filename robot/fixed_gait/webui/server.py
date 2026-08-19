@@ -22,7 +22,7 @@ import sys
 import time
 
 import numpy as np
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 import paths
 import blackbox
@@ -178,6 +178,65 @@ def api_telemetry():
 
 def _nan_list(a, nd=2):
     return [None if not np.isfinite(v) else round(float(v), nd) for v in a]
+
+
+@app.get("/api/telemetry_raw")
+def api_telemetry_raw():
+    """The SAME data as /api/telemetry, as an .npz of raw arrays instead of JSON.
+
+    WHY THIS EXISTS. /api/telemetry costs this process 36 per-element Python loops (6 fields x 6
+    motors, via _nan_list) plus jsonify, and it is served from the process that also runs the
+    200 Hz CAN thread. Measured on the robot 2026-08-19 with candump: the motors' own status frames
+    arrive at 200.1 Hz with 0.04 ms of jitter -- the SPI/CAN path is clean -- while the Pi's own
+    SET_CURRENT stream managed only 156.6 Hz, dropping 21.6% of its slots, with 6.4 ms sd and 72 ms
+    worst case. Gaps over 10 ms occurred 9.16 times a second against a browser poll rate of 9.1/s:
+    one stall per HTTP request. The UI was eating a fifth of the control loop through the GIL.
+    Serialising here is what costs; reading the ring does not. So this endpoint does the one thing
+    that must happen in this process (copy the ring under its lock) and hands the bytes to uiproc.py
+    to turn into JSON in a DIFFERENT interpreter, with a different GIL.
+    np.savez writes at C level, so the per-element work leaves this process entirely.
+    /api/telemetry stays exactly as it was: running server.py alone on :8080 still works, which is
+    the rollback."""
+    d = _dm()
+    since = int(request.args.get("since", 0))
+    seq, t, data = d.ring.read_since(since)
+    snap = d.get_snapshot()
+    # linkage stays HERE: it is two LUT interpolations, not a per-element loop, and it needs the
+    # calibration + FK state that only this process owns.
+    fk = STATE["fk"]
+    linkage = {}
+    for side in paths.SIDES:
+        mm = snap.get("motors", {})
+        cam = (mm.get(f"{side}.cam") or {}).get("pos_norm")
+        thigh = (mm.get(f"{side}.thigh") or {}).get("pos_norm")
+        if fk.available and fk.side_verified(side) and cam is not None and thigh is not None:
+            nodes, valid = fk.interp_nodes(side, cam, thigh)
+            linkage[side] = {"nodes": nodes, "valid": valid, "cam": cam, "thigh": thigh}
+        else:
+            linkage[side] = None
+    buf = io.BytesIO()
+    np.savez(buf, t=t, **{f: data[f] for f in d.ring.FIELDS})
+    return Response(buf.getvalue(), mimetype="application/octet-stream",
+                    headers={"X-Seq": str(seq), "X-Mode": str(snap.get("mode")),
+                             "X-Linkage": json.dumps(linkage)})
+
+
+@app.get("/api/sensors_raw")
+def api_sensors_raw():
+    """Sense HAT counterpart of /api/telemetry_raw — same reasoning, same contract."""
+    sh = STATE["sense"]
+    if sh is None:
+        return Response(b"", mimetype="application/octet-stream",
+                        headers={"X-Seq": "0", "X-Meta": json.dumps(
+                            {"available": False, "error": "sensors disabled (--no-sensors)"})})
+    meta = sh.snapshot() or {"available": False, "error": sh.error}
+    since = int(request.args.get("since", 0))
+    seq, t, data = sh.ring.read_since(since)
+    buf = io.BytesIO()
+    np.savez(buf, t=t, **{f: data[f] for f in sh.ring.fields})
+    return Response(buf.getvalue(), mimetype="application/octet-stream",
+                    headers={"X-Seq": str(seq), "X-Fields": json.dumps(list(sh.ring.fields)),
+                             "X-Meta": json.dumps(meta)})
 
 
 # ===================================================================== Sense HAT (B) sensors
