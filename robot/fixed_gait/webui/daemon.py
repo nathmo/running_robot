@@ -161,7 +161,21 @@ NO_LOAD_DPS = {"abd": 590.0, "cam": 1261.0, "thigh": 1261.0}
 # 0.6 Hz / 9 deg put only 0.7-4.8% of the drive current into the qddot column (the rest was Coulomb
 # friction), which is why the identified inertia was garbage: excitation, not estimator.
 MEASURE_FRAC = 0.8
-MEASURE_F_MAX = 3.0                     # ceiling from _merge_measure_spec's clamp
+# Ceiling on chirp frequency, and the SINGLE source of truth: _merge_measure_spec clamps f0/f1 to
+# it. It used to be 3.0 mirrored by a hard-coded 3.0 in that clamp, so a 9 Hz sweep typed into the
+# web UI was silently executed as a 3 Hz one (2026-08-19: two runs saved as *_9hz are bit-for-bit
+# 0.05->3 Hz chirps -- 0.12% of the command energy sat above 3 Hz, i.e. none).
+# 15 Hz because the drive now closes at ~4.7-5.0 Hz on both legs, so the interesting part of the
+# response -- gain crossover and the phase margin that goes with it -- lives at 5-12 Hz and was
+# entirely outside the old window. The measurement CANNOT see a margin it never excites.
+# Not higher than 15: the command stream and the log both run at ~200 Hz, so 15 Hz is already only
+# ~13 samples per cycle and the commanded "sine" degrades into a staircase above that.
+# NOTE this raises what a HAND-TYPED spec may ask for. measure_defaults() still sizes amplitude
+# against no-load speed and predicted tracking error, but a manual spec bypasses that sizing --
+# at 12 Hz, 15 deg peaks at 1131 deg/s, which is 90% of no-load for cam/thigh and ~192% for
+# abduction. Type the amplitude DOWN when you raise the frequency; the max_speed and max_track_err
+# trips are the net, and a latching trip costs the whole run.
+MEASURE_F_MAX = 15.0
 MEASURE_F_STATIC = 0.03                 # quasi-static: velocity ~ 0, every sample is gravity
 
 # Measured closed-loop response of the drive's POSITION loop (swept-sine on all six joints,
@@ -697,8 +711,8 @@ class RobotDaemon(threading.Thread):
         m["override"] = bool(m["override"])
         for r in paths.ROLES:
             m["amp"][r] = float(np.clip(m["amp"][r], 0.0, 60.0))
-            m["f0"][r] = float(np.clip(m["f0"][r], 0.0, 3.0))
-            m["f1"][r] = float(np.clip(m["f1"][r], 0.0, 3.0))
+            m["f0"][r] = float(np.clip(m["f0"][r], 0.0, MEASURE_F_MAX))
+            m["f1"][r] = float(np.clip(m["f1"][r], 0.0, MEASURE_F_MAX))
             m["phase"][r] = float(m["phase"][r])
         return m
 
