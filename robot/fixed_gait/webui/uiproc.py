@@ -59,7 +59,14 @@ _DROP = {"content-length", "connection", "keep-alive", "transfer-encoding", "upg
 
 
 def _fetch(path, query=b"", method="GET", body=None, headers=None):
-    """One upstream call. Returns (status, body_bytes, headers_dict)."""
+    """One upstream call. Returns (status, body_bytes, headers_dict).
+
+    query MUST be decoded: Flask's request.query_string is bytes, and f-string-ing it yields the
+    repr -- the upstream then saw `?b'since=94'`, parsed no `since` at all, and fell back to 0, so
+    every poll re-sent the WHOLE 512-sample ring instead of the handful of new samples. That turned
+    the cheap path into the worst case on every request, which is the opposite of the point."""
+    if isinstance(query, bytes):
+        query = query.decode("utf-8", "replace")
     url = f"{UPSTREAM}{path}" + (f"?{query}" if query else "")
     req = urllib.request.Request(url, data=body, method=method)
     for k, v in (headers or {}).items():
