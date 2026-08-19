@@ -45,9 +45,13 @@ Writes, from model/dash01.xml:
     dash01_blade.xml  dash01_blade_bal.xml
                       dash01_sphere_bal.xml
 The *_bal plants are the ones the classical controller wants: same foot, stance re-solved so the
-FOOTPRINT CENTRE sits under the CoM instead of ~85 mm ahead of it. All three land on the SAME
-absolute ride height, so a foot A/B is not secretly a ride-height A/B. dash01.xml is never touched
--- every existing checkpoint's plant has to stay bit-identical.
+FOOTPRINT CENTRE sits under the CoM instead of ~82 mm ahead of it. dash01.xml is never touched --
+every existing checkpoint's plant has to stay bit-identical.
+
+RIDE HEIGHT IS AN OUTPUT, NOT A TARGET, and that is a finding rather than a shortcut: on this leg
+the balanced footprint and a chosen crouch are not independently achievable (see _newton_stance).
+The heights the three balanced arms land on are printed at the end so the residual spread stays
+visible as a confound.
 """
 import argparse
 import os
@@ -81,17 +85,26 @@ ORACLE_PRESET = "walk_fwd_m3"
 #   flat:  the centre must sit half a plate thickness above the floor -> -25 + 5 = -20 mm
 #   blade: a 25 mm cylinder's bottom is 25 mm below its axis, same as the ball -> 0
 FEET = {
-    "sphere": dict(type="sphere", half=(SPHERE_R,), drop=0.0, level=False,
+# `tilt` names WHICH misorientations actually matter, and it is not cosmetic -- it is the fixed
+# point's error signal, so a metric that measures something physically irrelevant makes the loop
+# chase a phantom. Measured: scoring the blade on its FULL rotation reported 7.6 / 4.3 / 8.2 deg
+# across three passes and never converged, while both blades sat flat on the floor the whole time
+# -- all of it was SPIN ABOUT THE CYLINDER'S OWN AXIS, which changes nothing.
+#   "none" sphere: no orientation to get wrong.
+#   "axis" cylinder: only the direction of the axis (local z) counts; spin about it is free.
+#   "full" box:     every axis counts -- roll and pitch set whether the sole is flat, yaw sets
+#                   which way the 100 mm points.
+    "sphere": dict(type="sphere", half=(SPHERE_R,), drop=0.0, tilt="none",
                    world_rot=np.eye(3)),
     "flat": dict(type="box",
                  half=(0.015, 0.050, 0.005),      # 30 mm fore-aft, 100 mm lateral, 10 mm thick
-                 drop=-(SPHERE_R - 0.005), level=True,
+                 drop=-(SPHERE_R - 0.005), tilt="full",
                  # contact face level: the geom's axes ARE the world axes, so the 100 mm runs
                  # across the robot and the 30 mm fore-aft.
                  world_rot=np.eye(3)),
     "blade": dict(type="cylinder",
                   half=(0.025, 0.050),            # radius 25 mm, half-length 50 mm => 100 mm long
-                  drop=0.0, level=True,
+                  drop=0.0, tilt="axis",
                   # MuJoCo's cylinder axis is its LOCAL z; rotate -90 deg about world x so the axis
                   # lies along world y (across the robot) and the round profile faces fore-aft.
                   world_rot=np.array([[1.0, 0.0, 0.0],
@@ -171,9 +184,20 @@ def env_settle(plant):
     return out
 
 
-def _tilt_deg(R_actual, R_target):
-    c = (np.trace(R_actual @ R_target.T) - 1.0) / 2.0
-    return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+def tilt_deg(spec, st):
+    """How far the contact geometry is from where it was aimed, in degrees — see FEET["tilt"]."""
+    mode = spec["tilt"]
+    if mode == "none":
+        return 0.0
+    out = 0.0
+    for s in "LR":
+        R, T = st[s]["geom_R"], spec["world_rot"]
+        if mode == "axis":                       # cylinder: only the axis direction counts
+            c = float(np.dot(R[:, 2], T[:, 2]))
+        else:                                    # box: the whole frame counts
+            c = (np.trace(R @ T.T) - 1.0) / 2.0
+        out = max(out, float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))))
+    return out
 
 
 def _level(spec, base_geom_pos, st):
@@ -182,17 +206,31 @@ def _level(spec, base_geom_pos, st):
     pose = {}
     for s in "LR":
         Rb = st[s]["body_R"]
-        R_local = Rb.T @ spec["world_rot"] if spec["level"] else np.eye(3)
+        R_local = np.eye(3) if spec["tilt"] == "none" else Rb.T @ spec["world_rot"]
         pos = base_geom_pos[s] + Rb.T @ np.array([0.0, 0.0, spec["drop"]])
         pose[s] = dict(pos=pos, quat=_quat(R_local))
     return pose
 
 
-def _newton_stance(write_and_settle, x0, qpos0, z_target, iters=8, tol=2e-3, verbose=True):
-    """Newton on (cam, thigh) -> (footprint_x - com_x, base_z - z_target), with the ENV as f.
+def _newton_stance(write_and_settle, x0, qpos0, iters=16, tol=2e-3, verbose=True):
+    """Gauss-Newton on (cam, thigh) -> footprint_x - com_x, with the ENV as f.
 
-    `write_and_settle(x, qpos) -> (st, qpos)`. The step is clipped: the settle is only locally
-    smooth (the 4-bar has a fold branch), and an unclipped Newton walks straight into it.
+    ONE objective, deliberately. The obvious formulation also pins base_z, and adding it made this
+    solve strictly worse: LOCALLY the two are near-conflicting (every Jacobian taken near the
+    shipped stance pointed along (cam, thigh) ~ (-1,+1) with d(footprint)/d(height) ~ -2.9 m/m, so
+    14 mm of extra crouch cost 29 mm of balance and the line search correctly refused every such
+    step), and the residual then plateaued with the height term dominating -- which let it trade
+    away the fore-aft balance, the one thing that actually matters, to chase millimetres of height
+    it was never going to get.
+
+    Do NOT read that as "this leg cannot crouch": that was measured only near one stance, and the
+    stronger claim ("no down-reach at 96% of extension") turned out to be an artifact of a sweep the
+    floor was blocking -- the leg really has ~10 cm ([[scripted-walk-controller]]). The balanced
+    stances this tool now produces sit at essentially the shipped ride height anyway. Height is an
+    OUTPUT, reported with its across-feet spread so it stays visible as a confound.
+
+    `write_and_settle(x, qpos) -> (st, qpos)`. Steps are clipped and line-searched: the settle is
+    only locally smooth (the 4-bar has a fold branch), and an unclipped step walks straight in.
     """
     def probe(xx, q):
         """A candidate stance can simply not stand -- DashEnv raises when its own stance search
@@ -200,54 +238,86 @@ def _newton_stance(write_and_settle, x0, qpos0, z_target, iters=8, tol=2e-3, ver
         legitimate answer from f(), not a crash, so a probe that hits it returns None and the
         caller backs off instead of taking the whole build down."""
         try:
-            return write_and_settle(xx, q)
-        except RuntimeError as exc:
+            return write_and_settle(xx, np.asarray(q, float).copy())
+        except RuntimeError:
             if verbose:
-                print(f"      probe cam {xx[0]:+.4f} thigh {xx[1]:+.4f} does not stand ({exc})")
+                print(f"      probe cam {xx[0]:+.4f} thigh {xx[1]:+.4f} does not stand")
             return None
 
-    x, qpos = np.asarray(x0, float).copy(), qpos0.copy()
-    st = None
-    for it in range(iters):
-        got = probe(x, qpos)
-        if got is None:
-            break                       # keep the last posture that did stand
-        st, qpos = got
-        r = np.array([st["off"], st["base_z"] - z_target])
-        if verbose:
-            print(f"      it{it}: cam {x[0]:+.4f} thigh {x[1]:+.4f} -> "
-                  f"footprint-CoM {r[0]:+.4f}  z {st['base_z']:.4f}  |r| {np.linalg.norm(r):.4f}")
-        if np.linalg.norm(r) < tol:
+    def resid(s):
+        return abs(float(s["off"]))
+
+    # SAFEGUARDED, and it has to be. Two things bite here and both were measured:
+    #   * the settle is PATH DEPENDENT -- DashEnv re-settles from the keyframe qpos it is handed,
+    #     and handed a collapsed one it happily lands in the 4-bar's fold branch (base_z -0.048,
+    #     feet 217 mm in the air). So every probe warm-starts from the BEST pose found so far,
+    #     never from whatever the previous probe produced.
+    #   * an undamped step overshoots into that same branch. So a step is only accepted if it
+    #     actually reduces the residual, and is halved up to 4 times before being given up on.
+    # Returning the best EVALUATED iterate matters just as much: returning the post-step x (which
+    # was never evaluated) alongside the pre-step measurements is what silently mismatched the
+    # written keyframe from its own settle.
+    best_x = np.asarray(x0, float).copy()
+    got = probe(best_x, qpos0)
+    if got is None:
+        return best_x, None, qpos0.copy()
+    best_st, best_q = got
+    best_r = resid(best_st)
+    if verbose:
+        print(f"      it0: cam {best_x[0]:+.4f} thigh {best_x[1]:+.4f} -> "
+              f"footprint-CoM {best_st['off']:+.4f}  z {best_st['base_z']:.4f}")
+
+    for it in range(1, iters + 1):
+        if best_r < tol:
             break
-        J = np.zeros((2, 2))
+        r = float(best_st["off"])
+        g = np.zeros(2)
         ok = True
         for i in range(2):
             col = None
-            for h in (0.02, -0.02, 0.01, -0.01):     # try the other side / a shorter step
-                xp = x.copy()
+            # h=0.03, not 0.02: the settle is only good to ~1 mm, so a shorter step buries the
+            # gradient in settle noise.
+            for h in (0.03, -0.03, 0.015, -0.015):   # try the other side / a shorter step
+                xp = best_x.copy()
                 xp[i] += h
-                s2 = probe(xp, qpos)
+                s2 = probe(xp, best_q)
                 if s2 is not None:
-                    col = [(s2[0]["off"] - r[0]) / h, (s2[0]["base_z"] - st["base_z"]) / h]
+                    col = (s2[0]["off"] - r) / h
                     break
             if col is None:
                 ok = False
                 break
-            J[:, i] = col
-        if not ok:
+            g[i] = col
+        if not ok or float(g @ g) < 1e-9:
             break
-        try:
-            step = np.clip(np.linalg.solve(J, -r), -0.08, 0.08)
-        except np.linalg.LinAlgError:
-            break
-        x = x + step
-        x[0] = float(np.clip(x[0], -CAM_LIM, CAM_LIM))
-        x[1] = float(np.clip(x[1], -THIGH_LIM, THIGH_LIM))
-    return x, st, qpos
+        # MINIMUM-NORM Gauss-Newton: one residual, two knobs, so the step is the shortest one that
+        # zeroes the linearised residual. Moving both joints as little as possible is also what
+        # keeps the stance close to the shipped posture, which is the point -- this is meant to be
+        # the same robot standing differently, not a different crouch.
+        full = np.clip(-r * g / float(g @ g), -0.12, 0.12)
+        improved = False
+        for shrink in (1.0, 0.5, 0.25, 0.125):
+            xt = best_x + shrink * full
+            xt[0] = float(np.clip(xt[0], -CAM_LIM, CAM_LIM))
+            xt[1] = float(np.clip(xt[1], -THIGH_LIM, THIGH_LIM))
+            cand = probe(xt, best_q)
+            if cand is None:
+                continue
+            rn = resid(cand[0])
+            if verbose:
+                print(f"      it{it}: cam {xt[0]:+.4f} thigh {xt[1]:+.4f} (x{shrink:g}) -> "
+                      f"footprint-CoM {cand[0]['off']:+.4f}  z {cand[0]['base_z']:.4f}"
+                      f"{'' if rn < best_r else '  rejected'}")
+            if rn < best_r:
+                best_x, (best_st, best_q), best_r, improved = xt, cand, rn, True
+                break
+        if not improved:
+            break                        # no step of any length helps: this is the fixed point
+    return best_x, best_st, best_q
 
 
-def build(kind, out, balance=False, z_target=None, passes=4, tol_deg=0.25, tol_m=3e-3,
-          verbose=True):
+def build(kind, out, balance=False, passes=4, tol_deg=0.25, tol_m=3e-3,
+          verbose=True, ref=None):
     """Fixed point over (contact-face orientation, stance). Each pass writes a complete, compilable
     plant, so an aborted run still leaves a valid file."""
     spec = FEET[kind]
@@ -256,45 +326,131 @@ def build(kind, out, balance=False, z_target=None, passes=4, tol_deg=0.25, tol_m
     base_geom_pos = {s: base_m.geom_pos[
         mujoco.mj_name2id(base_m, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col")].copy() for s in "LR"}
 
-    qpos = base_m.key_qpos[0].copy()
     ctrl = base_m.key_ctrl[0].copy()
     x = np.array([float(ctrl[1]), float(ctrl[2])])
-    # pass 0 needs SOME plant to settle: the un-levelled foot on the shipped stance.
-    pose = {s: dict(pos=base_geom_pos[s], quat=np.array([1.0, 0, 0, 0])) for s in "LR"}
-    write_plant(src_txt, out, spec, pose, qpos, ctrl)
-    st = env_settle(out)
+    if balance:
+        # SEED THE BALANCED SOLVE FROM dash01_bal.xml's STANCE, not from the shipped one.
+        #
+        # "footprint centre under the CoM" is ONE equation in TWO unknowns, so its solutions form a
+        # curve, and WHICH point on that curve you land on matters far more than the residual does.
+        # Both of these balance the footprint:
+        #     cam -0.037 thigh +0.084   (thigh DOWN from the shipped +0.12, base_z 0.997)
+        #     cam -0.089 thigh +0.188   (thigh UP,                          base_z 1.012)
+        # and only the second is worth anything: it is the keyframe measured to take m3 from 0.91 s
+        # 0/6 to 24.7 s with 3/5 surviving the full 60 s ([[scripted-walk-controller]]). A
+        # minimum-norm step finds the nearest solution to wherever it starts, which is a property
+        # of the seed and not of the robot -- started at the shipped stance it walks down the wrong
+        # branch. So start on the branch that is known to work and let each foot re-converge near
+        # it; the feet perturb the settle by millimetres, not by a branch.
+        bal = os.path.join(HERE, "dash01_bal.xml")
+        if os.path.exists(bal):
+            k = mujoco.MjModel.from_xml_path(bal).key_ctrl[0]
+            x = np.array([float(k[1]), float(k[2])])
+            if verbose:
+                print(f"  seeding the stance solve from dash01_bal.xml: "
+                      f"cam {x[0]:+.4f} thigh {x[1]:+.4f}")
+    # SEED FROM THE SHIPPED ROBOT'S OWN SETTLED STANCE, and level pass 1 against it. Seeding from a
+    # settle of the un-levelled variant instead (a cylinder with its axis pointing 51 deg up out of
+    # the foot, which is not a foot anyone is proposing) is path-dependent enough to matter: it put
+    # the blade's footprint 114 mm ahead of the CoM against the sphere's 82 mm, i.e. a 3 cm stance
+    # difference that has nothing to do with the foot. Same robot, same pose, different foot.
+    ref = ref if ref is not None else env_settle(BASE)
+    st = ref
+    qpos = ref["qpos"].copy()
 
+    def score(tilt, s):
+        """One number to rank passes by, in units of "how many tolerances out". Ranking matters:
+        a later pass is not automatically a better one -- re-levelling perturbs the contact and a
+        pass can land the robot on its side (measured: tilt 112 deg, one blade 802 mm in the air).
+        Whatever pass was best is what gets written."""
+        return tilt / tol_deg + (abs(s["off"]) / tol_m if balance else 0.0)
+
+    def settle_at(_pose, xx, q):
+        """Settle twice and return (the measurement OF THE FILE AS WRITTEN, the qpos IN it).
+
+        Two separate things go wrong here and only doing both fixes it.
+
+        First, DashEnv's `_resettle_keyframe` runs a 2 s settle from whatever `key_qpos` it is
+        handed, and 2 s is not always enough: measured on the balanced sphere, one settle from the
+        solved pose reported base_z 0.9865, and settling again from THAT reported 0.9972 and then
+        stayed there to 1e-5. So a single settle can be a transient. Hence settle 1.
+
+        Second — and this is the one that actually cost the plants — the returned qpos has to be
+        the one LEFT IN THE FILE, not the one the last settle produced. Returning `s.qpos` while
+        the file still held the previous qpos meant every reported number described a plant that
+        was never written: the build claimed the plate was 0.80 deg off level and reloading it read
+        6.58 deg, with one foot 3.8 mm off the floor. So settle 2 measures the file exactly as it
+        now stands, and that measurement is what is reported and searched on."""
+        c = stance_ctrl(*xx)
+        write_plant(src_txt, out, spec, _pose, q, c)
+        s = env_settle(out)                       # absorb the transient
+        q = s["qpos"]
+        write_plant(src_txt, out, spec, _pose, q, c)
+        return env_settle(out), q                 # measure THIS file; q is what is in it
+
+    def relevel(_pose, xx, q, _st, n=5):
+        """Level the contact face at a FROZEN stance, repeatedly, until it stops moving.
+
+        Levelling on its own is a contraction: the shipped-stance builds run 4.7 -> 0.63 -> 0.16
+        deg without help. Interleaving it one-for-one with the stance solve is what broke it -- the
+        Newton moves the posture, the posture rotates the foot, and the plate ends up 6.6 deg off
+        level, i.e. standing on an edge, which is not a flat foot at all. So the two loops are
+        separated: solve the stance, then hold it and let the levelling converge on its own."""
+        best_local = (tilt_deg(spec, _st), _pose, _st, q)
+        for _ in range(n):
+            _pose = _level(spec, base_geom_pos, _st)
+            _st, q = settle_at(_pose, xx, q)
+            t = tilt_deg(spec, _st)
+            if t < best_local[0]:
+                best_local = (t, _pose, _st, q)
+            if t < 0.5 * tol_deg:
+                break
+        return best_local[1], best_local[2], best_local[3]
+
+    best = None
     for p in range(1, passes + 1):
+        # ORDER MATTERS: level the foot FIRST, then correct the stance. Levelling is not neutral
+        # for the footprint -- re-hanging the geom off the toe tip at a new orientation moved the
+        # plate's contact patch 28 mm forward, so running it AFTER the stance solve simply undid
+        # the solve (tilt converged to 0.017 deg with the footprint stuck at +28 mm for three
+        # passes). The Newton's own stance change is small once seeded on the right branch, so it
+        # barely disturbs the levelling, and the two converge together.
         pose = _level(spec, base_geom_pos, st)
-
-        def write_and_settle(xx, q, _pose=pose):
-            write_plant(src_txt, out, spec, _pose, q, stance_ctrl(*xx))
-            s = env_settle(out)
-            return s, s["qpos"]
-
+        st, qpos = settle_at(pose, x, qpos)
+        pose, st, qpos = relevel(pose, x, qpos, st)
         if balance:
-            x, st, qpos = _newton_stance(write_and_settle, x, qpos, z_target, verbose=verbose)
-        else:
-            st, qpos = write_and_settle(x, qpos)
+            x, st, qpos = _newton_stance(lambda xx, q: settle_at(pose, xx, q), x, qpos,
+                                         verbose=verbose)
+            if st is None:
+                raise SystemExit(f"{kind}: the stance solve has no standing posture to start from "
+                                 f"(cam {x[0]:+.4f} thigh {x[1]:+.4f}) — nothing was written")
         ctrl = stance_ctrl(*x)
-        write_plant(src_txt, out, spec, pose, qpos, ctrl)
 
-        # a sphere has no contact-face orientation to get wrong; comparing its geom frame (which
-        # just rides the foot body's 51 deg pitch) against the world would report ~57 deg forever
-        # and the fixed point would never terminate.
-        tilt = (max(_tilt_deg(st[s]["geom_R"], spec["world_rot"]) for s in "LR")
-                if spec["level"] else 0.0)
+        tilt = tilt_deg(spec, st)
+        sc = score(tilt, st)
         if verbose:
             soles = " ".join("%+.4f" % st[s]["bottom"] for s in "LR")
             print(f"  pass {p}: tilt {tilt:.3f} deg   footprint-CoM {st['off']:+.4f} m   "
                   f"base_z {st['base_z']:.4f} m   sole z {soles} m   "
-                  f"toe air {np.round(st['toe_h'] * 1000, 1)} mm")
+                  f"toe air {np.round(st['toe_h'] * 1000, 1)} mm   score {sc:.2f}")
         if st["stance_delta"] != (0.0, 0.0):
             print(f"  WARNING: the env's stance search moved off the solved posture by "
                   f"{st['stance_delta']} — the plant does not stand where this tool put it")
+        if best is None or sc < best[0]:
+            best = (sc, {s: dict(pose[s]) for s in "LR"}, qpos.copy(), ctrl.copy(), st, tilt,
+                    x.copy())
         if tilt < tol_deg and (not balance or abs(st["off"]) < tol_m):
             break
+        if sc > 3.0 * best[0] + 5.0:
+            # running away, not converging (the blade did exactly this: a good pass 2, then
+            # 12 -> 53 -> 191 as re-levelling walked the settle into the 4-bar's fold branch).
+            # The best pass is already banked; grinding out the rest just burns minutes.
+            print(f"  pass {p} is {sc / best[0]:.0f}x worse than the best — stopping, "
+                  f"keeping pass with score {best[0]:.2f}")
+            break
 
+    _, pose, qpos, ctrl, st, tilt, x = best
+    write_plant(src_txt, out, spec, pose, qpos, ctrl)
     dims = " x ".join(f"{2000 * v:g}" for v in spec["half"])
     print(f"  wrote {os.path.basename(out)}: {spec['type']} {dims} mm | tilt {tilt:.2f} deg | "
           f"footprint-CoM {st['off']:+.4f} m | base_z {st['base_z']:.4f} m | "
@@ -302,35 +458,75 @@ def build(kind, out, balance=False, z_target=None, passes=4, tol_deg=0.25, tol_m
     return st
 
 
+PLANTS = ["dash01.xml", "dash01_blade.xml", "dash01_flat.xml",
+          "dash01_sphere_bal.xml", "dash01_blade_bal.xml", "dash01_flat_bal.xml"]
+
+
+def verify():
+    """Report every foot plant side by side, as the env sees it. This IS the plant record for the
+    study: contact tilt, where the footprint sits relative to the CoM, ride height, and whether
+    both feet are actually on the floor at t=0."""
+    kind_of = {"dash01.xml": "sphere", "dash01_blade.xml": "blade", "dash01_flat.xml": "flat",
+               "dash01_sphere_bal.xml": "sphere", "dash01_blade_bal.xml": "blade",
+               "dash01_flat_bal.xml": "flat"}
+    print(f"{'plant':26s} {'foot':7s} {'tilt':>6s} {'foot-CoM':>10s} {'base_z':>8s} "
+          f"{'sole L/R (mm)':>16s} {'cam':>8s} {'thigh':>8s}")
+    for name in PLANTS:
+        path = os.path.join(HERE, name)
+        if not os.path.exists(path):
+            print(f"{name:26s} MISSING")
+            continue
+        st = env_settle(path)
+        spec = FEET[kind_of[name]]
+        print(f"{name:26s} {kind_of[name]:7s} {tilt_deg(spec, st):5.2f}d {st['off']:+10.4f} "
+              f"{st['base_z']:8.4f} {st['toe_h'][0] * 1000:7.2f}/{st['toe_h'][1] * 1000:-6.2f} "
+              f"{st['ctrl'][1]:+8.4f} {st['ctrl'][2]:+8.4f}"
+              + ("   STANCE SEARCH MOVED" if st["stance_delta"] != (0.0, 0.0) else ""))
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--verify", action="store_true",
+                    help="report every existing foot plant as the env sees it; build nothing")
     ap.add_argument("--kinds", nargs="*", default=["sphere", "blade", "flat"], choices=list(FEET))
-    ap.add_argument("--crouch", type=float, default=0.05,
-                    help="ride height given up by the *_bal stance solve (matches dash01_bal.xml)")
     ap.add_argument("--no-balance", action="store_true", help="skip the *_bal plants")
-    ap.add_argument("--passes", type=int, default=4)
+    ap.add_argument("--only-balance", action="store_true", help="skip the shipped-stance plants")
+    ap.add_argument("--passes", type=int, default=6)
     args = ap.parse_args()
 
-    # ONE absolute ride-height target for every foot, taken from the shipped plant's own settled
-    # stance. Solving each foot to "its own z0 minus 5 cm" instead would hand the flat plate a
-    # 13 mm taller stance than the sphere and quietly turn the foot A/B into a ride-height A/B.
-    z0 = env_settle(BASE)["base_z"]
-    z_target = z0 - args.crouch
-    print(f"shipped plant settles at base_z {z0:.4f} m in the env "
-          f"({ORACLE_PRESET}, rigid ankle, resettled)")
-    print(f"balanced-stance target: footprint-CoM = 0, base_z = {z_target:.4f} m "
-          f"(crouch {args.crouch:.3f} m)\n")
+    if args.verify:
+        verify()
+        return
 
+    # The shipped robot's own settled stance is the common reference every foot is built against:
+    # same pose, same leg configuration, only the contact swapped.
+    ref = env_settle(BASE)
+    print(f"reference: the shipped plant settles at base_z {ref['base_z']:.4f} m with its footprint "
+          f"{ref['off'] * 1000:+.0f} mm ahead of the CoM\n"
+          f"({ORACLE_PRESET}, rigid ankle, resettled — the stance every episode actually starts "
+          f"from)\n")
+
+    zs = {}
     for kind in args.kinds:
-        if kind != "sphere":            # the sphere control only exists in its balanced form
+        if kind != "sphere" and not args.only_balance:   # sphere exists only in its balanced form
             print(f"=== {kind}: shipped stance ===")
             build(kind, os.path.join(HERE, f"dash01_{kind}.xml"), balance=False,
-                  passes=args.passes)
+                  passes=args.passes, ref=ref)
         if not args.no_balance:
             print(f"=== {kind}: balanced stance (footprint centre under the CoM) ===")
-            build(kind, os.path.join(HERE, f"dash01_{kind}_bal.xml"), balance=True,
-                  z_target=z_target, passes=args.passes)
+            zs[kind] = build(kind, os.path.join(HERE, f"dash01_{kind}_bal.xml"), balance=True,
+                             passes=args.passes, ref=ref)["base_z"]
         print()
+
+    if len(zs) > 1:
+        # Ride height is an OUTPUT of the balanced solve, not a target (see _newton_stance). Say
+        # out loud how far apart the arms landed, because that spread is the one confound left in
+        # the classical-controller A/B and nobody should have to rediscover it from the XML.
+        lo, hi = min(zs.values()), max(zs.values())
+        print("balanced-stance ride heights: "
+              + "  ".join(f"{k} {v:.4f}" for k, v in zs.items())
+              + f"   (spread {1000 * (hi - lo):.0f} mm — a residual confound in any foot A/B "
+                f"run on the *_bal plants)")
 
 
 if __name__ == "__main__":

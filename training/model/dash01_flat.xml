@@ -67,7 +67,7 @@
               <joint name="LegLeftNCS-v1_RÃ©volution-9" type="hinge" axis="1.4729443511407235e-15 -1.0 -6.650599895248049e-16" pos="-8.679350578343133e-08 -0.004700000008616256 -2.293391507246932e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="-0.7" />
               <geom name="FootLeftNCS-v1_geom" type="mesh" mesh="FootLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
               <inertial mass="0.222" pos="-0.004826310056437695 0.000377045846251916 -0.10466467671885393" fullinertia="0.00254888344 0.00254345046 5.54919617e-05 1.54171857e-06 0.00014412983 -1.30987407e-05" />
-              <geom name="foot_L_col" class="collision" type="box" size="0.015 0.05 0.005" pos="-0.0148853 -1.85016e-05 -0.324858" quat="0.913205 -0.000422395 0.407501 0.000188486" />
+              <geom name="foot_L_col" class="collision" type="box" size="0.015 0.05 0.005" pos="-0.0142965 0.00143974 -0.325412" quat="0.92065 0.0331805 0.388723 -0.0140097" />
               <geom name="heel_L_col" class="collision" type="sphere" size="0.03" pos="-0.0256445 0 0.0749563" />
             </body>
             <site name="leg_anchor_L" pos="-0.0660502 -0.0002 0.026337" />
@@ -107,7 +107,7 @@
               <joint name="LegRightNCS-v1_RÃ©volution-10" type="hinge" axis="2.2644132062488165e-07 1.0000002844449258 1.4601449516496445e-07" pos="3.4514539044840315e-07 0.004700248978108805 -2.0422932496191323e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="0.7" />
               <geom name="FootRightNCS-v1_geom" type="mesh" mesh="FootRightNCS-v1" pos="0 0 0" euler="0 0 0" />
               <inertial mass="0.222" pos="-0.00495501786349592 -0.0002889852253573598 -0.10446233298751854" fullinertia="0.0025505821 0.00254513751 5.55102195e-05 -1.52328442e-06 0.000145179859 1.23587927e-05" />
-              <geom name="foot_R_col" class="collision" type="box" size="0.015 0.05 0.005" pos="-0.0147382 0.000442618 -0.325013" quat="0.915312 0.0101296 0.402594 -0.00445546" />
+              <geom name="foot_R_col" class="collision" type="box" size="0.015 0.05 0.005" pos="-0.0160258 -0.000426445 -0.323458" quat="0.893825 -0.00953027 0.448289 0.0047798" />
               <geom name="heel_R_col" class="collision" type="sphere" size="0.03" pos="-0.0262104 0 0.0749022" />
             </body>
             <site name="leg_anchor_R" pos="-0.0670644 0.0002 0.0274238" />
@@ -172,6 +172,6 @@
     <actuatorfrc name="thigh_R_frc" actuator="thigh_R" />
   </sensor>
   <keyframe>
-    <key name="stand" qpos="0 0 1.02487 0 0 0 0.000923688 -0.0214449 -0.122493 0.126361 0.222098 -0.257293 -0.000999149 0.0210028 -0.122371 -0.126323 -0.218015 0.261606" ctrl="0 0 0.12 0 0 -0.12" />
+    <key name="stand" qpos="0 0 1.01274 0 0 0 -0.0695793 -0.0563241 -0.15219 0.109006 0.110538 -0.201837 0.0449302 0.00649124 -0.112316 -0.137751 -0.275736 0.205406" ctrl="0 0 0.12 0 -0 -0.12" />
   </keyframe>
 </mujoco>

@@ -20,6 +20,7 @@ if str(PKG_DIR) not in sys.path:
     sys.path.insert(0, str(PKG_DIR))
 
 import numpy as np
+import mujoco
 
 import fourier_gait
 from config import Config, PRESETS, get_config, config_from_dict, config_to_dict
@@ -506,6 +507,54 @@ def test_workspace_kill():
     env2 = DashEnv(get_config("m3_sym_gait"))               # kill off
     env2.reset(seed=0)
     check("kill off -> ref None + no fire", env2._ws_ref is None and not env2._workspace_violation())
+
+
+def test_foot_variants():
+    """The foot-shape arms: the plate and blade plants exist, are wired to the right presets, and
+    stand the way model/make_foot_variants.py built them.
+
+    This is a CHEAP GATE ON AN EXPENSIVE MISTAKE. The plants are generated files; if one is stale
+    or was never rsynced, every symptom is silent — the run trains happily on whatever geometry is
+    there, and the A/B against ladder3 is quietly worthless. The sole-height check is the one that
+    matters: a foot whose contact face is not level is a point contact wearing a plate's name, and
+    that is exactly the failure mode (the blade sat 8 deg rolled with one foot 4.8 mm off the floor
+    until the levelling was referenced to the env's own re-settled stance)."""
+    print("foot-shape plants (flat plate / blade):")
+    base = DashEnv(get_config("walk_fwd_m3"))
+    base.reset(seed=0)
+    check("control plant is still the point toe",
+          int(base.model.geom_type[base.foot_gids[0]]) == int(mujoco.mjtGeom.mjGEOM_SPHERE)
+          and base.cfg.model_path == "model/dash01.xml")
+    want = {"flat": (mujoco.mjtGeom.mjGEOM_BOX, (0.015, 0.050, 0.005)),
+            "blade": (mujoco.mjtGeom.mjGEOM_CYLINDER, (0.025, 0.050))}
+    for kind, (gtype, size) in want.items():
+        env = DashEnv(get_config(f"walk_fwd_m3_{kind}"))
+        env.reset(seed=0)
+        g = env.foot_gids[0]
+        n = len(size)
+        check(f"{kind}: geom is a {gtype.name.split('_')[-1].lower()} of the right size",
+              int(env.model.geom_type[g]) == int(gtype)
+              and np.allclose(env.model.geom_size[g][:n], size),
+              f"{env.model.geom_size[g][:n]}")
+        # the sole offset must be the THIN direction (plate 5 mm, blade 25 mm radius), not
+        # geom_size[0] -- reading size[0] as a radius would put the plate's sole 15 mm low
+        env.data.qpos[:] = env.default_qpos
+        env.data.qvel[:] = 0
+        mujoco.mj_forward(env.model, env.data)
+        soles = env._sole_offsets()
+        expect = 0.005 if kind == "flat" else 0.025
+        check(f"{kind}: sole offset is the contact face ({expect * 1000:.0f} mm), not size[0]",
+              np.allclose(soles, expect, atol=1.5e-3), f"{np.round(soles, 4)}")
+        check(f"{kind}: both feet on the floor at the stand keyframe",
+              np.all(np.abs(env._toe_heights()) < 2e-3), f"{np.round(env._toe_heights() * 1000, 2)} mm")
+        # everything except the plant must be the ladder rung it is named after
+        c, c0 = env.cfg, base.cfg
+        differs = [k for k in vars(c0) if getattr(c, k, None) != getattr(c0, k)]
+        check(f"{kind}: model_path is the ONLY difference from walk_fwd_m3",
+              differs == ["model_path"], f"{differs}")
+        check(f"{kind}: obs/action shapes match the control (warm starts stay loadable)",
+              env.observation_space.shape == base.observation_space.shape
+              and env.action_space.shape == base.action_space.shape)
 
 
 def test_torque_curriculum():
@@ -1253,6 +1302,7 @@ if __name__ == "__main__":
     test_contact_switch()
     test_duty_sym()
     test_workspace_kill()
+    test_foot_variants()
     test_torque_curriculum()
     test_hz200_timing()
     test_angmom_term()

@@ -2028,11 +2028,14 @@ PRESETS.update({
 
 # ----- THE FOOT-SHAPE ARMS (2026-08-11) ----------------------------------------------------------
 # Every controller this project has produced walks on a 25 mm point toe, which has EXACTLY ZERO
-# centre-of-pressure authority: it can carry no ankle moment about the contact, so the only way to
-# arrest a lean is to move the foot, and moving the foot needs a step the 4-bar cannot deliver in
-# time. That is the measured shape of the m3 wall (feet planted ~8 cm BEHIND the CoM while falling
-# forward, 0.0 N on the swung foot through an entire fall -- [[m3-ankle-stiffness-foot-ahead]],
-# [[scripted-walk-controller]]). A foot with a FOOTPRINT changes that premise.
+# centre-of-pressure authority IN ANY DIRECTION: it can carry no moment about the contact, so the
+# only way to arrest a lean is to move the foot, and moving the foot needs a step the 4-bar cannot
+# deliver in time (feet planted ~8 cm BEHIND the CoM while falling forward, 0.0 N on the swung foot
+# through an entire fall -- [[m3-ankle-stiffness-foot-ahead]], [[scripted-walk-controller]]).
+# The finished ladder3 chain says where that costs the most: m2 clears (one seed WALKS), m3 drops
+# to ~2 s, and m5 -- the rung that unlocks ROLL -- is a flat wall, both seeds at ~400 ep_len for
+# 80 M with no slope while the retreating curriculum backed off and bought them nothing.
+# A foot with a FOOTPRINT changes that premise, and the two arms below split it by axis.
 #
 #   _blade  25 mm radius cylinder, 100 mm long, axis ACROSS the robot. The sagittal profile is
 #           bit-identical to the shipped ball -- it still rolls fore-aft carrying no pitch moment --

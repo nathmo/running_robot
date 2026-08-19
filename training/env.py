@@ -150,19 +150,29 @@ class DashEnv(gym.Env):
         # sole offset as 0 rather than raising.
         mujoco.mj_forward(self.model, self.data)
         self._toe_r = float(self._sole_offsets()[0])          # nominal-pose value, for reporting
+        # The shipped point toe's radius: the fixed penetration budget every foot shape is graded
+        # against below, so the floor check is the same test on every arm of the foot study.
+        self._toe_r_nominal = 0.025
         self._col_gids = {}
         for s in "LR":
             for kind in ("foot", "heel"):
                 g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"{kind}_{s}_col")
                 if g >= 0:
-                    # penetration scale for _floor_violation: the SMALLEST half-extent, i.e. how
-                    # thick the part is in its thinnest direction. For the shipped spheres this is
-                    # the radius and nothing changes; for the 10 mm plate it is 5 mm, which is the
-                    # honest "driven through the ground" scale for a plate.
-                    n = {mujoco.mjtGeom.mjGEOM_SPHERE: 1, mujoco.mjtGeom.mjGEOM_CYLINDER: 2,
-                         mujoco.mjtGeom.mjGEOM_CAPSULE: 2, mujoco.mjtGeom.mjGEOM_BOX: 3}.get(
-                             int(self.model.geom_type[g]), 1)
-                    self._col_gids[g] = float(np.min(self.model.geom_size[g][:n]))
+                    # Penetration budget for _floor_violation. For the shipped SPHERES this is the
+                    # radius, exactly as before, so the control plant's terminations are unchanged.
+                    #
+                    # For a shaped foot it is NOT derived from the geometry, deliberately. Scaling
+                    # it by the part's own thinnest half-extent was tried and is wrong: the 10 mm
+                    # plate got a 2.5 mm budget against the point toe's 12.5 mm, and terminated on
+                    # STEP 1 of every episode on 2 of 6 seeds — a foot graded five times harder
+                    # than the foot it is being compared against. The budget is a property of the
+                    # CHECK ("is the solver being driven through the floor"), not of the part, so
+                    # every foot gets the same absolute depth as the toe it replaces and a
+                    # termination means the same thing on every arm.
+                    self._col_gids[g] = (
+                        float(self.model.geom_size[g][0])
+                        if int(self.model.geom_type[g]) == int(mujoco.mjtGeom.mjGEOM_SPHERE)
+                        else float(self._toe_r_nominal))
         self._air_time = np.zeros(2, np.float32)      # continuous seconds NOT grounded, per foot
         self._contact_time = np.zeros(2, np.float32)  # continuous seconds grounded, per foot
         self._grounded_prev = np.zeros(2, bool)
