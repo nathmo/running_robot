@@ -2024,6 +2024,29 @@ PRESETS.update({
     "walk_fwd_m6": lambda: _walk_fwd3(base_lock=LOCKS["m6"], drive_bandwidth_hz=3.0,
                                       ankle_mode="rigid",
                                       **_LADDER_RWD),  # + yaw
+    # ----- THE MIT-DRIVE RUNGS (2026-08-26) -------------------------------------------------------
+    # Force control over the extended-id frame (robot/MIT_PROTOCOL.md) bypasses the drive's internal
+    # position planner -- the 0.8 -> 3.0 Hz roll-off above IS that planner. Measured on both motor
+    # families: ~6-7 ms command->response delay at 200 Hz command rate, inertia-independent (servo
+    # SET_POS was ~200 ms). The law the drive runs in this mode, tau = Kp(qd-q) - Kd*qdot + tau_ff,
+    # is the same law the plant's <position kp kv> actuator already computes, so the sim change is
+    # lag only: 12 Hz stands in for the UNIDENTIFIED MIT closed-loop bandwidth (kept below the
+    # plant servo's own ~13 Hz pole; replace with the chirp number once mit_identify.py is ported
+    # to the real wire format and run on the stiff leg), and 25 -> 7 ms delay (1 step at 200 Hz).
+    # Command START box 0.25 -> 0.50 fwd: 0.25 was sized for the 0.8 Hz planner, the cmd gate has
+    # never opened anywhere in this lineage, and the d3 walker already travels at 0.69 m/s.
+    "walk_fwd_m2_mit": lambda: _walk_fwd3(base_lock=LOCKS["m2"], drive_bandwidth_hz=12.0,
+                                          drive_delay_ms=7.0, ankle_mode="rigid",
+                                          cmd_v_fwd_start=0.50, cmd_v_back_start=0.15,
+                                          **_LADDER_RWD),
+    "walk_fwd_m3_mit": lambda: _walk_fwd3(base_lock=LOCKS["m3"], drive_bandwidth_hz=12.0,
+                                          drive_delay_ms=7.0, ankle_mode="rigid",
+                                          cmd_v_fwd_start=0.50, cmd_v_back_start=0.15,
+                                          **_LADDER_RWD),
+    "walk_fwd_m4_mit": lambda: _walk_fwd3(base_lock=LOCKS["m4"], drive_bandwidth_hz=12.0,
+                                          drive_delay_ms=7.0, ankle_mode="rigid",
+                                          cmd_v_fwd_start=0.50, cmd_v_back_start=0.15,
+                                          **_LADDER_RWD),
 })
 
 # ----- THE FOOT-SHAPE ARMS (2026-08-11) ----------------------------------------------------------

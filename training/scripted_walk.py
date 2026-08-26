@@ -479,7 +479,7 @@ class ScriptedWalker:
 # plant setup + rollout
 # ----------------------------------------------------------------------------------------------
 def make_env(milestone="m6", dr=0.0, pushes=False, episode_s=None, res_scale=1.5, drive_hz=None,
-             model_path=None):
+             model_path=None, stance=None):
     """Build the measured-plant env (200 Hz, 0.8 Hz drive + 25 ms, bar ankle) with the gait
     generator DISABLED, so the scripted controller owns the 6 targets outright.
 
@@ -508,8 +508,13 @@ def make_env(milestone="m6", dr=0.0, pushes=False, episode_s=None, res_scale=1.5
         # A/B the STANCE KEYFRAME (model/dash01_bal.xml): same robot, same everything, only
         # key_ctrl re-solved so the toes start under the CoM instead of 9.2 cm ahead of them.
         cfg.model_path = str(model_path)
+    # STANCE OVERRIDE (crouch sweeps). See training/stance.py -- there is exactly one correct way
+    # to do this and four wrong ones, all of which produce tables of zeros.
+    import stance as _stance
+    _stance.prepare_cfg(cfg, stance)
     env = DashEnv(cfg)
     env.set_dr_scale(dr)                    # 0 = nominal plant + clean sensors
+    _stance.apply(env, stance)
     return env
 
 
@@ -606,7 +611,7 @@ def evaluate(gains, milestone, seeds, v_des, est, dr, pushes, episode_s, env=Non
 def tune(args):
     seeds = list(range(args.seeds))
     env = make_env(args.milestone, dr=args.dr, pushes=args.pushes,
-                   episode_s=args.tune_seconds, model_path=args.model)
+                   episode_s=args.tune_seconds, model_path=args.model, stance=args.stance)
     g = dict(GAINS)
     if args.start_gains:
         g.update(json.loads(Path(args.start_gains).read_text()))
@@ -794,6 +799,9 @@ def main():
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--seconds", type=float, default=None, help="episode length override")
     ap.add_argument("--dr", type=float, default=0.0, help="domain-randomization width 0..1")
+    ap.add_argument("--stance", default=None, metavar="CAM,THIGH",
+                    help="stance target; the env re-solves its own balanced keyframe for it. "
+                         "Use with --model model/dash01_bal.xml. See training/stance.py.")
     ap.add_argument("--model", default=None,
                     help="model xml override, e.g. model/dash01_bal.xml (re-solved stance keyframe)")
     ap.add_argument("--pushes", action="store_true", help="enable shoves + trips")
@@ -810,6 +818,10 @@ def main():
     ap.add_argument("--start-gains", default=None)
     ap.add_argument("--save-gains", default=None)
     args = ap.parse_args()
+    if args.stance:
+        args.stance = tuple(float(v) for v in args.stance.split(","))
+        if args.model is None:
+            args.model = "model/dash01_bal.xml"   # the recipe needs a balanced starting keyframe
 
     if args.tune:
         tune(args)
@@ -828,7 +840,13 @@ def main():
     if sched and args.seconds is None:
         args.seconds = 35.0
     env = make_env(args.milestone, dr=args.dr, pushes=args.pushes, episode_s=args.seconds,
-                   model_path=args.model)
+                   model_path=args.model, stance=args.stance)
+    if args.stance:
+        import stance as _st
+        _bz, _tc = _st.settled(env)
+        print("[scripted] stance cam %+.4f thigh %+.4f -> base_z %.4f (crouch %.1f cm), "
+              "toe-CoM %+.1f mm" % (args.stance[0], args.stance[1], _bz,
+                                    _st.crouch_of(_bz) * 100, _tc * 1000))
     print(f"[scripted] {args.milestone}  drive {env.drive_bandwidth_hz:.2f} Hz "
           f"(action_filter {env.cfg.action_filter:.4f}, delay {env.cfg.action_delay_steps} steps) "
           f"control {1 / env.control_dt:.0f} Hz  dr={args.dr}")
@@ -858,6 +876,8 @@ def main():
     vid_every = max(1, int(round(1.0 / (env.control_dt * VIDEO_FPS))))
     if args.video:
         import imageio.v2 as imageio
+        env.model.vis.global_.offwidth = max(env.model.vis.global_.offwidth, 640)
+        env.model.vis.global_.offheight = max(env.model.vis.global_.offheight, 480)
         renderer = mujoco.Renderer(env.model, 480, 640)
         writer = imageio.get_writer(args.video, fps=int(round(1.0 / (env.control_dt * vid_every))))
     grab = {"on": False, "n": 0, "i": 0}

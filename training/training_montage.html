@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Training Montage: Failure to Success</title>
+    <style>
+        :root {
+            --bg: #fafaf9;
+            --text: #1c1917;
+            --border: #e7e5e4;
+            --success: #16a34a;
+            --failure: #dc2626;
+            --accent: #0284c7;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1c1917;
+                --text: #fafaf9;
+                --border: #292524;
+                --success: #22c55e;
+                --failure: #ef4444;
+            }
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 2000px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, var(--failure), var(--accent), var(--success));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            color: #888;
+            margin-bottom: 0.5rem;
+        }
+
+        .stats {
+            display: flex;
+            gap: 2rem;
+            justify-content: center;
+            margin-top: 1rem;
+            font-size: 0.95rem;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .stat-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .stat-dot.fail { background: var(--failure); }
+        .stat-dot.success { background: var(--success); }
+
+        /* Failures Grid Section */
+        .section {
+            margin-bottom: 4rem;
+        }
+
+        .section-title {
+            font-size: 1.8rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .section-title.failures {
+            color: var(--failure);
+        }
+
+        .section-title.success {
+            color: var(--success);
+        }
+
+        .icon {
+            font-size: 1.5em;
+        }
+
+        .grid {
+            display: grid;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .grid.failures {
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        }
+
+        .grid.success {
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        }
+
+        .video-card {
+            aspect-ratio: 16 / 9;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            border: 2px solid var(--border);
+            transition: all 0.3s ease;
+            background: #000;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .video-card:hover {
+            border-color: var(--accent);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+            transform: translateY(-2px);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .video-card:hover {
+                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+            }
+        }
+
+        .video-card.failures {
+            border-color: rgba(220, 38, 38, 0.3);
+        }
+
+        .video-card.failures:hover {
+            border-color: var(--failure);
+            box-shadow: 0 0 12px rgba(220, 38, 38, 0.3);
+        }
+
+        .video-card.success {
+            border-color: rgba(34, 197, 94, 0.3);
+        }
+
+        .video-card.success:hover {
+            border-color: var(--success);
+            box-shadow: 0 0 12px rgba(34, 197, 94, 0.3);
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .video-card.loading::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                rgba(255, 255, 255, 0.2),
+                transparent
+            );
+            animation: shimmer 2s infinite;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        .video-title {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+            color: white;
+            padding: 0.75rem;
+            font-size: 0.85rem;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .video-card:hover .video-title {
+            opacity: 1;
+        }
+
+        .description {
+            background: var(--border);
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+            line-height: 1.8;
+        }
+
+        .divider {
+            height: 3px;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+            margin: 4rem 0;
+            border: none;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 4rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .highlight {
+            background: var(--accent);
+            color: white;
+            padding: 0.2em 0.4em;
+            border-radius: 0.25em;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Training Montage</h1>
+            <p class="subtitle">SpiderBot RL: Failure Diversity Highlights</p>
+            <div class="stats">
+                <div class="stat">
+                    <span class="stat-dot fail"></span>
+                    <span><strong>12 Failed Experiments</strong></span>
+                </div>
+                <div class="stat">
+                    <span class="stat-dot success"></span>
+                    <span><strong>8 Success Runs</strong></span>
+                </div>
+                <div class="stat">
+                    <span>~<strong>68 Total</strong> experiments</span>
+                </div>
+            </div>
+        </header>
+
+        <hr class="divider">
+
+        <!-- FAILURES SECTION -->
+        <section class="section">
+            <div class="section-title failures">
+                <span class="icon">❌</span>
+                The 12 Ways We Failed (10 seconds of exploration)
+            </div>
+            <p class="description">
+                This is the <span class="highlight">active exploration</span> phase. Cold starts, architectural experiments (CPG vs Fourier), hardware variants (rigid ankles, foot shapes), and pushing into harder terrain (ladder climbs). Each cell represents a <strong>completely different hypothesis</strong> about what makes a walking robot work.
+            </p>
+            <div class="grid failures" id="failureGrid"></div>
+        </section>
+
+        <hr class="divider">
+
+        <!-- SUCCESS SECTION -->
+        <section class="section">
+            <div class="section-title success">
+                <span class="icon">✅</span>
+                The Few That Worked
+            </div>
+            <p class="description">
+                These are the <span class="highlight">validated solutions</span>. From scripted open-loop controllers that proved the kinematics, to warm-started RL policies that learned robust walking. The jump in time-to-fall is the difference between <strong>no balance</strong> and <strong>real control</strong>.
+            </p>
+            <div class="grid success" id="successGrid"></div>
+        </section>
+
+        <hr class="divider">
+
+        <footer>
+            <p>Each video ~2–3 seconds. Total montage: active testing across <strong>6 design dimensions</strong>, 68 runs, dozens of seeds.</p>
+            <p style="margin-top: 1rem; font-size: 0.85rem; color: #999;">
+                Experiments include: controller architecture (CPG, Fourier, scripted), ankle stiffness, foot shape, curriculum stages (m1–m6), random seeds, and real-robot domain randomization.
+            </p>
+        </footer>
+    </div>
+
+    <script>
+        // Dynamically load videos - using relative paths to the training directory
+        const failureVideos = [
+            { path: "../milestones/videos/m6_seed0_FALLS.mp4", name: "m6 Fall" },
+            { path: "../milestones/videos/m3_seed4_FALLS.mp4", name: "m3 Collapse" },
+            { path: "../milestones/videos/m3_seed7_FALLS.mp4", name: "m3 Loss" },
+            { path: "../milestones/videos/m4_seed0_FALLS.mp4", name: "m4 Tumble" },
+            { path: "../milestones/scripted_m3_fail.mp4", name: "Scripted Fail" },
+            { path: "../runs/ab_cpg_cold_s0/dash.mp4", name: "CPG Cold" },
+            { path: "../runs/ab_f_cold_s0/dash.mp4", name: "Fourier Cold" },
+            { path: "../runs/ab_cpg_m2_s0/dash.mp4", name: "CPG m2" },
+            { path: "../runs/ab_f_m2_s0/dash.mp4", name: "Fourier m2" },
+            { path: "../runs/ab_cpg_nr_m2_s0/dash.mp4", name: "CPG No Residual" },
+            { path: "../runs/ab_cpg_wide_m2_s0/dash.mp4", name: "CPG Wide" },
+            { path: "../runs/ab_cpg_m3warm_s0/dash.mp4", name: "m3 Warm Start" },
+        ];
+
+        const successVideos = [
+            { path: "../milestones/scripted_m2_demo.mp4", name: "Scripted m2 Demo" },
+            { path: "../milestones/scripted_m2.mp4", name: "Scripted Walk" },
+            { path: "../milestones/walk_fwd_easy_s0.mp4", name: "Walk Easy" },
+            { path: "../milestones/walk_fwd3_s0.mp4", name: "Walk Forward v3" },
+            { path: "../milestones/walk_fwd_s0.mp4", name: "Walk Forward" },
+            { path: "../milestones/teleop_v5_warm.mp4", name: "Teleop Warm" },
+            { path: "../milestones/keyframe_shipped_m3_s0.mp4", name: "m3 Shipped" },
+            { path: "../milestones/keyframe_balanced_m3_s0.mp4", name: "m3 Balanced" },
+        ];
+
+        function createVideoCard(video, className) {
+            const card = document.createElement('div');
+            card.className = `video-card ${className}`;
+            card.innerHTML = `
+                <video preload="metadata" controls>
+                    <source src="${video.path}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+                <div class="video-title">${video.name}</div>
+            `;
+            return card;
+        }
+
+        const failureGrid = document.getElementById('failureGrid');
+        const successGrid = document.getElementById('successGrid');
+
+        failureVideos.forEach(video => {
+            failureGrid.appendChild(createVideoCard(video, 'failures'));
+        });
+
+        successVideos.forEach(video => {
+            successGrid.appendChild(createVideoCard(video, 'success'));
+        });
+    </script>
+</body>
+</html>
