@@ -20,6 +20,10 @@ Chain (job IDs in `walk_mit/monitor/status.log` header, or `squeue -n dash-mit`)
 - **`imp_m2_s0/s1`** — preset `walk_fwd_m2_mit_imp`, 100 M, **COLD** (from scratch): +4 per-leg
   kp/kd impedance action dims (action 30, obs 596 — its own lineage, nothing loads into it).
   This is the user's priority arm. `imp_m3_s0/s1` — 80 M, `afterany`, warm from its seed's imp m2.
+- **`imp_m2_long`** (66248742, 400 M, warm from imp_m2_s1) → `imp_m3_long` (66248743, 300 M) —
+  the literature-parity arm (≈23 simulated robot-days, matches Li et al. Cassie): budget > the
+  240 M ramp pin, so the efficiency curriculum COMPLETES with ~160 M at full hardening. Runs into
+  Thursday; judge it by trend only tonight, never escalate it (it is supposed to look unfinished).
 
 Healthy references: fps ≥ ~4,000; **warm** m2 ep_len_mean should recover toward >2,000 within
 ~20 M steps; m3 anything >600 is progress (ladder3_m3 got ~601), >1,500 is a win. **Cold** imp
@@ -64,10 +68,11 @@ for the first 30-40 M; what matters is a rising trend after that. Episode cap is
 
 ## Every 4th tick (2 h): video
 
-Film the user's priority first: the best **imp** arm once any imp run shows ep_len_mean > 400;
-otherwise the furthest-along rung, best seed by ep_len_mean (m3 > m2 once m3 has >5 M steps).
-When time allows, alternate: imp arm this video tick, best warm arm the next — the morning
-comparison needs both on film:
+**03:00 amendment (imp-eval anomaly):** imp checkpoints currently collapse in any fresh eval env
+(see status.log 02:40/03:00 and the imp-eval-anomaly memory) — filming them produces 0.1 s clips.
+Until resolved: film the best WARM (mit) arm each video tick, and once per 2 ticks re-try a single
+short imp eval (1 episode, no video) to check whether the anomaly persists at newer checkpoints.
+Do NOT escalate or cancel imp runs over this — their in-distribution curves remain the A/B signal:
 
 ```
 # R = chosen run name, e.g. mit_m2_s0
