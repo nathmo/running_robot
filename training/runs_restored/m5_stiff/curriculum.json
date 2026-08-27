@@ -1,0 +1,1 @@
+{"sprint_dist_m": 100.0, "stance_ratio": 0.442059392, "eff_scale": 0.9040896, "ctrl_jitter_ms": 4.0, "ctrl_drop_prob": 0.05, "ctrl_jitter_ms_gate_from": 44052480, "ctrl_drop_prob_gate_from": 44052480, "ent_anneal_from": 100012032, "ent_anneal_base": 0.01}
