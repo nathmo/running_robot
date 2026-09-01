@@ -1,0 +1,51 @@
+[eval] using ppo_599994000_steps + ppo_vecnormalize_599994000_steps.pkl
+[budget] m5_stiff_600M   4 eps x 12s, greedy, paired seeds
+[budget] mass 15.14 kg   limits hip_roll_L=61 cam_L=144 thigh_L=144 hip_roll_R=61 cam_R=144 thigh_R=144
+
+  STATIC  (base railed, stand keyframe held) = carry own weight
+    actuator          RMS      P95     peak    %lim    sat%  RMSlim%
+    ----------------------------------------------------------------
+    hip_roll_L        6.3      9.5      9.6     16%    0.0%      10%
+    cam_L            16.0     27.3     35.9     25%    0.0%      11%
+    thigh_L          14.1     27.5     28.1     19%    0.0%      10%
+    hip_roll_R        3.8      7.6      8.0     13%    0.0%       6%
+    cam_R            17.6     34.5     40.8     28%    0.0%      12%
+    thigh_R          13.7     29.7     30.1     21%    0.0%      10%
+
+  RUN     (policy, no disturbance; 1/4 survived) = + locomotion
+    actuator          RMS      P95     peak    %lim    sat%  RMSlim%   d(peak)
+    --------------------------------------------------------------------------
+    hip_roll_L       20.8     36.9     61.2    100%    0.8%      34%     +51.6
+    cam_L            45.6     94.1    119.0     82%    0.0%      32%     +83.1
+    thigh_L          27.4     56.5    107.0     74%    0.0%      19%     +78.9
+    hip_roll_R       33.9     61.2     61.2    100%    9.7%      55%     +53.2
+    cam_R            53.7     99.6    144.5    100%    0.0%      37%    +103.7
+    thigh_R          55.5     95.0    144.5    100%    0.3%      38%    +114.4
+
+  PUSH    (shoves every 2s; 0/4 survived) = + disturbance rejection
+    actuator          RMS      P95     peak    %lim    sat%  RMSlim%   d(peak)
+    --------------------------------------------------------------------------
+    hip_roll_L       22.4     41.0     61.2    100%    2.1%      37%      +0.0
+    cam_L            44.3     90.8    120.0     83%    0.0%      31%      +1.1
+    thigh_L          28.8     57.4    107.0     74%    0.0%      20%      +0.0
+    hip_roll_R       34.4     61.2     61.2    100%   11.0%      56%      +0.0
+    cam_R            54.1    100.9    144.5    100%    0.2%      37%      +0.0
+    thigh_R          56.5    100.7    144.5    100%    0.6%      39%      +0.0
+
+  BUDGET BY REGIME (RMS torque, N*m, and share of each actuator's own limit)
+    actuator       gravity   +locomotion   +disturb  total RMS  of limit
+    --------------------------------------------------------------------
+    hip_roll_L         6.3         +14.5       +1.7       22.4       37%
+    cam_L             16.0         +29.7       -1.4       44.3       31%
+    thigh_L           14.1         +13.3       +1.3       28.8       20%
+    hip_roll_R         3.8         +30.1       +0.6       34.4       56%
+    cam_R             17.6         +36.1       +0.3       54.1       37%
+    thigh_R           13.7         +41.7       +1.1       56.5       39%
+
+  BOTTLENECK SWEEP: peak torque as % of each actuator's OWN limit, vs mass
+     mass x    hip_roll_L       cam_L     thigh_L  hip_roll_R       cam_R     thigh_R   surv
+    ----------------------------------------------------------------------------------------
+       1.00          100%         82%         74%        100%        100%        100%    25%
+
+    (sat duty %, same order)
+       1.00          0.8%        0.0%        0.0%        9.7%        0.0%        0.3%

@@ -1,0 +1,49 @@
+{
+  "x_best": [
+    6.27931765766693,
+    0.15288383307703377,
+    0.3854134262943617,
+    0.0982687368119671,
+    0.009992303353623829
+  ],
+  "v_best": 0.9227323528274091,
+  "detail": {
+    "f_hz": 6.27931765766693,
+    "duty": 0.15288383307703377,
+    "stride": 0.3854134262943617,
+    "clearance": 0.0982687368119671,
+    "z_off": 0.009992303353623829,
+    "v_target": 2.4201333332320973,
+    "v_measured": 0.9227323528274091,
+    "rms_cam": 71.10597879429606,
+    "rms_thigh": 56.416547988477774,
+    "thermal_ok": false,
+    "sat_frac": 0.1171875,
+    "finite": true,
+    "collapsed": false,
+    "flew_off": false,
+    "ok": true,
+    "z_min": 0.3483988857154415,
+    "z_max": 0.8609540174082395
+  },
+  "report": {
+    "lines": [
+      "gait: f=6.28Hz duty=0.15 stride=0.385m clearance=0.098m z_off=0.010m",
+      "achieved speed: 0.923 m/s (commanded target 2.420 m/s)",
+      "stance height range: 0.348-0.861 m  (stable)",
+      "torque-speed clamp engaged (saturated) on 11.7% of measured control steps",
+      "time near peak torque (137+ N*m): 0.0%",
+      "time near no-load speed (18.7+ rad/s): 0.0%",
+      "time near peak power (676+ W of 795 W available): 6.2%",
+      "RMS torque: cam 71.1 N*m, thigh 56.4 N*m (continuous rating 55 N*m, margin -16.1 N*m)",
+      "BURST ONLY -- exceeds the continuous torque rating, would need to slow down to sustain",
+      "verdict: thermally-limited"
+    ],
+    "verdict": "thermally-limited",
+    "sat_frac": 0.1171875,
+    "near_peak_torque": 0.0,
+    "near_peak_power": 0.0625,
+    "thermal_margin": -16.105978794296064
+  },
+  "n_evaluations": 3180
+}

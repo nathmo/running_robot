@@ -624,6 +624,7 @@ class SenseHat(threading.Thread):
         self.capture_status = {"kind": None, "state": "idle", "msg": ""}
         self.loop = {"hz": 0.0, "slip": 0, "nominal_hz": self.imu_hz}
         self._lever_buf = None       # list of (f_body, omega, alpha, up_body) while recording
+        self._fast = None            # (t, up_body, gyro_body) at IMU_HZ -- see fast()
         self.lever_status = {"state": "idle", "msg": "", "n": 0}
         self._lock = threading.Lock()
         self._snap = {}
@@ -639,6 +640,13 @@ class SenseHat(threading.Thread):
     def snapshot(self):
         with self._lock:
             return dict(self._snap)
+
+    def fast(self):
+        """(t_wall, up_body[3], gyro_body[3]) at the full IMU rate, or None before the first
+        sample. `up_body` is the world's UP direction in body axes; a controller written against
+        the MuJoCo convention wants gravity = -up_body."""
+        with self._lock:
+            return self._fast
 
     def start_capture(self, kind):
         """Ask the poll thread for a still-robot average: `gyro` (zero-rate bias), `level` (the
@@ -862,6 +870,16 @@ class SenseHat(threading.Thread):
                 "gyro_mag": math.sqrt(gyr_b[0]**2 + gyr_b[1]**2 + gyr_b[2]**2),
                 "temp_imu": temp_imu, **env,
             }
+            # FAST PATH, published every IMU tick rather than at LOG_HZ. A 200 Hz control loop
+            # reading the 20 Hz snapshot would be steering on attitude up to 50 ms stale, which at
+            # the 0.31 s fall timescale is a sixth of the whole budget. Three floats of gravity and
+            # three of body rate, behind the same lock, cost nothing to publish and are the only
+            # IMU quantities a policy actually consumes. `up_body` is the FILTERED attitude, not
+            # the raw accelerometer: the accelerometer also reads linear acceleration, which is
+            # exactly the leak term the training sensor model calls noise_accel_leak.
+            with self._lock:
+                self._fast = (now, self.filt.up_body(), gyr_b)
+
             # The AHRS runs at IMU_HZ, but nothing downstream reads faster than the UI polls, so
             # the ring push and the snapshot rebuild are both decimated to LOG_HZ.
             if now >= next_log:

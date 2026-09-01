@@ -1,0 +1,324 @@
+{
+ "run": "m5_stiff_600M",
+ "pkg": "training",
+ "episodes": 20,
+ "seconds": 20.0,
+ "command_mode": false,
+ "impedance": false,
+ "axes": {
+  "torque": {
+   "label": "torque limit x",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.5,
+     "survival": 0.0,
+     "t_mean": 1.0267499999999998,
+     "dist_mean": 0.5055,
+     "dist_max": 1.42,
+     "v_mean": 0.5478182765333874,
+     "v_peak": 3.4309826203986864,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.6,
+     "survival": 0.0,
+     "t_mean": 1.276,
+     "dist_mean": 1.56,
+     "dist_max": 3.03,
+     "v_mean": 1.258268728040786,
+     "v_peak": 3.9970038135702497,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.75,
+     "survival": 0.0,
+     "t_mean": 1.65425,
+     "dist_mean": 2.847,
+     "dist_max": 8.32,
+     "v_mean": 1.6556903772441536,
+     "v_peak": 4.755392835942712,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.9,
+     "survival": 0.0,
+     "t_mean": 4.336500000000001,
+     "dist_mean": 10.607000000000001,
+     "dist_max": 29.0,
+     "v_mean": 2.16762055891677,
+     "v_peak": 4.98647374239289,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.05,
+     "t_mean": 9.51875,
+     "dist_mean": 23.896000000000004,
+     "dist_max": 54.46,
+     "v_mean": 2.2582321723120513,
+     "v_peak": 5.007111736668065,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "delay": {
+   "label": "action delay (steps)",
+   "kind": "abs",
+   "rows": [
+    {
+     "value": 2,
+     "survival": 0.0,
+     "t_mean": 1.0082499999999999,
+     "dist_mean": -0.43699999999999994,
+     "dist_max": 0.51,
+     "v_mean": -0.4279357906050345,
+     "v_peak": 1.185859894583475,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 3,
+     "survival": 0.0,
+     "t_mean": 0.9205000000000002,
+     "dist_mean": -0.45,
+     "dist_max": -0.03,
+     "v_mean": -0.4498800187723912,
+     "v_peak": 1.4914014512746465,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 4,
+     "survival": 0.05,
+     "t_mean": 9.51875,
+     "dist_mean": 23.896000000000004,
+     "dist_max": 54.46,
+     "v_mean": 2.2582321723120513,
+     "v_peak": 5.007111736668065,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 5,
+     "survival": 0.0,
+     "t_mean": 1.9762499999999998,
+     "dist_mean": 3.4809999999999994,
+     "dist_max": 17.41,
+     "v_mean": 1.0571686377153435,
+     "v_peak": 5.091017605987556,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 6,
+     "survival": 0.0,
+     "t_mean": 1.06175,
+     "dist_mean": -0.6135,
+     "dist_max": -0.07,
+     "v_mean": -0.6356865792218411,
+     "v_peak": 0.12223915552091048,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 8,
+     "survival": 0.0,
+     "t_mean": 1.01175,
+     "dist_mean": -0.387,
+     "dist_max": 0.12,
+     "v_mean": -0.3774888970086774,
+     "v_peak": 0.6901400338040368,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 10,
+     "survival": 0.0,
+     "t_mean": 1.0989999999999998,
+     "dist_mean": 0.5065,
+     "dist_max": 1.4,
+     "v_mean": 0.5064554259715225,
+     "v_peak": 3.47335123885963,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 4.0
+  },
+  "kp": {
+   "label": "servo kp x  (GAIN)",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.6,
+     "survival": 0.0,
+     "t_mean": 1.0350000000000001,
+     "dist_mean": -0.6425,
+     "dist_max": -0.19,
+     "v_mean": -0.579074276322671,
+     "v_peak": 1.2998308709712845,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.7,
+     "survival": 0.0,
+     "t_mean": 1.1885,
+     "dist_mean": -0.5814999999999999,
+     "dist_max": -0.19,
+     "v_mean": -0.49998825414729425,
+     "v_peak": 0.1867280226162122,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.85,
+     "survival": 0.0,
+     "t_mean": 1.3904999999999998,
+     "dist_mean": 0.8414999999999999,
+     "dist_max": 3.2,
+     "v_mean": 0.5645791294675223,
+     "v_peak": 4.420741929530925,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.05,
+     "t_mean": 9.51875,
+     "dist_mean": 23.896000000000004,
+     "dist_max": 54.46,
+     "v_mean": 2.2582321723120513,
+     "v_peak": 5.007111736668065,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.2,
+     "survival": 0.1,
+     "t_mean": 4.11075,
+     "dist_mean": 8.458000000000002,
+     "dist_max": 45.72,
+     "v_mean": 1.144480365760438,
+     "v_peak": 4.310474785900121,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.4,
+     "survival": 0.0,
+     "t_mean": 0.40475000000000005,
+     "dist_mean": 0.16199999999999998,
+     "dist_max": 1.19,
+     "v_mean": 0.4124012121106569,
+     "v_peak": 2.0192726415620377,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.7,
+     "survival": 0.0,
+     "t_mean": 0.41675000000000006,
+     "dist_mean": 0.162,
+     "dist_max": 0.43,
+     "v_mean": 0.495265583868396,
+     "v_peak": 2.7794773984920087,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "mass": {
+   "label": "total mass x",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.8,
+     "survival": 0.65,
+     "t_mean": 13.476249999999999,
+     "dist_mean": 32.910000000000004,
+     "dist_max": 50.97,
+     "v_mean": 2.0316278265066066,
+     "v_peak": 4.191064242480941,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.9,
+     "survival": 0.8,
+     "t_mean": 16.26125,
+     "dist_mean": 40.1375,
+     "dist_max": 50.68,
+     "v_mean": 2.288578745499917,
+     "v_peak": 4.565281668017874,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.05,
+     "t_mean": 9.51875,
+     "dist_mean": 23.896000000000004,
+     "dist_max": 54.46,
+     "v_mean": 2.2582321723120513,
+     "v_peak": 5.007111736668065,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.1,
+     "survival": 0.0,
+     "t_mean": 2.2960000000000003,
+     "dist_mean": 4.5195,
+     "dist_max": 14.67,
+     "v_mean": 1.769350788295911,
+     "v_peak": 4.9543163361131555,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.2,
+     "survival": 0.0,
+     "t_mean": 1.7145,
+     "dist_mean": 2.54,
+     "dist_max": 6.47,
+     "v_mean": 1.3923328174172869,
+     "v_peak": 4.5566271781572265,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.35,
+     "survival": 0.0,
+     "t_mean": 1.1712500000000001,
+     "dist_mean": 0.5810000000000001,
+     "dist_max": 1.88,
+     "v_mean": 0.5056632248086201,
+     "v_peak": 3.1896360993492396,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.5,
+     "survival": 0.0,
+     "t_mean": 1.275,
+     "dist_mean": 0.15599999999999997,
+     "dist_max": 2.07,
+     "v_mean": 0.1388002735837574,
+     "v_peak": 3.7370129404053114,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  }
+ }
+}

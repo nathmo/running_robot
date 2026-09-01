@@ -16,6 +16,15 @@
       <span class="brand">🤖 DASH-01</span>
       <span id="mode-badge" class="badge">—</span>
       <span id="calib-badge" class="badge">—</span>
+      <span id="lamp-zero" class="lamp">●&nbsp;zeroed</span>
+      <span id="lamp-ws" class="lamp">●&nbsp;workspace</span>
+      <span id="guards" class="guards" title="Software safety limits. Unticking one disables it until the daemon restarts.">
+        <span class="guards-label">guards</span>
+        <label><input type="checkbox" class="gk" data-bypass="workspace" checked>workspace</label>
+        <label><input type="checkbox" class="gk" data-bypass="speed" checked>speed</label>
+        <label><input type="checkbox" class="gk" data-bypass="torque" checked>torque</label>
+        <label><input type="checkbox" class="gk" data-bypass="tracking" checked>tracking</label>
+      </span>
       <span id="daemon-dot" class="dot" title="daemon">●</span>
       <span id="loop-info" class="loopinfo"></span>
     </div>
@@ -31,9 +40,10 @@
 
 <main id="main">
 
-  <!-- ============================ calibration (always visible, gates the rest) ============================ -->
-  <section class="panel wide" id="panel-calib">
-    <h2>Boot calibration
+  <!-- ======================== row: zeroing · workspace · gyro · manual ======================== -->
+  <div class="prow">
+  <section class="panel" id="panel-calib">
+    <h2>Zeroing
       <span class="hint">encoders wake at a random angle/direction — everything is locked until
       the robot is re-zeroed; re-calibrate any time</span></h2>
 
@@ -59,7 +69,9 @@
         <h3>2 — Direction check</h3>
         <p>Backdrive each joint in its <b>positive direction</b>: <b>thigh</b> swings FORWARD,
         <b>cam</b> moves DOWN, <b>abduction</b> lifts the FOOT OFF THE GROUND — same for both legs.
-        The live number must <b>increase</b>. Wrong way? <i>Flip</i>, then <i>Confirm</i>.</p>
+        The live number must <b>increase</b>. Wrong way? <i>Flip</i>, then <i>Confirm</i>.
+        One joint's zero came out wrong? Pose <b>just that joint</b> and hit its <b>📍 Zero</b> —
+        the other five keep theirs; re-confirm that joint's direction afterwards.</p>
         <div id="wiz-cards" class="wiz-cards"></div>
         <div class="row">
           <button id="btn-wiz-back" class="btn">↩ Re-capture zero</button>
@@ -68,27 +80,115 @@
       </div>
     </div>
   </section>
+  <section class="panel" id="panel-workspace">
+    <h2>Safe workspace
+      <span class="hint">record a sweep → review &amp; edit → save / share</span>
+      <span id="ws-source" class="hint"></span></h2>
 
-  <!-- ============================ telemetry ============================ -->
-  <section class="panel" id="panel-telemetry">
-    <h2>Telemetry <span class="hint">raw°, normalized°, A, °C — live</span></h2>
-    <div class="chart-legend">
-      <span><i class="sw" style="background:#4da3ff"></i>position (normalized °)</span>
-      <span><i class="sw dash" style="background:#f2f2f2"></i>commanded target °
-        <span class="hint">— gap = nothing commanded (limp)</span></span>
-      <span><i class="sw" style="background:#e0a020"></i>current (A)</span>
-      <span><i class="sw" style="background:#e04545"></i>temperature (°C)</span>
-      <span><i class="sw dash" style="background:#e04545"></i>80 °C limit</span>
-      <span class="hint">one row of charts per motor, in that order; each spans the last 60 s,
-        auto-scaled (the two numbers at the left edge are that chart's range)</span>
+    <div class="row" style="margin-top:2px">
+      <span class="hint">working on:</span>
+      <div class="tabs" id="ws-tabs" style="margin-bottom:0">
+        <button class="tab active" data-leg="right">right leg</button>
+        <button class="tab" data-leg="left">left leg</button>
+      </div>
+      <span class="spacer"></span>
+      <span class="hint">loaded:</span>
+      <span id="ws-legs-loaded" class="leg-badges"></span>
     </div>
-    <div id="motor-cards" class="motor-cards"></div>
-  </section>
 
-  <!-- ============================ Sense HAT (B) ============================ -->
+    <!-- Step 1 — record a sweep -->
+    <div class="step" id="ws-step-record">
+      <div class="step-h"><span class="step-n">1</span> Record a sweep
+        <span class="hint">— per leg, one continuous take</span></div>
+      <p class="step-note">Motors go limp — <b>backdrive the <span class="wsrec-legname">right</span>
+        leg by hand</b>. A single pass captures <b>abduction, cam and hip together</b>; sweep the
+        whole reachable range in one motion (do extra passes if you missed a corner — they add up).
+        The yellow trail shows what you've covered so far. Hit <b>Process</b> when it looks complete.</p>
+      <div class="row">
+        <button id="btn-wsrec-mode" class="btn">Enter sweep mode</button>
+        <button id="btn-wsrec-take" class="btn" disabled>▶ start pass</button>
+        <button id="btn-wsrec-undo" class="btn small" disabled>undo last pass</button>
+        <span id="wsrec-status" class="hint"></span>
+      </div>
+      <div class="row small">
+        margin <input type="number" id="wsrec-margin" class="num small" value="3" step="0.5">°
+        grid <input type="number" id="wsrec-grid" class="num small" value="1" step="0.5">°
+        dilate <input type="number" id="wsrec-dilate" class="num small" value="2" step="0.5">°
+        <span class="spacer"></span>
+        <button id="btn-wsrec-process" class="btn small primary" disabled>Process → build workspace</button>
+      </div>
+    </div>
+
+    <!-- Step 2 — review / edit -->
+    <div class="step" id="ws-step-edit">
+      <div class="step-h"><span class="step-n">2</span> Review &amp; edit the safe region</div>
+      <p class="step-note">Green cells are the safe (cam, hip) region; the bar is the safe abduction
+        range. Touch it up by hand if needed, then <b>Apply to robot</b> to arm the live safety check.</p>
+
+      <div class="ws-abd">
+        <canvas id="ws-abd-canvas" width="640" height="70"></canvas>
+        <div class="row small">
+          abduction safe: <input type="number" id="abd-min" class="num small" step="0.5">
+          … <input type="number" id="abd-max" class="num small" step="0.5"> °
+          <button id="btn-abd-apply" class="btn small">apply</button>
+        </div>
+      </div>
+
+      <div class="toolbar" id="ws-toolbar">
+        <button class="tool active" data-tool="pan" title="pan/zoom">✋</button>
+        <button class="tool" data-tool="draw" title="draw safe cells">✏️</button>
+        <button class="tool" data-tool="erase" title="erase cells">🧽</button>
+        <button class="tool" data-tool="fill" title="flood fill">🪣</button>
+        <select id="brush-size" class="num small">
+          <option value="1">1px</option><option value="3" selected>3px</option>
+          <option value="5">5px</option><option value="9">9px</option>
+        </select>
+        <button id="btn-undo" class="btn small">↩ undo</button>
+        <button id="btn-redo" class="btn small">↪ redo</button>
+        <span class="spacer"></span>
+        <button id="btn-ws-apply" class="btn small primary">Apply to robot</button>
+        <button id="btn-ws-revert" class="btn small">Revert</button>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="ws-canvas" width="900" height="620"></canvas>
+        <div id="ws-coords" class="coords"></div>
+      </div>
+      <div id="ws-stats" class="hint"></div>
+    </div>
+
+    <!-- Step 3 — save / share -->
+    <div class="step" id="ws-step-save">
+      <div class="step-h"><span class="step-n">3</span> Save &amp; share</div>
+      <div class="row small">
+        <button id="btn-ws-mirror" class="btn small">⇄ copy right → left</button>
+        <span class="hint">normalized frames coincide between legs; flip an axis only if a direction
+          convention turns out inverted:</span>
+        <label><input type="checkbox" id="mir-abd"> abd</label>
+        <label><input type="checkbox" id="mir-cam"> cam</label>
+        <label><input type="checkbox" id="mir-thigh"> thigh</label>
+      </div>
+      <div class="row">
+        <input type="text" id="ws-name" class="txt" placeholder="workspace name" value="workspace_web">
+        <button id="btn-ws-save" class="btn small">💾 Save on robot</button>
+        <select id="ws-files" class="txt small"></select>
+        <button id="btn-ws-load" class="btn small">Load</button>
+      </div>
+      <div class="row">
+        <button id="btn-ws-export" class="btn small">⬇ Export file</button>
+        <label class="btn small file-btn">⬆ Import file<input type="file" id="ws-import" accept=".npz" hidden></label>
+        <span class="hint">file contains:</span>
+        <span id="ws-legs-loaded2" class="leg-badges"></span>
+      </div>
+      <p class="step-note">Export writes <b>every leg currently loaded</b> into one <code>.npz</code>
+        (both legs, or whichever one you have). Import <b>merges</b> a file's legs into what's already
+        loaded — so a right-only file and a left-only file can be imported one after the other to
+        combine them into a both-legs workspace.</p>
+    </div>
+  </section>
   <section class="panel" id="panel-sensors">
-    <h2>Sense HAT (B)
-      <span class="hint">Waveshare 9-DOF IMU + air + light + analog, on the Pi's I2C bus — live</span>
+    <h2>Gyro calibration
+      <span class="hint">Sense HAT (B): Waveshare 9-DOF IMU + air + light + analog, on the Pi's
+        I2C bus — live</span>
       <span id="sns-status" class="hint"></span></h2>
 
     <div id="sns-down" class="sns-down hidden"></div>
@@ -239,8 +339,6 @@ afterwards.">⌖ Zero gyro (hold still)</button>
       <div class="sns-chart"><span>temperature</span><canvas id="sns-c-temp" width="300" height="46"></canvas></div>
     </div>
   </section>
-
-  <!-- ============================ manual control ============================ -->
   <section class="panel" id="panel-manual">
     <h2>Manual control <span class="hint">sliders track the live motor position — grab one to jog
       that joint, or type an exact angle</span></h2>
@@ -262,115 +360,75 @@ Home, and like Home it works from a pose outside the safe region.">⌖ Centre (m
     </div>
     <div id="manual-rows"></div>
   </section>
+  </div>
 
-  <!-- ============================ workspace ============================ -->
-  <section class="panel" id="panel-workspace">
-    <h2>Safe workspace
-      <span class="hint">record a sweep → review &amp; edit → save / share</span>
-      <span id="ws-source" class="hint"></span></h2>
-
-    <div class="row" style="margin-top:2px">
-      <span class="hint">working on:</span>
-      <div class="tabs" id="ws-tabs" style="margin-bottom:0">
-        <button class="tab active" data-leg="right">right leg</button>
-        <button class="tab" data-leg="left">left leg</button>
-      </div>
-      <span class="spacer"></span>
-      <span class="hint">loaded:</span>
-      <span id="ws-legs-loaded" class="leg-badges"></span>
-    </div>
-
-    <!-- Step 1 — record a sweep -->
-    <div class="step" id="ws-step-record">
-      <div class="step-h"><span class="step-n">1</span> Record a sweep
-        <span class="hint">— per leg, one continuous take</span></div>
-      <p class="step-note">Motors go limp — <b>backdrive the <span class="wsrec-legname">right</span>
-        leg by hand</b>. A single pass captures <b>abduction, cam and hip together</b>; sweep the
-        whole reachable range in one motion (do extra passes if you missed a corner — they add up).
-        The yellow trail shows what you've covered so far. Hit <b>Process</b> when it looks complete.</p>
-      <div class="row">
-        <button id="btn-wsrec-mode" class="btn">Enter sweep mode</button>
-        <button id="btn-wsrec-take" class="btn" disabled>▶ start pass</button>
-        <button id="btn-wsrec-undo" class="btn small" disabled>undo last pass</button>
-        <span id="wsrec-status" class="hint"></span>
-      </div>
-      <div class="row small">
-        margin <input type="number" id="wsrec-margin" class="num small" value="3" step="0.5">°
-        grid <input type="number" id="wsrec-grid" class="num small" value="1" step="0.5">°
-        dilate <input type="number" id="wsrec-dilate" class="num small" value="2" step="0.5">°
-        <span class="spacer"></span>
-        <button id="btn-wsrec-process" class="btn small primary" disabled>Process → build workspace</button>
-      </div>
-    </div>
-
-    <!-- Step 2 — review / edit -->
-    <div class="step" id="ws-step-edit">
-      <div class="step-h"><span class="step-n">2</span> Review &amp; edit the safe region</div>
-      <p class="step-note">Green cells are the safe (cam, hip) region; the bar is the safe abduction
-        range. Touch it up by hand if needed, then <b>Apply to robot</b> to arm the live safety check.</p>
-
-      <div class="ws-abd">
-        <canvas id="ws-abd-canvas" width="640" height="70"></canvas>
-        <div class="row small">
-          abduction safe: <input type="number" id="abd-min" class="num small" step="0.5">
-          … <input type="number" id="abd-max" class="num small" step="0.5"> °
-          <button id="btn-abd-apply" class="btn small">apply</button>
-        </div>
-      </div>
-
-      <div class="toolbar" id="ws-toolbar">
-        <button class="tool active" data-tool="pan" title="pan/zoom">✋</button>
-        <button class="tool" data-tool="draw" title="draw safe cells">✏️</button>
-        <button class="tool" data-tool="erase" title="erase cells">🧽</button>
-        <button class="tool" data-tool="fill" title="flood fill">🪣</button>
-        <select id="brush-size" class="num small">
-          <option value="1">1px</option><option value="3" selected>3px</option>
-          <option value="5">5px</option><option value="9">9px</option>
+  <!-- ======================== row: telemetry ======================== -->
+  <div class="prow">
+  <section class="panel wide" id="panel-telemetry">
+    <h2>Telemetry <span class="hint">raw°, normalized°, A, °C — live</span></h2>
+    <div class="chart-legend">
+      <span><i class="sw" style="background:#4da3ff"></i>position (normalized °)</span>
+      <span><i class="sw dash" style="background:#f2f2f2"></i>commanded target °
+        <span class="hint">— gap = nothing commanded (limp)</span></span>
+      <span><i class="sw" style="background:#e0a020"></i>current (A)</span>
+      <span><i class="sw" style="background:#e04545"></i>temperature (°C)</span>
+      <span><i class="sw dash" style="background:#e04545"></i>80 °C limit</span>
+      <span class="hint">one card per motor: position, current, temperature. Auto-scaled — the two
+        numbers at the left edge are that chart's range; gridlines and the labels under the bottom
+        chart are the time axis.</span>
+      <label class="tel-span">window
+        <select id="tel-span" class="sel">
+          <option value="30">30 s</option>
+          <option value="60">60 s</option>
+          <option value="120">2 min</option>
+          <option value="300">5 min</option>
+          <option value="600">10 min</option>
         </select>
-        <button id="btn-undo" class="btn small">↩ undo</button>
-        <button id="btn-redo" class="btn small">↪ redo</button>
-        <span class="spacer"></span>
-        <button id="btn-ws-apply" class="btn small primary">Apply to robot</button>
-        <button id="btn-ws-revert" class="btn small">Revert</button>
-      </div>
-      <div class="canvas-wrap">
-        <canvas id="ws-canvas" width="900" height="620"></canvas>
-        <div id="ws-coords" class="coords"></div>
-      </div>
-      <div id="ws-stats" class="hint"></div>
+      </label>
     </div>
+    <div id="motor-cards" class="motor-cards"></div>
+  </section>
+  </div>
 
-    <!-- Step 3 — save / share -->
-    <div class="step" id="ws-step-save">
-      <div class="step-h"><span class="step-n">3</span> Save &amp; share</div>
-      <div class="row small">
-        <button id="btn-ws-mirror" class="btn small">⇄ copy right → left</button>
-        <span class="hint">normalized frames coincide between legs; flip an axis only if a direction
-          convention turns out inverted:</span>
-        <label><input type="checkbox" id="mir-abd"> abd</label>
-        <label><input type="checkbox" id="mir-cam"> cam</label>
-        <label><input type="checkbox" id="mir-thigh"> thigh</label>
-      </div>
-      <div class="row">
-        <input type="text" id="ws-name" class="txt" placeholder="workspace name" value="workspace_web">
-        <button id="btn-ws-save" class="btn small">💾 Save on robot</button>
-        <select id="ws-files" class="txt small"></select>
-        <button id="btn-ws-load" class="btn small">Load</button>
-      </div>
-      <div class="row">
-        <button id="btn-ws-export" class="btn small">⬇ Export file</button>
-        <label class="btn small file-btn">⬆ Import file<input type="file" id="ws-import" accept=".npz" hidden></label>
-        <span class="hint">file contains:</span>
-        <span id="ws-legs-loaded2" class="leg-badges"></span>
-      </div>
-      <p class="step-note">Export writes <b>every leg currently loaded</b> into one <code>.npz</code>
-        (both legs, or whichever one you have). Import <b>merges</b> a file's legs into what's already
-        loaded — so a right-only file and a left-only file can be imported one after the other to
-        combine them into a both-legs workspace.</p>
+  <!-- ======================== row: leg linkage ======================== -->
+  <div class="prow">
+  <section class="panel wide" id="panel-ee">
+    <h2>Leg linkage — end-effector space
+      <span class="hint">workspace ∙ gait path ∙ ○ calibrated zero ∙ ◆ URDF/model zero ∙ live linkage</span>
+      <button id="btn-fk-verify" class="btn small" style="float:right">verify FK map (sign + offset)</button>
+    </h2>
+    <div class="ee-row">
+      <div><h3>left</h3><canvas id="ee-left" width="440" height="480"></canvas></div>
+      <div><h3>right</h3><canvas id="ee-right" width="440" height="480"></canvas></div>
+    </div>
+    <div id="ee-status" class="hint"></div>
+    <div class="row small">
+      <span class="hint">manual map (if auto-verify is not decisive): model° = sign·norm° + offset°
+        — the captured zero is NOT the model zero, so offsets matter:</span>
+      <span>left: cam <select id="fkm-left-cam" class="num small"><option value="+1">+1</option>
+        <option value="-1">−1</option></select>
+        thigh <select id="fkm-left-thigh" class="num small"><option value="+1">+1</option>
+        <option value="-1">−1</option></select>
+        cam off <input type="number" id="fkm-left-camoff" class="num small" step="1" value="0">°
+        thigh off <input type="number" id="fkm-left-thighoff" class="num small" step="1" value="0">°
+        <label title="display-only x-mirror of the plot"><input type="checkbox" id="fkm-left-flip">
+          mirror view</label>
+        <button id="btn-fkm-left" class="btn small">force enable</button></span>
+      <span>right: cam <select id="fkm-right-cam" class="num small"><option value="+1">+1</option>
+        <option value="-1">−1</option></select>
+        thigh <select id="fkm-right-thigh" class="num small"><option value="+1">+1</option>
+        <option value="-1">−1</option></select>
+        cam off <input type="number" id="fkm-right-camoff" class="num small" step="1" value="0">°
+        thigh off <input type="number" id="fkm-right-thighoff" class="num small" step="1" value="0">°
+        <label title="display-only x-mirror of the plot"><input type="checkbox" id="fkm-right-flip">
+          mirror view</label>
+        <button id="btn-fkm-right" class="btn small">force enable</button></span>
     </div>
   </section>
+  </div>
 
-  <!-- ============================ trajectory / gait ============================ -->
+  <!-- ======================== row: gait: draw · play back · policy inference ======================== -->
+  <div class="prow">
   <section class="panel" id="panel-trajectory">
     <h2>Gait trajectory
       <span class="hint">teach/draw each leg → process &amp; save → play</span></h2>
@@ -455,43 +513,6 @@ Home, and like Home it works from a pose outside the safe region.">⌖ Centre (m
       </div>
     </div>
   </section>
-
-  <!-- ============================ EE animation ============================ -->
-  <section class="panel wide" id="panel-ee">
-    <h2>Leg linkage — end-effector space
-      <span class="hint">workspace ∙ gait path ∙ ○ calibrated zero ∙ ◆ URDF/model zero ∙ live linkage</span>
-      <button id="btn-fk-verify" class="btn small" style="float:right">verify FK map (sign + offset)</button>
-    </h2>
-    <div class="ee-row">
-      <div><h3>left</h3><canvas id="ee-left" width="440" height="480"></canvas></div>
-      <div><h3>right</h3><canvas id="ee-right" width="440" height="480"></canvas></div>
-    </div>
-    <div id="ee-status" class="hint"></div>
-    <div class="row small">
-      <span class="hint">manual map (if auto-verify is not decisive): model° = sign·norm° + offset°
-        — the captured zero is NOT the model zero, so offsets matter:</span>
-      <span>left: cam <select id="fkm-left-cam" class="num small"><option value="+1">+1</option>
-        <option value="-1">−1</option></select>
-        thigh <select id="fkm-left-thigh" class="num small"><option value="+1">+1</option>
-        <option value="-1">−1</option></select>
-        cam off <input type="number" id="fkm-left-camoff" class="num small" step="1" value="0">°
-        thigh off <input type="number" id="fkm-left-thighoff" class="num small" step="1" value="0">°
-        <label title="display-only x-mirror of the plot"><input type="checkbox" id="fkm-left-flip">
-          mirror view</label>
-        <button id="btn-fkm-left" class="btn small">force enable</button></span>
-      <span>right: cam <select id="fkm-right-cam" class="num small"><option value="+1">+1</option>
-        <option value="-1">−1</option></select>
-        thigh <select id="fkm-right-thigh" class="num small"><option value="+1">+1</option>
-        <option value="-1">−1</option></select>
-        cam off <input type="number" id="fkm-right-camoff" class="num small" step="1" value="0">°
-        thigh off <input type="number" id="fkm-right-thighoff" class="num small" step="1" value="0">°
-        <label title="display-only x-mirror of the plot"><input type="checkbox" id="fkm-right-flip">
-          mirror view</label>
-        <button id="btn-fkm-right" class="btn small">force enable</button></span>
-    </div>
-  </section>
-
-  <!-- ============================ playback ============================ -->
   <section class="panel" id="panel-playback">
     <h2>Gait playback</h2>
     <div class="row">
@@ -535,8 +556,191 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
       <div class="phasebar"><div id="pb-phase" class="phasefill"></div></div>
     </div>
   </section>
+  <section class="panel" id="panel-policy">
+    <h2>Policy inference
+      <span class="hint">run a trained policy bundle — the .npz carries the whole controller
+        architecture it must run with (estimator + policy MLPs, impedance gains, gait
+        reconstruction, observation statistics)</span></h2>
 
-  <!-- ============================ dynamic identification (system-ID) ============================ -->
+    <div class="row">
+      <select id="pol-file" class="txt"></select>
+      <button id="btn-pol-refresh" class="btn small">⟳ rescan</button>
+      <label class="btn small file-btn">⬆ Upload bundle<input type="file" id="pol-upload"
+        accept=".npz" hidden></label>
+      <span id="pol-count" class="hint"></span>
+    </div>
+    <p class="step-note">Bundles are exported with <code>robot/deploy/export_policy.py</code>,
+      which writes them to <code>robot/deploy/bundles/</code>; an upload here lands in
+      <code>webui/data/policies/</code>. Both directories are offered above, and the tag after each
+      name says which one it came from. A bundle is loadable by numpy alone and cannot execute
+      code.</p>
+
+    <div id="pol-info" class="hidden"></div>
+    <div id="pol-preflight"></div>
+
+    <div class="step">
+      <div class="step-h">Dress rehearsal
+        <span class="hint">— runs the bundle's full control law on this machine with a mock bus
+          and mock IMU: proves the export + runtime end to end, energises nothing</span></div>
+      <div class="row">
+        <button id="btn-pol-rehearse" class="btn primary" disabled>▶ Rehearse (mock)</button>
+        <button id="btn-pol-rehearse-stop" class="btn" disabled>■ Stop</button>
+        <label>for <input id="pol-seconds" type="number" class="num small" value="5" min="1"
+          max="30"> s</label>
+        <span id="pol-rehearse-status" class="hint"></span>
+      </div>
+      <pre id="pol-log" class="pol-log hidden"></pre>
+    </div>
+
+    <div class="step" id="pol-run-step">
+      <div class="step-h">Real run <span class="hint">— on the drives, in force control, under the
+        deploy safety governor</span></div>
+      <div class="warn-box">
+        <b>⚠ The torso must be physically supported.</b>
+        Every bundle that can be deployed at all was trained with the base's roll and yaw
+        <b>railed</b> — the policy has never experienced those axes free and there is nothing in it
+        that stabilises them. On a free-standing robot it is open-loop there, and a fall is the
+        expected outcome of removing the support, not a surprise. Gantry, boom, or hands.
+        <br><br>
+        The run happens <b>inside this daemon</b>, not in a subprocess: the CAN bus has exactly one
+        owner, so <code>run_policy.py</code> refuses to start while the web UI is up. It is the same
+        control law and the same governor either way — the deploy package is imported, not
+        reimplemented.
+      </div>
+      <div class="row">
+        <label>forward <input id="pol-v" type="number" class="num small" value="0" step="0.05">
+          m/s</label>
+        <label>yaw <input id="pol-yaw" type="number" class="num small" value="0" step="0.1">
+          rad/s</label>
+        <label>for <input id="pol-secs" type="number" class="num small" value="10" min="1"
+          max="60"> s</label>
+        <span id="pol-cmd-box" class="hint"></span>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="pol-supported">
+          the torso is supported and I expect it to fall</label>
+      </div>
+      <div id="pol-acks"></div>
+      <div class="row">
+        <button id="btn-pol-arm" class="btn danger" disabled>▶ Arm &amp; run</button>
+        <button id="btn-pol-run-stop" class="btn" disabled>■ Stop (soft)</button>
+        <button id="btn-pol-run-kill" class="btn" disabled>✖ Kill (limp now)</button>
+        <span id="pol-run-status" class="hint"></span>
+      </div>
+      <div id="pol-run" class="hidden"></div>
+      <details class="pol-headless">
+        <summary>headless equivalent — same law, no browser, web UI stopped</summary>
+        <pre id="pol-cmd" class="pol-cmd">select a bundle above</pre>
+      </details>
+    </div>
+  </section>
+  </div>
+
+  <!-- ======================== row: identification: thermal · dynamic · limbs & inertia · files ======================== -->
+  <div class="prow">
+  <section class="panel" id="panel-thermal">
+    <h2>Thermal identification
+      <span class="hint">deposit a known heat in one motor, measure how hot it gets — fits the
+        lumped model</span></h2>
+
+    <div class="warn-box">
+      <b>⚠ Declare how the rotor is held before a burst.</b>
+      <b>Clamped</b> holds ONE motor at full torque, in one direction, for up to three minutes:
+      the joint is held, must not move, and sustained motion aborts the run because it means the
+      fixture is failing. <b>Free</b> is for a motor off the robot with <b>nothing on the
+      shaft</b>: it tracks a position-mode sine, so every half-cycle the drive has to decelerate
+      and re-accelerate its own rotor inertia. Net work per cycle is ~zero — what goes in is I²R,
+      which is exactly what the fit integrates.
+      <br><br>
+      <b>The sine cannot command a current.</b> I&nbsp;=&nbsp;J·α/Kt is set by physics, so the
+      current knob is a <i>target</i>: the run integrates the current the drive actually measures,
+      stops early with the achieved number if the sine cannot draw a useful fraction of the target
+      (raise the frequency or the amplitude), and aborts the moment measured I²·dt reaches the
+      deposit the winding-rise gate approved — position mode has no current cap, so the integral
+      is the wall.
+      <br><br>
+      <b>Nothing may be attached to the shaft in free mode.</b> A leg on the shaft turns the sine
+      into a pendulum drive with a gravity load the budget was not sized for — and a leg on
+      <i>current-mode</i> excitation is the <b>free-JOINT dither retracted on 2026-08-29</b>,
+      which self-excited through the drive's ~10&nbsp;ms actuation delay (25&nbsp;500&nbsp;ERPM
+      in 0.21&nbsp;s on right.cam). The sine survives that delay because it is position-mode —
+      the drive's own loop closes the fast loop, like the identify wiggle above.
+    </div>
+
+    <div class="row wrap">
+      <label>Motor <select id="th-motor" class="sel"></select></label>
+      <label>Current <input id="th-amps" type="number" class="num small" value="20" step="0.5"
+             min="0.5" max="30"> A</label>
+      <label>Duration <input id="th-dur" type="range" min="1" max="180" step="1" value="60">
+             <b id="th-dur-val">60 s</b></label>
+      <label>Ambient <input id="th-ambient" type="number" class="num small" step="0.5"> °C</label>
+      <label>Probe <select id="th-probe" class="sel">
+        <option value="case">case (IR / contact on the housing)</option>
+        <option value="winding">winding (thermocouple in the slot)</option>
+        <option value="drive">the drive's own reading</option>
+      </select></label>
+    </div>
+
+    <div class="row wrap th-identrow">
+      <span class="hint">Not sure that is the joint you think it is?</span>
+      <button id="btn-th-ident" class="btn">↔ Wiggle 5° for 2 s to identify</button>
+      <button id="btn-th-ident-stop" class="btn" disabled>■ Stop</button>
+      <span id="th-ident-note" class="hint">holds the other five in place and reports which joint actually moved</span>
+    </div>
+    <div id="th-ident" class="th-ident hidden"></div>
+
+    <div id="th-predict" class="th-predict"></div>
+
+    <div class="row wrap hidden" id="th-sine-row">
+      <span class="hint">free-rotor sine:</span>
+      <label>freq <input id="th-freq" type="number" class="num small" value="6" step="0.5"
+             min="0.5" max="25"> Hz</label>
+      <label>amplitude <input id="th-amp" type="number" class="num small" value="20" step="1"
+             min="1" max="60"> °</label>
+      <span id="th-sine-note" class="hint"></span>
+    </div>
+
+    <div class="row wrap">
+      <label>Rotor <select id="th-rotor" class="sel">
+        <option value="blocked">clamped — joint held, must not turn</option>
+        <option value="free">free — off the robot, nothing on the shaft: tracks a sine</option>
+      </select></label>
+      <label class="chk"><input type="checkbox" id="th-confirm">
+        <span id="th-confirm-label">the joint is clamped and cannot turn</span></label>
+      <button id="btn-th-suggest" class="btn">suggest</button>
+      <button id="btn-th-start" class="btn primary" disabled>▶ Start burst</button>
+      <button id="btn-th-stop" class="btn" disabled>■ Stop</button>
+    </div>
+
+    <div id="th-live" class="th-live hidden"></div>
+
+    <div class="row wrap">
+      <label>Start temp <input id="th-tstart" type="number" class="num small" step="0.1"> °C</label>
+      <label>Peak temp <input id="th-tpeak" type="number" class="num small" step="0.1"> °C</label>
+      <label>read <input id="th-tpeak-at" type="number" class="num small" step="1"> s after the burst</label>
+      <input id="th-notes" class="txt" placeholder="notes (optional)">
+      <button id="btn-th-save" class="btn primary">Save burst</button>
+    </div>
+
+    <div id="th-progress" class="th-progress"></div>
+
+    <table class="tbl small">
+      <thead><tr><th>when</th><th>dur</th><th>I rms</th><th>operator</th><th>drive</th><th></th></tr></thead>
+      <tbody id="th-runs"></tbody>
+    </table>
+
+    <div class="step">
+      <h3>Cooldown curve <span class="hint">the half of the experiment that pins the case time
+        constant — follow it for at least 15 minutes</span></h3>
+      <div class="row wrap">
+        <button id="btn-th-cool-start" class="btn">Start a cooldown curve</button>
+        <label>at <input id="th-cool-t" type="number" class="num small" step="1"> s</label>
+        <label>temp <input id="th-cool-temp" type="number" class="num small" step="0.1"> °C</label>
+        <button id="btn-th-cool-add" class="btn">+ point</button>
+      </div>
+      <div id="th-cool-body"></div>
+    </div>
+  </section>
   <section class="panel" id="panel-measure">
     <h2>Dynamic identification — measurement
       <span class="hint">excite ONE leg with position chirps, log torque at 200 Hz → derive Kt,
@@ -628,8 +832,6 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
       </div>
     </div>
   </section>
-
-  <!-- ============================ limbs & inertia ============================ -->
   <section class="panel" id="panel-limbs">
     <h2>Limbs &amp; inertia
       <span class="hint">enter each weighed limb mass; compare the CAD inertia tensor with the
@@ -657,10 +859,8 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
       <div id="identify-summary" class="hint"></div>
     </div>
   </section>
-
-  <!-- ============================ manage / delete files ============================ -->
   <section class="panel" id="panel-files">
-    <h2>Manage files
+    <h2>File manager
       <span class="hint">permanently delete a saved workspace-calibration or gait file you no
         longer need</span></h2>
     <div class="row">
@@ -678,9 +878,11 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
       <button id="btn-del-cancel" class="btn">Cancel</button>
     </div>
   </section>
+  </div>
 
-  <!-- ============================ mock tools ============================ -->
-  <section class="panel hidden" id="panel-mock">
+  <!-- ======================== row: mock tools (simulated motors only) ======================== -->
+  <div class="prow hidden" id="row-mock">
+  <section class="panel" id="panel-mock">
     <h2>Mock tools <span class="hint">simulated motors only</span></h2>
     <div class="row">
       <button id="btn-mock-sweep-right" class="btn small">auto-sweep right leg</button>
@@ -698,6 +900,7 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
       <button id="btn-mock-rock" class="btn small">rock (two axes)</button>
     </div>
   </section>
+  </div>
 
 </main>
 
@@ -705,5 +908,7 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
 <script src="/static/inertia3d.js"></script>
 <script src="/static/sysid.js"></script>
 <script src="/static/sensors.js"></script>
+<script src="/static/thermal.js"></script>
+<script src="/static/policy.js"></script>
 </body>
 </html>

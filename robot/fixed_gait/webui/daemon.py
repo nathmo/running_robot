@@ -13,9 +13,11 @@ Modes:
     RECORD_GAIT     limp + sample takes for the gait recorder
     RECORD_WS       limp + sample segments for the workspace sweep
     PLAYBACK        trajectory replay, 'position' or 'current' control law
+    POLICY          a trained policy bundle, in force control, under the deploy safety governor
     ESTOPPED        latched; zero current streamed until cleared
 HTTP handlers never touch the buses — they only post requests into this object and read snapshots.
 """
+import os
 import threading
 import time
 import traceback
@@ -29,8 +31,36 @@ import ringbuffer
 
 import play_trajectory as pt              # fixed_gait/ — Motor, drain, reconstruct-side helpers
 import trajectory as traj                 # fixed_gait/
+import thermal_excite                     # robot/deploy/ — the burst law + its envelope
+# robot/deploy/, all three pure (numpy / struct / json) and importing nothing from the webui: the
+# force-control wire format, the model<->motor joint map, and the policy safety governor. The
+# dependency runs one way on purpose, so the deployed control law stays reviewable on its own.
+import mit
+import jointmap as JM
+import safety as SAFE
 
-MODES = ("LIMP", "MANUAL", "RECORD_GAIT", "RECORD_WS", "PLAYBACK", "MEASURE", "ESTOPPED")
+# ===================================================================== operator bypasses
+# Four software limits the operator can switch off deliberately. They exist because every one of
+# them is tuned for a plant that keeps changing: the workspace polygon erodes as the robot is
+# rebuilt, the playback current cap was chosen for a different leg, and a tracking threshold that
+# is right for homing is wrong for a chirp. Refusing to let the person who owns the machine
+# override them just means they run the procedure somewhere the recorder cannot see it.
+#
+# What a bypass does NOT touch, ever:
+#   * the joints' own hard limits -- _validate_pose checks those BEFORE the workspace, so a
+#     workspace bypass cannot walk a joint into a stop
+#   * the drive's own firmware phase-current limit, which is not ours to raise
+#   * the E-STOP, the fall/tilt kill, drive error codes, over-temperature, and telemetry staleness
+#
+# Bypasses are NEVER persisted. A daemon restart re-arms every one of them, because the state a
+# bypass leaves behind outlives the reason for it.
+BYPASS_NAMES = ("workspace", "speed", "torque", "tracking")
+# A torque bypass raises the software cap; it does not remove it. Unbounded is not a setting.
+BYPASS_CURRENT_CEILING_A = 40.0
+
+MODES = ("LIMP", "MANUAL", "RECORD_GAIT", "RECORD_WS", "PLAYBACK", "MEASURE", "THERMAL",
+         "IDENTIFY", "POLICY",
+         "ESTOPPED")
 MODE_CODE = {m: i for i, m in enumerate(MODES)}
 blackbox.register_modes(MODES)            # so a recorded mode byte is decodable offline
 TICK_HZ = 200.0
@@ -105,6 +135,178 @@ WARN_TEMP_C = 70
 # Raising this needs a hardware argument, not a UI one. See scripts in the commit message.
 PERIOD_MIN = 0.4
 PERIOD_MAX = 600.0
+
+# ===================================================================== thermal bursts (2026-08-28)
+# A burst deliberately saturates ONE motor's torque to deposit a known amount of copper loss in a
+# few seconds, so the lumped thermal model can be fitted from the temperature rise that follows.
+# Everything about it is bounded twice: once by thermal_excite.Envelope (the law cannot ask for
+# more) and once here (the daemon will not accept a spec that asks for more).
+# The current here has to be large enough to deposit a READABLE amount of heat -- see the note in
+# thermal_excite: 12 A for 30 s moves the case by 0.7 degC, which no handheld probe resolves. The
+# real bound on a burst is its predicted WINDING rise, checked in thermal_start; these are the
+# outer walls. The drive's own configured phase limit is a separate, lower ceiling and it wins.
+THERMAL_MAX_AMPS = 30.0
+THERMAL_MAX_DURATION_S = 180.0   # the operator-facing knob; the panel's slider is 1-30 s by default
+THERMAL_WINDOW_DEG = 8.0         # half-width of the dither window, before the safe-room intersect
+THERMAL_SPEED_ERPM = 600.0       # the PRIMARY bound: reversing on speed keeps the motion small
+THERMAL_ABORT_TEMP_C = 70        # well under MAX_TEMP_C (80): the reported temperature LAGS
+THERMAL_COOLDOWN_S = 3.0         # forced limp after every burst before the mode will do anything else
+# FREE-ROTOR sine defaults (motor off the robot, nothing on the shaft): the run tracks a
+# position-mode sine so the current comes from the rotor fighting its own inertia. The knob
+# bounds live in thermal_excite (FREE_SINE_*); these are just where the panel opens.
+THERMAL_FREE_FREQ_HZ = 6.0
+THERMAL_FREE_AMP_DEG = 20.0
+
+# ===================================================================== joint identify (2026-08-28)
+# "Is left.thigh the joint I think it is?" precedes every measurement on this robot, and it has
+# been answered wrong before -- can0/can1 and the 104/105/106 ids are easy to transpose, and the
+# abduction axis has never been mapped by anything in this repo at all. A 5 deg, 2 s sine answers
+# it by eye, but the half that actually settles it is MEASURED: every other joint is HELD at the
+# raw pose it started in, so the per-joint excursion over the wiggle is a direct read of the
+# mapping. Exactly one number should be large. If two are, the joints are coupled or two drives
+# share an id; if the wrong one is, the map is wrong.
+#
+# Excursion is accumulated in RAW encoder degrees, so the verdict does not depend on the
+# calibration being right -- which is the whole point of being able to run it.
+IDENT_AMP_DEG = 5.0              # a gentle, unmistakable 5 deg
+IDENT_MAX_AMP_DEG = 10.0
+IDENT_DURATION_S = 2.0
+IDENT_MAX_DURATION_S = 10.0
+IDENT_MIN_AMP_DEG = 1.5          # below this the wiggle is neither visible nor conclusive
+IDENT_FREQ_HZ = 1.0              # 5 deg at 1 Hz peaks at 31 deg/s: obvious, and gentle
+IDENT_RAMP_S = 0.25              # raised-cosine in/out -- no velocity step at either end
+# Tracking is judged against the amplitude, not against a fixed number of degrees. The command
+# is always centre +- amp where centre is the joint's MEASURED position, so calib.raw(centre)
+# is exactly where the joint already is: a wrong zero cannot make this slew. What it CAN do is
+# invert the direction -- and a joint running the wrong way tracks at 2x amplitude, while a
+# joint that simply does not move never exceeds 1x. That gap is what this threshold sits in,
+# so it catches a flipped calibration sign (which this project has shipped before) instead of
+# duplicating the excursion verdict.
+IDENT_TRACK_MARGIN_DEG = 3.0     # abort above amp + this
+IDENT_MOVED_DEG = 1.5            # excursion at or above this counts as "this joint moved"
+
+
+# ===================================================================== policy runs (2026-09-01)
+# Running a learned policy is the only mode here whose command is not a shape the operator drew.
+# Four things bound it, in this order, and none of them replaces the others:
+#
+#   1. this block          -- what may be ASKED for (run length, approach speed, watchdog windows)
+#   2. safety.SafetyGovernor -- what may be SENT (position, rate, torque, gains; clamp then kill)
+#   3. the daemon's own _validate_pose -- the recorded workspace polygon, which the governor cannot
+#      see because it bounds each joint independently and self-collision is a joint COMBINATION
+#   4. the drive's own firmware phase-current limit, which is not ours to raise
+#
+# The approach numbers come straight from robot/deploy/run_policy.py, which is the version of this
+# that has actually been run. They are deliberately crawling: the first policy tick is only legal
+# if the legs are already AT the stance, because the controller's filter starts there, and a step
+# at the policy's own 200 N*m/rad is not a gait, it is an impact.
+POLICY_DEFAULT_SECONDS = 10.0
+POLICY_MAX_SECONDS = 60.0
+POLICY_APPROACH_DPS = 25.0        # joint travel during the approach -- deliberately crawling
+POLICY_APPROACH_KP = 40.0         # N*m/rad: enough to carry a leg, far too little to hurt anything
+POLICY_APPROACH_KD = 2.0
+POLICY_APPROACH_TRACK_ERR_DEG = 12.0   # abort: the map is wrong, the zero is stale, or it is stuck
+POLICY_APPROACH_ARRIVE_DEG = 3.0
+POLICY_APPROACH_SLACK_S = 5.0     # grace on top of the computed travel time before giving up
+POLICY_APPROACH_MAX_S = 30.0      # only used to size the log buffer
+# The dead-man is the panel saying "a human is looking at this", refreshed only while the page is
+# VISIBLE. A status poll deliberately does not refresh it: a poll proves a browser is alive, which
+# is not the same claim. 1.5 s is ~7 missed 200 ms refreshes.
+POLICY_DEADMAN_S = 1.5
+# The drives broadcast at exactly 200.0 Hz (measured, 0.14 ms sd), so 50 ms is 10 missed frames.
+POLICY_TELEMETRY_STALE_S = 0.05
+POLICY_IMU_STALE_S = 0.2          # gravity is the ONLY fall detector; stale gravity is blind
+# A workspace refusal is frozen-then-killed rather than killed outright, on the governor's own
+# clamp-now-kill-if-persistent rule: 100 ms at 200 Hz, longer than a footfall and far shorter than
+# the 0.31 s fall timescale.
+POLICY_WS_PERSIST_TICKS = 20
+# A drive holds its last force-control frame, and SET_CURRENT 0 is not the release for that mode.
+# After the last force frame, keep streaming the zero-gain frame for this long.
+POLICY_FORCE_RELEASE_S = 1.0
+POLICY_UPRIGHT_GRAV = np.array([0.0, 0.0, -1.0])   # --no-imu fallback: faked upright, never a fall
+# ===================================================================== can this Pi run it?
+# THE ROBOT'S PI 3B CANNOT HOLD 200 Hz FOR A POLICY. Measured 2026-09-01, imp_m3d bundle, per tick,
+# single-threaded so the numbers are work and not GIL contention:
+#
+#     controller.step()     4.2 - 5.6 ms      (only ~2.0 ms of it is the neural network)
+#     SafetyGovernor.step() 2.3 ms            (now includes the winding observer)
+#     send prep + 6 frames  0.4 ms
+#     --------------------------------
+#     policy tick core      6.5 - 8 ms        against a 5.0 ms budget
+#
+# The first measurement was 14 ms, because Debian's numpy was linked against the REFERENCE netlib
+# BLAS: a 593x256 float32 gemv ran at 52 MFLOPS. Installing libopenblas0-pthread (one 3.5 MB
+# package, no dependencies; Debian's alternatives system repoints libblas.so.3 and numpy picks it
+# up with no rebuild) took that gemv to 519 MFLOPS -- 10x -- and the whole tick from 14 ms to
+# 8-9 ms. Worth doing, and not enough on its own.
+#
+# What is left is not BLAS. It is numpy's per-call overhead on SIX-ELEMENT arrays, where the
+# dispatch costs more than the arithmetic. Per tick, counted: the governor makes 177 Python calls
+# (14 ufunc reductions, 7 np.all, 6 np.any, 6 np.clip) and the controller 150 (9 np.clip alone).
+# Folding the thermal observer INTO the governor (2026-09-01) plus two constant-hoists in
+# thermal.step took the core from 8-9 ms to 6.5. Closing the last 1.3x means rewriting
+# safety.step, controller.step and fourier_gait in scalar or preallocated form -- and they are the
+# bit-exactness-verified deploy path, so every change has to be re-proven with verify_export.py
+# against the torch policy.
+#
+# WHY A SLOW LOOP IS NOT MERELY "A BIT SLOW". control_dt is a CONSTANT inside the control law, and
+# the loop free-runs when it slips (next_t is reset, never caught up). So a loop that manages 100 Hz
+# while the law still believes 200 Hz produces:
+#
+#   * a gait clock advancing at half real time -- the whole gait plays in slow motion
+#   * a velocity channel of (pos - prev) * 200 computed over a 10 ms interval, so every joint
+#     velocity the policy observes is inflated 2x: an observation off the training manifold
+#   * a thermal observer integrating 5 ms of heating per 10 ms of real current, which is the one
+#     error here that is NOT conservative
+#
+# The filter, the slew limit and the governor's rate cap are all per-step too, but those err
+# toward commanding LESS, so they are not what this guard is about.
+#
+# Two gates, because a bench measurement and a live loop answer different questions: a probe at arm
+# time (is this bundle plausible on this machine at all) and the realised rate during the run (is
+# it holding up right now, with the IMU thread, Flask and the recorder all competing). Both can be
+# acknowledged away with `allow_slow_loop` -- bringing the drives up to watch them move is a real
+# reason to run a knowingly-wrong control law, as long as it is knowingly. Until the hot paths are
+# optimised, that acknowledgement is how this robot runs a policy at all.
+# The probe times controller.step ALONE, so its ceiling is the tick budget minus everything else
+# in the tick -- and that is now measured rather than assumed: governor+observer 2.3 ms, send prep
+# 0.4, plus drain, measure, log and the black-box sample. Call it 3.0 ms of non-controller work.
+POLICY_MAX_STEP_MS = 2.0
+POLICY_PROBE_TICKS = 40           # enough to see past the first-call allocations
+POLICY_RATE_WINDOW = 200          # realised-rate window, ticks (1 s at nominal)
+POLICY_MIN_RATE_FRAC = 0.90       # kill below 180 Hz sustained
+
+# ===================================================================== the runaway that got out
+# 2026-09-01, first policy run on the real drives. Four of six drives faulted simultaneously with
+# error code 3, across BOTH buses, at 46-52 degC -- so not thermal, and not one bad drive:
+#
+#     r.abd 12430 ERPM   r.cam 9060 ERPM   r.thigh 15570 ERPM at -19.8 A   (left leg ~1500)
+#
+# A joint at 15 570 ERPM being braked with 19.8 A of OPPOSING current is pumping energy back into
+# the bus. Nothing on this robot can sink that -- there is no brake resistor, and the drives report
+# no bus voltage (see the CAN feedback protocol note), so the first evidence of the spike is every
+# drive on the bus tripping at once. CubeMars' AK fault table calls code 3 over-voltage, which is
+# the only reading consistent with four drives, two buses, one instant and cold motors.
+#
+# WHAT LET IT HAPPEN: POLICY had no measured-speed kill at all. PLAYBACK has had one since the
+# beginning (max_speed 16000 ERPM, warn at 9000) and MEASURE bounds its own excitation, but the
+# policy path only ever checked the COMMAND -- the governor's rate clamp bounds how fast the target
+# may move, which is a different quantity from how fast the joint is actually turning. So the only
+# thing that stopped a runaway was the drives' own over-voltage protection. That is the wrong layer
+# to be relying on: it is a hardware fault trip, it takes the whole bus down with it, and it leaves
+# the robot limp at speed.
+#
+# The ceiling is well under playback's 16 000 because a walking policy has no business anywhere
+# near no-load speed: in the same recording the leg that was NOT running away sat at ~1500 ERPM.
+# The kill is HARD on purpose. A soft stop keeps commanding, and it is the commanded BRAKING that
+# generates the over-voltage -- going limp lets the joint spin down through friction instead.
+POLICY_MAX_ERPM = 8000.0
+
+POLICY_LOG_COLS = 64
+POLICY_LOG_COLUMNS = ("t | pos6 | vel6 | tau6 | amps6 | temp6 | grav3 | gyro3 | target6 | kp6 | "
+                      "kd6 | t_winding6 | gait_phase | gait_freq | stop  "
+                      "(every six-vector is in MODEL actuator order: "
+                      "hip_roll_L, cam_L, thigh_L, hip_roll_R, cam_R, thigh_R)")
 
 
 def _clamp_period(v):
@@ -233,6 +435,22 @@ class RobotDaemon(threading.Thread):
         self._playback_req = None          # dict: params + 'data'
         self._playback_patch = None
         self._record_cmds = []             # (cmd, leg) tuples
+        self._thermal_req = None           # dict: burst spec (motor, amps, duration_s)
+        self._thermal_stop = False
+        self._therm = None                 # live burst state; see thermal_start/_tick_thermal
+        self._wiggle_req = None            # dict: identify spec (motor, amp_deg, duration_s)
+        self._wiggle_stop = False
+        # NOT _ident: RobotDaemon is a threading.Thread and Thread._set_ident() assigns
+        # self._ident = get_ident(). That collision cost an afternoon on 2026-08-28 -- the
+        # daemon crashed publishing an int as if it were the wiggle state.
+        self._wiggle = None                # live identify state; see identify_start
+        self._plan_cache = None            # (key, t_mono, result) -- see IDENT_PLAN_CACHE_S
+        # deliberately not restored from anywhere: see BYPASS_NAMES
+        self.bypass = {n: False for n in BYPASS_NAMES}
+        self._pol_req = None               # dict: a request already validated by policy_arm
+        self._pol_stop = None              # "soft" | "hard", consumed by _tick_policy
+        self._pol = None                   # live/finished policy run; see _start_policy
+        self._pol_deadman = 0.0            # monotonic stamp of the last panel keepalive
         self._measure_req = None           # dict: excitation spec (MEASURE_DEFAULTS merged)
         self._measure_stop = False         # request to end the active excitation (keep the log)
 
@@ -253,6 +471,13 @@ class RobotDaemon(threading.Thread):
                          takes={"right": [], "left": []}, segments={"right": [], "left": []},
                          centers={"right": None, "left": None}, outside=False)
         self._last_reject = ""             # last workspace-check refusal (surfaced in snapshot)
+        # The Sense HAT is created by the server AFTER the daemon (so a wedged I2C bus can never
+        # delay motor bring-up), so it is attached rather than passed in. None is supported
+        # everywhere; only POLICY needs it, and it refuses to arm without one unless told to.
+        self.sense = None
+        self._rx_at = {}                   # motor name -> t_mono of its last status frame
+        self._tick_mono = 0.0              # this tick's monotonic stamp (read by _stream_limp)
+        self._force_until = 0.0            # keep streaming the zero-gain force frame until here
         self._tick_count = 0
         self._slip_count = 0
         self.ring = ringbuffer.TelemetryRing()
@@ -321,7 +546,10 @@ class RobotDaemon(threading.Thread):
             lo, hi = self._hard_bounds(side, role)
             if not lo <= v <= hi:
                 return False, f"{n} {v:+.1f} deg exceeds the hard limit [{lo:+.0f}, {hi:+.0f}]"
-        limits = self.wstore.limits if (self.wstore and not override) else None
+        # NB the hard-limit loop above has already run and is not bypassable -- only the
+        # workspace/feasibility half below can be switched off.
+        limits = (self.wstore.limits
+                  if (self.wstore and not override and not self.bypass["workspace"]) else None)
         if limits is not None:
             for side in paths.SIDES:
                 if not limits.has_leg(side):
@@ -852,7 +1080,10 @@ class RobotDaemon(threading.Thread):
         while time.time() < t_end and any(m.pos is None for m in self.motors):
             for m in self.motors:
                 canio.set_current(m.bus, m.cid, 0.0)
-            pt.drain(self.buses, self.motors_by_bus, 0.0)
+            # _drain rather than pt.drain so _rx_at is populated from the very first frame: the
+            # telemetry watchdog reports "no drive has ever spoken" as infinitely stale, and the
+            # preflight is exactly where a drive first speaks.
+            self._drain(time.monotonic(), 0.0)
             time.sleep(0.005)
         silent = [self._name_of[id(m)] for m in self.motors if m.pos is None]
         raw = {n: m.pos for n, m in self.by_name.items()}
@@ -891,6 +1122,7 @@ class RobotDaemon(threading.Thread):
             t_mono = time.monotonic()
             dt_actual = t_mono - prev_mono
             prev_mono = t_mono
+            self._tick_mono = t_mono
 
             # 1) e-stop first — latch (limp is streamed by the mode body below)
             if self.estop_event.is_set() and self.mode != "ESTOPPED":
@@ -898,12 +1130,16 @@ class RobotDaemon(threading.Thread):
                 self._pb = None
                 if self._meas:
                     self._meas["running"] = False       # keep the partial log; stop exciting
+                if self._pol is not None and self._pol["phase"] != "done":
+                    # end it rather than drop it: an e-stop during a policy run is exactly when
+                    # the 200 Hz log is worth keeping
+                    self._policy_end(self._pol, now, self.estop_reason or "e-stop")
                 with self.lock:
                     self._manual_targets = {}
                     self._manual_override = False
 
             # 2) always drain feedback (telemetry works even limp)
-            pt.drain(self.buses, self.motors_by_bus, dt)
+            self._drain(t_mono, dt)
 
             # 3) consume web requests
             self._consume_requests(now)
@@ -919,6 +1155,12 @@ class RobotDaemon(threading.Thread):
                 self._tick_playback(now, dt)
             elif self.mode == "MEASURE":
                 self._tick_measure(now, dt)
+            elif self.mode == "THERMAL":
+                self._tick_thermal(now, dt)
+            elif self.mode == "IDENTIFY":
+                self._tick_identify(now, dt)
+            elif self.mode == "POLICY":
+                self._tick_policy(now, dt)
 
             # 5) safety sweep (err flag / temp in every mode; run_hardware.safety_check semantics)
             for m in self.motors:
@@ -981,9 +1223,42 @@ class RobotDaemon(threading.Thread):
                            slip=self._slip_count, homing=self._home_active)
             self._bb_dump("trip", why=reason)
 
+    def _drain(self, t_mono, dt):
+        """play_trajectory.drain, plus a per-motor arrival stamp.
+
+        pt.drain returns nothing, so a caller cannot tell a live drive from a dead one -- and the
+        question that matters is not "did any frame arrive" but "has ONE drive gone quiet while its
+        five neighbours keep talking". One dict store per frame buys that; the POLICY governor's
+        telemetry watchdog is the first thing that needs it, and the answer it gets is the age of
+        the OLDEST motor rather than of the newest frame."""
+        rx, name_of = self._rx_at, self._name_of
+        for ch, bus in self.buses.items():
+            by_id = self.motors_by_bus[ch]
+            while True:
+                msg = bus.recv(timeout=0.0)
+                if msg is None:
+                    break
+                if not msg.is_extended_id:
+                    continue
+                m = by_id.get(msg.arbitration_id & 0xFF)
+                if m is None:
+                    continue
+                st = canio.parse_status(msg.data)
+                if st:
+                    m.update_from(st, dt)
+                    rx[name_of[id(m)]] = t_mono
+
     def _stream_limp(self):
         for m in self.motors:
             canio.set_current(m.bus, m.cid, 0.0)
+        # A force-control run leaves the drive holding its last kp/kd frame, and SET_CURRENT 0 is
+        # not the release for THAT mode. So for a second after the last force frame, stream the
+        # zero-gain force frame alongside -- streamed, because "stop sending" is never "stop
+        # commanding". Outside that window this is the same six frames it has always been.
+        if self._tick_mono < self._force_until:
+            payload = mit.limp_payload()
+            for m in self.motors:
+                canio.force_control(m.bus, m.cid, payload)
         self._last_cmd_raw.clear()
 
     def _motion_allowed(self):
@@ -1211,7 +1486,10 @@ class RobotDaemon(threading.Thread):
         now = time.monotonic()
         if why != last_why or (now - last_t) > 30.0:      # do not spam on a polling UI
             self._guard_logged = (why, now)
-            self._bb_event("premove.refused", reason=why, mode=self.mode, **detail)
+            # one dict, for the reason spelled out at the thermal.done call site: a key
+            # appearing in both halves is a TypeError at binding, not a merge
+            self._bb_event("premove.refused",
+                           **dict(detail, reason=why, mode=self.mode))
             self._bb_dump("premove_guard_refused", why=why)
         return False, why
 
@@ -1232,6 +1510,16 @@ class RobotDaemon(threading.Thread):
             self._measure_req = None
             meas_stop = self._measure_stop
             self._measure_stop = False
+            th_req = self._thermal_req
+            self._thermal_req = None
+            th_stop = self._thermal_stop
+            self._thermal_stop = False
+            id_req = self._wiggle_req
+            self._wiggle_req = None
+            id_stop = self._wiggle_stop
+            self._wiggle_stop = False
+            pol_req = self._pol_req
+            self._pol_req = None
 
         if clear and self.mode == "ESTOPPED":
             self.estop_event.clear()
@@ -1268,10 +1556,44 @@ class RobotDaemon(threading.Thread):
             else:
                 self._last_reject = why
 
+        if th_stop and self._therm is not None:
+            self._therm["running"] = False
+            self._therm["abort"] = self._therm["abort"] or "stopped by operator"
+            self._bb_event("thermal.stop", motor=self._therm["motor"])
+        if th_req is not None:
+            ok, why = self._activation_allowed()
+            if ok:
+                self._start_thermal(th_req, now)
+            else:
+                self._last_reject = why
+
+        if id_stop and self._wiggle is not None:
+            self._wiggle["running"] = False
+            self._wiggle["abort"] = self._wiggle["abort"] or "stopped by operator"
+            self._bb_event("identify.stop", motor=self._wiggle["motor"])
+        if id_req is not None:
+            ok, why = self._activation_allowed()
+            if ok:
+                self._start_identify(id_req, now)
+            else:
+                self._last_reject = why
+
+        if pol_req is not None:
+            ok, why = self._activation_allowed()
+            if ok:
+                self._start_policy(pol_req, now)
+            else:
+                self._last_reject = why
+
         if req_mode and req_mode != self.mode:
             if req_mode == "LIMP":
+                if self._pol is not None and self._pol["phase"] != "done":
+                    # end it, do NOT drop it: the run log is the whole point of having run it
+                    self._policy_end(self._pol, now, "operator requested LIMP")
                 self._pb = None
                 self._meas = None                          # finished/aborted run is cleared here
+                self._therm = None
+                self._wiggle = None
                 self._end_active_record()
                 self._enter_hold(None)
                 with self.lock:
@@ -1404,7 +1726,7 @@ class RobotDaemon(threading.Thread):
             raw = self.calib.raw(n, targets_norm[n])
             canio.set_pos(m.bus, m.cid, raw)
             self._last_cmd_raw[n] = raw
-            if abs(m.pos - raw) > track_lim:
+            if not self.bypass["tracking"] and abs(m.pos - raw) > track_lim:
                 self._trip(f"{n} tracking error {m.pos - raw:+.1f} deg (> {track_lim}"
                            f"{' while homing' if homing else ''})")
                 return
@@ -1511,7 +1833,8 @@ class RobotDaemon(threading.Thread):
         ramp = min(1.0, elapsed / pb["ramp"]) if pb["ramp"] > 0 else 1.0
         play_t = max(0.0, elapsed - pb["ramp"])
         phase = (play_t / pb["period"]) % 1.0
-        lim = ramp * pb["current_limit"]
+        lim = ramp * (BYPASS_CURRENT_CEILING_A if self.bypass["torque"]
+                      else pb["current_limit"])
         abd_override = {"right": pb["abd_right"], "left": pb["abd_left"]}
         active = [m for m in self.motors if m.side in pb["sides"]]
 
@@ -1557,15 +1880,1276 @@ class RobotDaemon(threading.Thread):
                     m.integ = float(np.clip(m.integ, -lim / pb["ki"], lim / pb["ki"]))
                 curr = pb["kp"] * err + pb["ki"] * m.integ + pb["kd"] * (m.tvel - m.vel)
                 curr = float(np.clip(curr, -lim, lim))
-                if pb["speed_limit"] > 0 and curr * m.spd > 0 and abs(m.spd) > pb["speed_limit"]:
+                if (not self.bypass["speed"] and pb["speed_limit"] > 0
+                        and curr * m.spd > 0 and abs(m.spd) > pb["speed_limit"]):
                     band = 0.3 * pb["speed_limit"]
                     curr *= float(np.clip((pb["speed_limit"] + band - abs(m.spd)) / band, 0.0, 1.0))
                 canio.set_current(m.bus, m.cid, curr)
-                if abs(m.spd) > pb["max_speed"]:
+                if not self.bypass["speed"] and abs(m.spd) > pb["max_speed"]:
                     self._trip(f"{n} runaway {m.spd:.0f} ERPM (> {pb['max_speed']:.0f})")
                     return
 
     # ----------------------------------------------------------------- MEASURE (system-ID)
+    # ---------------------------------------------------------------- thermal bursts
+    def thermal_start(self, spec):
+        """Validate a burst request and queue it. Returns (ok, why) -- the CAN thread starts it.
+
+        Every bound is computed HERE, against the pose the joint is actually in, rather than being
+        trusted from the web request. The window is intersected with the joint's hard band and with
+        the safe-workspace room it has right now, so a burst can never dither a leg into a stop or
+        into the other leg."""
+        if self._wiggle is not None and self._wiggle["running"]:
+            return False, "an identification wiggle is still running"
+        # The free-joint dither this panel shipped with self-excited on right.cam at 30 A and
+        # destroyed its envelope in 0.21 s (2026-08-28); see the retraction at the top of
+        # thermal_excite.py. There is no current-mode law that is both worth depositing and
+        # gentle on an unloaded JOINT, so a leg on the robot has to be held by something other
+        # than software.
+        # Two ways a burst is allowed, and neither is the retracted free-JOINT dither:
+        #   blocked -- the joint is clamped and must not move; unidirectional saturated current.
+        #   free    -- the motor is off the robot with NOTHING on the shaft. Tracks a
+        #              position-mode sine so the current comes from the rotor fighting its own
+        #              inertia (thermal_excite.step_sine) -- unidirectional current cannot heat a
+        #              free rotor (back-EMF), and the sine only works unloaded.
+        rotor = str(spec.get("rotor_mode", "blocked" if spec.get("rotor_is_blocked") else ""))
+        if rotor not in ("blocked", "free"):
+            return False, ("a burst needs the rotor declared: 'blocked' (joint clamped, the "
+                           "experiment that works) or 'free' (motor off the robot, nothing on the "
+                           "shaft). The free-JOINT dither -- a leg on a spinning shaft -- is "
+                           "retracted: it self-excited on right.cam at 30 A and left its window "
+                           "in 0.21 s.")
+        name = str(spec.get("motor", ""))
+        if name not in paths.MOTOR_NAMES:
+            return False, "unknown motor {!r}".format(name)
+        m = self.by_name[name]
+        if m.pos is None:
+            return False, "{} is not reporting -- never energising a drive we cannot watch".format(name)
+        try:
+            amps = float(spec.get("amps", 6.0))
+            duration = float(spec.get("duration_s", 5.0))
+        except (TypeError, ValueError):
+            return False, "amps and duration_s must be numbers"
+        if not (amps == amps and duration == duration):            # NaN: json.loads makes them
+            return False, "amps and duration_s must be numbers"
+        if amps <= 0 or amps > THERMAL_MAX_AMPS:
+            return False, "amps must be in (0, {:.0f}]".format(THERMAL_MAX_AMPS)
+        # Predicted-energy gate. The parameters this uses are placeholders until the campaign is
+        # finished, so it is a floor on the risk rather than a measurement -- but it is the only
+        # thing standing between a 30 s burst at 30 A and a winding nobody can see cooking.
+        ok, why, pred = thermal_excite.check_burst(self._thermal_params(name), amps, duration)
+        if not ok:
+            return False, why
+        if not (thermal_excite.MIN_DURATION_S <= duration <= THERMAL_MAX_DURATION_S):
+            return False, "duration must be {:.0f}-{:.0f} s".format(
+                thermal_excite.MIN_DURATION_S, THERMAL_MAX_DURATION_S)
+
+        side, role = paths.split_name(name)
+        centre = self.calib.norm(name, m.pos)
+        if rotor == "free":
+            # Off the robot there is no workspace to intersect and no hard stop to respect --
+            # the drift band in step_sine is the position bound. The sine is centred on the
+            # MEASURED position, so like the wiggle it cannot slew on a wrong zero.
+            try:
+                freq = float(spec.get("freq_hz", THERMAL_FREE_FREQ_HZ))
+                amp = float(spec.get("amp_deg", THERMAL_FREE_AMP_DEG))
+            except (TypeError, ValueError):
+                return False, "freq_hz and amp_deg must be numbers"
+            if not (freq == freq and amp == amp):                  # NaN survives float()
+                return False, "freq_hz and amp_deg must be numbers"
+            if not (thermal_excite.FREE_SINE_FREQ_MIN_HZ <= freq
+                    <= thermal_excite.FREE_SINE_FREQ_MAX_HZ):
+                return False, "sine frequency must be {:.1f}-{:.0f} Hz".format(
+                    thermal_excite.FREE_SINE_FREQ_MIN_HZ, thermal_excite.FREE_SINE_FREQ_MAX_HZ)
+            if not (1.0 <= amp <= thermal_excite.FREE_SINE_AMP_MAX_DEG):
+                return False, "sine amplitude must be 1-{:.0f} deg".format(
+                    thermal_excite.FREE_SINE_AMP_MAX_DEG)
+            try:
+                env = thermal_excite.Envelope(
+                    amps=amps, duration_s=duration, centre_deg=centre,
+                    window_deg=amp, speed_erpm=THERMAL_SPEED_ERPM,
+                    temp_abort_c=THERMAL_ABORT_TEMP_C, blocked=True, mode="free",
+                    freq_hz=freq, sine_amp_deg=amp)
+            except ValueError as e:
+                return False, str(e)
+            with self.lock:
+                self._thermal_req = {"motor": name, "env": env,
+                                     "ambient_c": spec.get("ambient_c")}
+            return True, ""
+        lo, hi = self._hard_bounds(side, role)
+        # how far this joint can actually travel from here without leaving the safe workspace
+        pose = {n: self.calib.norm(n, mm.pos) for n, mm in self.by_name.items()
+                if mm.pos is not None}
+        room_up = self._safe_room(pose, name, +1.0, THERMAL_WINDOW_DEG) if len(pose) == paths.N_MOTORS else 0.0
+        room_dn = self._safe_room(pose, name, -1.0, THERMAL_WINDOW_DEG) if len(pose) == paths.N_MOTORS else 0.0
+        window = min(THERMAL_WINDOW_DEG, max(room_up, room_dn))
+        try:
+            env = thermal_excite.Envelope(
+                amps=amps, duration_s=duration, centre_deg=centre, window_deg=max(window, 1.0),
+                speed_erpm=THERMAL_SPEED_ERPM, temp_abort_c=THERMAL_ABORT_TEMP_C,
+                pos_lo=max(lo, centre - room_dn), pos_hi=min(hi, centre + room_up),
+                blocked=True, mode=rotor)
+        except ValueError as e:
+            return False, str(e)
+        with self.lock:
+            self._thermal_req = {"motor": name, "env": env,
+                                 "ambient_c": spec.get("ambient_c")}
+        return True, ""
+
+    def _thermal_params(self, motor_name):
+        """Thermal parameters for one motor, fitted if we have them and placeholders otherwise.
+
+        Deliberately re-read per call rather than cached: the whole point of the campaign is that
+        these numbers change while the robot is powered, and a burst gated on a stale copy of them
+        is gated on nothing."""
+        import thermal as _th
+        role = paths.split_name(motor_name)[1]
+        kind = "AK60-39" if role == "abd" else "AKE90-8"
+        try:
+            fitted = _th.load_params(os.path.join(paths.DEPLOY, "thermal_params.json"))
+            if kind in fitted:
+                return fitted[kind]
+        except (OSError, ValueError, KeyError):
+            pass
+        return _th.DEFAULT_PARAMS[kind]
+
+    def thermal_stop(self):
+        with self.lock:
+            self._thermal_stop = True
+
+    def get_thermal(self):
+        """The finished burst, for the HTTP layer to persist. None while one is still running."""
+        t = self._therm
+        if t is None or t["running"]:
+            return None
+        return {"motor": t["motor"], "envelope": t["env"].as_dict(),
+                "summary": t["ex"].summary(), "abort": t["abort"],
+                "drive_t_start_c": t["t_start"], "drive_t_peak_c": t["t_peak"],
+                "ambient_c": t["ambient_c"],
+                "elapsed_since_end_s": (time.monotonic() - t["t_end"]) if t["t_end"] else 0.0,
+                "log": {k: list(v) for k, v in t["buf"].items()}}
+
+    def _start_thermal(self, req, now):
+        m = self.by_name[req["motor"]]
+        free = req["env"].free_rotor
+        self._therm = {
+            "motor": req["motor"], "env": req["env"],
+            # the sine gets a longer ramp: its first cycles are the position loop settling, and a
+            # velocity step into a bare rotor is exactly the impulse the raised cosine removes
+            "ex": thermal_excite.BurstExciter(req["env"], ramp_s=1.0 if free else 0.25),
+            "t0": now, "t_end": None, "running": True, "abort": None,
+            # hold-before-move for the position-mode sine, same rule as manual/identify: the first
+            # commands are set_pos(measured raw), which cannot slew whatever the zero says
+            "t_move": now + (HOLD_BEFORE_MOVE_S if free else 0.0),
+            "raw0": m.pos,
+            "t_start": m.temp, "t_peak": m.temp, "ambient_c": req.get("ambient_c"),
+            "buf": {"t": [], "amps_cmd": [], "amps_meas": [], "pos": [], "pos_cmd": [],
+                    "spd": [], "temp": []},
+            "last_rx": now,
+        }
+        self._last_reject = ""
+        self._set_mode("THERMAL", "thermal burst started", motor=req["motor"],
+                       **req["env"].as_dict())
+
+    def _tick_thermal(self, now, dt):
+        """One tick of a burst -- or of the WAIT that follows it.
+
+        The wait is not idle time. The case temperature peaks roughly a winding time constant
+        AFTER the current stops, so the drive's own peak is still ahead of us when the burst ends;
+        the mode therefore stays in THERMAL, streaming limp, tracking that peak, until the operator
+        saves. Dropping to LIMP at the end of the burst would throw away the measurement."""
+        t = self._therm
+        if t is None:
+            self._set_mode("LIMP", "thermal state vanished")
+            return
+        m = self.by_name[t["motor"]]
+        if m.pos is not None:
+            t["last_rx"] = now
+        # the peak keeps being tracked through the whole wait, not just the burst
+        if m.temp is not None:
+            t["t_peak"] = max(t["t_peak"] if t["t_peak"] is not None else m.temp, m.temp)
+
+        if not t["running"]:
+            self._stream_limp()
+            return
+
+        ok, why = self._motion_allowed()
+        if not ok:
+            t["running"] = False
+            t["abort"] = why
+            t["t_end"] = now
+            self._stream_limp()
+            self._trip(why)
+            return
+
+        # EVERY other drive is actively held limp for the whole burst -- unaddressed is not the
+        # same as commanded, and only one motor is supposed to be moving here
+        for n, mm in self.by_name.items():
+            if n != t["motor"]:
+                canio.set_current(mm.bus, mm.cid, 0.0)
+
+        pos_norm = self.calib.norm(t["motor"], m.pos) if m.pos is not None else t["env"].centre
+        if t["env"].free_rotor:
+            # position-mode sine: the drive's own loop closes the fast loop (stable against the
+            # actuation delay, unlike the retracted current-mode dither), and the heat comes from
+            # the rotor fighting its own inertia. Hold-before-move first, like manual/identify.
+            if now < t["t_move"]:
+                if t["raw0"] is not None:
+                    canio.set_pos(m.bus, m.cid, t["raw0"])
+                    self._last_cmd_raw[t["motor"]] = t["raw0"]
+                return
+            el = now - t["t_move"]
+            want, done, abort = t["ex"].step_sine(
+                el, pos_norm, m.spd, m.temp, m.err, now - t["last_rx"],
+                i_meas=None if m.pos is None else m.cur)
+            amps_cmd = None
+            if not done:
+                raw = self.calib.raw(t["motor"], float(want))
+                canio.set_pos(m.bus, m.cid, raw)
+                self._last_cmd_raw[t["motor"]] = raw
+        else:
+            el = now - t["t0"]
+            amps, done, abort = t["ex"].step(
+                el, pos_norm, m.spd, m.temp, m.err, now - t["last_rx"],
+                i_meas=None if m.pos is None else m.cur)
+            canio.set_current(m.bus, m.cid, float(amps))
+            amps_cmd, want = float(amps), None
+        b = t["buf"]
+        b["t"].append(round(el, 4))
+        b["amps_cmd"].append(None if amps_cmd is None else round(amps_cmd, 3))
+        b["amps_meas"].append(None if m.pos is None else round(float(m.cur), 3))
+        b["pos"].append(None if m.pos is None else round(self.calib.norm(t["motor"], m.pos), 3))
+        b["pos_cmd"].append(None if want is None else round(float(want), 3))
+        b["spd"].append(None if m.pos is None else round(float(m.spd), 1))
+        b["temp"].append(None if m.pos is None else int(m.temp))
+        if done:
+            t["running"] = False
+            t["abort"] = abort
+            t["t_end"] = now
+            canio.set_current(m.bus, m.cid, 0.0)
+            self._stream_limp()
+            # Merge into ONE dict rather than passing abort= alongside **summary(): the
+            # exciter's summary already carries `abort`, so the two collided and TypeError'd at
+            # argument binding -- inside the branch that handles an ABORT, killing the control
+            # loop at the exact moment it was shutting a runaway burst down (2026-08-28). Argument
+            # binding happens before the callee runs, so no try/except in _bb_event could have
+            # caught it; the fix has to be here, at the call.
+            self._bb_event("thermal.done", **dict(t["ex"].summary(),
+                                                  motor=t["motor"], abort=abort))
+            self._bb_dump("thermal_burst", why=abort or "burst complete")
+
+    # ---------------------------------------------------------------- joint identify
+    # A plan costs two _safe_room scans -- about 40 _validate_pose evaluations -- and it is
+    # served from the process that runs the 200 Hz CAN loop, on the same GIL. It is also POLLED by
+    # the panel, and on 2026-08-29 a stale browser tab polled it 4x a second. The client is rate
+    # limited now, but a client is not a safety boundary: memoise the answer briefly so no caller
+    # can turn a poll into control-loop jitter. Keyed on the pose, so it still tracks a joint that
+    # is actually being moved by hand.
+    IDENT_PLAN_CACHE_S = 0.5
+
+    def set_bypass(self, name, on, note=""):
+        """Turn one safety limit off (or back on). Every change is an event in the black box.
+
+        Returns (ok, message). The message is what the UI shows: it names what is now unguarded,
+        because a bypass nobody remembers enabling is the failure mode this whole feature has."""
+        if name not in BYPASS_NAMES:
+            return False, "unknown bypass {!r} (have: {})".format(name, ", ".join(BYPASS_NAMES))
+        on = bool(on)
+        was = self.bypass[name]
+        self.bypass[name] = on
+        if was != on:
+            self._bb_event("bypass", name=name, on=on, note=str(note)[:200], mode=self.mode,
+                           active=[k for k, v in self.bypass.items() if v])
+            if on:
+                # worth a dump: whatever happens next, the record should say this was off
+                self._bb_dump("bypass_enabled", why="{} limit bypassed by the operator".format(name))
+        return True, ""
+
+    def bypass_active(self):
+        return [n for n in BYPASS_NAMES if self.bypass[n]]
+
+    def identify_plan(self, spec):
+        """Validate a wiggle and report the amplitude it would actually use. Queues NOTHING.
+
+        Split out of identify_start so the panel can ask "would this work?" without energising a
+        drive, and so a refusal can say which bound produced it. Returns (ok, why, plan).
+
+        Bounds are computed HERE against the pose the joint is in right now -- the same treatment
+        thermal_start gives a burst -- so a wiggle can never be argued into a hard stop by the web
+        request."""
+        if self._therm is not None and self._therm["running"]:
+            return False, "a thermal burst is still running", None
+        name = str(spec.get("motor", ""))
+        if name not in paths.MOTOR_NAMES:
+            return False, "unknown motor {!r}".format(name), None
+        m = self.by_name[name]
+        if m.pos is None:
+            return False, "{} is not reporting -- never energising a drive we cannot watch".format(name), None
+        try:
+            want_amp = float(spec.get("amp_deg", IDENT_AMP_DEG))
+            duration = float(spec.get("duration_s", IDENT_DURATION_S))
+        except (TypeError, ValueError):
+            return False, "amp_deg and duration_s must be numbers", None
+        if not (want_amp == want_amp and duration == duration):   # NaN survives float()
+            return False, "amp_deg and duration_s must be numbers", None
+        if not (0.0 < want_amp <= IDENT_MAX_AMP_DEG):
+            return False, "amplitude must be in (0, {:.0f}] deg".format(IDENT_MAX_AMP_DEG), None
+        if not (0.5 <= duration <= IDENT_MAX_DURATION_S):
+            return False, "duration must be 0.5-{:.0f} s".format(IDENT_MAX_DURATION_S), None
+
+        side, role = paths.split_name(name)
+        centre = self.calib.norm(name, m.pos)
+        lo, hi = self._hard_bounds(side, role)
+        pose = {n: self.calib.norm(n, mm.pos) for n, mm in self.by_name.items()
+                if mm.pos is not None}
+        if len(pose) != paths.N_MOTORS:
+            return False, "not every joint is reporting -- cannot bound the wiggle", None
+
+        # pose rounded to 0.5 deg: fine enough that a hand-moved joint re-plans, coarse enough
+        # that encoder dither does not defeat the cache
+        ckey = (name, round(want_amp, 2), round(duration, 2), self.calib.zero_epoch,
+                tuple(round(pose[n] * 2.0) for n in paths.MOTOR_NAMES))
+        hit = self._plan_cache
+        if hit is not None and hit[0] == ckey and (time.monotonic() - hit[1]) < self.IDENT_PLAN_CACHE_S:
+            return hit[2]
+
+        # The joint's OWN never-exceed band. This is the bound that actually stops a joint hitting
+        # an end stop, and it always applies.
+        hard_up, hard_dn = max(0.0, hi - centre), max(0.0, centre - lo)
+
+        # The gait-feasibility polygon, which is a different question: can the LEGS be in this
+        # configuration. It can only advise from inside itself -- _safe_room scans outward from the
+        # current pose and returns 0.0 for every direction when that pose is already outside the
+        # recorded set. A robot hanging limp on a stand, sagging, is routinely outside it, and
+        # taking that 0.0 at face value refused every wiggle on the real robot (2026-08-28) with a
+        # message about being near a stop that was not true.
+        #
+        # Homing already resolves exactly this: "_manual_override = homing -- homing trusts the
+        # feasibility net, not the eroded gait polygon". A +-5 deg dither about a joint's MEASURED
+        # position, clamped to its hard band, is in the same category. So the polygon SHRINKS the
+        # amplitude when it can speak, and is skipped -- loudly, in the returned plan -- when it
+        # cannot.
+        pose_ok, pose_why = self._validate_pose(pose, override=False)
+        if pose_ok:
+            amp = min(want_amp, self._safe_room(pose, name, +1.0, want_amp),
+                      self._safe_room(pose, name, -1.0, want_amp), hard_up, hard_dn)
+            bound = "safe workspace"
+            note = ""
+        else:
+            amp = min(want_amp, hard_up, hard_dn)
+            bound = "hard limits"
+            note = ("the current pose is outside the recorded safe workspace ({}), so the wiggle "
+                    "is bounded by {}'s own hard limits instead".format(pose_why, name))
+
+        # The pre-move guard, asked here rather than only on the CAN thread. _activation_allowed
+        # is the authority and still runs when the request is consumed, but it runs AFTER the HTTP
+        # call has already returned 200 -- so a guard refusal reached the operator as a button that
+        # did nothing. _premove_guard is documented pure, so asking it early costs nothing and
+        # turns "nothing happened" into the sentence that says what to do about it.
+        guard_ok, guard_why = self._motion_allowed()
+        if guard_ok:
+            guard_ok, guard_why, _detail = self._premove_guard()
+
+        plan = {"motor": name, "amp_deg": float(amp), "duration_s": duration,
+                "centre_deg": centre, "lo": lo, "hi": hi,
+                "requested_amp_deg": want_amp, "bound": bound, "note": note,
+                "hard_room_deg": round(min(hard_up, hard_dn), 2),
+                "pose_in_workspace": bool(pose_ok),
+                "guard_ok": bool(guard_ok), "guard_why": guard_why}
+        if not guard_ok:
+            return False, guard_why, plan
+        if amp < IDENT_MIN_AMP_DEG:
+            out = (False, ("{} has only {:.1f} deg of room here (bounded by {}) and the wiggle "
+                           "needs {:.1f} -- move it away from the stop first"
+                           .format(name, amp, bound, IDENT_MIN_AMP_DEG)), plan)
+        else:
+            out = (True, "", plan)
+        self._plan_cache = (ckey, time.monotonic(), out)
+        return out
+
+    def identify_start(self, spec):
+        """identify_plan, plus queueing it for the CAN thread."""
+        ok, why, plan = self.identify_plan(spec)
+        if not ok:
+            return False, why
+        with self.lock:
+            self._wiggle_req = plan
+        return True, ""
+
+    def identify_stop(self):
+        with self.lock:
+            self._wiggle_stop = True
+
+    def get_identify(self):
+        """The finished wiggle and its verdict. None while one is still running."""
+        i = self._wiggle
+        if i is None or i["running"]:
+            return None
+        return self._identify_result(i)
+
+    def _start_identify(self, req, now):
+        self._wiggle = {
+            "motor": req["motor"], "amp_deg": req["amp_deg"], "duration_s": req["duration_s"],
+            "centre_deg": req["centre_deg"], "lo": req["lo"], "hi": req["hi"],
+            "bound": req.get("bound", ""), "note": req.get("note", ""),
+            "t0": now, "t_move": now + HOLD_BEFORE_MOVE_S, "t_end": None,
+            "running": True, "abort": None,
+            # raw pose at entry: what the other five are commanded to for the whole run, and the
+            # datum every excursion is measured from. Raw, so none of this trusts the calibration.
+            "raw0": {n: mm.pos for n, mm in self.by_name.items() if mm.pos is not None},
+            "raw_lo": {}, "raw_hi": {}, "track_err": 0.0,
+        }
+        for n, r in self._wiggle["raw0"].items():
+            self._wiggle["raw_lo"][n] = r
+            self._wiggle["raw_hi"][n] = r
+        self._last_reject = ""
+        self._set_mode("IDENTIFY", "joint identification wiggle", motor=req["motor"],
+                       amp_deg=round(req["amp_deg"], 2), duration_s=req["duration_s"])
+
+    def _wiggle_envelope(self, u):
+        """Raised-cosine in/out over IDENT_RAMP_S at each end, as a fraction of full amplitude.
+
+        The sine already starts and ends at the centre after whole cycles; the envelope is what
+        removes the velocity step, so the joint eases in and eases out instead of snapping."""
+        i = self._wiggle
+        ramp = min(IDENT_RAMP_S, 0.4 * i["duration_s"])
+        if ramp <= 0.0:
+            return 1.0
+        if u < ramp:
+            return 0.5 * (1.0 - np.cos(np.pi * u / ramp))
+        if u > i["duration_s"] - ramp:
+            return 0.5 * (1.0 - np.cos(np.pi * max(0.0, i["duration_s"] - u) / ramp))
+        return 1.0
+
+    def _tick_identify(self, now, dt):
+        """One tick of the wiggle: sine on the selected joint, position hold on the other five.
+
+        The other five are commanded to the RAW angle they were measured at when the run started,
+        never through the calibration -- identical to the hold-before-move rule and for the same
+        reason. It also makes the measurement clean: a LIMP joint can be back-driven through the
+        4-bar by the joint that is moving, which would read as a second joint responding and would
+        answer the mapping question wrongly."""
+        i = self._wiggle
+        if i is None:
+            self._set_mode("LIMP", "identify state vanished")
+            return
+
+        # excursions are tracked across the whole run, including the hold and the tail
+        for n, mm in self.by_name.items():
+            if mm.pos is None or n not in i["raw_lo"]:
+                continue
+            i["raw_lo"][n] = min(i["raw_lo"][n], mm.pos)
+            i["raw_hi"][n] = max(i["raw_hi"][n], mm.pos)
+
+        if not i["running"]:
+            self._stream_limp()                    # finished: hold limp until the panel clears it
+            return
+
+        ok, why = self._motion_allowed()
+        if not ok:
+            i["running"], i["abort"], i["t_end"] = False, why, now
+            self._stream_limp()
+            self._trip(why)
+            return
+
+        # every joint that is not under test holds where it started, for the whole run
+        for n, mm in self.by_name.items():
+            if n == i["motor"]:
+                continue
+            raw = i["raw0"].get(n)
+            if raw is not None:
+                canio.set_pos(mm.bus, mm.cid, raw)
+                self._last_cmd_raw[n] = raw
+
+        m = self.by_name[i["motor"]]
+        if now < i["t_move"]:                      # (a) hold-before-move, on the test joint too
+            raw = i["raw0"].get(i["motor"])
+            if raw is not None:
+                canio.set_pos(m.bus, m.cid, raw)
+                self._last_cmd_raw[i["motor"]] = raw
+            return
+
+        u = now - i["t_move"]
+        want = i["centre_deg"] + (i["amp_deg"] * self._wiggle_envelope(u)
+                                 * float(np.sin(2.0 * np.pi * IDENT_FREQ_HZ * u)))
+        want = float(np.clip(want, i["lo"], i["hi"]))
+        if m.pos is not None:
+            err = abs(self.calib.norm(i["motor"], m.pos) - want)
+            i["track_err"] = max(i["track_err"], err)
+            if err > i["amp_deg"] + IDENT_TRACK_MARGIN_DEG:
+                i["running"] = False
+                i["abort"] = ("{} is {:.1f} deg off a +-{:.1f} deg command -- more than a joint "
+                              "that simply refuses to move could be. Most likely the calibration "
+                              "sign is inverted and it is being driven away from the target."
+                              .format(i["motor"], err, i["amp_deg"]))
+                i["t_end"] = now
+                self._stream_limp()
+                self._bb_dump("identify_track_error", why=i["abort"])
+                return
+        raw = self.calib.raw(i["motor"], want)
+        canio.set_pos(m.bus, m.cid, raw)
+        self._last_cmd_raw[i["motor"]] = raw
+
+        if u >= i["duration_s"]:                   # the envelope has already returned it to centre
+            i["running"], i["t_end"] = False, now
+            res = self._identify_result(i)
+            self._bb_event("identify.done", motor=i["motor"], verdict=res["verdict"],
+                           excursions=res["excursions"])
+            self._bb_dump("identify", why="identify complete: " + res["verdict"])
+
+    def _identify_result(self, i):
+        """Per-joint excursion over the run, and what it says about the mapping.
+
+        Excursion is max-min of the RAW encoder angle. calib.norm is sign*(raw-offset), so this is
+        the same number of degrees the normalized axis moved -- but it is computed without the
+        calibration, which is exactly what lets it be used to CHECK a calibration."""
+        exc = {n: round(float(i["raw_hi"][n] - i["raw_lo"][n]), 2) for n in i["raw_lo"]}
+        moved = sorted([n for n, v in exc.items() if v >= IDENT_MOVED_DEG], key=lambda n: -exc[n])
+        sel = i["motor"]
+        if i["abort"]:
+            verdict, detail = "aborted", i["abort"]
+        elif moved == [sel]:
+            verdict = "confirmed"
+            detail = "{} moved {:.1f} deg, and nothing else moved more than {:.1f}".format(
+                sel, exc.get(sel, 0.0), IDENT_MOVED_DEG)
+        elif not moved:
+            verdict = "no-motion"
+            detail = ("nothing moved more than {:.1f} deg. That drive is not following position "
+                      "commands, or it is not the drive you think it is.".format(IDENT_MOVED_DEG))
+        elif sel not in moved:
+            verdict = "mismatch"
+            detail = ("you selected {} but it barely moved ({:.1f} deg) -- {} moved instead. The "
+                      "motor map is wrong.".format(sel, exc.get(sel, 0.0), " and ".join(moved)))
+        else:
+            others = [n for n in moved if n != sel]
+            verdict = "coupled"
+            detail = ("{} moved {:.1f} deg as commanded, but so did {}. Either they are "
+                      "mechanically coupled, or two drives answer to the same id.".format(
+                          sel, exc.get(sel, 0.0),
+                          " and ".join("{} ({:.1f} deg)".format(n, exc[n]) for n in others)))
+        return {"motor": sel, "amp_deg": round(i["amp_deg"], 2), "duration_s": i["duration_s"],
+                "abort": i["abort"], "track_err_deg": round(i["track_err"], 2),
+                "bound": i.get("bound", ""), "note": i.get("note", ""),
+                "excursions": exc, "moved": moved, "verdict": verdict, "detail": detail,
+                "threshold_deg": IDENT_MOVED_DEG}
+
+    def _identify_pub(self, now):
+        """Live wiggle state for the panel. None when none has been run this session."""
+        i = self._wiggle
+        if i is None:
+            return None
+        out = {"motor": i["motor"], "running": bool(i["running"]),
+               "amp_deg": round(i["amp_deg"], 2), "duration_s": i["duration_s"],
+               "elapsed_s": round(max(0.0, now - i["t_move"]), 2),
+               "holding": now < i["t_move"], "abort": i["abort"]}
+        if not i["running"]:
+            out.update(self._identify_result(i))
+        return out
+
+    # ================================================================= POLICY (learned control)
+    # A trained policy running on the drives, from the web UI, in this thread.
+    #
+    # WHY IT LIVES HERE AND NOT IN A SUBPROCESS
+    # -----------------------------------------
+    # robot/deploy/run_policy.py does exactly this from a terminal, and it refuses to start while
+    # this daemon is up -- correctly, because the CAN bus has exactly ONE owner and two writers
+    # race, the loser being a motor holding whichever frame arrived last. So "run a policy from the
+    # panel" cannot mean "launch run_policy.py"; it has to mean running the control law inside the
+    # loop that already owns the buses, the way THERMAL and IDENTIFY do.
+    #
+    # Everything that decides behaviour is still the deploy package, imported, not reimplemented:
+    #   bundle.Bundle          the .npz that IS the control law (nets, stance, scales, gait cfg)
+    #   controller.PolicyController   the 200 Hz law, byte-identical to what verify_export.py
+    #                          proved against the torch policy inside MuJoCo
+    #   safety.SafetyGovernor  clamp-then-kill on position/rate/torque/gains + the watchdogs
+    #   thermal.MotorThermalModel     the winding observer that derates the torque budget
+    #   jointmap.JointMap      model radians <-> normalized degrees, per joint, verified
+    #   mit.pack               the force-control frame (kp-first, DLC 8 always)
+    # This module contributes the parts that need the robot: the phase machine, the daemon's own
+    # pre-move guard and workspace polygon, the flight-recorder events, and the dead-man.
+    #
+    # WHAT IT STILL DOES NOT DO: balance. Every bundle that can be deployed at all is railed in
+    # roll and yaw in training (a policy that reads the privileged base velocity cannot run here at
+    # all, and is refused at arm time). SUPPORT THE TORSO -- that is the `supported` acknowledgement
+    # and it is the one hazard no check in this file can see.
+    def policy_arm(self, spec):
+        """Validate a run request end to end and queue it. Returns (ok, why, info).
+
+        Runs on the HTTP thread on purpose: loading a bundle, building the nets and scanning the
+        workspace for the stance are tens of milliseconds of work, and none of it may happen inside
+        the 200 Hz tick. What crosses into the CAN thread is finished objects only."""
+        info = {}
+        busy = self._policy_busy_with()
+        if busy:
+            return False, busy, info
+        if self._pol is not None and self._pol["phase"] not in ("done",):
+            return False, "a policy run is already active", info
+
+        # ---- the acknowledgement no software check can replace ---------------------------------
+        if spec.get("supported") is not True:
+            return False, ("confirm the torso is physically supported. Every deployable bundle was "
+                           "trained with the base's roll and yaw RAILED -- it has never experienced "
+                           "them free and nothing in it stabilises them. On a free-standing robot "
+                           "it is open-loop there and a fall is the expected outcome."), info
+
+        # ---- the bundle -----------------------------------------------------------------------
+        fname = os.path.basename(str(spec.get("file", "")))
+        if not fname.endswith(".npz") or not fname[:-4]:
+            return False, "a policy bundle is a .npz file", info
+        # both bundle directories: export_policy.py writes to deploy/bundles/, the panel's upload
+        # writes to data/policies/, and a name resolves against whichever has it
+        path = paths.find_policy_bundle(fname)
+        if path is None:
+            return False, "no bundle {!r} in data/policies/ or deploy/bundles/".format(fname), info
+        try:
+            from bundle import Bundle
+            from controller import PolicyController
+            import thermal as TH
+            b = Bundle.load(path)
+        except Exception as e:                              # noqa: BLE001 -- surfaced as data
+            return False, "not a loadable policy bundle: {}".format(e), info
+
+        hz = 1.0 / float(b.control_dt)
+        if abs(hz - TICK_HZ) > 1.0:
+            return False, ("this bundle wants {:.0f} Hz control and the daemon runs at {:.0f}. The "
+                           "action filter, the actuation delay and the slew limit are all per-step "
+                           "constants -- running it at the wrong rate is a different control law."
+                           .format(hz, TICK_HZ)), info
+        if bool(b.meta.get("obs_base_vel")):
+            return False, ("this bundle was trained with the PRIVILEGED base velocity in its "
+                           "observation (obs_base_vel=True). No robot can produce that number, so "
+                           "the policy cannot be deployed at all -- re-train or export a checkpoint "
+                           "with obs_base_vel=False."), info
+
+        # ---- the joint map: a sign error here drives corrections the WRONG WAY at 200 N*m/rad ---
+        if tuple(JM.MOTOR_NAMES) != tuple(paths.MOTOR_NAMES):
+            return False, ("jointmap and paths disagree about motor ordering -- refusing to guess "
+                           "which column is which joint"), info
+        jm_path = os.path.join(paths.DEPLOY, "deploy_map.json")
+        try:
+            jm = JM.JointMap.load(jm_path)
+        except OSError:
+            return False, ("robot/deploy/deploy_map.json does not exist -- the model->motor joint "
+                           "map has never been built on this robot. Run "
+                           "robot/deploy/make_deploy_map.py after verifying fklut."), info
+        except (ValueError, KeyError) as e:
+            return False, "deploy_map.json is unreadable: {}".format(e), info
+        jm_ok, jm_why = jm.check_ready()
+        if not jm_ok and spec.get("skip_jointmap_check") is not True:
+            return False, jm_why, info
+
+        # ---- the IMU: gravity is the only thing that can say the robot has fallen ---------------
+        sh = self.sense
+        no_imu = spec.get("no_imu") is True
+        if not no_imu:
+            if sh is None:
+                return False, ("no Sense HAT: the fall detector reads gravity and there is none. "
+                               "Start the server without --no-sensors, or acknowledge no_imu and "
+                               "keep the robot physically restrained."), info
+            if sh.fast() is None:
+                return False, ("the IMU has not produced a sample yet -- refusing to run a "
+                               "balance-relevant controller blind"), info
+            if not self.mock and not getattr(getattr(sh, "mount", None), "calibrated", False):
+                return False, ("the IMU mount rotation has not been calibrated, so 'up' is in CHIP "
+                               "axes rather than body axes. Every gravity reading the policy sees "
+                               "would be rotated. Run the mount calibration first."), info
+
+        # ---- the thermal observer ---------------------------------------------------------------
+        try:
+            amb = float(spec.get("ambient_c", 25.0))
+        except (TypeError, ValueError):
+            return False, "ambient_c must be a number", info
+        chain = [self._thermal_params(n) for n in JM.MODEL_TO_MOTOR]
+        uncal = sorted({p.name for p in chain if not p.calibrated})
+        if uncal and spec.get("allow_uncalibrated_thermal") is not True:
+            return False, ("the thermal parameters for {} are UNCALIBRATED placeholders, so the "
+                           "winding-temperature estimate that derates every torque budget is a "
+                           "guess. Fit them (thermal panel), or acknowledge "
+                           "allow_uncalibrated_thermal.".format(", ".join(uncal))), info
+        try:
+            thermal = TH.MotorThermalModel(chain, dt=1.0 / TICK_HZ, t_amb=amb,
+                                           names=list(JM.MODEL_ACTUATORS),
+                                           allow_uncalibrated=True)
+        except ValueError as e:
+            return False, str(e), info
+
+        # ---- the governor's envelope ------------------------------------------------------------
+        # Start from what the policy was TRAINED against (the model's own ctrlrange and force
+        # ranges) and narrow it with THIS robot's hard bounds. Narrowing is the only direction that
+        # is ever safe, and it is the direction the daemon's own limits point.
+        lo_norm = np.empty(paths.N_MOTORS)
+        hi_norm = np.empty(paths.N_MOTORS)
+        for i, n in enumerate(paths.MOTOR_NAMES):
+            lo_norm[i], hi_norm[i] = self._hard_bounds(*paths.split_name(n))
+        e0, e1 = jm.to_model_rad(lo_norm), jm.to_model_rad(hi_norm)
+        hard_lo, hard_hi = np.minimum(e0, e1), np.maximum(e0, e1)
+
+        i_cont = np.array([p.i_continuous(amb) for p in chain])
+        peak = np.asarray(b["forcerange"], float)
+        tau_cont = np.minimum(peak, jm.kt_joint * jm.kt_efficiency * i_cont)
+        try:
+            amp_cap = spec.get("drive_amp_limit")
+            amp_cap = None if amp_cap in (None, "") else float(amp_cap)
+        except (TypeError, ValueError):
+            return False, "drive_amp_limit must be a number", info
+        if amp_cap:
+            peak = np.minimum(peak, jm.kt_joint * jm.kt_efficiency * amp_cap)
+        try:
+            max_s = float(spec.get("max_seconds", POLICY_DEFAULT_SECONDS))
+        except (TypeError, ValueError):
+            return False, "max_seconds must be a number", info
+        if not (max_s == max_s) or not (1.0 <= max_s <= POLICY_MAX_SECONDS):
+            return False, "max_seconds must be 1-{:.0f}".format(POLICY_MAX_SECONDS), info
+
+        limits = SAFE.Limits.from_bundle(b, hard_lo=hard_lo, hard_hi=hard_hi, tau_cont=tau_cont,
+                                         deadman_s=POLICY_DEADMAN_S,
+                                         telemetry_stale_s=POLICY_TELEMETRY_STALE_S)
+        limits.tau_peak = peak
+        gov = SAFE.SafetyGovernor(limits, 1.0 / TICK_HZ, thermal=thermal,
+                                  names=list(JM.MODEL_ACTUATORS))
+
+        # ---- the stance has to be somewhere this robot can actually stand ----------------------
+        stance = np.asarray(b["nominal_ctrl"], float)
+        stance_norm = jm.to_norm_deg(stance)
+        pose = {n: float(stance_norm[i]) for i, n in enumerate(paths.MOTOR_NAMES)}
+        ok, why = self._validate_pose(pose, override=False)
+        if not ok:
+            return False, ("the stance this policy centres its gait on is not a pose this robot "
+                           "may hold: {}. The approach would refuse on its first tick. Extend the "
+                           "recorded workspace, or switch the workspace guard off in the top bar "
+                           "and accept that self-collision is no longer checked.".format(why)), info
+        for n, v in pose.items():
+            lo, hi = self._hard_bounds(*paths.split_name(n))
+            if not lo <= v <= hi:
+                return False, ("the policy's stance puts {} at {:+.1f} deg, outside its hard limit "
+                               "[{:+.0f}, {:+.0f}] -- the joint map or the calibration is wrong"
+                               .format(n, v, lo, hi)), info
+
+        # ---- the command, inside the box this checkpoint was trained to ------------------------
+        try:
+            v_want = float(spec.get("v_cmd", 0.0))
+            yaw_want = float(spec.get("yaw_cmd", 0.0))
+        except (TypeError, ValueError):
+            return False, "v_cmd and yaw_cmd must be numbers", info
+        if not (v_want == v_want and yaw_want == yaw_want):
+            return False, "v_cmd and yaw_cmd must be numbers", info
+        v_cmd = float(np.clip(v_want, -float(b.cmd_v_back_trained), float(b.cmd_v_fwd_trained)))
+        yaw_lim = float(b.cmd_yaw_trained)
+        yaw_cmd = float(np.clip(yaw_want, -yaw_lim, yaw_lim))
+
+        ctrl = PolicyController(b)
+        # Can this machine actually run it? Timed HERE, on the HTTP thread, with the real bundle
+        # and the real numpy -- not estimated. ctrl.step mutates the controller, which is fine:
+        # _tick_policy calls ctrl.start() when it enters RUN and start() reallocates everything.
+        step_ms = self._policy_probe(ctrl, b)
+        slow = step_ms > POLICY_MAX_STEP_MS
+        if slow and spec.get("allow_slow_loop") is not True:
+            budget_ms = 1000.0 / TICK_HZ
+            return False, (
+                "this machine needs {:.1f} ms per control tick for this bundle and the loop period "
+                "is {:.1f} ms. The control law's dt is a CONSTANT, so running it anyway plays the "
+                "gait at about {:.2f}x speed and inflates every joint velocity the policy observes "
+                "by about {:.1f}x -- an observation it was never trained on. Acknowledge "
+                "allow_slow_loop to bring the drives up anyway and watch them move; the lasting "
+                "fix is a numpy linked against OpenBLAS, since most of that time is three matrix "
+                "multiplies running on the reference BLAS.".format(
+                    step_ms, budget_ms, min(1.0, budget_ms / max(step_ms, 1e-6)),
+                    max(1.0, step_ms / budget_ms))), info
+        # preallocated, because a 200 Hz loop must not allocate: approach budget + run + slack
+        rows = int((max_s + POLICY_APPROACH_MAX_S + 2.0) * TICK_HZ) + 8
+        req = {
+            "file": fname, "bundle": b, "ctrl": ctrl, "gov": gov, "thermal": thermal, "jm": jm,
+            "stance": stance, "v_cmd": v_cmd, "yaw_cmd": yaw_cmd, "max_seconds": max_s,
+            "ambient_c": amb, "no_imu": no_imu, "log": np.zeros((rows, POLICY_LOG_COLS), np.float32),
+            "jm_verified": jm_ok, "thermal_uncalibrated": bool(uncal),
+            "step_ms": step_ms, "slow_loop": slow,
+        }
+        info = {"file": fname, "run": b.meta.get("run"), "checkpoint": b.meta.get("checkpoint"),
+                "v_cmd": v_cmd, "yaw_cmd": yaw_cmd, "max_seconds": max_s,
+                "v_cmd_clamped": v_cmd != v_want, "yaw_cmd_clamped": yaw_cmd != yaw_want,
+                "stance_norm_deg": {k: round(v, 2) for k, v in pose.items()},
+                "tau_peak": np.round(peak, 1).tolist(),
+                "tau_cont": np.round(tau_cont, 1).tolist(),
+                "thermal_uncalibrated": bool(uncal), "jointmap_verified": jm_ok,
+                "no_imu": no_imu, "log_rows": rows,
+                "step_ms": round(step_ms, 2), "slow_loop": slow,
+                "tick_budget_ms": round(1000.0 / TICK_HZ, 2)}
+        self._pol_deadman = time.monotonic()          # arm the dead-man before the mode change
+        with self.lock:
+            self._pol_req = req
+        return True, "", info
+
+    def _policy_probe(self, ctrl, b):
+        """Median milliseconds per ctrl.step() on THIS machine, with THIS bundle. Measured, never
+        assumed: the same numpy on the same Pi is 90x off the figure the port was estimated at,
+        because whether it found OpenBLAS is not something the code can see."""
+        pos = np.asarray(b["nominal_ctrl"], float)
+        zero6, grav, gyro = np.zeros(6), POLICY_UPRIGHT_GRAV.copy(), np.zeros(3)
+        ctrl.start(pos, zero6, zero6, grav, gyro)
+        for _ in range(5):                                   # first calls allocate; discard them
+            ctrl.step(pos, zero6, zero6, grav, gyro)
+        ts = []
+        for _ in range(POLICY_PROBE_TICKS):
+            t0 = time.perf_counter()
+            ctrl.step(pos, zero6, zero6, grav, gyro)
+            ts.append(time.perf_counter() - t0)
+        ts.sort()
+        return float(ts[len(ts) // 2]) * 1e3                 # median: one scheduler hiccup is not it
+
+    def _policy_busy_with(self):
+        """The other exclusive activities. One thread, one bus, one thing at a time."""
+        if self.mode == "ESTOPPED":
+            return "the e-stop is latched -- clear it first"
+        if self._therm is not None and self._therm["running"]:
+            return "a thermal burst is still running"
+        if self._wiggle is not None and self._wiggle["running"]:
+            return "an identification wiggle is still running"
+        if self._meas is not None and self._meas["running"]:
+            return "a system-ID excitation is still running"
+        if self.mode == "PLAYBACK":
+            return "a gait playback is running -- stop it first"
+        return ""
+
+    def policy_stop(self, hard=False):
+        """Ask for a stop. SOFT freezes the target and bleeds the gains out over ~0.3 s, which
+        puts the robot down under control; HARD zeroes them this tick."""
+        with self.lock:
+            self._pol_stop = "hard" if hard else "soft"
+
+    def policy_keepalive(self):
+        """The dead-man. The panel refreshes this while the run is visible on screen; if it stops
+        arriving -- tab closed, page hidden, Wi-Fi gone -- the governor soft-stops within
+        POLICY_DEADMAN_S. It is deliberately NOT refreshed by the status poll: a poll proves a
+        browser is alive, not that anyone is watching.
+
+        Lock-free on purpose, and _deadman_age below reads it the same way: a single float store
+        is atomic under the GIL, and taking self.lock here would be a bug rather than caution --
+        _publish() calls _policy_pub() while ALREADY holding it, threading.Lock is not reentrant,
+        and the deadlock lands in the thread that owns both CAN buses."""
+        self._pol_deadman = time.monotonic()
+
+    def get_policy(self):
+        """The finished run, for the HTTP layer to persist. None while one is still active."""
+        p = self._pol
+        if p is None or p["phase"] != "done":
+            return None
+        g = p["gov"].status()
+        return {
+            "file": p["file"], "run": p["run_name"], "checkpoint": p["checkpoint"],
+            "v_cmd": p["v_cmd"], "yaw_cmd": p["yaw_cmd"], "max_seconds": p["max_seconds"],
+            "ambient_c": p["ambient_c"], "exit_reason": p["exit_reason"],
+            "reached_run": p["reached_run"], "run_seconds": round(p["run_seconds"], 2),
+            "governor": g, "no_imu": p["no_imu"],
+            "step_ms": round(float(p["step_ms"]), 2), "slow_loop": bool(p["slow_loop"]),
+            "realised_hz": round(float(p["rate_hz"]), 1), "nominal_hz": float(TICK_HZ),
+            "thermal_uncalibrated": p["thermal_uncalibrated"],
+            "jointmap_verified": p["jm_verified"],
+            "peak_winding_c": np.round(p["thermal"].peak_w, 1).tolist(),
+            "ticks": int(p["n"]), "late_ticks": int(self._slip_count - p["slip0"]),
+            "columns": POLICY_LOG_COLUMNS,
+            "log": p["log"][:int(p["n"])],
+        }
+
+    def _start_policy(self, req, now):
+        p = dict(req)
+        b = req["bundle"]
+        p.update(phase="hold", t0=now, t_move=now + HOLD_BEFORE_MOVE_S, t_phase=now,
+                 t_end=None, run_t0=None, run_seconds=0.0, reached_run=False,
+                 exit_reason=None, n=0, slip0=self._slip_count, ws_block=0, ws_blocked_total=0,
+                 last_ws_target=None, prev_pos=None, approach_total=0.0, approach_f=0.0,
+                 freq=0.0, gait_phase=0.0, saturated=0,
+                 rate_t0=None, rate_n=0, rate_hz=float(TICK_HZ),
+                 run_name=b.meta.get("run"), checkpoint=b.meta.get("checkpoint"),
+                 imu_age=0.0, tel_age=0.0)
+        self._pol = p
+        with self.lock:
+            # a stop posted after the previous run had already ended is still sitting there, and
+            # it would kill this one on its first tick
+            self._pol_stop = None
+        self._last_reject = ""
+        self._enter_hold(now)
+        # the observer must start at the drives' reported temperature, never at ambient: a robot
+        # switched on after a run is not cold, and this is the one estimate that must never be
+        # optimistic
+        t_now = np.array([float(self.by_name[n].temp) for n in JM.MODEL_TO_MOTOR])
+        p["thermal"].reset(t_now, t_amb=p["ambient_c"])
+        self._set_mode("POLICY", "policy run armed", file=p["file"], run=p["run_name"],
+                       checkpoint=p["checkpoint"], v_cmd=p["v_cmd"], yaw_cmd=p["yaw_cmd"],
+                       max_seconds=p["max_seconds"], no_imu=p["no_imu"],
+                       step_ms=round(p["step_ms"], 2), slow_loop=p["slow_loop"],
+                       jointmap_verified=p["jm_verified"],
+                       thermal_uncalibrated=p["thermal_uncalibrated"],
+                       bypass=[k for k, v in self.bypass.items() if v])
+
+    # ---------------------------------------------------------------- POLICY: the tick
+    def _policy_imu(self):
+        """(gravity_body, gyro_body, age_s) in the MuJoCo convention the controller expects.
+
+        The Sense HAT publishes world UP in body axes; gravity is world DOWN, so grav = -up."""
+        sh = self.sense
+        if sh is None:
+            return POLICY_UPRIGHT_GRAV.copy(), np.zeros(3), 0.0
+        f = sh.fast()
+        if f is None:
+            return POLICY_UPRIGHT_GRAV.copy(), np.zeros(3), 1e9
+        t, up, gyr = f
+        return -np.asarray(up, float), np.asarray(gyr, float), max(0.0, time.time() - t)
+
+    def _policy_measure(self, p):
+        """Everything the controller and the governor read, in the MODEL frame."""
+        jm = p["jm"]
+        norm = np.array([self.calib.norm(n, self.by_name[n].pos) for n in paths.MOTOR_NAMES])
+        amps = np.array([self.by_name[n].cur for n in paths.MOTOR_NAMES])
+        temp = np.array([float(self.by_name[n].temp) for n in JM.MODEL_TO_MOTOR])
+        err = np.array([int(self.by_name[n].err) for n in JM.MODEL_TO_MOTOR])
+        return jm.to_model_rad(norm), amps, temp, err
+
+    def _policy_send(self, p, target_model, kp_model, kd_model):
+        """Model-frame command -> six force-control frames. Returns the clamped wire fields.
+
+        Force control, not SET_POS: kp and kd are per-joint per-tick outputs of the policy's
+        impedance channel, and the drive computes tau = kp*(p_des - p) - kd*v, which is exactly the
+        MuJoCo position actuator the policy trained against. v_des and tau_ff stay at zero because
+        their wire spans have never been identified for these motors (see mit.py)."""
+        jm = p["jm"]
+        norm_deg = jm.to_norm_deg(target_model)
+        kp_m = np.asarray(kp_model, float)[jm.motor_from_model]
+        kd_m = np.asarray(kd_model, float)[jm.motor_from_model]
+        clamped = set()
+        self._cmd_zero_epoch = self.calib.zero_epoch          # commanding absolute positions
+        for i, n in enumerate(paths.MOTOR_NAMES):
+            m = self.by_name[n]
+            raw = self.calib.raw(n, float(norm_deg[i]))
+            payload, cl = mit.pack(np.radians(raw), float(kp_m[i]), float(kd_m[i]))
+            clamped.update(cl)
+            canio.force_control(m.bus, m.cid, payload)
+            self._last_cmd_raw[n] = raw
+        self._force_until = self._tick_mono + POLICY_FORCE_RELEASE_S
+        return clamped
+
+    def _policy_workspace(self, p, target_model):
+        """(ok, why) for a MODEL-frame command, against the recorded safe workspace.
+
+        This is the check the governor cannot make. The governor bounds each joint independently,
+        and self-collision is a property of the COMBINATION -- two individually-legal angles can
+        put the legs through each other. It is also the one guard here the operator can switch off
+        (the `workspace` bypass in the top bar), and _validate_pose already honours that."""
+        norm = p["jm"].to_norm_deg(target_model)
+        pose = {n: float(norm[i]) for i, n in enumerate(paths.MOTOR_NAMES)}
+        return self._validate_pose(pose, override=False)
+
+    def _policy_hold_frame(self, p):
+        """Hold the pose the joints were MEASURED at, in raw encoder degrees, at approach gains.
+
+        The same hold-before-move discipline MANUAL uses, in the force-control frame: the command
+        never passes through calibration.offsets, so it is correct even against a completely wrong
+        zero. Whatever the offsets say, commanding where the joint already is cannot slew."""
+        for n, m in self.by_name.items():
+            raw = self._hold_raw.get(n)
+            if raw is None:
+                continue
+            payload, _ = mit.pack(np.radians(raw), POLICY_APPROACH_KP, POLICY_APPROACH_KD)
+            canio.force_control(m.bus, m.cid, payload)
+            self._last_cmd_raw[n] = raw
+        self._force_until = self._tick_mono + POLICY_FORCE_RELEASE_S
+
+    def _policy_limp(self):
+        """Zero-gain force frame AND SET_CURRENT 0, streamed. Both, because the drive holds its
+        last command in whichever mode it is in and 'stop sending' is not 'stop commanding'."""
+        payload = mit.limp_payload()
+        for m in self.motors:
+            canio.force_control(m.bus, m.cid, payload)
+            canio.set_current(m.bus, m.cid, 0.0)
+        self._last_cmd_raw.clear()
+
+    def _policy_end(self, p, now, reason):
+        p["phase"] = "done"
+        p["t_end"] = now
+        p["exit_reason"] = reason
+        self._policy_limp()
+        self._force_until = self._tick_mono + POLICY_FORCE_RELEASE_S
+        g = p["gov"].status()
+        self._bb_event("policy.done", file=p["file"], run=p["run_name"],
+                       checkpoint=p["checkpoint"], reason=reason, reached_run=p["reached_run"],
+                       run_seconds=round(p["run_seconds"], 2), ticks=int(p["n"]),
+                       late_ticks=int(self._slip_count - p["slip0"]), governor=g,
+                       ws_blocked_ticks=int(p["ws_blocked_total"]),
+                       peak_winding_c=np.round(p["thermal"].peak_w, 1).tolist())
+        self._bb_dump("policy_run", why=reason)
+
+    def _policy_log(self, p, t, pos, vel, tau, amps, temp, grav, gyro, v, stop_code):
+        """One row into the preallocated buffer. `amps` arrives in MOTOR order and every other
+        six-vector here is in MODEL actuator order, so it is reindexed -- a log whose columns are
+        in two different orders is a log that will be read wrong once."""
+        n = int(p["n"])
+        if n >= p["log"].shape[0]:
+            return
+        row = p["log"][n]
+        row[0] = t
+        row[1:7] = pos
+        row[7:13] = vel
+        row[13:19] = tau
+        row[19:25] = np.asarray(amps, float)[p["jm"].model_from_motor]
+        row[25:31] = temp
+        row[31:34] = grav
+        row[34:37] = gyro
+        row[37:43] = v.target
+        row[43:49] = v.kp
+        row[49:55] = v.kd
+        row[55:61] = p["thermal"].t_winding
+        row[61] = p["gait_phase"]
+        row[62] = p["freq"]
+        row[63] = stop_code
+        p["n"] = n + 1
+
+    def _tick_policy(self, now, dt):
+        p = self._pol
+        if p is None:
+            self._set_mode("LIMP", "policy state vanished")
+            return
+        if p["phase"] == "done":
+            self._policy_limp()
+            return
+
+        ok, why = self._motion_allowed()
+        if not ok:
+            self._policy_end(p, now, why)
+            self._trip(why)
+            return
+
+        gov = p["gov"]
+        stale = self._telemetry_age()
+        deadman = self._deadman_age()
+        grav, gyro, imu_age = self._policy_imu()
+        p["tel_age"], p["imu_age"] = stale, imu_age
+
+        with self.lock:
+            req_stop = self._pol_stop
+            self._pol_stop = None
+        if req_stop:
+            gov.kill("stopped by the operator", hard=(req_stop == "hard"))
+
+        # ---- watchdogs that apply in EVERY phase, not just under the policy --------------------
+        if stale > POLICY_TELEMETRY_STALE_S:
+            gov.kill("telemetry stale by {:.0f} ms -- never command a joint we cannot see"
+                     .format(stale * 1e3), hard=True)
+        if deadman > POLICY_DEADMAN_S:
+            gov.kill("dead-man not refreshed for {:.2f} s -- the panel stopped saying it is "
+                     "watching".format(deadman), hard=False)
+        if not p["no_imu"] and imu_age > POLICY_IMU_STALE_S:
+            gov.kill("IMU sample is {:.0f} ms old -- gravity is the only fall detector there is"
+                     .format(imu_age * 1e3), hard=True)
+
+        # ---- measured speed, which is NOT what the governor's rate clamp bounds -------------
+        # The governor limits how fast the TARGET may move. This is how fast the joint is actually
+        # turning, and on 2026-09-01 the difference between those two was four faulted drives.
+        if not self.bypass["speed"]:
+            for n, m in self.by_name.items():
+                if m.pos is not None and abs(m.spd) > POLICY_MAX_ERPM:
+                    why = ("{} runaway {:.0f} ERPM (> {:.0f}) -- going limp rather than braking, "
+                           "because braking a joint at this speed is what puts the bus into "
+                           "over-voltage".format(n, m.spd, POLICY_MAX_ERPM))
+                    self._policy_end(p, now, why)
+                    self._trip(why)
+                    return
+
+        pos, amps, temp, err = self._policy_measure(p)
+        if p["prev_pos"] is None:
+            p["prev_pos"] = pos.copy()
+        # Joint velocity from the DIFFERENTIATED model position at the NOMINAL period, exactly as
+        # run_policy.py does: the drive reports ERPM and nothing in this repo has ever measured the
+        # ERPM-to-joint-speed scale. Noisy but unambiguous, and inside the noise band the policy
+        # trained against.
+        vel = (pos - p["prev_pos"]) * TICK_HZ
+        p["prev_pos"] = pos.copy()
+        tau = p["jm"].torque_to_model(amps)
+        amps_model = np.abs(amps)[p["jm"].model_from_motor]
+
+        # ---- HOLD: the first commands are where the joints already are --------------------------
+        if p["phase"] == "hold":
+            if gov.stop != SAFE.STOP_NONE:
+                self._policy_end(p, now, "; ".join(gov.reasons) or "stopped before the approach")
+                return
+            if now < p["t_move"]:
+                gov.observe(amps_model, omega=np.abs(vel), drive_temp=temp, t_amb=p["ambient_c"])
+                self._policy_hold_frame(p)
+                return
+            p["phase"] = "approach"
+            p["t_phase"] = now
+            p["approach_start"] = pos.copy()
+            travel = float(np.max(np.abs(p["stance"] - pos)))
+            p["approach_total"] = travel / np.radians(POLICY_APPROACH_DPS)
+            self._bb_event("policy.approach", file=p["file"],
+                           travel_deg=round(float(np.degrees(travel)), 1),
+                           seconds=round(p["approach_total"], 2), dps=POLICY_APPROACH_DPS)
+            return
+
+        # ---- APPROACH: crawl to the stance at a gain that can carry a leg and nothing more ------
+        if p["phase"] == "approach":
+            if gov.stop != SAFE.STOP_NONE:
+                self._policy_end(p, now, "; ".join(gov.reasons) or "stopped during the approach")
+                return
+            if np.any(err):
+                bad = ", ".join(JM.MODEL_ACTUATORS[i] for i in np.flatnonzero(err))
+                self._policy_end(p, now, "drive error flag on {} during the approach".format(bad))
+                return
+            el = now - p["t_phase"]
+            f = 1.0 if p["approach_total"] <= 0 else min(1.0, el / p["approach_total"])
+            p["approach_f"] = f
+            tgt = p["approach_start"] + (p["stance"] - p["approach_start"]) * f
+            # The endpoints were both checked -- the stance at arm time, the measured pose is
+            # where the robot already is -- but a straight line between two safe poses is not
+            # itself safe, and this one sweeps both legs at once. Aborted rather than frozen: the
+            # approach is a deterministic ramp, so a refusal here is permanent, not transient.
+            ws_ok, ws_why = self._policy_workspace(p, tgt)
+            if not ws_ok:
+                p["ws_blocked_total"] += 1
+                self._policy_end(p, now, "the approach path leaves the safe workspace: {} -- move "
+                                         "the legs closer to the policy's stance by hand, or "
+                                         "extend the recorded workspace".format(ws_why))
+                return
+            p["last_ws_target"] = tgt.copy()
+            miss = np.abs(pos - tgt)
+            if float(np.max(miss)) > np.radians(POLICY_APPROACH_TRACK_ERR_DEG):
+                i = int(np.argmax(miss))
+                self._policy_end(p, now, (
+                    "{} is {:.1f} deg from its approach target -- either the joint map is wrong, "
+                    "the zero is stale, or the leg is obstructed".format(
+                        JM.MODEL_ACTUATORS[i], float(np.degrees(miss[i])))))
+                return
+            # the observer tracks through the approach as well -- the drive's case temperature
+            # is what corrects it, and that correction should not wait for the policy to start
+            gov.observe(amps_model, omega=np.abs(vel), drive_temp=temp, t_amb=p["ambient_c"])
+            self._policy_send(p, tgt, np.full(6, POLICY_APPROACH_KP),
+                              np.full(6, POLICY_APPROACH_KD))
+            if f >= 1.0 and float(np.max(np.abs(pos - p["stance"]))) < np.radians(
+                    POLICY_APPROACH_ARRIVE_DEG):
+                p["phase"] = "run"
+                p["t_phase"] = now
+                p["run_t0"] = now
+                p["reached_run"] = True
+                p["ctrl"].start(pos, np.zeros(6), tau, grav, gyro,
+                                v_cmd=p["v_cmd"], yaw_cmd=p["yaw_cmd"])
+                self._bb_event("policy.run", file=p["file"], v_cmd=p["v_cmd"],
+                               yaw_cmd=p["yaw_cmd"], max_seconds=p["max_seconds"])
+                return
+            if el > p["approach_total"] + POLICY_APPROACH_SLACK_S:
+                self._policy_end(p, now, "the approach did not converge within its budget")
+            return
+
+        # ---- RUN --------------------------------------------------------------------------------
+        t = now - p["run_t0"]
+        p["run_seconds"] = t
+        if t >= p["max_seconds"]:
+            gov.kill("max run time {:.0f} s reached".format(p["max_seconds"]), hard=False)
+
+        # Realised rate, measured over a rolling window. The arm-time probe says the machine
+        # CAN; this says it IS -- with the IMU thread, Flask, the recorder and the GC all competing
+        # for the same four cores. See the POLICY_MAX_STEP_MS block for why a slow loop is not a
+        # slightly-degraded control law but a different one.
+        if p["rate_t0"] is None:
+            p["rate_t0"], p["rate_n"] = now, 0
+        p["rate_n"] += 1
+        if p["rate_n"] >= POLICY_RATE_WINDOW:
+            el = max(now - p["rate_t0"], 1e-9)
+            p["rate_hz"] = p["rate_n"] / el
+            p["rate_t0"], p["rate_n"] = now, 0
+            if p["rate_hz"] < POLICY_MIN_RATE_FRAC * TICK_HZ and not p["slow_loop"]:
+                gov.kill("the control loop is running at {:.0f} Hz, not {:.0f} -- the control law's "
+                         "dt is a constant, so the gait is playing at {:.2f}x and every observed "
+                         "joint velocity is inflated {:.1f}x".format(
+                             p["rate_hz"], TICK_HZ, p["rate_hz"] / TICK_HZ,
+                             TICK_HZ / max(p["rate_hz"], 1e-6)), hard=False)
+
+        cmd = p["ctrl"].step(pos, vel, tau, grav, gyro)
+        p["gait_phase"], p["freq"] = float(cmd.phase), float(cmd.freq)
+        p["saturated"] += 1 if cmd.saturated else 0
+        # the governor steps the winding observer itself, off `current` -- see
+        # safety.SafetyGovernor.observe for why that is not the caller's job any more
+        v = gov.step(cmd.target, cmd.kp, cmd.kd, pos, vel, grav, gyro,
+                     telemetry_age=stale, deadman_age=deadman, drive_temp=temp, drive_err=err,
+                     current=amps_model, t_amb=p["ambient_c"])
+
+        # ---- the daemon's own workspace polygon, which the governor knows nothing about ---------
+        # The governor bounds each joint independently; only the recorded workspace knows that two
+        # individually-legal joint angles can put the legs through each other. It cannot be
+        # clamped (it is a polygon, not an interval), so: FREEZE at the last pose that passed, and
+        # kill if the policy is still asking for the same forbidden place 100 ms later. Same
+        # clamp-now-kill-if-persistent rule the governor uses, for the same reason -- dropping a
+        # standing robot on one transient is worse than the transient.
+        if not v.limp:
+            ws_ok, ws_why = self._policy_workspace(p, v.target)
+            if ws_ok:
+                p["ws_block"] = 0
+                p["last_ws_target"] = v.target.copy()
+            elif p["last_ws_target"] is not None:
+                p["ws_block"] += 1
+                p["ws_blocked_total"] += 1
+                v.target = p["last_ws_target"].copy()
+                self._last_reject = ws_why
+                if p["ws_block"] >= POLICY_WS_PERSIST_TICKS:
+                    gov.kill("the policy has been commanding outside the safe workspace for "
+                             "{:.0f} ms: {}".format(p["ws_block"] * 1000.0 / TICK_HZ, ws_why),
+                             hard=False)
+            else:
+                # nothing safe to fall back to: the very first commanded pose is already outside
+                gov.kill("the first commanded pose is outside the safe workspace: {}".format(
+                    ws_why), hard=True)
+
+        if v.limp:
+            self._policy_limp()
+        else:
+            self._policy_send(p, v.target, v.kp, v.kd)
+
+        self._policy_log(p, t, pos, vel, tau, amps, temp, grav, gyro, v, float(v.stop))
+        if v.stop != SAFE.STOP_NONE and v.limp:
+            self._policy_end(p, now, "; ".join(v.reasons) or "stopped")
+
+    def _policy_pub(self, now):
+        """Live run state for the panel. None when no run has been armed this session."""
+        p = self._pol
+        if p is None:
+            return None
+        g = p["gov"].status()
+        out = {
+            "file": p["file"], "run": p["run_name"], "checkpoint": p["checkpoint"],
+            "phase": p["phase"], "running": p["phase"] not in ("done",),
+            "v_cmd": p["v_cmd"], "yaw_cmd": p["yaw_cmd"], "max_seconds": p["max_seconds"],
+            "elapsed_s": round(p["run_seconds"], 2),
+            "approach_frac": round(float(p["approach_f"]), 3),
+            "gait_freq_hz": round(p["freq"], 2),
+            "rate_hz": round(float(p["rate_hz"]), 1), "step_ms": round(float(p["step_ms"]), 2),
+            "slow_loop": bool(p["slow_loop"]),
+            "gait_phase": round(p["gait_phase"], 3),
+            "stop": g["stop"], "reasons": g["reasons"], "clamps": g["clamp_counts"],
+            "saturated_now": [k for k, n in g["saturated_now"].items() if n],
+            "ramp": round(float(g["ramp"]), 3),
+            "ticks": int(p["n"]), "late_ticks": int(self._slip_count - p["slip0"]),
+            "ws_blocked_ticks": int(p["ws_blocked_total"]),
+            "target_clip_ticks": int(p["saturated"]),
+            "winding_c": [round(float(x), 1) for x in p["thermal"].t_winding],
+            "peak_winding_c": [round(float(x), 1) for x in p["thermal"].peak_w],
+            "winding_names": list(JM.MODEL_ACTUATORS),
+            "thermal_uncalibrated": p["thermal_uncalibrated"],
+            "jointmap_verified": p["jm_verified"], "no_imu": p["no_imu"],
+            "telemetry_age_ms": round(p["tel_age"] * 1e3, 1),
+            "imu_age_ms": round(p["imu_age"] * 1e3, 1),
+            "deadman_age_s": round(self._deadman_age(), 2),
+            "exit_reason": p["exit_reason"], "reached_run": p["reached_run"],
+        }
+        return out
+
+    def _deadman_age(self):
+        return max(0.0, time.monotonic() - self._pol_deadman)   # lock-free: see policy_keepalive
+
+    def _telemetry_age(self):
+        """Seconds since the OLDEST motor last said anything.
+
+        Not the newest frame: a bus-wide 'did anything arrive' would miss the case that actually
+        matters, which is ONE drive going quiet while its five neighbours keep talking."""
+        if len(self._rx_at) < paths.N_MOTORS:
+            return 1e9
+        return max(0.0, self._tick_mono - min(self._rx_at.values()))
+
     def _start_measure(self, meas, now):
         meas["t0"] = now
         meas["running"] = True
@@ -1758,6 +3342,10 @@ class RobotDaemon(threading.Thread):
                 # The 2026-08-10 lesson twice over: nothing measured the tick period, so a
                 # loop running at a third of its rate looked exactly like a healthy one.
                 loop=dict(hz=TICK_HZ, slip=self._slip_count, ticks=self._tick_count),
+                thermal=self._thermal_pub(now),
+                identify=self._identify_pub(now),
+                policy=self._policy_pub(now),
+                bypass=dict(self.bypass),
                 loop_error=self.loop_error,
                 can_errors=canio.send_errors(), can_bus=canio.send_stats(),
                 last_reject=self._last_reject,
@@ -1807,6 +3395,27 @@ class RobotDaemon(threading.Thread):
                                             else [round(v, 1) for v in r["centers"][s]])
                                         for s in ("right", "left")}),
             )
+
+    def _thermal_pub(self, now):
+        """Live burst state for the panel. None when no burst has been run this session."""
+        t = self._therm
+        if t is None:
+            return None
+        el = now - t["t0"]
+        d = {"motor": t["motor"], "running": bool(t["running"]),
+             "elapsed_s": round(el, 2),
+             "duration_s": t["env"].duration_s,
+             "amps": t["env"].amps,
+             "since_end_s": round(now - t["t_end"], 1) if t["t_end"] else None,
+             "drive_t_start_c": t["t_start"], "drive_t_peak_c": t["t_peak"],
+             "abort": t["abort"], "reversals": t["ex"].n_reversals,
+             "i_rms": round(t["ex"].summary()["i_rms"], 2),
+             "travel_deg": t["ex"].summary()["travel_deg"],
+             "peak_erpm": t["ex"].spd_peak,
+             "free_rotor": t["env"].free_rotor}
+        if t["env"].free_rotor:
+            d.update(freq_hz=t["env"].freq_hz, sine_amp_deg=t["env"].sine_amp)
+        return d
 
     def get_snapshot(self):
         with self.lock:

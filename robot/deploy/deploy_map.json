@@ -1,0 +1,61 @@
+{
+  "joints": {
+    "left.abd": {
+      "sign": 1.0,
+      "offset_deg": 0.0,
+      "erpm_per_rad_s": null,
+      "verified": true,
+      "verified_when": "2026-08-29",
+      "note": "model hip_roll_L moves the foot outward at +0.25 rad while the robot reads + outward; offset 0 because abduction is zeroed aligned with the base, which is model qpos-0"
+    },
+    "left.cam": {
+      "sign": 1.0,
+      "offset_deg": -24.5,
+      "erpm_per_rad_s": null,
+      "verified": true,
+      "verified_when": "2026-08-29",
+      "note": "fklut fit against the recorded workspace band"
+    },
+    "left.thigh": {
+      "sign": -1.0,
+      "offset_deg": -1.2,
+      "erpm_per_rad_s": null,
+      "verified": true,
+      "verified_when": "2026-08-29",
+      "note": "fklut fit against the recorded workspace band"
+    },
+    "right.abd": {
+      "sign": -1.0,
+      "offset_deg": 0.0,
+      "erpm_per_rad_s": null,
+      "verified": true,
+      "verified_when": "2026-08-29",
+      "note": "model hip_roll_R moves the foot inward at +0.25 rad while the robot reads + outward; offset 0 because abduction is zeroed aligned with the base, which is model qpos-0"
+    },
+    "right.cam": {
+      "sign": 1.0,
+      "offset_deg": -18.7,
+      "erpm_per_rad_s": null,
+      "verified": true,
+      "verified_when": "2026-08-29",
+      "note": "fklut fit against the recorded workspace band"
+    },
+    "right.thigh": {
+      "sign": -1.0,
+      "offset_deg": -8.4,
+      "erpm_per_rad_s": null,
+      "verified": true,
+      "verified_when": "2026-08-29",
+      "note": "fklut fit against the recorded workspace band"
+    }
+  },
+  "kt_joint": [
+    4.655,
+    2.176,
+    2.176,
+    4.655,
+    2.176,
+    2.176
+  ],
+  "kt_efficiency": 0.85
+}

@@ -13,10 +13,21 @@ python robot/fixed_gait/webui/tools/imu_bench.py --seconds 20    # bank-select s
 sudo systemctl start runningrobot-webui
 ```
 
+The noise figure (`results/imu_noise.png`, rendered by `tools/plot_imu_noise.py`) comes from a
+300 s record captured the same way with `--seconds 300 --save /tmp/imu_noise_300s.npz`, scp'd to
+`fixed_gait/webui/data/measurements/imu_noise_300s.npz` — the raw record is in the repo, so the
+figure regenerates without the robot.
+
 > **Provenance matters more than usual here.** A noise figure taken while the robot sways on its
 > test rig measures the sway, and nothing in the number says so — that mistake once produced a
 > yaw-axis "noise" 8x too high, and a low-pass sweep in which a *narrower* filter measured *more*
-> noise. `imu_bench.py` now gates every noise figure on a motion check. Rows below are marked
+> noise. `imu_bench.py` now gates every noise figure on a motion check: vibration on the RMS,
+> sway on the 1 s block means (a swaying robot *rotates* — the gyro block means are the sharp
+> detector), bumps on the raw peak-to-peak measured against its own white-noise expectation.
+> The peak-to-peak bound scales with record length on purpose: expected extremes grow as
+> sqrt(2 ln n), so the original fixed 0.6 dps bound tripped on the first 300 s record while
+> every sway statistic was clean (0.73 dps swing = 0.9x what white noise predicts for 60 000
+> samples). Rows below are marked
 > **[M]** measured at rest, **[M*]** measured but motion-independent (a mean, a rate, an LSB),
 > **[D]** datasheet and not verified on this part, **[?]** not characterised.
 
@@ -38,16 +49,30 @@ the poll rate on purpose: poll faster than the ODR and reads simply return the p
 
 ## Accelerometer and gyroscope
 
+![Measured IMU noise: 10 s excerpts and amplitude spectral density](../results/imu_noise.png)
+
+*(2026-09-01, 300 s at rest on the stand. Left: raw traces, mean-removed and offset per axis.
+Right: ASD against the datasheet density and the DLPF corner. The Allan-deviation statistics in
+the table below come from the same record — `tools/plot_imu_noise.py` prints them; the panel was
+dropped from the figure.)*
+
 | | accel | gyro | |
 |---|---|---|---|
 | Resolution (1 LSB) | **0.1221 mg** (1/8192 g) | **0.0305 dps** (1/32.8) | [M*] confirmed: smallest observed step = exactly 1 LSB |
-| 3 dB bandwidth | 50.4 Hz | 51.2 Hz | [D] DLPF cfg 3 |
-| Noise, RMS at rest | **1.84 / 1.88 / 1.72 mg** | **0.086 / 0.083 / 0.078 dps** | [M] |
-| → noise density | ~218 µg/√Hz | ~0.0096 dps/√Hz | [M] vs [D] 230 µg/√Hz and 0.015 dps/√Hz — this part is at or better than spec |
-| Turn-on bias | absorbed by the mount calibration | **[1.03, 0.11, −0.53] dps** | [M*] repeatable to ~0.1 dps across restarts |
-| In-run bias stability | — | **0.010–0.012 dps** sd of 1 s averages | [M] |
+| 3 dB bandwidth | 50.4 Hz | 51.2 Hz | [D] DLPF cfg 3, rolloff visible in the ASD |
+| Noise, RMS at rest | **1.56 / 1.68 / 1.67 mg** | **0.087 / 0.084 / 0.077 dps** | [M] 300 s record (a 20 s run read 1.7–1.9 mg — same part, shorter statistics) |
+| → noise density | ~190 µg/√Hz | ~0.0097 dps/√Hz | [M] flat 1–30 Hz ASD band, vs [D] 230 µg/√Hz and 0.015 dps/√Hz — this part is at or better than spec |
+| Turn-on bias | absorbed by the mount calibration | **[1.03, 0.11, −0.53] dps** | [M*] repeatable to ~0.1 dps across restarts (300 s run: [1.04, 0.15, −0.53]) |
+| In-run bias stability | — | **0.008–0.012 dps** sd of 1 s averages | [M] |
+| Bias instability (Allan floor) | **0.06–0.11 mg** at τ ≈ 40–50 s, Z worst | **0.0024 dps** (~8.6°/h) at τ ≈ 16–60 s | [M] 300 s record; the gyro floor implies yaw wander ~0.14°/min once the turn-on bias is zeroed |
 | Scale error | **−0.03%** (\|a\| = 0.9997 g) | [?] | [M] |
 | Cross-axis, non-linearity | [?] | [?] | not characterised |
+
+The accel leaves the white-noise slope above τ ≈ 0.5 s — a slow, plausibly thermal drift
+(strongest on Z, the gravity axis, which rules out stand sway: tilt shows up on the horizontal
+axes at first order and on Z only at second). The gyro is textbook: white to its floor, no
+excess low-frequency power. One narrow environmental line sits at **47.8 Hz on accel X**
+(≈5x the floor, ~0.15 mg integrated — negligible; not 50 Hz mains, source unidentified).
 
 **Quantisation sits ~15x below the noise floor on both channels.** Widening the ranges therefore
 costs nothing in effective resolution — worth doing if footfall impacts start clipping ±4 g, which
@@ -125,7 +150,9 @@ just the sensor** — its dynamics dominate.
 Flagged rather than guessed at:
 
 * **Temperature dependence** of the gyro bias and accel scale. The die runs at 36–40 °C, ~13 °C
-  above ambient, and warms during a session.
+  above ambient, and warms during a session. The 300 s record now *bounds* the effect at rest:
+  slow accel drift of 1.4–2.9 mg peak-to-peak over 5 min (Allan floor 0.06–0.11 mg), gyro clean —
+  but the drift-vs-temperature *model* is still unmeasured.
 * **Vibration rectification** under footfall impact — the classic MEMS failure mode for a legged
   robot, and the one most likely to bite.
 * **Accel cross-axis sensitivity and non-linearity.**
@@ -142,7 +169,8 @@ IMU = dict(
     accel=dict(
         range_g=4.0,        # CLIP at this, impacts may exceed it
         lsb_g=1.221e-4,     # quantise
-        noise_density_g_rthz=218e-6,    # -> 1.8 mg RMS at this bandwidth
+        noise_density_g_rthz=190e-6,    # -> 1.6 mg RMS at this bandwidth; slow drift on top
+                                        #    (up to ~3 mg over minutes, Allan floor 0.06-0.11 mg)
         scale_error=0.01,   # measured 0.0003; randomise wider for robustness
     ),
     gyro=dict(

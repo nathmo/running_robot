@@ -1,0 +1,6 @@
+[eval] using final_model + vecnormalize.pkl
+imp_m3d_s0 cmd +0.2: [314 st, vx 0.49] [56 st, vx -0.08] [268 st, vx -0.39] [604 st, vx 0.20] [214 st, vx -0.43] -> MEAN VX -0.041 | episodes >=20s: 0/5
+imp_m3d_s0 cmd +0.4: [173 st, vx 0.23] [233 st, vx 0.51] [295 st, vx 0.20] [232 st, vx 0.42] [140 st, vx 0.19] -> MEAN VX 0.308 | episodes >=20s: 0/5
+[eval] using final_model + vecnormalize.pkl
+imp_m3d_s1 cmd +0.2: [231 st, vx 0.52] [389 st, vx 0.44] [406 st, vx 0.32] [313 st, vx -0.07] [245 st, vx 0.32] -> MEAN VX 0.304 | episodes >=20s: 0/5
+imp_m3d_s1 cmd +0.4: [301 st, vx 0.63] [109 st, vx -0.18] [134 st, vx -0.12] [171 st, vx -0.28] [136 st, vx -0.43] -> MEAN VX -0.074 | episodes >=20s: 0/5

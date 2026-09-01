@@ -1,0 +1,718 @@
+{
+ "run": "m5_stiff_600M",
+ "pkg": "training",
+ "episodes": 6,
+ "seconds": 20.0,
+ "command_mode": false,
+ "impedance": false,
+ "axes": {
+  "mass": {
+   "label": "total mass x",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.8,
+     "survival": 0.16666666666666666,
+     "t_mean": 4.699166666666666,
+     "dist_mean": 10.635,
+     "dist_max": 49.42,
+     "v_mean": 1.559736005315762,
+     "v_peak": 4.191064242480941,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.9,
+     "survival": 0.6666666666666666,
+     "t_mean": 13.620833333333332,
+     "dist_mean": 33.15833333333334,
+     "dist_max": 50.06,
+     "v_mean": 2.0264493051009045,
+     "v_peak": 3.253605870377287,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.1,
+     "survival": 0.0,
+     "t_mean": 2.1666666666666665,
+     "dist_mean": 4.181666666666667,
+     "dist_max": 6.39,
+     "v_mean": 1.8840829116520081,
+     "v_peak": 4.818453615706071,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.2,
+     "survival": 0.0,
+     "t_mean": 1.8141666666666667,
+     "dist_mean": 2.768333333333333,
+     "dist_max": 4.81,
+     "v_mean": 1.4948185730870496,
+     "v_peak": 4.4718867161994424,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.35,
+     "survival": 0.0,
+     "t_mean": 1.1583333333333334,
+     "dist_mean": 0.6783333333333332,
+     "dist_max": 1.88,
+     "v_mean": 0.5318206377228009,
+     "v_peak": 3.1896360993492396,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.5,
+     "survival": 0.0,
+     "t_mean": 1.1966666666666668,
+     "dist_mean": 0.16,
+     "dist_max": 2.07,
+     "v_mean": 0.14112338616509085,
+     "v_peak": 3.7370129404053114,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "inertia": {
+   "label": "link inertia x",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.6,
+     "survival": 0.0,
+     "t_mean": 1.5166666666666666,
+     "dist_mean": 2.763333333333333,
+     "dist_max": 6.86,
+     "v_mean": 1.5448555184061064,
+     "v_peak": 4.383323681327769,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.8,
+     "survival": 0.5,
+     "t_mean": 12.181666666666665,
+     "dist_mean": 32.196666666666665,
+     "dist_max": 54.83,
+     "v_mean": 2.4160272554066022,
+     "v_peak": 4.860098235739584,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.25,
+     "survival": 0.0,
+     "t_mean": 6.75,
+     "dist_mean": 16.41333333333333,
+     "dist_max": 28.74,
+     "v_mean": 2.257568641209,
+     "v_peak": 4.690091574307018,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.6,
+     "survival": 0.0,
+     "t_mean": 5.4025,
+     "dist_mean": 12.641666666666666,
+     "dist_max": 34.9,
+     "v_mean": 1.9738976935366679,
+     "v_peak": 3.7233617078566468,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "friction": {
+   "label": "floor friction mu",
+   "kind": "abs",
+   "rows": [
+    {
+     "value": 0.3,
+     "survival": 0.0,
+     "t_mean": 0.42333333333333334,
+     "dist_mean": 0.051666666666666666,
+     "dist_max": 0.11,
+     "v_mean": 0.41303900676549804,
+     "v_peak": 1.9349588508723812,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.5,
+     "survival": 0.0,
+     "t_mean": 0.46166666666666667,
+     "dist_mean": 0.11666666666666665,
+     "dist_max": 0.19,
+     "v_mean": 0.5765256615749997,
+     "v_peak": 2.3569514447365476,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.7,
+     "survival": 0.6666666666666666,
+     "t_mean": 13.710833333333333,
+     "dist_mean": 35.571666666666665,
+     "dist_max": 53.28,
+     "v_mean": 2.2631464036293996,
+     "v_peak": 4.240234723526286,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.3,
+     "survival": 0.0,
+     "t_mean": 5.5566666666666675,
+     "dist_mean": 13.271666666666667,
+     "dist_max": 29.48,
+     "v_mean": 2.349354028252476,
+     "v_peak": 5.039037777755515,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "ankle_k": {
+   "label": "ankle spring k x",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.6,
+     "survival": 0.0,
+     "t_mean": 0.9141666666666666,
+     "dist_mean": 0.8816666666666668,
+     "dist_max": 1.32,
+     "v_mean": 1.0552803122396384,
+     "v_peak": 3.481469970843156,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.8,
+     "survival": 0.0,
+     "t_mean": 1.7133333333333336,
+     "dist_mean": 3.0733333333333337,
+     "dist_max": 5.25,
+     "v_mean": 1.701288615324346,
+     "v_peak": 4.612703196525491,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.9,
+     "survival": 0.0,
+     "t_mean": 5.82,
+     "dist_mean": 15.448333333333332,
+     "dist_max": 41.18,
+     "v_mean": 2.168535985323809,
+     "v_peak": 5.145048939550886,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.1,
+     "survival": 0.5,
+     "t_mean": 14.516666666666667,
+     "dist_mean": 34.53666666666666,
+     "dist_max": 48.55,
+     "v_mean": 2.3686186173328196,
+     "v_peak": 4.5616546598340495,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.25,
+     "survival": 1.0,
+     "t_mean": 20.0,
+     "dist_mean": 45.401666666666664,
+     "dist_max": 46.56,
+     "v_mean": 2.2741916172108043,
+     "v_peak": 3.0311621225655454,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.5,
+     "survival": 0.8333333333333334,
+     "t_mean": 16.99,
+     "dist_mean": 38.14,
+     "dist_max": 46.14,
+     "v_mean": 2.1021208357380172,
+     "v_peak": 3.1346397559967705,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "ankle_c": {
+   "label": "ankle damping x",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.3,
+     "survival": 0.0,
+     "t_mean": 2.7475,
+     "dist_mean": 5.546666666666667,
+     "dist_max": 14.45,
+     "v_mean": 1.781623221013809,
+     "v_peak": 4.44085571910553,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.6,
+     "survival": 0.16666666666666666,
+     "t_mean": 11.8025,
+     "dist_mean": 28.195000000000004,
+     "dist_max": 50.42,
+     "v_mean": 2.060250150890569,
+     "v_peak": 3.8897979729242476,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.5,
+     "survival": 0.5,
+     "t_mean": 14.850833333333332,
+     "dist_mean": 40.98,
+     "dist_max": 56.56,
+     "v_mean": 2.7340210634666486,
+     "v_peak": 4.881520347323506,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 2.5,
+     "survival": 0.0,
+     "t_mean": 3.098333333333333,
+     "dist_mean": 7.625,
+     "dist_max": 14.45,
+     "v_mean": 2.300667475959498,
+     "v_peak": 5.33227305859851,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "kp": {
+   "label": "servo kp x  (GAIN)",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.6,
+     "survival": 0.0,
+     "t_mean": 1.0516666666666667,
+     "dist_mean": -0.7250000000000001,
+     "dist_max": -0.35,
+     "v_mean": -0.6926138943920538,
+     "v_peak": 1.0376546423275281,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.7,
+     "survival": 0.0,
+     "t_mean": 1.0808333333333333,
+     "dist_mean": -0.5316666666666666,
+     "dist_max": -0.19,
+     "v_mean": -0.4880953042851784,
+     "v_peak": 0.17311118429188915,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.85,
+     "survival": 0.0,
+     "t_mean": 1.3508333333333333,
+     "dist_mean": 0.565,
+     "dist_max": 2.73,
+     "v_mean": 0.34196075644456386,
+     "v_peak": 4.221515650634828,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.2,
+     "survival": 0.0,
+     "t_mean": 3.3816666666666673,
+     "dist_mean": 6.928333333333334,
+     "dist_max": 39.02,
+     "v_mean": 1.1014319562259707,
+     "v_peak": 3.9312971420981677,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.4,
+     "survival": 0.0,
+     "t_mean": 0.3116666666666667,
+     "dist_mean": 0.08,
+     "dist_max": 0.24,
+     "v_mean": 0.2973733608591371,
+     "v_peak": 1.716112364821271,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.7,
+     "survival": 0.0,
+     "t_mean": 0.3033333333333333,
+     "dist_mean": 0.09166666666666666,
+     "dist_max": 0.35,
+     "v_mean": 0.2472428527516998,
+     "v_peak": 2.1576046580734998,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "torque": {
+   "label": "torque limit x",
+   "kind": "x",
+   "rows": [
+    {
+     "value": 0.5,
+     "survival": 0.0,
+     "t_mean": 0.9408333333333333,
+     "dist_mean": 0.49333333333333335,
+     "dist_max": 1.01,
+     "v_mean": 0.5920871891026617,
+     "v_peak": 3.073223147564791,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.6,
+     "survival": 0.0,
+     "t_mean": 0.995,
+     "dist_mean": 1.0233333333333332,
+     "dist_max": 2.01,
+     "v_mean": 1.1000783646736871,
+     "v_peak": 3.7735514311303326,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.75,
+     "survival": 0.0,
+     "t_mean": 1.3808333333333334,
+     "dist_mean": 2.153333333333333,
+     "dist_max": 4.34,
+     "v_mean": 1.5286004843224301,
+     "v_peak": 4.534783499184753,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.9,
+     "survival": 0.0,
+     "t_mean": 4.079999999999999,
+     "dist_mean": 10.023333333333333,
+     "dist_max": 29.0,
+     "v_mean": 2.15557961730178,
+     "v_peak": 4.98647374239289,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 1.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 1.0
+  },
+  "delay": {
+   "label": "action delay (steps)",
+   "kind": "abs",
+   "rows": [
+    {
+     "value": 2,
+     "survival": 0.0,
+     "t_mean": 1.1233333333333333,
+     "dist_mean": -0.3333333333333333,
+     "dist_max": 0.51,
+     "v_mean": -0.3337109894788208,
+     "v_peak": 1.185859894583475,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 3,
+     "survival": 0.0,
+     "t_mean": 0.8358333333333333,
+     "dist_mean": -0.4183333333333334,
+     "dist_max": -0.06,
+     "v_mean": -0.3975879324091202,
+     "v_peak": 0.11482522258903607,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 4,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 5,
+     "survival": 0.0,
+     "t_mean": 2.1,
+     "dist_mean": 3.5133333333333336,
+     "dist_max": 11.23,
+     "v_mean": 1.0569618465185313,
+     "v_peak": 4.825405899267535,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 6,
+     "survival": 0.0,
+     "t_mean": 0.8675,
+     "dist_mean": -0.4449999999999999,
+     "dist_max": -0.07,
+     "v_mean": -0.5451671537979957,
+     "v_peak": 0.12223915552091048,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 8,
+     "survival": 0.0,
+     "t_mean": 1.0383333333333333,
+     "dist_mean": -0.5133333333333333,
+     "dist_max": -0.2,
+     "v_mean": -0.4837712319343804,
+     "v_peak": 0.15742663239452578,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 10,
+     "survival": 0.0,
+     "t_mean": 1.0175,
+     "dist_mean": 0.3916666666666666,
+     "dist_max": 1.0,
+     "v_mean": 0.4278738199827197,
+     "v_peak": 3.030533468120627,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 4.0
+  },
+  "slope": {
+   "label": "ground slope (deg)",
+   "kind": "abs",
+   "rows": [
+    {
+     "value": 0.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 2.0,
+     "survival": 0.0,
+     "t_mean": 4.645,
+     "dist_mean": 12.601666666666667,
+     "dist_max": 37.32,
+     "v_mean": 2.36505061948716,
+     "v_peak": 4.887441681925989,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 4.0,
+     "survival": 0.0,
+     "t_mean": 2.2,
+     "dist_mean": 5.378333333333333,
+     "dist_max": 13.47,
+     "v_mean": 2.150039786982937,
+     "v_peak": 5.288875972873752,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 6.0,
+     "survival": 0.0,
+     "t_mean": 1.66,
+     "dist_mean": 3.9000000000000004,
+     "dist_max": 9.12,
+     "v_mean": 1.9757567039329282,
+     "v_peak": 4.971616755381659,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 8.0,
+     "survival": 0.0,
+     "t_mean": 1.4891666666666667,
+     "dist_mean": 3.5966666666666662,
+     "dist_max": 6.25,
+     "v_mean": 2.2688733181454492,
+     "v_peak": 5.394830673968556,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 0.0
+  },
+  "com": {
+   "label": "CoM offset x (m)",
+   "kind": "abs",
+   "rows": [
+    {
+     "value": 0.0,
+     "survival": 0.16666666666666666,
+     "t_mean": 7.475833333333331,
+     "dist_mean": 18.014999999999997,
+     "dist_max": 52.17,
+     "v_mean": 2.0132245850528308,
+     "v_peak": 4.262949436189517,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.01,
+     "survival": 0.16666666666666666,
+     "t_mean": 5.238333333333332,
+     "dist_mean": 13.530000000000001,
+     "dist_max": 58.25,
+     "v_mean": 2.036464591216632,
+     "v_peak": 4.997069826051447,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.02,
+     "survival": 0.0,
+     "t_mean": 3.1425,
+     "dist_mean": 7.946666666666668,
+     "dist_max": 17.76,
+     "v_mean": 1.9620925480101816,
+     "v_peak": 5.270768004981583,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.04,
+     "survival": 0.0,
+     "t_mean": 0.5958333333333333,
+     "dist_mean": 0.8383333333333334,
+     "dist_max": 2.81,
+     "v_mean": 0.8640603928938507,
+     "v_peak": 3.9846799800514354,
+     "track_mae": NaN,
+     "stand": NaN
+    },
+    {
+     "value": 0.06,
+     "survival": 0.0,
+     "t_mean": 0.056666666666666664,
+     "dist_mean": 0.0,
+     "dist_max": 0.0,
+     "v_mean": -0.01989108993792248,
+     "v_peak": 0.07255503381350968,
+     "track_mae": NaN,
+     "stand": NaN
+    }
+   ],
+   "nominal": 0.0
+  }
+ }
+}

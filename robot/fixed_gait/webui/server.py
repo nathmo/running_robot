@@ -21,6 +21,21 @@ import subprocess
 import sys
 import time
 
+# MEASURED on the robot's Pi 3B, 2026-09-01, with the imp_m3d bundle:
+#
+#     OPENBLAS_NUM_THREADS=1   controller.step p50 4.53 ms
+#     OPENBLAS_NUM_THREADS=2                       4.75 ms
+#     OPENBLAS_NUM_THREADS=4 (the default, = cores) 5.05 ms
+#
+# The policy's largest matrix is 593x256. That is far too small to pay for thread synchronisation,
+# so OpenBLAS's default of one thread per core makes the control law SLOWER while also putting
+# three extra runnable threads in front of the 200 Hz CAN loop and the 200 Hz IMU thread on a
+# four-core machine. Pinned to one.
+#
+# This must run before numpy is imported: OpenBLAS reads the variable when the shared library is
+# loaded, and by the time `import numpy` returns it is too late.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
@@ -33,6 +48,8 @@ import dynstore
 import fklut
 import gaitstore
 import measurestore
+import thermalstore
+import thermal_excite
 import sensehat
 import workspace
 
@@ -63,6 +80,19 @@ CTL_TIMEOUT_S = 15.0
 # ===================================================================== helpers
 def _dm():
     return STATE["daemon"]
+
+
+def _since_arg():
+    """The ring cursor from ?since=, tolerating the value a browser sends before it has one.
+
+    A fresh page sends `since=undefined` on its first poll of each stream, which int() raised on --
+    a 500 and a traceback in the journal on every single page load, for a request whose correct
+    answer is obviously "start from the beginning".
+    """
+    try:
+        return int(request.args.get("since", 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _ok(**extra):
@@ -184,7 +214,7 @@ def api_state_cold():
 @app.get("/api/telemetry")
 def api_telemetry():
     d = _dm()
-    since = int(request.args.get("since", 0))
+    since = _since_arg()
     seq, t, data = d.ring.read_since(since)
     out = {"seq": seq, "t": np.round(t, 3).tolist(),
            "motors": {}}
@@ -237,7 +267,7 @@ def api_telemetry_raw():
     /api/telemetry stays exactly as it was: running server.py alone on :8080 still works, which is
     the rollback."""
     d = _dm()
-    since = int(request.args.get("since", 0))
+    since = _since_arg()
     seq, t, data = d.ring.read_since(since)
     snap = d.get_snapshot()
     # linkage stays HERE: it is two LUT interpolations, not a per-element loop, and it needs the
@@ -276,7 +306,7 @@ def api_sensors_raw():
                         headers={"X-Seq": "0", "X-Meta": json.dumps(
                             {"available": False, "error": "sensors disabled (--no-sensors)"})})
     meta = sh.snapshot() or {"available": False, "error": sh.error}
-    since = int(request.args.get("since", 0))
+    since = _since_arg()
     seq, t, data = sh.ring.read_since(since)
     buf = io.BytesIO()
     np.save(buf, t)
@@ -298,7 +328,7 @@ def api_sensors():
         return jsonify({"available": False, "error": "sensors disabled (--no-sensors)", "seq": 0,
                         "t": [], "series": {}})
     out = sh.snapshot() or {"available": False, "error": sh.error}
-    since = int(request.args.get("since", 0))
+    since = _since_arg()
     seq, t, data = sh.ring.read_since(since)
     out["seq"] = seq
     out["t"] = np.round(t, 3).tolist()
@@ -419,12 +449,49 @@ def api_calibration_get():
     return jsonify(STATE["calib"].snapshot())
 
 
+def _invalidate_fk_map():
+    """A re-zero moves the frame every downstream map is expressed in. fklut's cam/thigh
+    offsets were fitted against the OLD zero, so leaving them marked verified leaves a map
+    describing a frame that no longer exists — which is exactly what was found on
+    2026-08-29: a map dated 4 August, still flagged verified, with offsets never fitted.
+    JointMap.invalidate() already states this rule; fklut had no hook to enforce it."""
+    fk = STATE["fk"]
+    mm = getattr(fk, "model_map", None)        # test stubs / degraded boots have no map at all
+    if mm and any(mm.get("verified", {}).values()):
+        for side in paths.SIDES:
+            mm["verified"][side] = False
+        try:
+            fk.save_map()
+        except Exception:                      # a stale flag in memory is what matters
+            pass
+
+
 @app.post("/api/calibration/zero")
 def api_calibration_zero():
     d = _dm()
     if d.get_snapshot().get("mode") not in ("LIMP", "ESTOPPED"):
         return _err("go LIMP before setting zero")
     ok, why = STATE["calib"].set_zero(d.latest_raw_positions())
+    if ok:
+        _invalidate_fk_map()
+    return _ok() if ok else _err(why)
+
+
+@app.post("/api/calibration/zero_one")
+def api_calibration_zero_one():
+    """Re-capture ONE joint's zero from wherever it is right now (direction-check step).
+
+    Same gates as the full capture: motors limp, position reported. It shares the FK-map
+    invalidation too — moving one joint's zero moves the frame the fitted offsets live in just
+    as surely as moving all six."""
+    d = _dm()
+    if d.get_snapshot().get("mode") not in ("LIMP", "ESTOPPED"):
+        return _err("go LIMP before setting zero")
+    b = request.get_json(force=True, silent=True) or {}
+    name = b.get("motor", "")
+    ok, why = STATE["calib"].set_zero_one(name, d.latest_raw_positions().get(name))
+    if ok:
+        _invalidate_fk_map()
     return _ok() if ok else _err(why)
 
 
@@ -893,6 +960,598 @@ def api_measure_export():
                      mimetype="application/octet-stream")
 
 
+# ===================================================================== thermal calibration
+# The experiment: saturate ONE motor's torque for 1-30 s, then read how far its temperature rises.
+# The operator supplies the temperatures (an external probe is the only instrument that sees the
+# right node); the daemon supplies what it actually did -- the measured current integral, which is
+# the deposited energy the fit needs. Those two halves arrive at different TIMES, which is why
+# starting a burst and recording its peak are separate calls: when the burst ends, the peak has
+# not happened yet.
+@app.get("/api/thermal/runs")
+def api_thermal_runs():
+    runs, cools = thermalstore.all_runs()
+    return _ok(runs=runs, cooldowns=cools, summary=thermalstore.summary(),
+               limits={"max_amps": daemon_mod.THERMAL_MAX_AMPS,
+                       "max_duration_s": daemon_mod.THERMAL_MAX_DURATION_S,
+                       "min_duration_s": thermal_excite.MIN_DURATION_S,
+                       "abort_temp_c": daemon_mod.THERMAL_ABORT_TEMP_C,
+                       "free_freq_min_hz": thermal_excite.FREE_SINE_FREQ_MIN_HZ,
+                       "free_freq_max_hz": thermal_excite.FREE_SINE_FREQ_MAX_HZ,
+                       "free_amp_max_deg": thermal_excite.FREE_SINE_AMP_MAX_DEG},
+               motors=list(paths.MOTOR_NAMES))
+
+
+@app.post("/api/thermal/predict")
+def api_thermal_predict():
+    """What a proposed burst would do, at both nodes, before it is run.
+
+    This exists because the obvious burst does not work. A handheld probe resolves ~0.5 degC, and
+    the case rise is E / (C_w + C_c) -- for a ~1 kg servo, 12 A for 10 s moves it about 0.1 degC.
+    Three of those runs and an afternoon later you would have three unusable rows. The panel shows
+    the number up front instead, together with the WINDING rise, which is the one that decides
+    whether the burst is safe and which no instrument on this robot can see."""
+    b = request.get_json(force=True, silent=True) or {}
+    motor = b.get("motor", "")
+    if motor not in paths.MOTOR_NAMES:
+        return _err("unknown motor {!r}".format(motor))
+    try:
+        amps = float(b.get("amps", 0.0))
+        dur = float(b.get("duration_s", 0.0))
+    except (TypeError, ValueError):
+        return _err("amps and duration_s must be numbers")
+    params = _dm()._thermal_params(motor)
+    viable, why, pred = thermal_excite.check_burst(params, amps, dur)
+    # The verdict is `viable`, NOT `ok`. `ok` belongs to the _ok() envelope, and the shared api()
+    # helper in app.js treats a response with ok:false as a FAILED REQUEST -- it banners d.error
+    # and throws. Returning the burst verdict in that field made every non-viable burst look like
+    # a server error: the prediction readout stopped updating, the banner said "undefined", and
+    # Start stayed disabled forever, which is exactly how this shipped broken on 2026-08-28.
+    return _ok(prediction=pred, viable=viable, why=why, calibrated=bool(params.calibrated),
+               suggestion=dict(zip(("amps", "duration_s"),
+                                   thermal_excite.suggest(params, 6.0, amps or None))))
+
+
+@app.post("/api/thermal/start")
+def api_thermal_start():
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    # An explicit, typed acknowledgement rather than a checkbox that defaults to true: this call
+    # energises a motor to saturation, and the one failure mode the software cannot detect is
+    # something bolted to the output shaft that should not be there.
+    if b.get("rotor_mode") not in ("blocked", "free"):
+        return _err("a burst needs the rotor declared: rotor_mode 'blocked' (joint clamped, "
+                    "saturated current) or 'free' (motor off the robot, nothing on the shaft — "
+                    "tracks a position sine and heats by fighting its own rotor inertia). The "
+                    "free-JOINT dither — a leg on a turning shaft — was retracted on 2026-08-29.",
+                    400)
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    ok, why = _dm().thermal_start(b)
+    time.sleep(0.05)
+    return _ok(token=token) if ok else _err(why)
+
+
+# ===================================================================== joint identification
+@app.post("/api/thermal/identify")
+def api_thermal_identify():
+    """Wiggle ONE joint a few degrees so the operator can see which joint it actually is.
+
+    This is a motion endpoint and carries the same guards as a burst -- calibration, the control
+    token, and an explicit confirm_free -- because a joint with something bolted to it does not
+    care that the commanded amplitude is small."""
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    if b.get("confirm_free") is not True:
+        return _err("confirm the joint is free to move before wiggling it", 400)
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    ok, why = _dm().identify_start(b)
+    time.sleep(0.05)
+    return _ok(token=token) if ok else _err(why)
+
+
+@app.post("/api/bypass")
+def api_bypass():
+    """Switch one software safety limit off, or back on.
+
+    Turning a limit OFF requires `acknowledged: true` — not as ceremony, but because the UI's
+    confirmation is the only place the consequence gets stated, and a bypass set by a stray click
+    is the failure mode this feature would otherwise introduce. Turning one back ON never needs it.
+    """
+    b = request.get_json(force=True, silent=True) or {}
+    name, on = b.get("name", ""), bool(b.get("on"))
+    if on and b.get("acknowledged") is not True:
+        return _err("disabling a safety limit needs an explicit acknowledgement", 400)
+    ok, why = _dm().set_bypass(name, on, note=b.get("note", ""))
+    return _ok(bypass=dict(_dm().bypass)) if ok else _err(why)
+
+
+@app.post("/api/thermal/identify/plan")
+def api_thermal_identify_plan():
+    """Would this wiggle run, and at what amplitude? Read-only: queues nothing, moves nothing.
+
+    Same shape as /api/thermal/predict -- the verdict is `viable`, never the envelope's `ok`."""
+    b = request.get_json(force=True, silent=True) or {}
+    viable, why, plan = _dm().identify_plan(b)
+    return _ok(viable=viable, why=why, plan=plan)
+
+
+@app.post("/api/thermal/identify/stop")
+def api_thermal_identify_stop():
+    _dm().identify_stop()
+    time.sleep(0.05)
+    return _ok()
+
+
+@app.post("/api/thermal/stop")
+def api_thermal_stop():
+    _dm().thermal_stop()
+    time.sleep(0.02)
+    return _ok()
+
+
+@app.post("/api/thermal/save")
+def api_thermal_save():
+    """Persist the finished burst. Operator temperatures are optional here and can be added later
+    via /api/thermal/annotate -- the case peak lags the burst by a winding time constant, so the
+    run has to be saveable before it has been read."""
+    got = _dm().get_thermal()
+    if got is None:
+        return _err("no finished burst to save -- start one, and wait for it to end", 404)
+    b = request.get_json(force=True, silent=True) or {}
+    run = thermalstore.add_burst(
+        motor=got["motor"], envelope=got["envelope"], summary=got["summary"],
+        drive_t_start=got["drive_t_start_c"], drive_t_peak=got["drive_t_peak_c"],
+        ambient_c=b.get("ambient_c", got.get("ambient_c")), aborted=got["abort"])
+    fields = {k: b[k] for k in ("t_start_c", "t_peak_c", "t_peak_at_s", "probe", "notes")
+              if b.get(k) is not None}
+    if fields:
+        run = thermalstore.annotate(run["id"], **fields)
+    return _ok(run=run, summary=thermalstore.summary())
+
+
+@app.post("/api/thermal/annotate")
+def api_thermal_annotate():
+    b = request.get_json(force=True, silent=True) or {}
+    rid = b.pop("id", "")
+    try:
+        run = thermalstore.annotate(rid, **{k: v for k, v in b.items() if k != "token"})
+    except (KeyError, ValueError) as e:
+        return _err(e, 404 if isinstance(e, KeyError) else 400)
+    return _ok(run=run, summary=thermalstore.summary())
+
+
+@app.post("/api/thermal/delete")
+def api_thermal_delete():
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        thermalstore.delete(b.get("id", ""))
+    except KeyError as e:
+        return _err(e, 404)
+    return _ok(summary=thermalstore.summary())
+
+
+@app.post("/api/thermal/cooldown/start")
+def api_thermal_cooldown_start():
+    b = request.get_json(force=True, silent=True) or {}
+    motor = b.get("motor", "")
+    if motor not in paths.MOTOR_NAMES:
+        return _err("unknown motor {!r}".format(motor))
+    c = thermalstore.start_cooldown(motor, ambient_c=b.get("ambient_c"),
+                                    probe=b.get("probe", "case"), after_run=b.get("after_run"))
+    return _ok(cooldown=c)
+
+
+@app.post("/api/thermal/cooldown/point")
+def api_thermal_cooldown_point():
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        c = thermalstore.add_point(b.get("id", ""), b.get("t_s"), b.get("temp_c"))
+    except (KeyError, TypeError, ValueError) as e:
+        return _err(e, 404 if isinstance(e, KeyError) else 400)
+    return _ok(cooldown=c, summary=thermalstore.summary())
+
+
+@app.post("/api/thermal/cooldown/drop")
+def api_thermal_cooldown_drop():
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        c = thermalstore.drop_point(b.get("id", ""), b.get("index", -1))
+    except (KeyError, IndexError) as e:
+        return _err(e, 404 if isinstance(e, KeyError) else 400)
+    return _ok(cooldown=c, summary=thermalstore.summary())
+
+
+# ===================================================================== policy inference
+# The panel: pick an exported bundle, read the controller architecture it carries, prove the
+# export + runtime end to end (a --mock dress rehearsal), and RUN IT ON THE DRIVES.
+#
+# The real run happens inside the daemon, as mode POLICY — not in a subprocess. The CAN bus has
+# exactly one owner, so robot/deploy/run_policy.py (which does the same job from a terminal)
+# refuses to start while this daemon is up, and the two must never share a bus. Rather than ask the
+# operator to stop the web UI and ssh in, the daemon runs the deploy package's own control law and
+# safety governor in the loop that already owns the buses. run_policy.py remains the headless
+# path and is unchanged.
+#
+# So the only subprocess this section ever launches is still the dress rehearsal, whose bus and IMU
+# are mocks and which therefore cannot collide with anything.
+_REHEARSAL = {"proc": None, "file": None, "log": None, "t0": 0.0}
+_AXES6 = ("X", "Y", "Z", "roll", "pitch", "yaw")
+
+
+def _policy_path(fname):
+    """POLICY_DIR-jailed path for a client-supplied name. This is the WRITE path (uploads); reads
+    go through _policy_read_path, which also sees robot/deploy/bundles/."""
+    fname = os.path.basename(str(fname))
+    if not fname.endswith(".npz") or not fname[:-4]:
+        raise ValueError("a policy bundle is a .npz file")
+    return os.path.join(paths.POLICY_DIR, fname)
+
+
+def _policy_read_path(fname):
+    """Where a named bundle actually is, across both bundle directories, or None."""
+    return paths.find_policy_bundle(fname)
+
+
+def _load_bundle(path):
+    from bundle import Bundle          # robot/deploy — numpy+json only, importable on the Pi
+    return Bundle.load(path)
+
+
+@app.get("/api/policy/list")
+def api_policy_list():
+    """Every .npz in either bundle directory (data/policies/ and deploy/bundles/), each fully
+    validated by the bundle loader. An unloadable file is listed with its error rather than
+    hidden: 'the bundle I scp'd is not offered' must diagnose itself from the panel."""
+    out = []
+    for f, p, where in paths.list_policy_bundles():
+        try:
+            m = _load_bundle(p).meta
+            out.append({"file": f, "valid": True, "where": where,
+                        "run": m.get("run"), "checkpoint": m.get("checkpoint"),
+                        "hz": (round(1.0 / float(m["control_dt"]))
+                               if m.get("control_dt") else None),
+                        "size_kb": os.path.getsize(p) // 1024})
+        except Exception as e:                                     # noqa: BLE001 — shown as data
+            out.append({"file": f, "valid": False, "where": where, "error": str(e)})
+    return _ok(bundles=out, limits={
+        "max_seconds": daemon_mod.POLICY_MAX_SECONDS,
+        "default_seconds": daemon_mod.POLICY_DEFAULT_SECONDS,
+        "deadman_s": daemon_mod.POLICY_DEADMAN_S,
+        "approach_dps": daemon_mod.POLICY_APPROACH_DPS,
+        "approach_kp": daemon_mod.POLICY_APPROACH_KP,
+        "approach_kd": daemon_mod.POLICY_APPROACH_KD,
+        "control_hz": daemon_mod.TICK_HZ})
+
+
+# Per-tick cost is a property of (this bundle, this machine's numpy), so it is measured once and
+# remembered until the file changes. The measurement itself costs ~0.5 s on a Pi 3B, which is fine
+# once and not fine on every dropdown change.
+_PROBE_CACHE = {}
+
+
+def _policy_step_ms(path):
+    """Measured milliseconds per control tick for this bundle here, or None if it will not build.
+
+    This is the number that decides whether the loop can hold 200 Hz, and it is not guessable: the
+    same code on the same Pi runs ~90x slower against the reference BLAS than against OpenBLAS, and
+    nothing in the bundle or the config says which one numpy found."""
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return None
+    if key in _PROBE_CACHE:
+        return _PROBE_CACHE[key]
+    try:
+        from controller import PolicyController
+        bd = _load_bundle(path)
+        ms = _dm()._policy_probe(PolicyController(bd), bd)
+    except Exception:                                          # noqa: BLE001 — absence is the answer
+        ms = None
+    _PROBE_CACHE[key] = ms
+    return ms
+
+
+def _policy_preflight(bundle_path=None):
+    """What stands between this robot and a REAL run of a bundle, as data. run_policy.py
+    re-checks all of it itself before energising anything — this is the same list surfaced
+    where the operator plans, instead of as a SystemExit at the terminal."""
+    checks = []
+    cal = STATE["calib"]
+    ok = bool(cal and cal.complete)
+    checks.append({"name": "zeroing", "ok": ok, "why": "" if ok else
+                   "run the zeroing wizard — every joint angle the policy reads derives from it"})
+    if ok and getattr(cal, "restored_from_disk", False):
+        checks.append({"name": "zeroing freshness", "ok": False, "why":
+                       "calibration was restored from disk — valid only if the drives were not "
+                       "power-cycled since (they re-randomise their origin every power cycle)"})
+    jm_path = os.path.join(paths.DEPLOY, "deploy_map.json")
+    if os.path.exists(jm_path):
+        try:
+            import jointmap
+            jm_ok, jm_why = jointmap.JointMap.load(jm_path).check_ready()
+        except Exception as e:                                     # noqa: BLE001 — shown as data
+            jm_ok, jm_why = False, "deploy_map.json is unreadable: {}".format(e)
+    else:
+        jm_ok, jm_why = False, ("robot/deploy/deploy_map.json does not exist — the model→motor "
+                                "joint map has never been verified on this robot")
+    checks.append({"name": "joint map", "ok": jm_ok, "why": jm_why})
+    th_ok = os.path.exists(os.path.join(paths.DEPLOY, "thermal_params.json"))
+    checks.append({"name": "thermal model", "ok": th_ok, "why": "" if th_ok else
+                   "no fitted thermal_params.json — continuous-torque limits fall back to "
+                   "placeholders (the runner then needs --allow-uncalibrated-thermal)"})
+    sh = STATE.get("sense")
+    mount_ok = bool(sh and getattr(getattr(sh, "mount", None), "calibrated", False))
+    checks.append({"name": "IMU mount", "ok": mount_ok, "why": "" if mount_ok else
+                   ("the Sense HAT is not running — gravity is the only fall detector there is"
+                    if sh is None else
+                    "the IMU mount rotation is not calibrated — 'up' would be in chip axes, not "
+                    "body axes (see the gyro calibration panel)")})
+    live = bool(sh is not None and sh.fast() is not None)
+    checks.append({"name": "IMU live", "ok": live, "why": "" if live else
+                   "no IMU sample has arrived — a balance-relevant controller will not be run "
+                   "blind"})
+    # The run happens in the daemon, so the daemon has to be in a state that can start one.
+    d = _dm()
+    busy = d._policy_busy_with() if d is not None else "the daemon is not running"
+    checks.append({"name": "robot free", "ok": not busy, "why": busy})
+    # ...and it has to be able to run it AT RATE. The control law's dt is a constant, so a loop
+    # that cannot keep up does not degrade, it changes: the gait plays slow and the observed joint
+    # velocities are inflated by exactly the ratio.
+    if bundle_path:
+        ms = _policy_step_ms(bundle_path)
+        budget = 1000.0 / daemon_mod.TICK_HZ
+        rate_ok = ms is not None and ms <= daemon_mod.POLICY_MAX_STEP_MS
+        checks.append({"name": "loop rate", "ok": rate_ok,
+                       "step_ms": None if ms is None else round(ms, 2),
+                       "budget_ms": round(budget, 2),
+                       "why": "" if rate_ok else (
+                           "the bundle would not build here"
+                           if ms is None else
+                           "this machine needs {:.1f} ms per control tick and the loop period is "
+                           "{:.1f} ms — the gait would play at {:.2f}x and every observed joint "
+                           "velocity would be inflated {:.1f}x".format(
+                               ms, budget, min(1.0, budget / ms), max(1.0, ms / budget)))})
+    return checks
+
+
+@app.post("/api/policy/info")
+def api_policy_info():
+    b = request.get_json(force=True, silent=True) or {}
+    p = _policy_read_path(b.get("file", ""))
+    if p is None:
+        return _err("no bundle {!r} in data/policies/ or deploy/bundles/".format(
+            os.path.basename(str(b.get("file", "")))), 404)
+    try:
+        bd = _load_bundle(p)
+    except Exception as e:                                         # noqa: BLE001 — shown as data
+        return _err("not a loadable policy bundle: {}".format(e))
+    m = bd.meta
+    lock = list(m.get("base_lock") or [])
+    railed = [n for n, l in zip(_AXES6, lock) if l]
+    warnings = []
+    if railed:
+        warnings.append("RAILED IN TRAINING: {}. The policy has never experienced those axes "
+                        "free and nothing in it stabilises them — on a free-standing robot it "
+                        "is open-loop there. Run it on a gantry/boom or with the torso "
+                        "supported.".format(", ".join(railed)))
+    kp, kd = bd["imp_kp_base"], bd["imp_kd_base"]
+    info = {
+        "file": os.path.basename(p),
+        "run": m.get("run"), "checkpoint": m.get("checkpoint"),
+        "control_hz": (round(1.0 / float(m["control_dt"])) if m.get("control_dt") else None),
+        "action_dim": m.get("action_dim"),
+        "frame_dim": m.get("frame_dim"), "history_len": m.get("history_len"),
+        "obs_dim": bd.n_actor,
+        # layer sizes, input → output: what "its needed controller architecture" concretely is
+        "estimator": [bd.n_actor] + [int(v) for v in (m.get("est_hidden") or [])] + [3],
+        "policy": ([bd.n_actor + 3] + [int(v) for v in (m.get("policy_hidden") or [])]
+                   + [int(m.get("action_dim") or 0)]),
+        "imp_kp": [round(float(np.min(kp)), 1), round(float(np.max(kp)), 1)],
+        "imp_kd": [round(float(np.min(kd)), 2), round(float(np.max(kd)), 2)],
+        "cmd_box": {"fwd_ms": m.get("cmd_v_fwd_trained"), "back_ms": m.get("cmd_v_back_trained"),
+                    "yaw_rads": m.get("cmd_yaw_trained")},
+        "base_lock": lock,
+        "bundle_version": m.get("bundle_version"),
+    }
+    # The headless equivalent, for the record and for running without a browser. It is NOT the
+    # path the panel uses: run_policy.py refuses to start while this daemon is up, because the CAN
+    # bus has one owner.
+    cmd = ("sudo systemctl stop runningrobot-webui.service\n"
+           "python robot/deploy/run_policy.py \\\n"
+           "    --bundle robot/fixed_gait/webui/data/policies/{} \\\n"
+           "    --jointmap robot/deploy/deploy_map.json \\\n"
+           "    --thermal robot/deploy/thermal_params.json \\\n"
+           "    --v-cmd 0.0 --max-seconds 20 --deadman-file /tmp/dash_deadman"
+           .format(os.path.basename(p)))
+    return _ok(info=info, warnings=warnings, preflight=_policy_preflight(p), command=cmd)
+
+
+# --------------------------------------------------------------------- running one, for real
+@app.post("/api/policy/arm")
+def api_policy_arm():
+    """Start a real run on the drives. The daemon validates everything again itself; this handler
+    only adds the two guards every motion endpoint here carries — the calibration and the
+    single-controller token — and then hands the spec over.
+
+    The acknowledgements (`supported`, and the two that stand in for run_policy's
+    --skip-jointmap-check / --allow-uncalibrated-thermal flags) are checked in the daemon, next to
+    the checks they switch off, rather than here."""
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    ok, why, info = _dm().policy_arm(b)
+    if not ok:
+        return _err(why)
+    time.sleep(0.08)                      # let the CAN thread pick it up so the reply shows POLICY
+    return _ok(token=token, armed=info)
+
+
+@app.post("/api/policy/keepalive")
+def api_policy_keepalive():
+    """The dead-man. The panel calls this ~5 Hz while the run is on screen AND the page is
+    visible; if it stops arriving the governor soft-stops within POLICY_DEADMAN_S — gains bled out
+    over 0.3 s with the target frozen, which puts the robot down under control.
+
+    Deliberately its own endpoint rather than a side effect of the status poll: a poll proves a
+    browser is alive, not that a person is watching."""
+    _dm().policy_keepalive()
+    return _ok()
+
+
+@app.post("/api/policy/stop")
+def api_policy_stop():
+    """Soft by default (freeze the target, bleed the gains out); `hard: true` zeroes them now."""
+    b = request.get_json(force=True, silent=True) or {}
+    _dm().policy_stop(hard=bool(b.get("hard")))
+    time.sleep(0.05)
+    return _ok()
+
+
+@app.post("/api/policy/run/save")
+def api_policy_run_save():
+    """Persist the finished run's 200 Hz log. Written from THIS thread — the CAN loop never
+    touches the filesystem."""
+    got = _dm().get_policy()
+    if got is None:
+        return _err("no finished policy run to save", 404)
+    data = np.asarray(got.pop("log"))
+    got["saved_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    name = "policyrun_{}_{}".format(time.strftime("%Y%m%d_%H%M%S"),
+                                    os.path.splitext(got["file"])[0])
+    path = os.path.join(paths.POLICYRUN_DIR, name + ".npz")
+    np.savez_compressed(path, data=data, meta_json=np.array(json.dumps(got, default=str)))
+    return _ok(file=os.path.basename(path), rows=int(data.shape[0]), run=got)
+
+
+@app.get("/api/policy/runs")
+def api_policy_runs():
+    """Saved runs, newest first — the panel links them and the blackbox keeps the rest."""
+    out = []
+    for f in sorted(os.listdir(paths.POLICYRUN_DIR), reverse=True):
+        if not f.endswith(".npz"):
+            continue
+        p = os.path.join(paths.POLICYRUN_DIR, f)
+        row = {"file": f, "size_kb": os.path.getsize(p) // 1024,
+               "when": time.strftime("%Y-%m-%d %H:%M:%S",
+                                     time.localtime(os.path.getmtime(p)))}
+        try:
+            with np.load(p, allow_pickle=False) as z:
+                m = json.loads(str(z["meta_json"]))
+            row.update(run=m.get("run"), checkpoint=m.get("checkpoint"),
+                       exit_reason=m.get("exit_reason"), seconds=m.get("run_seconds"),
+                       reached_run=m.get("reached_run"))
+        except Exception as e:                                     # noqa: BLE001 — shown as data
+            row["error"] = str(e)
+        out.append(row)
+    return _ok(runs=out)
+
+
+@app.get("/api/policy/run/download")
+def api_policy_run_download():
+    fname = os.path.basename(request.args.get("file", ""))
+    path = os.path.join(paths.POLICYRUN_DIR, fname)
+    if not fname.endswith(".npz") or not os.path.exists(path):
+        return _err("no such run log", 404)
+    with open(path, "rb") as f:
+        blob = f.read()
+    return send_file(io.BytesIO(blob), download_name=fname, as_attachment=True,
+                     mimetype="application/octet-stream")
+
+
+@app.post("/api/policy/upload")
+def api_policy_upload():
+    """Accept a bundle over the hotspot (the Pi has no internet; the alternative is scp). The
+    whole file is validated by the bundle loader BEFORE anything lands on disk — allow_pickle
+    stays False all the way down, so an upload cannot be a code-execution vector."""
+    f = request.files.get("file")
+    if f is None:
+        return _err("no file in the upload")
+    raw = f.read()
+    if len(raw) > 64 * 1024 * 1024:
+        return _err("bundle is {} MB — a policy bundle is a few MB at most"
+                    .format(len(raw) >> 20))
+    try:
+        from bundle import Bundle
+        with np.load(io.BytesIO(raw), allow_pickle=False) as z:
+            meta = json.loads(str(z["meta"]))
+            arrays = {k: z[k] for k in z.files if k != "meta"}
+        Bundle(arrays, meta)
+    except Exception as e:                                         # noqa: BLE001 — shown as data
+        return _err("not a valid policy bundle: {}".format(e))
+    try:
+        dest = _policy_path(f.filename or "bundle.npz")
+    except ValueError:
+        dest = os.path.join(paths.POLICY_DIR, "uploaded.npz")
+    with open(dest, "wb") as out:
+        out.write(raw)
+    return _ok(file=os.path.basename(dest))
+
+
+@app.post("/api/policy/rehearse")
+def api_policy_rehearse():
+    b = request.get_json(force=True, silent=True) or {}
+    if _REHEARSAL["proc"] is not None and _REHEARSAL["proc"].poll() is None:
+        return _err("a rehearsal is already running", 409)
+    p = _policy_read_path(b.get("file", ""))
+    if p is None:
+        return _err("no bundle {!r} in data/policies/ or deploy/bundles/".format(
+            os.path.basename(str(b.get("file", "")))), 404)
+    try:
+        secs = min(30.0, max(1.0, float(b.get("seconds") or 5.0)))
+    except (TypeError, ValueError):
+        secs = 5.0
+    log = os.path.join(paths.POLICYRUN_DIR, "rehearsal.log")
+    cmd = [sys.executable, os.path.join(paths.DEPLOY, "run_policy.py"),
+           "--bundle", p, "--mock", "--max-seconds", str(secs), "--no-log"]
+    with open(log, "w", encoding="utf-8") as fh:       # Popen dups the fd; ours can close
+        _REHEARSAL["proc"] = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT)
+    _REHEARSAL.update(file=os.path.basename(p), log=log, t0=time.time())
+    return _ok(started=True)
+
+
+@app.get("/api/policy/rehearse/status")
+def api_policy_rehearse_status():
+    r = _REHEARSAL
+    if r["proc"] is None:
+        return _ok(rehearsal=None)
+    rc = r["proc"].poll()
+    tail = ""
+    try:
+        with open(r["log"], "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            n = f.tell()
+            f.seek(max(0, n - 8000))
+            tail = f.read()
+    except OSError:
+        pass
+    return _ok(rehearsal={"file": r["file"], "running": rc is None, "returncode": rc,
+                          "elapsed_s": round(time.time() - r["t0"], 1), "tail": tail})
+
+
+@app.post("/api/policy/rehearse/stop")
+def api_policy_rehearse_stop():
+    if _REHEARSAL["proc"] is not None and _REHEARSAL["proc"].poll() is None:
+        _REHEARSAL["proc"].terminate()
+    return _ok()
+
+
+@atexit.register
+def _kill_rehearsal():
+    if _REHEARSAL["proc"] is not None and _REHEARSAL["proc"].poll() is None:
+        _REHEARSAL["proc"].terminate()
+
+
 # ===================================================================== black box (flight recorder)
 def _bb():
     return STATE["bb"]
@@ -1223,6 +1882,10 @@ def main():
     if not args.no_sensors:
         sh = sensehat.SenseHat(bus_num=args.i2c_bus, mock=args.mock, imu_hz=args.imu_hz)
         STATE["sense"] = sh
+        # POLICY mode reads gravity and body rate off this at 200 Hz (sh.fast() is one lock and a
+        # tuple read). Attached rather than constructor-injected because the HAT is deliberately
+        # started AFTER the daemon, so a wedged I2C bus cannot delay motor bring-up.
+        d.sense = sh
         sh.start()
     atexit.register(_shutdown)
 

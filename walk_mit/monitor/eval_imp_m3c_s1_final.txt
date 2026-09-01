@@ -1,0 +1,3 @@
+[eval] using final_model + vecnormalize.pkl
+episodes=12  ep_len 805+/-950 control steps (max 12000)  mean_return 544.3  mean vx 0.01 m/s  peak vx 0.50 m/s
+wrote walk_mit/monitor/imp_m3c_s1_FINAL_200M.mp4 (8000 frames, 40.0 s)

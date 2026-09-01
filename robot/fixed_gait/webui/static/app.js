@@ -16,6 +16,13 @@ const S = {
   ws: null,                      // /api/workspace payload
   traj: null, trajName: null,    // shown trajectory
   latest: {},                    // motor -> latest telemetry values
+  chartSpan: 120,                // seconds shown per telemetry chart (buffers keep CHART_KEEP_S)
+  // Last KNOWN value of fields that only some state payloads carry. /api/state merges the hot and
+  // cold halves, but api() calls applyState with the daemon snapshot alone, which has no
+  // calibration and no workspace. Reading those directly made the "calibrated" badge flip to NOT
+  // CALIBRATED on every API call; the lamps below would have inherited the same flicker. Only ever
+  // LEARN a field that is present.
+  cal: {}, ws: {}, bypassBanner: false,
   linkage: { left: null, right: null }, linkPrev: { left: null, right: null }, linkT: 0,
   mockTimers: {},
   preview: { on: false, t0: 0 },  // client-side both-legs gait preview animation
@@ -82,10 +89,14 @@ function applyState(st) {
   const mb = $("mode-badge");
   mb.textContent = mode;
   mb.className = "badge mode-" + mode;
-  const cal = st.calibration || {};
+  if (st.calibration) S.cal = st.calibration;
+  if (st.workspace) S.ws = st.workspace;
+  const cal = S.cal;
   const cb = $("calib-badge");
   cb.textContent = cal.stage === "complete" ? "calibrated" : "NOT CALIBRATED";
   cb.className = "badge " + (cal.stage === "complete" ? "cal-ok" : "cal-no");
+  updateLamps(st);
+  updateGuards(st);
   $("daemon-dot").classList.toggle("alive", !!st.daemon_alive && st.daemon_thread_alive !== false);
   $("loop-info").textContent = st.loop ? `${st.loop.hz | 0} Hz, slip ${st.loop.slip}` : "";
 
@@ -106,10 +117,14 @@ function applyState(st) {
   updateManualStatus(st);
   updateFileLists(st);
   syncFkMapSelects(st);
-  $("panel-mock").classList.toggle("hidden", !st.mock);
+  // the visibility toggle lives on the ROW, not the panel: a hidden panel inside a visible
+  // (empty) row would still cost the page an extra flex gap
+  $("row-mock").classList.toggle("hidden", !st.mock);
   $("btn-estop").textContent = (st.estop && st.estop.latched) ? "CLEAR E-STOP" : "E-STOP";
   if (cal.stage === "complete" && !S.sineDefFetched) { S.sineDefFetched = true; fetchSineDefaults(); }
   if (window.onSysidState) window.onSysidState(st);      // system-ID panels (sysid.js)
+  if (window.onThermalState) window.onThermalState(st); // thermal calibration (thermal.js)
+  if (window.onPolicyState) window.onPolicyState(st);   // policy runs (policy.js)
 }
 
 /** Has the slow guided move (Home / ⌖ Centre) reached what it was sent to? The move stays armed
@@ -169,9 +184,11 @@ function updateWizard(st) {
   $("panel-calib").classList.toggle("attention", !complete);
   // gate every actionable panel until calibrated (telemetry + mock stay usable — the wizard
   // itself needs live values and mock dragging)
-  document.querySelectorAll("#main > .panel").forEach((p) => {
-    // panel-limbs is pure inspection (mass entry + inertia comparison) — usable before calibration
-    if (!["panel-calib", "panel-telemetry", "panel-mock", "panel-files", "panel-limbs"].includes(p.id))
+  document.querySelectorAll("#main .panel").forEach((p) => {
+    // panel-limbs and panel-policy are pure inspection here (mass entry / bundle metadata + a
+    // mock-bus rehearsal that energises nothing) — usable before calibration
+    if (!["panel-calib", "panel-telemetry", "panel-mock", "panel-files", "panel-limbs",
+          "panel-policy"].includes(p.id))
       p.classList.toggle("locked", !complete);
   });
   if (complete) {
@@ -199,10 +216,15 @@ function updateWizard(st) {
           <div class="val">—</div>
           <div class="instr">${INSTR[n]}</div>
           <div class="row">
+            <button class="btn small" data-zero1="${n}" title="Re-capture THIS joint's zero from
+where it is right now — pose just this joint, leave the other five alone. Its direction must be
+re-confirmed afterwards (the sign is kept, the ✓ is cleared).">📍 Zero</button>
             <button class="btn small" data-flip="${n}">↔ Flip</button>
             <button class="btn small primary" data-confirm="${n}">✓ Confirm</button>
           </div>
         </div>`).join("");
+      cards.querySelectorAll("[data-zero1]").forEach((b) => b.onclick = () =>
+        api("/api/calibration/zero_one", { json: { motor: b.dataset.zero1 } }));
       cards.querySelectorAll("[data-flip]").forEach((b) => b.onclick = async () => {
         const n = b.dataset.flip;
         const cur = S.state.calibration.motors[n].sign;
@@ -239,11 +261,24 @@ $("btn-recal-reset").onclick = () => {
 };
 
 /* ================================================================ strip charts */
+/* The longest window the buffers RETAIN, independent of what is currently displayed. Keeping the
+ * full history means widening the time window shows history that already happened, instead of
+ * starting an empty chart and making you wait for it. At 10 Hz x 6 motors x 3 charts this is a few
+ * hundred kB, which is nothing next to being able to look backwards. */
+const CHART_KEEP_S = 600;
+
 class StripChart {
   /** color2, when given, draws an optional second series (the commanded target) under the first. */
   constructor(canvas, color, span = 60, color2 = null) {
     this.cv = canvas; this.color = color; this.color2 = color2; this.span = span;
     this.t = []; this.v = []; this.v2 = [];
+    // OPT-IN, and it must stay opt-in. _fit() sizes the backing store from the element's measured
+    // box; on a canvas with no CSS width the width ATTRIBUTE is what drives layout, so writing it
+    // changes the measurement that produced it and the canvas grows without bound. That is what
+    // happened to #meas-chart on 2026-08-29 — it has no CSS width, so it doubled every frame and,
+    // sitting in a 1fr grid, dragged Gait playback / Dynamic ID / Limbs & inertia / Manage files
+    // out to infinity with it. Only enable this on a canvas whose width comes from CSS.
+    this.autoFit = false;
   }
   /** v2 is optional and may be null on any sample — nothing is commanded while limp, and the line
    *  must BREAK there rather than hold the last target flat, which would read as a real command. */
@@ -251,8 +286,40 @@ class StripChart {
     if (v === null || v === undefined) return;
     this.t.push(t); this.v.push(v);
     this.v2.push(v2 === null || v2 === undefined ? NaN : v2);
-    const cut = t - this.span;
+    const cut = t - CHART_KEEP_S;
     while (this.t.length && this.t[0] < cut) { this.t.shift(); this.v.shift(); this.v2.shift(); }
+  }
+  /** Match the backing store to the CSS box, in device pixels, so a full-width chart is crisp
+   *  rather than a 220 px bitmap stretched across 700 px. */
+  _fit() {
+    if (!this.autoFit) { this.dpr = 1; return; }
+    const c = this.cv, r = c.getBoundingClientRect();
+    this.dpr = window.devicePixelRatio || 1;
+    const w = Math.max(80, Math.round(r.width * this.dpr));
+    const h = Math.max(24, Math.round(r.height * this.dpr));
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  }
+  /** Time gridlines with real labels. Without them a strip chart shows you a shape but not how
+   *  long anything took, which is the question you actually have when watching a gait. */
+  _timeAxis(g, w, h) {
+    const k = this.dpr || 1;
+    // ~5 divisions, snapped to a round number of seconds
+    const raw = this.span / 5;
+    const step = [1, 2, 5, 10, 15, 30, 60, 120, 300].find((x) => x >= raw) || 300;
+    g.save();
+    g.font = `${Math.round(9 * k)}px monospace`;
+    g.textBaseline = "bottom";
+    for (let a = 0; a <= this.span + 1e-6; a += step) {
+      const x = w - (a / this.span) * w;
+      g.strokeStyle = a === 0 ? "rgba(139,151,168,.35)" : "rgba(139,151,168,.14)";
+      g.lineWidth = k;
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+      if (!this.showTimeLabels) continue;
+      g.fillStyle = "rgba(139,151,168,.75)";
+      g.textAlign = a === 0 ? "right" : (x < 24 * k ? "left" : "center");
+      g.fillText(a === 0 ? "now" : `-${a}s`, a === 0 ? w - 2 * k : x, h - 2 * k);
+    }
+    g.restore();
   }
   _stroke(g, vals, now, lo, hi, w, h) {
     let pen = false;
@@ -268,8 +335,11 @@ class StripChart {
   }
   draw(now, refLine = null) {
     const c = this.cv, g = c.getContext("2d");
+    this._fit();
+    const k = this.dpr || 1;
     const w = c.width, h = c.height;
     g.clearRect(0, 0, w, h);
+    this._timeAxis(g, w, h);
     if (this.v.length < 2) return;
     // Scale over BOTH series: if the target is clipped out of view you cannot see the tracking
     // error, which is the entire reason for drawing it.
@@ -280,18 +350,130 @@ class StripChart {
     const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
     if (refLine !== null && refLine <= hi && refLine >= lo) {
       const y = h - ((refLine - lo) / (hi - lo)) * h;
-      g.strokeStyle = "rgba(224,69,69,.5)"; g.setLineDash([3, 3]);
+      g.strokeStyle = "rgba(224,69,69,.5)"; g.setLineDash([3 * k, 3 * k]);
       g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); g.setLineDash([]);
     }
     if (this.color2 && finite2.length) {
-      g.strokeStyle = this.color2; g.lineWidth = 1; g.setLineDash([4, 3]);
+      g.strokeStyle = this.color2; g.lineWidth = k; g.setLineDash([4 * k, 3 * k]);
       this._stroke(g, this.v2, now, lo, hi, w, h);
       g.setLineDash([]);
     }
-    g.strokeStyle = this.color; g.lineWidth = 1.2;
+    g.strokeStyle = this.color; g.lineWidth = 1.2 * k;
     this._stroke(g, this.v, now, lo, hi, w, h);
-    g.fillStyle = "rgba(139,151,168,.9)"; g.font = "9px monospace";
-    g.fillText(hi.toFixed(1), 2, 9); g.fillText(lo.toFixed(1), 2, h - 2);
+    g.fillStyle = "rgba(139,151,168,.9)";
+    g.font = `${Math.round(9 * k)}px monospace`;
+    g.textAlign = "left"; g.textBaseline = "alphabetic";
+    g.fillText(hi.toFixed(1), 2 * k, 9 * k);
+    // lift the range label clear of the time axis on whichever chart carries the labels
+    g.fillText(lo.toFixed(1), 2 * k, h - (this.showTimeLabels ? 12 : 2) * k);
+  }
+}
+
+
+/* Two things the operator has to know before commanding anything, and which are otherwise buried
+ * in the calibration wizard and the workspace panel.
+ *
+ * ZEROED is not the same question as "is there a calibration". Every drive re-randomises its raw
+ * encoder origin on a power cycle, so a calibration restored from disk describes a frame that no
+ * longer exists — the daemon's pre-move guard refuses motion until it is re-captured. Amber is
+ * exactly that state: calibrated, but not in THIS session, so nothing will move yet.
+ *
+ * WORKSPACE is the recorded feasible-configuration set the daemon bounds MANUAL, PLAYBACK and the
+ * identify wiggle against. Without it _safe_room has nothing to say and those guards fall back to
+ * the joints' own hard limits. */
+function updateLamps(st) {
+  const cal = S.cal, ws = S.ws;
+  const guard = (st.premove || {}).refused || "";
+  const zl = $("lamp-zero");
+  if (cal.stage !== "complete") {
+    zl.className = "lamp off";
+    zl.title = "No calibration. Run the zero/direction wizard — nothing will move until you do.";
+  } else if (cal.restored_from_disk) {
+    zl.className = "lamp warn";
+    zl.title = "Calibration restored from disk, not re-captured this session. The drives "
+      + "re-randomise their raw origin on every power cycle, so the pre-move guard will refuse "
+      + "motion until you set zero again.";
+  } else if (guard) {
+    zl.className = "lamp warn";
+    zl.title = "Zeroed this session, but the pre-move guard is refusing: " + guard;
+  } else {
+    zl.className = "lamp ok";
+    zl.title = `Zeroed this session (epoch ${cal.zero_epoch}). The pre-move guard is satisfied.`;
+  }
+
+  const wl = $("lamp-ws");
+  const legs = (ws.legs || []).length;
+  if (!ws.source) {
+    wl.className = "lamp off";
+    wl.title = "No safe workspace loaded. MANUAL, playback and the identify wiggle fall back to "
+      + "each joint's own hard limits — the self-collision check has nothing to work from.";
+  } else if (legs < 2) {
+    wl.className = "lamp warn";
+    wl.title = `${ws.source}: only ${legs} leg recorded. The missing side is unbounded by the `
+      + "workspace check.";
+  } else {
+    wl.className = "lamp ok";
+    wl.title = `${ws.source} — both legs recorded.`;
+  }
+}
+
+
+/* Four software limits the operator can switch off. Ticked = enforced; unticking DISABLES the
+ * limit and asks first, naming what stops being checked. The daemon is the authority — these
+ * checkboxes only ever mirror st.bypass, so a bypass set from another tab shows up here too.
+ *
+ * What none of them touch: the joints' own hard limits, the drive's firmware current limit, the
+ * E-STOP, the fall kill, drive errors, over-temperature, telemetry staleness. */
+const GUARD_WARN = {
+  workspace: "Disable the WORKSPACE limit?\n\nPoses will no longer be checked against the "
+    + "recorded feasible set, so the legs may be commanded into each other or into the ground.\n\n"
+    + "Each joint's own hard limit still applies — this cannot drive a joint into a stop.",
+  speed: "Disable the SPEED limit?\n\nThe playback speed governor and the runaway cut-out both "
+    + "stop applying. A joint that starts accelerating will not be caught by software.",
+  torque: "Disable the TORQUE limit?\n\nThe playback current cap rises from its configured value "
+    + "to the 40 A software ceiling. The drive's own firmware phase limit is still the real "
+    + "ceiling and is not affected.",
+  tracking: "Disable the TRACKING-ERROR limit?\n\nThe daemon will no longer trip when a joint "
+    + "falls behind its commanded position. That trip is what catches a stale zero, a jammed "
+    + "joint, and a mechanism that has stopped following — before it is obvious.",
+};
+
+function wireGuards() {
+  document.querySelectorAll(".gk").forEach((el) => {
+    el.onchange = async () => {
+      const name = el.dataset.bypass;
+      const disabling = !el.checked;            // unticking = turning the SAFETY off
+      if (disabling && !confirm(GUARD_WARN[name] + "\n\nThis is recorded in the flight recorder "
+          + "and stays off until the daemon restarts.")) {
+        el.checked = true;                      // refused: put the guard back
+        return;
+      }
+      try {
+        await api("/api/bypass", { json: { name, on: disabling, acknowledged: true } });
+      } catch (_) { el.checked = !disabling; }  // server refused: mirror reality
+    };
+  });
+}
+
+function updateGuards(st) {
+  const by = st.bypass;
+  if (!by) return;                              // partial state: never guess
+  let any = false;
+  document.querySelectorAll(".gk").forEach((el) => {
+    const off = !!by[el.dataset.bypass];
+    if (document.activeElement !== el) el.checked = !off;
+    el.parentElement.classList.toggle("off", off);
+    any = any || off;
+  });
+  $("guards").classList.toggle("breached", any);
+  const names = Object.keys(by).filter((k) => by[k]);
+  if (names.length) {
+    setBanner("SAFETY BYPASSED: " + names.join(", ") + " — these limits are NOT being enforced. "
+      + "They re-arm when the daemon restarts.", "error");
+    S.bypassBanner = true;
+  } else if (S.bypassBanner) {
+    S.bypassBanner = false;
+    setBanner("");
   }
 }
 
@@ -306,16 +488,33 @@ function buildMotorCards() {
         <span><span class="v-cur">—</span> A</span><span><span class="v-temp">—</span> °C</span>
         <span class="mc-err v-err"></span>
       </div>
-      <canvas class="c-pos" width="220" height="34"></canvas>
-      <canvas class="c-cur" width="220" height="34"></canvas>
-      <canvas class="c-temp" width="220" height="34"></canvas>
+      <div class="mc-plot"><span class="mc-ylab">pos °</span><canvas class="c-pos"></canvas></div>
+      <div class="mc-plot"><span class="mc-ylab">current A</span><canvas class="c-cur"></canvas></div>
+      <div class="mc-plot"><span class="mc-ylab">temp °C</span><canvas class="c-temp"></canvas></div>
     </div>`).join("");
   for (const n of MOTORS) {
     const card = $("mc-" + n.replace(".", "-"));
     charts[n] = {
-      pos: new StripChart(card.querySelector(".c-pos"), COLORS.pos, 60, COLORS.target),
-      cur: new StripChart(card.querySelector(".c-cur"), COLORS.cur),
-      temp: new StripChart(card.querySelector(".c-temp"), COLORS.temp),
+      pos: new StripChart(card.querySelector(".c-pos"), COLORS.pos, S.chartSpan, COLORS.target),
+      cur: new StripChart(card.querySelector(".c-cur"), COLORS.cur, S.chartSpan),
+      temp: new StripChart(card.querySelector(".c-temp"), COLORS.temp, S.chartSpan),
+    };
+    // these three are `width: 100%` in the stylesheet, so their layout width comes from CSS and
+    // sizing the backing store cannot feed back into it
+    for (const k of ["pos", "cur", "temp"]) charts[n][k].autoFit = true;
+    // only the bottom chart of each card carries the labels; the gridlines line up across all
+    // three, so one set of numbers reads for the whole column
+    charts[n].temp.showTimeLabels = true;
+  }
+  const sel = $("tel-span");
+  if (sel) {
+    sel.value = String(S.chartSpan);
+    sel.onchange = () => {
+      S.chartSpan = +sel.value;
+      for (const n of MOTORS) {
+        for (const k of ["pos", "cur", "temp"]) charts[n][k].span = S.chartSpan;
+      }
+      drawCharts();
     };
   }
 }
@@ -606,9 +805,27 @@ const wsEd = {
 function wsLegData() { return S.ws && S.ws.legs ? S.ws.legs[S.wsLeg] : null; }
 
 function loadWsIntoEditor() {
+  if (!wsEd.view) return;  // guard against early calls before canvas setup
   const d = wsLegData();
-  if (!d) { wsEd.grid = null; wsEd.view.render(); drawAbd(); updateWsStats(); return; }
+  if (!d) {
+    wsEd.grid = null;
+    wsEd.shape = null;
+    wsEd.view.fit(-60, 60, -60, 60);  // use default bounds
+    wsEd.view.render();
+    drawAbd();
+    updateWsStats();
+    return;
+  }
   const k = d.knee;
+  if (!k || !k.shape) {
+    wsEd.grid = null;
+    wsEd.shape = null;
+    wsEd.view.fit(-60, 60, -60, 60);
+    wsEd.view.render();
+    drawAbd();
+    updateWsStats();
+    return;
+  }
   wsEd.shape = k.shape; wsEd.camO = k.cam_origin; wsEd.thighO = k.thigh_origin; wsEd.res = k.res_deg;
   wsEd.grid = unpackBits(k.grid_b64, k.shape[0] * k.shape[1]);
   wsEd.undo = []; wsEd.redo = []; wsEd.dirty = false;
@@ -635,7 +852,9 @@ function packBits(arr) {
 }
 
 function renderWs() {
+  if (!wsEd.view || !wsEd.view.g) return;
   const v = wsEd.view, g = v.g, cv = v.cv;
+  if (cv.width === 0 || cv.height === 0) return;  // canvas not visible
   g.fillStyle = "#10141a"; g.fillRect(0, 0, cv.width, cv.height);
   v.drawAxes();
   const d = wsLegData();
@@ -892,14 +1111,28 @@ $("btn-abd-apply").onclick = () => api("/api/workspace/abduction", { json: {
 
 /* ---------------- workspace files / recording ---------------- */
 async function refreshWorkspace() {
-  S.ws = await (await fetch("/api/workspace")).json();
-  $("ws-source").textContent = S.ws.source ? "· " + S.ws.source : "";
-  const legs = (S.ws && S.ws.legs) || {};
-  legBadges($("ws-legs-loaded"), !!legs.right, !!legs.left);
-  legBadges($("ws-legs-loaded2"), !!legs.right, !!legs.left);
-  loadWsIntoEditor();
-  updateManualRanges();
-  renderEE();
+  try {
+    const r = await fetch("/api/workspace");
+    if (!r.ok) {
+      console.error("workspace fetch failed:", r.status, r.statusText);
+      return;
+    }
+    S.ws = await r.json();
+    if (!S.ws) {
+      console.error("workspace response is null");
+      return;
+    }
+    $("ws-source").textContent = S.ws.source ? "· " + S.ws.source : "";
+    const legs = (S.ws && S.ws.legs) || {};
+    legBadges($("ws-legs-loaded"), !!legs.right, !!legs.left);
+    legBadges($("ws-legs-loaded2"), !!legs.right, !!legs.left);
+    loadWsIntoEditor();
+    updateManualRanges();
+    renderEE();
+  } catch (e) {
+    console.error("refreshWorkspace error:", e);
+    setBanner("Failed to refresh workspace: " + e.message, "error", 5000);
+  }
 }
 
 /* slider bounds follow the demonstrated workspace (the real ranges can exceed the URDF guesses) */
@@ -923,14 +1156,20 @@ function updateManualRanges() {
   }
 }
 $("ws-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
-  $("ws-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active");
-  S.wsLeg = b.dataset.leg;
-  $("btn-ws-mirror").textContent =
-    S.wsLeg === "right" ? "⇄ copy right → left" : "⇄ copy left → right";
-  document.querySelectorAll(".wsrec-legname").forEach((s) => s.textContent = S.wsLeg);
-  resetWsTrail();                    // the sweep trail belongs to the leg you were recording
-  loadWsIntoEditor();
+  try {
+    $("ws-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    S.wsLeg = b.dataset.leg;
+    $("btn-ws-mirror").textContent =
+      S.wsLeg === "right" ? "⇄ copy right → left" : "⇄ copy left → right";
+    document.querySelectorAll(".wsrec-legname").forEach((s) => s.textContent = S.wsLeg);
+    resetWsTrail();
+    loadWsIntoEditor();
+    wsEd.view.render();  // force immediate render after leg switch
+  } catch (e) {
+    console.error("workspace tab switch error:", e);
+    setBanner("Error switching workspace leg: " + e.message, "error", 5000);
+  }
 });
 function resetWsTrail() { S.wsTrail = []; S.wsAbdSweep = [Infinity, -Infinity]; }
 $("btn-ws-mirror").onclick = async () => {
@@ -1038,7 +1277,9 @@ function previewIdx(tr, side, p) {
 }
 
 function renderTraj() {
+  if (!trEd.view || !trEd.view.g) return;
   const v = trEd.view, g = v.g, cv = v.cv;
+  if (cv.width === 0 || cv.height === 0) return;  // canvas not visible
   g.fillStyle = "#10141a"; g.fillRect(0, 0, cv.width, cv.height);
   v.drawAxes();
   // workspace backdrops for BOTH legs (active leg green, other faded — the normalized frames
@@ -1131,25 +1372,34 @@ function updateTrajStats() {
 }
 
 $("traj-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
-  $("traj-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active");
-  S.trajLeg = b.dataset.leg;
-  document.querySelectorAll(".traj-legname").forEach((s) => s.textContent = S.trajLeg);
-  trEd.stroke = [];
-  fitTrajView();
-  trEd.view.render();
+  try {
+    $("traj-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    S.trajLeg = b.dataset.leg;
+    document.querySelectorAll(".traj-legname").forEach((s) => s.textContent = S.trajLeg);
+    trEd.stroke = [];
+    fitTrajView();
+    trEd.view.render();
+  } catch (e) {
+    console.error("trajectory tab switch error:", e);
+    setBanner("Error switching trajectory leg: " + e.message, "error", 5000);
+  }
 });
 function updateTrajLegBadges() {
   const t = S.traj || {};
   legBadges($("traj-legs-loaded"), !!t.right, !!t.left);
 }
 function fitTrajView() {
+  if (!trEd.view) return;  // guard against early calls before canvas setup
   const d = S.ws && S.ws.legs ? S.ws.legs[S.trajLeg] : null;
-  if (d) {
+  if (d && d.knee) {
     const k = d.knee;
     trEd.view.fit(k.cam_origin, k.cam_origin + k.shape[0] * k.res_deg,
                   k.thigh_origin, k.thigh_origin + k.shape[1] * k.res_deg);
-  } else trEd.view.fit(-60, 60, -60, 60);
+  } else {
+    trEd.view.fit(-60, 60, -60, 60);
+  }
+  trEd.view.render();  // ensure view renders after fitting
 }
 $("btn-traj-clear").onclick = () => { trEd.stroke = []; trEd.view.render(); updateTrajStats(); };
 $("btn-traj-reverse").onclick = () => { trEd.stroke.reverse(); trEd.view.render(); };
@@ -1601,6 +1851,7 @@ $("btn-mock-stop").onclick = stopMockSweeps;
 function boot() {
   buildMotorCards();
   buildManualRows();
+  wireGuards();
   setupWsCanvas();
   setupTrajCanvas();
   updateTrajLegBadges();

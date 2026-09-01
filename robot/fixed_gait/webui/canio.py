@@ -150,6 +150,48 @@ def set_current(bus, cid, amps):
     return _send(bus, _make_msg(cid | (CAN_PACKET_SET_CURRENT << 8), struct.pack(">i", val)))
 
 
+# ---- force control (MIT mode) --------------------------------------------------------------
+# The frame layout, the byte order and the reasons velocity/torque are pinned to zero all live in
+# robot/deploy/mit.py -- that module is the single definition of the wire format and it is written
+# to be readable without a training stack. This is only the transport, kept here because canio is
+# the ONLY webui module that constructs CAN messages.
+#
+# NOTE the arbitration id is EXTENDED with command 8, exactly like the servo commands above; it is
+# NOT the classic-MIT standard-id protocol that every mit_*.py in robot/tools implements. See the
+# 2026-08-26 characterisation.
+def force_control(bus, cid, payload):
+    """Send one 8-byte force-control payload (from mit.pack) to `cid`."""
+    if len(payload) != 8:
+        raise ValueError("force-control payload must be exactly 8 bytes, got {} -- a short frame "
+                         "reads its missing bytes as ZERO, and zero in the position field is the "
+                         "range MINIMUM. That is the 62 A incident.".format(len(payload)))
+    return _send(bus, _make_msg(cid | (8 << 8), payload))
+
+
+def _mit_decode(buf):
+    """Force-control payload -> engineering units, for MockBus only. The authority on this layout
+    is robot/deploy/mit.py; imported from there when it is reachable so there is ONE definition,
+    with a local fallback so the webui does not gain a hard dependency on the deploy package."""
+    if len(buf) != 8:
+        return None
+    try:
+        import os as _os
+        import sys as _sys
+        _d = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
+            _os.path.abspath(__file__)))), "deploy")
+        if _d not in _sys.path:
+            _sys.path.insert(0, _d)
+        import mit as _mit
+        return _mit.unpack(buf)
+    except Exception:
+        b = bytes(buf)
+        kpi = (b[0] << 4) | (b[1] >> 4)
+        kdi = ((b[1] & 0xF) << 8) | b[2]
+        pi = (b[3] << 8) | b[4]
+        return {"kp": kpi * 500.0 / 4096.0, "kd": kdi * 5.0 / 4096.0,
+                "p_des": pi * 25.12 / 65536.0 - 12.56, "v_des": 0.0, "tau_ff": 0.0}
+
+
 def parse_status(data):
     """Decode the 8-byte broadcast status frame (run_hardware.py:74-82)."""
     if len(data) < 8:
@@ -281,6 +323,16 @@ class MockBus:
                 m.target = (struct.unpack(">i", bytes(msg.data[:4]))[0] / 10_000.0
                             - m.origin_shift)
                 m.limp = False
+            elif cmd == 8:                       # force control -- see robot/deploy/mit.py
+                d = _mit_decode(msg.data)
+                if d is None or (d["kp"] <= 0.0 and d["kd"] <= 0.0):
+                    m.limp = True
+                    m.target = None
+                else:
+                    # crude but honest: a position loop with the commanded stiffness. The mock is
+                    # here to exercise the COMMAND PATH and the safety logic, not to be a plant.
+                    m.limp = False
+                    m.target = math.degrees(d["p_des"]) - m.origin_shift
             elif cmd == CAN_PACKET_SET_CURRENT:
                 amps = struct.unpack(">i", bytes(msg.data[:4]))[0] / 1000.0
                 if amps == 0.0:

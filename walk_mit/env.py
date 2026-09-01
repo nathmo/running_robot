@@ -198,7 +198,10 @@ class DashEnv(gym.Env):
         self._torque_scale = 1.0
         self._sag_scale = 1.0      # bus-voltage droop (dr_torque_sag)
         self._sag_state = 0.0
-        self.height_target = float(self.default_qpos[2])
+        # height_target_offset_m: crouch — see config.py. Applied to the reward TARGET only; the
+        # keyframe (and so every reset) still starts at the settled stance and the policy earns
+        # its way down. term_height stays absolute, so the kill line does not follow the crouch.
+        self.height_target = float(self.default_qpos[2]) - float(cfg.height_target_offset_m)
         # optional STIFFER passive ankle spring (m3 sagittal-balance experiment): a firmer foot
         # lever = more passive pitch-restoring torque in stance. The standing ankle sits well off
         # the spring's rest angle (loaded ~12.8 N*m), so raising k alone would balloon that preload
@@ -272,6 +275,11 @@ class DashEnv(gym.Env):
                               self.model.actuator_biasprm[:self.n_gait_act, 2].copy())
         self._imp_base = tuple(p.copy() for p in self._imp_pristine)
         self._imp_leg_ix = np.array([0, 0, 0, 1, 1, 1])[:self.n_gait_act]
+        # anti-shuffle swing-floor state: per-foot EMA airborne fraction (see w_swing_floor).
+        # Seeded AT the floor so a fresh episode starts penalty-free.
+        self._swing_ema = np.full(2, self.cfg.swing_floor_frac, np.float32)
+        self._swing_ema_coef = float(np.exp(-self.control_dt
+                                            / max(self.cfg.swing_floor_tau_s, 1e-6)))
         self._reflex_prate_filt = 0.0                               # pitch-reflex rate low-pass state
         self._coef_rate_gated = 0.0
         self._phase = 0.0                # fourier: the single global gait clock, kept in [0, 2*pi)
@@ -791,10 +799,11 @@ class DashEnv(gym.Env):
         self.model.key_qpos[self.key_id] = qpos
         self.default_qpos = qpos.copy()
         self.default_motor_pos = self.default_qpos[self.act_qadr]
-        self.height_target = float(self.default_qpos[2])
+        self.height_target = float(self.default_qpos[2]) - float(self.cfg.height_target_offset_m)
         # how far this ankle sags relative to the shipped k=28.65 preloaded stance. Reported by the
         # statics tool: a large sag IS the answer for a soft arm, not a nuisance to be normalized.
-        self.settle_sag_m = z_before - self.height_target
+        # (measured against the SETTLED height, not the crouch target)
+        self.settle_sag_m = z_before - float(self.default_qpos[2])
         self.settle_ankle = self.default_qpos[self._ankle_qpos].copy()
         # Re-reference the workspace box to THIS arm's settled stance.
         #
@@ -1166,6 +1175,7 @@ class DashEnv(gym.Env):
         self._prev_applied[:] = 0.0
         self._prev_motor_cmd[:] = 0.0
         self._prev_residual[:] = 0.0
+        self._swing_ema[:] = self.cfg.swing_floor_frac
         self._reflex_prate_filt = 0.0
         self._coef_rate_gated = 0.0
         self._phase = 0.0
@@ -1257,7 +1267,14 @@ class DashEnv(gym.Env):
         # --- yaw rate tracking (gyro z: measurable on hardware, unlike a curvature radius) ---
         sigw = max(c.track_yaw_sigma_min, c.track_sigma_rel * abs(self._yaw_cmd))
         e_yaw = (yaw_rate - self._yaw_cmd) / sigw
-        t["track_yaw"] = c.w_track_yaw * float(np.exp(-e_yaw * e_yaw))
+        yaw = c.w_track_yaw * float(np.exp(-e_yaw * e_yaw))
+        # anti-stand-subsidy: a policy standing still under a speed command tracks yaw_cmd ~0
+        # perfectly and banks the whole term (imp_m3b: 2.0/step for 200M while refusing to move).
+        # Couple yaw income to LINEAR competence so it only flows while the speed command is
+        # being followed. Stand commands keep the uncoupled term (v=0 is tracked by standing).
+        if c.track_yaw_couple and not self._standing:
+            yaw *= float(np.exp(-e_lin * e_lin))
+        t["track_yaw"] = yaw
         # --- stand still ---
         # Stepping in place is explicitly allowed (the plant cannot stand passively — it needs an
         # active gait for height), so this grades the BASE, not the feet: near-zero body velocity
@@ -1664,6 +1681,23 @@ class DashEnv(gym.Env):
                 self._air_time[i] += dt
                 self._contact_time[i] = 0.0
         t["air_time"] = air
+
+        # ANTI-SHUFFLE swing floor (2026-08-28): imp_m3_long converged on symmetric shuffling
+        # (worse foot airborne 3%) — duty_sym is blind to it and contact_switch rewards it. Bill
+        # the WORSE foot's EMA airborne fraction below swing_floor_frac, only while a speed is
+        # commanded (gait_on — standing stays legal, the stop-farm rule; worse foot not mean,
+        # the k350 one-leg-patter rule).
+        if c.w_swing_floor > 0.0:
+            a_ema = self._swing_ema_coef
+            self._swing_ema = (a_ema * self._swing_ema
+                               + (1.0 - a_ema) * (~grounded).astype(np.float32))
+            if gait_on:
+                deficit = max(0.0, c.swing_floor_frac - float(self._swing_ema.min()))
+                t["swing_floor"] = self._pen(-c.w_swing_floor * deficit ** 2)
+            else:
+                t["swing_floor"] = 0.0
+        else:
+            t["swing_floor"] = 0.0
 
         # per-foot stance-time cap: any foot grounded longer than the allowance pays per step
         if gait_on:

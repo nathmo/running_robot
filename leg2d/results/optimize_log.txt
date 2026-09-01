@@ -1,0 +1,61 @@
+[optimize] differential_evolution: popsize=15 maxiter=40 (~3000 evaluations)
+  gen   2  evals=  150  best so far v=0.421 m/s  (58s)
+  gen   3  evals=  225  best so far v=0.421 m/s  (89s)
+  gen   4  evals=  300  best so far v=0.421 m/s  (120s)
+  gen   5  evals=  375  best so far v=0.421 m/s  (153s)
+  gen   6  evals=  450  best so far v=0.473 m/s  (203s)
+  gen   7  evals=  525  best so far v=0.799 m/s  (223s)
+  gen   8  evals=  600  best so far v=0.799 m/s  (240s)
+  gen   9  evals=  675  best so far v=0.799 m/s  (256s)
+  gen  10  evals=  750  best so far v=0.830 m/s  (274s)
+  gen  11  evals=  825  best so far v=0.830 m/s  (300s)
+  gen  12  evals=  900  best so far v=0.830 m/s  (324s)
+  gen  13  evals=  975  best so far v=0.830 m/s  (346s)
+  gen  14  evals= 1050  best so far v=0.830 m/s  (372s)
+  gen  15  evals= 1125  best so far v=0.850 m/s  (396s)
+  gen  16  evals= 1200  best so far v=0.850 m/s  (416s)
+  gen  17  evals= 1275  best so far v=0.850 m/s  (433s)
+  gen  18  evals= 1350  best so far v=0.850 m/s  (451s)
+  gen  19  evals= 1425  best so far v=0.850 m/s  (471s)
+  gen  20  evals= 1500  best so far v=0.850 m/s  (491s)
+  gen  21  evals= 1575  best so far v=0.850 m/s  (514s)
+  gen  22  evals= 1650  best so far v=0.850 m/s  (533s)
+  gen  23  evals= 1725  best so far v=0.850 m/s  (553s)
+  gen  24  evals= 1800  best so far v=0.850 m/s  (573s)
+  gen  25  evals= 1875  best so far v=0.850 m/s  (594s)
+  gen  26  evals= 1950  best so far v=0.850 m/s  (613s)
+  gen  27  evals= 2025  best so far v=0.850 m/s  (629s)
+  gen  28  evals= 2100  best so far v=0.850 m/s  (647s)
+  gen  29  evals= 2175  best so far v=0.861 m/s  (665s)
+  gen  30  evals= 2250  best so far v=0.873 m/s  (683s)
+  gen  31  evals= 2325  best so far v=0.873 m/s  (700s)
+  gen  32  evals= 2400  best so far v=0.873 m/s  (717s)
+  gen  33  evals= 2475  best so far v=0.873 m/s  (733s)
+  gen  34  evals= 2550  best so far v=0.879 m/s  (749s)
+  gen  35  evals= 2625  best so far v=0.879 m/s  (767s)
+  gen  36  evals= 2700  best so far v=0.879 m/s  (784s)
+  gen  37  evals= 2775  best so far v=0.879 m/s  (800s)
+  gen  38  evals= 2850  best so far v=0.879 m/s  (817s)
+  gen  39  evals= 2925  best so far v=0.897 m/s  (834s)
+  gen  40  evals= 3000  best so far v=0.897 m/s  (851s)
+  gen  41  evals= 3075  best so far v=0.911 m/s  (868s)
+
+[optimize] DE done: 3075 evaluations, 868s  best v=0.9110 m/s at f=6.304 duty=0.152 stride=0.382 clearance=0.098 z_off=0.010
+[optimize] Nelder-Mead polish: v=0.9227 m/s  -> final best v=0.9227 m/s at f=6.279Hz duty=0.153 stride=0.385 clearance=0.098 z_off=0.010
+
+==============================================================================
+LIMITING FACTOR at the optimum
+==============================================================================
+  gait: f=6.28Hz duty=0.15 stride=0.385m clearance=0.098m z_off=0.010m
+  achieved speed: 0.923 m/s (commanded target 2.420 m/s)
+  stance height range: 0.348-0.861 m  (stable)
+  torque-speed clamp engaged (saturated) on 11.7% of measured control steps
+  time near peak torque (137+ N*m): 0.0%
+  time near no-load speed (18.7+ rad/s): 0.0%
+  time near peak power (676+ W of 795 W available): 6.2%
+  RMS torque: cam 71.1 N*m, thigh 56.4 N*m (continuous rating 55 N*m, margin -16.1 N*m)
+  BURST ONLY -- exceeds the continuous torque rating, would need to slow down to sustain
+  verdict: thermally-limited
+==============================================================================
+
+wrote C:\Users\Nathann\Downloads\running_robot\leg2d\results\optimize.json

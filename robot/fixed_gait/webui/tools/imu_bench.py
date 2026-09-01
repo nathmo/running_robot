@@ -7,6 +7,8 @@
 
     --dlpf     also sweep the chip's internal low-pass and check noise scales as sqrt(bandwidth)
     --seconds  length of the noise record (default 20)
+    --save     dump the raw at-rest record to an .npz (for tools/plot_imu_noise.py; use
+               --seconds 300+ if the plot should include an Allan deviation curve)
 
 **The robot must be genuinely at rest, and the tool checks.** A sensor-noise measurement taken
 while the robot sways on its rig reports the sway, and there is nothing in the resulting number to
@@ -22,8 +24,8 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import smbus2                       # noqa: E402
-import sensehat                     # noqa: E402
+# hardware imports live in main() so the stillness gate stays importable off-robot,
+# to re-judge saved records with the same code that judged them live
 
 # Datasheet, FCHOICE=1: DLPF config -> (3 dB bandwidth, noise bandwidth) in Hz. NOT measured here;
 # --dlpf checks whether the noise scales the way this table implies.
@@ -33,8 +35,14 @@ ACC_BW = {0: (246.0, 265.0), 1: (246.0, 265.0), 2: (111.4, 136.0), 3: (50.4, 68.
           4: (23.9, 34.4), 5: (11.5, 16.8), 6: (5.7, 8.3)}
 
 # A still robot on the ground. Above these, whatever is measured is the robot, not the sensor.
-STILL_GYRO_RANGE_DPS = 0.6
-STILL_ACC_RANGE_G = 0.02
+# Vibration bounds: ~4x the datasheet noise at DLPF cfg 3 (and still >2x margin at cfg 0, whose
+# noise bandwidth is ~4x wider). Sway bounds are on 1 s block means, where rocking lives: 6 mg
+# is a steady 0.4 deg of tilt, 0.2 dps is far above the measured 0.012 dps bias instability.
+STILL_GYRO_RMS_DPS = 0.35
+STILL_ACC_RMS_G = 0.007
+STILL_GYRO_DRIFT_DPS = 0.2
+STILL_ACC_DRIFT_G = 0.006
+STILL_PP_MARGIN = 1.6
 
 
 def collect(imu, seconds, hz=200.0):
@@ -52,24 +60,51 @@ def collect(imu, seconds, hz=200.0):
     return np.array(acc), np.array(gyr), np.array(ts)
 
 
-def stillness(acc, gyr):
-    """(is_still, one-line reason). Peak-to-peak, not sd: a slow drift is exactly what a swaying
-    robot looks like and it barely moves the standard deviation."""
-    gr = float(np.max(gyr.max(0) - gyr.min(0)))
-    ar = float(np.max(acc.max(0) - acc.min(0)))
-    if gr > STILL_GYRO_RANGE_DPS or ar > STILL_ACC_RANGE_G:
-        return False, (f"MOVING: gyro swing {gr:.2f} dps (limit {STILL_GYRO_RANGE_DPS}), "
-                       f"accel swing {ar * 1000:.1f} mg (limit {STILL_ACC_RANGE_G * 1000:.0f}) "
-                       f"— set the robot down on the floor, off any rig that lets it sway")
-    return True, f"still (gyro swing {gr:.2f} dps, accel swing {ar * 1000:.1f} mg)"
+def stillness(acc, gyr, fs):
+    """(is_still, one-line reason). Three failure modes, three checks. Vibration inflates the
+    RMS itself. Sway is low-frequency and lives in the 1 s block means (a swaying robot
+    ROTATES — the gyro block means are the sharp detector; sd barely moves). Bumps are
+    transients, caught by the raw peak-to-peak against what this record's own RMS predicts
+    for gaussian noise (2*sqrt(2 ln n)*sigma). A FIXED raw peak-to-peak bound is wrong: the
+    expected extremes grow with sample count, so a perfectly still sensor trips it once the
+    record is long enough — the old 0.6 dps / 20 mg gate did exactly that on the first
+    300 s record (gyro swing 0.73 dps, 0.9x the white-noise expectation, block means clean)."""
+    n = len(gyr)
+    w = max(1, int(round(fs)))
+    checks = []
+    for name, x, rms_lim, drift_lim, scale, unit in (
+            ("gyro", gyr, STILL_GYRO_RMS_DPS, STILL_GYRO_DRIFT_DPS, 1.0, "dps"),
+            ("accel", acc, STILL_ACC_RMS_G, STILL_ACC_DRIFT_G, 1000.0, "mg")):
+        sd = x.std(0)
+        bm = x[:n // w * w].reshape(-1, w, x.shape[1]).mean(1)
+        drift = float(np.max(bm.max(0) - bm.min(0)))
+        pp = float(np.max((x.max(0) - x.min(0)) / (2 * np.sqrt(2 * np.log(n)) * sd)))
+        if float(sd.max()) > rms_lim:
+            return False, (f"MOVING (vibration): {name} RMS {sd.max() * scale:.2f} {unit} "
+                           f"(limit {rms_lim * scale:.2f}) — something is buzzing the robot")
+        if drift > drift_lim:
+            return False, (f"MOVING (sway): {name} 1 s-average swing {drift * scale:.2f} {unit} "
+                           f"(limit {drift_lim * scale:.2f}) — set the robot down on the "
+                           f"floor, off any rig that lets it rock")
+        if pp > STILL_PP_MARGIN:
+            return False, (f"MOVING (bumps): {name} peak-to-peak {pp:.2f}x the white-noise "
+                           f"expectation (limit {STILL_PP_MARGIN}) — something knocked the "
+                           f"robot mid-record")
+        checks.append(f"{name} drift {drift * scale:.2f} {unit}, p-p {pp:.2f}x white")
+    return True, "still (" + "; ".join(checks) + ")"
 
 
 def main():
+    import smbus2
+    import sensehat
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bus", type=int, default=sensehat.I2C_BUS)
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--dlpf", action="store_true", help="sweep the internal low-pass too")
+    ap.add_argument("--save", metavar="PATH",
+                    help="dump the raw noise record (accel, gyro, timestamps) to an .npz")
     args = ap.parse_args()
 
     bus = smbus2.SMBus(args.bus)
@@ -109,7 +144,15 @@ def main():
 
     # ---- noise / bias / resolution, gated on the robot actually being still
     acc, gyr, ts = collect(imu, args.seconds)
-    ok, why = stillness(acc, gyr)
+    ok, why = stillness(acc, gyr, 1.0 / np.diff(ts).mean())
+    if args.save:
+        # the stillness verdict travels WITH the data — a record that fails the gate must not
+        # come back from the plotting side looking like a sensor property
+        np.savez(args.save, acc_g=acc, gyr_dps=gyr, t_s=ts, still=ok,
+                 acc_range_g=imu.ACC_RANGE_G, gyr_range_dps=imu.GYR_RANGE_DPS,
+                 dlpf_cfg=imu.DLPF_CFG, odr_hz=imu.odr_hz,
+                 acc_nbw_hz=ACC_BW[imu.DLPF_CFG][1], gyr_nbw_hz=GYR_BW[imu.DLPF_CFG][1])
+        print(f"raw record saved -> {args.save}")
     dt = np.diff(ts)
     print(f"\nAt rest, {len(acc)} samples: {why}")
     print(f"  achieved rate  : {1 / dt.mean():.1f} Hz, jitter sd {dt.std() * 1000:.2f} ms, "
@@ -147,8 +190,8 @@ def main():
             probe = sensehat.ICM20948(bus)
             probe.init()
             time.sleep(0.35)
-            a, g, _ = collect(probe, 6.0)
-            still, _ = stillness(a, g)
+            a, g, tsw = collect(probe, 6.0)
+            still, _ = stillness(a, g, 1.0 / np.diff(tsw).mean())
             am, gm = a.std(0).mean() * 1000, g.std(0).mean()
             if base_a is None:
                 base_a, base_g = am, gm

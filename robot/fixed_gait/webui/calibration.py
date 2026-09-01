@@ -152,6 +152,38 @@ class Calibration:
         blackbox.trigger_dump("calibration_zero_capture")
         return True, ""
 
+    def set_zero_one(self, name, raw_deg):
+        """Re-capture the zero of ONE joint from its current raw angle.
+
+        Exists for the direction-check step: posing all six joints at once takes three hands, and
+        one joint that slipped (or was captured badly) should not cost re-posing the other five.
+        The joint's sign is kept — it is a wiring property, not a pose property — but its
+        confirmation is cleared: a new zero must have its direction re-checked, and if the whole
+        calibration was complete it drops back to the direction step until that happens.
+
+        zero_epoch bumps like a full capture: the raw-at-rest fingerprint changed, so the
+        pre-move guard must compare against the new pose, not the old one."""
+        if name not in self.offsets:
+            return False, f"unknown motor {name}"
+        if raw_deg is None:
+            return False, f"no position from {name} — cannot zero it"
+        if self.stage == "none":
+            return False, ("capture the full zero pose first — per-joint re-zero adjusts one "
+                           "joint of an existing zero")
+        with self._lock:
+            before = self.offsets[name]
+            self.offsets[name] = float(raw_deg)
+            self.zero_raw[name] = float(raw_deg)
+            self.confirmed[name] = False
+            self.zero_epoch += 1
+            if self.stage == "complete":
+                self.stage = "zero_set"
+        self.save()
+        blackbox.log_event("calib.set_zero_one", motor=name, before=before,
+                           after=float(raw_deg), zero_epoch=self.zero_epoch,
+                           note="single-joint re-zero: sign kept, confirmation cleared")
+        return True, ""
+
     def set_sign(self, name, sign):
         if name not in self.signs:
             return False, f"unknown motor {name}"

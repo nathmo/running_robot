@@ -1,0 +1,123 @@
+<mujoco model="leg2d">
+  <compiler angle="radian" meshdir="../../training/model" autolimits="true" />
+  <option timestep="0.001" integrator="implicitfast" cone="elliptic" impratio="10" solver="Newton" iterations="100" ls_iterations="50" />
+  <default>
+    <default class="dash01">
+      <geom contype="0" conaffinity="0" group="2" />
+      <site group="4" size="0.012" rgba="0.95 0.45 0.1 1" />
+      <default class="collision">
+        <geom contype="1" conaffinity="1" group="3" condim="6" friction="1 0.008 0.001" solref="0.01 1" solimp="0.95 0.99 0.001" rgba="0.2 0.8 0.2 0.4" />
+      </default>
+    </default>
+  </default>
+  <asset>
+    <mesh name="bodyNCS-v1" file="meshes/bodyNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="HipLeftNCS-v1" file="meshes/HipLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="HipRightNCS-v1" file="meshes/HipRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="CamLeftNCS-v1" file="meshes/CamLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="CamRightNCS-v1" file="meshes/CamRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="ThighLeftNCS-v1" file="meshes/ThighLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="ThighRightNCS-v1" file="meshes/ThighRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="LegLeftNCS-v1" file="meshes/LegLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="LegRightNCS-v1" file="meshes/LegRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="FootLeftNCS-v1" file="meshes/FootLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="FootRightNCS-v1" file="meshes/FootRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="PushrodLeftNCS-v1" file="meshes/PushrodLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="PushrodRightNCS-v1" file="meshes/PushrodRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.2 0.3 0.4" rgb2="0.1 0.15 0.2" width="300" height="300" />
+    <material name="grid" texture="grid" texrepeat="6 6" reflectance="0.1" />
+  </asset>
+  <worldbody>
+    <light name="top" pos="0 0 3" dir="0 0 -1" directional="true" />
+    <geom name="floor" type="plane" size="0 0 0.05" material="grid" contype="1" conaffinity="1" condim="6" friction="1 0.008 0.001" solref="0.01 1" solimp="0.95 0.99 0.001" />
+    <body name="bodyNCS-v1" pos="0.0 0.0 0.0" euler="-0.0 0.0 -0.0" childclass="dash01">
+      <joint name="base_x" type="slide" axis="1 0 0" limited="false" damping="0" armature="0" />
+      <joint name="base_y" type="slide" axis="0 1 0" limited="false" damping="0" armature="0" />
+      <joint name="base_z" type="slide" axis="0 0 1" limited="false" damping="0" armature="0" />
+      <joint name="base_roll" type="hinge" axis="1 0 0" limited="false" damping="0" armature="0" />
+      <joint name="base_pitch" type="hinge" axis="0 1 0" limited="false" damping="0" armature="0" />
+      <joint name="base_yaw" type="hinge" axis="0 0 1" limited="false" damping="0" armature="0" />
+      <site name="imu" pos="0 0 0" size="0.015" rgba="0.1 0.5 0.95 1" />
+      <geom name="bodyNCS-v1_geom" type="mesh" mesh="bodyNCS-v1" pos="0 0 0" euler="0 0 0" />
+      <inertial mass="4.264" pos="0.0016690918854414011 4.297697354650468e-07 9.498539066587414e-06" fullinertia="0.0301414319 0.0109556959 0.0357522877 2.08952358e-07 3.43927879e-06 1.4056698e-06" />
+      <body name="HipLeftNCS-v1" pos="0.027294924660796353 0.12800000000861275 2.943479741862386e-11" euler="-0.0 2.15060487902769e-16 -0.0">
+        <joint name="bodyNCS-v1_RÃ©volution-1" type="hinge" axis="0.9999999999999929 0.0 2.1506048790276748e-16" pos="7.533920364649563e-08 -8.612749402558961e-12 -2.943479741860745e-11" damping="0.1" armature="0.046" limited="true" range="-0.785 0.785" />
+        <geom name="HipLeftNCS-v1_geom" type="mesh" mesh="HipLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+        <inertial mass="0.471" pos="-0.023170080111601033 0.016018447983417783 0.00019232179773001127" fullinertia="0.000460274929 0.00693703049 0.00675489528 0.000147086518 1.47877608e-07 2.54127495e-06" />
+        <body name="CamLeftNCS-v1" pos="-0.149 0.05190000000000062 -2.404748004659806e-17" euler="-0.0 0.0 -0.0">
+          <joint name="HipLeftNCS-v1_RÃ©volution-3" type="hinge" axis="0.0 1.0 0.0" pos="7.53392025709676e-08 -8.613360025222505e-12 -2.943480541514031e-11" damping="0.1" armature="0.0216" limited="true" range="-1.5 1.5" />
+          <geom name="CamLeftNCS-v1_geom" type="mesh" mesh="CamLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+          <inertial mass="0.066" pos="0.04624089887284015 0.0010000000000000143 2.6437697658976432e-17" fullinertia="1.2039053e-05 0.00015189714 0.000139902087 1.33124393e-19 2.20276235e-19 3.05355408e-21" />
+          <body name="PushrodLeftNCS-v1" pos="0.12 0.0020000000000000287 5.431898664463379e-17" euler="-2.7225169560989797e-16 -0.18047963198315084 -4.6730848860369244e-17">
+            <joint name="CamLeftNCS-v1_RÃ©volution-11" type="hinge" axis="-2.1387213778918383e-18 -1.0 -2.6782970497536714e-16" pos="7.411023789274043e-08 -8.613387780794649e-12 -1.3552451771001049e-08" damping="0.2" armature="0.001" limited="false" />
+            <geom name="PushrodLeftNCS-v1_geom" type="mesh" mesh="PushrodLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+            <inertial mass="0.071" pos="-0.001446515823232096 0.0009770750294905441 -0.19135709372461382" fullinertia="0.00156641716 0.00156725429 4.31005327e-06 -9.40194675e-08 -3.23793025e-07 3.44047099e-08" />
+            <site name="pushrod_tip_L" pos="0.000743214 0.007 -0.397969" />
+          </body>
+        </body>
+        <body name="ThighLeftNCS-v1" pos="0.10100000000000005 0.046100000000000314 -5.91526827518629e-15" euler="-0.0 0.0 -0.0">
+          <joint name="HipLeftNCS-v1_RÃ©volution-5" type="hinge" axis="0.0 1.0 0.0" pos="7.533920429181329e-08 -8.613054713890733e-12 -2.9428860429223196e-11" damping="0.1" armature="0.0216" limited="true" range="-1.047 1.047" />
+          <geom name="ThighLeftNCS-v1_geom" type="mesh" mesh="ThighLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+          <inertial mass="0.483" pos="0.0009733420828806365 0.01498294336196043 -0.1411118417746592" fullinertia="0.00707278695 0.00726992867 0.000297140879 8.87035959e-07 9.39578529e-05 8.55715459e-06" />
+          <body name="LegLeftNCS-v1" pos="-1.0658141036401502e-16 0.015000000000000142 -0.34999999999999615" euler="2.9000812736417158e-15 -1.0003899399443081 9.6267268912514e-16">
+            <joint name="ThighLeftNCS-v1_RÃ©volution-7" type="hinge" axis="1.472944351140723e-15 -1.0 1.5659688964504076e-15" pos="4.0656449283877955e-08 -0.010000000008613202 -6.342751552395111e-08" damping="0.2" armature="0.001" limited="false" />
+            <geom name="LegLeftNCS-v1_geom" type="mesh" mesh="LegLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+            <inertial mass="0.573" pos="-0.24518356685145476 -0.00017709874116033454 0.000420485236984125" fullinertia="9.08704862e-05 0.0146967658 0.0146222985 1.22532825e-05 -4.4836015e-05 1.40296465e-06" />
+            <body name="FootLeftNCS-v1" pos="-0.5000000000000007 -0.0015999999999976567 9.201528428093297e-15" euler="-2.231028885975213e-15 5.551115123125783e-17 -3.8456969129524326e-30">
+              <joint name="LegLeftNCS-v1_RÃ©volution-9" type="hinge" axis="1.4729443511407235e-15 -1.0 -6.650599895248049e-16" pos="-8.679350578343133e-08 -0.004700000008616256 -2.293391507246932e-07" damping="0.3" armature="0.001" limited="true" range="-1.047 1.047" stiffness="28.65" springref="-0.7" />
+              <geom name="FootLeftNCS-v1_geom" type="mesh" mesh="FootLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+              <inertial mass="0.222" pos="-0.004826310056437695 0.000377045846251916 -0.10466467671885393" fullinertia="0.00254888344 0.00254345046 5.54919617e-05 1.54171857e-06 0.00014412983 -1.30987407e-05" />
+              <geom name="foot_L_col" class="collision" type="sphere" size="0.025" pos="-3.74889e-10 1.77817e-11 -0.3115" />
+              <geom name="heel_L_col" class="collision" type="sphere" size="0.03" pos="-0.0256445 0 0.0749563" />
+            </body>
+            <site name="leg_anchor_L" pos="-0.0660502 -0.0002 0.026337" />
+          </body>
+        </body>
+        <body name="motor_cam_L" pos="-0.149 0.0519 -2.94348e-11">
+          <inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" />
+        </body>
+        <body name="motor_thigh_L" pos="0.101 0.0461 -2.94348e-11">
+          <inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" />
+        </body>
+      </body>
+      <body name="motor_hip_roll_L" pos="0.027295 0.128 2.06795e-25">
+        <inertial pos="0 0 0" mass="0.75" diaginertia="0.001 0.001 0.001" />
+      </body>
+      <body name="deadweight_R">
+        <inertial pos="0 0 0" mass="5.436000" diaginertia="0.001 0.001 0.001" />
+      </body>
+    </body>
+  </worldbody>
+  <equality>
+    <connect name="loop_L" site1="pushrod_tip_L" site2="leg_anchor_L" solref="0.005 1" solimp="0.95 0.99 0.001" />
+    <joint name="lock_x" joint1="base_x" polycoef="0 0 0 0 0" active="false" solref="0.005 1" solimp="0.95 0.99 0.001" />
+    <joint name="lock_y" joint1="base_y" polycoef="0 0 0 0 0" active="true" solref="0.005 1" solimp="0.95 0.99 0.001" />
+    <joint name="lock_z" joint1="base_z" polycoef="0 0 0 0 0" active="false" solref="0.005 1" solimp="0.95 0.99 0.001" />
+    <joint name="lock_roll" joint1="base_roll" polycoef="0 0 0 0 0" active="true" solref="0.005 1" solimp="0.95 0.99 0.001" />
+    <joint name="lock_pitch" joint1="base_pitch" polycoef="0 0 0 0 0" active="true" solref="0.005 1" solimp="0.95 0.99 0.001" />
+    <joint name="lock_yaw" joint1="base_yaw" polycoef="0 0 0 0 0" active="true" solref="0.005 1" solimp="0.95 0.99 0.001" />
+    <joint name="lock_ankle_L" joint1="LegLeftNCS-v1_RÃ©volution-9" polycoef="-0.201849 0 0 0 0" active="false" solref="0.002 1" solimp="0.999 0.9999 0.0001" />
+  </equality>
+  <actuator>
+    <position name="hip_roll_L" joint="bodyNCS-v1_RÃ©volution-1" kp="120" kv="4.0" forcerange="-61.2 61.2" ctrlrange="-0.785 0.785" />
+    <motor name="cam_L" joint="HipLeftNCS-v1_RÃ©volution-3" gear="1" ctrlrange="-144.5 144.5" forcerange="-144.5 144.5" />
+    <motor name="thigh_L" joint="HipLeftNCS-v1_RÃ©volution-5" gear="1" ctrlrange="-144.5 144.5" forcerange="-144.5 144.5" />
+  </actuator>
+  <sensor>
+    <accelerometer name="imu_acc" site="imu" />
+    <gyro name="imu_gyro" site="imu" />
+    <framequat name="base_quat" objtype="site" objname="imu" />
+    <jointpos name="hip_roll_L_pos" joint="bodyNCS-v1_RÃ©volution-1" />
+    <jointvel name="hip_roll_L_vel" joint="bodyNCS-v1_RÃ©volution-1" />
+    <actuatorfrc name="hip_roll_L_frc" actuator="hip_roll_L" />
+    <jointpos name="cam_L_pos" joint="HipLeftNCS-v1_RÃ©volution-3" />
+    <jointvel name="cam_L_vel" joint="HipLeftNCS-v1_RÃ©volution-3" />
+    <actuatorfrc name="cam_L_frc" actuator="cam_L" />
+    <jointpos name="thigh_L_pos" joint="HipLeftNCS-v1_RÃ©volution-5" />
+    <jointvel name="thigh_L_vel" joint="HipLeftNCS-v1_RÃ©volution-5" />
+    <actuatorfrc name="thigh_L_frc" actuator="thigh_L" />
+  </sensor>
+  <keyframe>
+    <key name="stand" qpos="0 0 0.809994 0 0 0 -0.0962847 -0.078318 -0.18283 0.11504 0.0791322 0.526175" ctrl="0 15.661 0.99056" />
+  </keyframe>
+</mujoco>

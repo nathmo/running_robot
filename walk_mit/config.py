@@ -110,6 +110,13 @@ class Config:
     track_sigma_rel: float = 0.25       # sigma = max(sigma_min, this * |cmd|)
     track_sigma_min: float = 0.20       # m/s floor (also the sigma used at cmd = 0)
     track_yaw_sigma_min: float = 0.25   # rad/s floor
+    # ANTI-STAND-SUBSIDY (2026-08-29): imp_m3b measured the failure — a policy that stands still
+    # under a 0.35+ m/s command banks the FULL w_track_yaw (yaw_cmd ~0 is tracked perfectly by not
+    # moving) plus ~40% of w_track_lin, and the cmd curriculum never opens (top-range err 0.42 vs
+    # the 0.22 gate). With this on, yaw income is multiplied by the LINEAR tracking kernel whenever
+    # a speed is commanded: refuse the velocity command and the yaw payout dies with it. Stand
+    # commands are unaffected (standing tracks v=0, kernel ~1). Default off: legacy bit-identical.
+    track_yaw_couple: bool = False
     w_stand: float = 3.0                # stand-still income when the stick is centred
     stand_sigma: float = 0.15           # m/s width of the 'stationary' kernel
     w_stand_drift: float = 2.0          # penalty per m^2 of drift from where the stand began
@@ -669,6 +676,15 @@ class Config:
     # overlap -> both feet penalized for ground contact at once -> a flight phase is demanded.
     # This is the one term that explicitly asks for RUNNING rather than fast walking.
     w_phase_contact: float = 1.0
+    # ANTI-SHUFFLE SWING FLOOR (2026-08-28, walk_mit). imp_m3_long converged on symmetric
+    # shuffling (worse-foot airborne 3%, both feet grounded ~95%) — a shape w_duty_sym is blind to
+    # by construction (duty stays symmetric) and contact_switch actively rewards. This term
+    # penalizes the WORSE foot's EMA airborne fraction falling below swing_floor_frac, ONLY while
+    # a speed is commanded (gait_cmd_gate; standing stays legal — the stop-farm rule) and keyed on
+    # the worse foot, not the mean (the k350 one-leg-patter rule). 0 = off, legacy identical.
+    w_swing_floor: float = 0.0
+    swing_floor_frac: float = 0.15      # target worse-foot airborne fraction
+    swing_floor_tau_s: float = 0.5      # EMA horizon (s) for the per-foot airborne fraction
     stance_ratio_start: float = 0.65    # walking duty factor (curriculum start)
     stance_ratio_final: float = 0.42    # running duty factor (< 0.5 = flight window exists)
     gait_curriculum_steps: int = 60_000_000   # env steps to ramp stance_ratio over; 0 = hold start
@@ -731,6 +747,15 @@ class Config:
     w_residual_rate: float = 0.0        # penalty per sum((residual - prev_residual)^2); 0 = off
     w_upright: float = 5.0
     w_height: float = 2.5               # only when Z is free (neutralized on the rail)
+    # CROUCH (2026-08-30): lower the height-reward target this many metres BELOW the settled
+    # stance. The measured plant fact behind it (foot-arc study): at the settled height the stance
+    # leg is at 99.5% reach with 2.7 cm of BACKWARD toe reach — the CoM sits at the rear edge of
+    # the workspace, so a normal gait cycle (stance foot passing behind the CoM) is geometrically
+    # near-impossible; policies converge on a splayed front-back creep instead (imp_m3c film).
+    # 5 cm of crouch takes backward reach 2.7 -> 20.2 cm for ~+2 N*m of the 144 available.
+    # Episodes still START at the settled keyframe; the reward pulls the policy down into the
+    # crouch. 0 = off, every legacy preset bit-identical.
+    height_target_offset_m: float = 0.0
     w_vz: float = 0.5
     w_lat_vel: float = 1.0              # body-frame lateral velocity (go straight)
     w_angvel_xy: float = 0.05
@@ -800,6 +825,14 @@ class Config:
     # fire. train.py now scales both against the REAL budget and says so -- see _size_entropy_schedule.
     ent_schedule_autoscale: bool = True
     max_log_std: float = 0.0            # std <= 1.0: beyond the clipped range is pure farming
+    # FORCED STD ANNEAL (2026-08-28, walk_mit). Both long runs (400M m2, 300M m3) finished with
+    # train/std still ~1.0: the ent_coef anneal completed but the optimizer kept sigma pinned at
+    # the clamp, so the run never got a precision phase — and at m3 a policy that must act under
+    # +/-full-range noise rationally prefers the noise-tolerant shuffle over precise stepping.
+    # std_anneal_target > 0 lowers the max_log_std CLAMP itself, from max_log_std down to
+    # log(std_anneal_target), over the SAME competence-gated window the ent anneal uses (sized to
+    # the real budget by _size_entropy_schedule). 0 = off, legacy runs bit-identical.
+    std_anneal_target: float = 0.0
     seed: int = 0
     policy_hidden: List[int] = field(default_factory=lambda: [256, 256])
 
@@ -812,6 +845,12 @@ class Config:
     # locked dim becomes readable from batch one: pitch 0.2 rad -> normalized 2.0, not clipped 10).
     warmstart_obs_count_cap: float = 50_000.0   # 0 = leave obs_rms.count untouched
     warmstart_var_floor: float = 1.0e-2         # 0 = leave obs_rms.var untouched
+    # PPO.load carries the PARENT'S log_std. Warm-starting from a precision-annealed parent
+    # (imp_m3b ended at std 0.25) would begin with almost no exploration — exactly wrong when the
+    # point of the new run is to escape the parent's local optimum (standing). With this on, the
+    # loaded log_std is reset to max_log_std so the run explores like a cold start; the forced
+    # std anneal (std_anneal_target) walks it back down late. Default off: legacy bit-identical.
+    warmstart_reset_log_std: bool = False
 
 
 # ----- presets ---------------------------------------------------------------------------
@@ -2120,6 +2159,132 @@ PRESETS.update({
                                                    ctrl_jitter_ms_final=0.0,
                                                    ctrl_drop_prob_final=0.0,
                                                    **_LADDER_RWD),
+    # THE m3 POLISH ARM (2026-08-28): imp_m3_long won BALANCE (fresh-env 3345+/-4571, first
+    # transferable free-pitch policy) but not LOCOMOTION (mean vx 0.02 — it stands/shuffles).
+    # Three levers against exactly that, warm from imp_m3_long's final:
+    #   fix 1  precision phase:  ent_final 0.002->0, std_anneal_target 0.25 (sigma FORCED down
+    #          over the gated anneal window; both long runs ended at sigma ~1.0 without this)
+    #   fix 2  anti-shuffle:     w_phase_contact 1->3 (the clock's swing window demands air) +
+    #          w_swing_floor 4.0 (worse-foot EMA airborne floor, speed-gated)
+    #   fix 3  pitch safety net: the PROVEN decaying assist (kp 100/kd 10, 60M fade, anti-crutch
+    #          billed) to absorb the risk of re-learning stepping with pitch free
+    "walk_fwd_m3_mit_imp2": lambda: _walk_fwd3(base_lock=LOCKS["m3"], drive_bandwidth_hz=12.0,
+                                               drive_delay_ms=7.0, ankle_mode="rigid",
+                                               cmd_v_fwd_start=0.50, cmd_v_back_start=0.15,
+                                               imp_enable=True,
+                                               ent_final=0.0, std_anneal_target=0.25,
+                                               w_phase_contact=3.0, w_swing_floor=4.0,
+                                               pitch_assist_kp=100.0, pitch_assist_kd=10.0,
+                                               pitch_assist_ramp_steps=60_000_000,
+                                               **_LADDER_RWD),
+    # ----- imp3 (2026-08-29): imp2 + the three walk-not-stand levers -----------------------------
+    # imp2's verdict: best m3 balancer ever (ep_len 1105 unassisted at full DR, real precision
+    # phase) but cmd_scale 0.0 for 200M in BOTH seeds — commanded up to 0.5 m/s and refused
+    # (top-range err 0.42 vs the 0.22 widen gate). Three located causes, three fixes:
+    #   fix 1  the box START (0.50 m/s) exceeds the plant's demonstrated ~0.14 m/s sustained, so
+    #          the <=0.22 err gate was likely unreachable BY CONSTRUCTION. Start at 0.20/0.10 ->
+    #          top-of-range 0.14 m/s = exactly what the hardware-calibrated plant has done.
+    #   fix 2  gait_cmd_gate 0.25 left the anti-shuffle swing floor + phase_contact OFF for ~60%
+    #          of commands. 0.10 puts them on for essentially every move command. track_sigma_min
+    #          0.10 (vs LADDER 0.15): refusing top-range pays 14% of w_track_lin, not 42%.
+    #   fix 3  standing under command banked the full w_track_yaw — track_yaw_couple multiplies
+    #          yaw income by the linear kernel, and warmstart_reset_log_std re-inflates the
+    #          parent's annealed std 0.25 back to 1.0 so stepping is discoverable at all.
+    "walk_fwd_m3_mit_imp3": lambda: _walk_fwd3(base_lock=LOCKS["m3"], drive_bandwidth_hz=12.0,
+                                               drive_delay_ms=7.0, ankle_mode="rigid",
+                                               cmd_v_fwd_start=0.20, cmd_v_back_start=0.10,
+                                               gait_cmd_gate=0.10,
+                                               track_yaw_couple=True,
+                                               warmstart_reset_log_std=True,
+                                               imp_enable=True,
+                                               ent_final=0.0, std_anneal_target=0.25,
+                                               w_phase_contact=3.0, w_swing_floor=4.0,
+                                               pitch_assist_kp=100.0, pitch_assist_kd=10.0,
+                                               pitch_assist_ramp_steps=60_000_000,
+                                               **{**_LADDER_RWD, "track_sigma_min": 0.10}),
+    # ----- RUN 6 (2026-08-31): the OBJECTIVE pivot ----------------------------------------------
+    # Three fix rounds on the command objective (imp_m3b/c/d) each cured their diagnosed defect and
+    # none produced a clean walker — every command-objective run in the project converges to
+    # standing or creeping. The only policies that ever genuinely locomoted are sprint-objective
+    # (m5_stiff@600M: 100 m at 2.84 m/s, roll free). So: sprint objective (dense speed income +
+    # clock, no command box to game) on the MIT plant. The July m3_reactive sprint attempts
+    # plateaued at ~1 s of passive fall, but they had NONE of what this arm has:
+    #   - MIT drive 12 Hz (capture-step repositioning ~0.1 s vs the 0.31 s fall timescale;
+    #     at the old 0.8 Hz it took 0.32 s — the capture step was physically impossible)
+    #   - crouch (backward reach 2.7 -> 20.2 cm)  - pitch-assist net (60M fade)
+    #   - per-step impedance dims                 - 600M budget (where *_stiff was still climbing)
+    "sprint_m3_mit": lambda: _sprint200(
+        "m3",
+        drive_bandwidth_hz=12.0, drive_delay_ms=7.0, ankle_mode="rigid",
+        height_target_offset_m=0.05,
+        imp_enable=True,
+        ent_final=0.0, std_anneal_target=0.25,
+        pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    # ----- RUN 7 (2026-09-01): the milestone ladder on the PROVEN runner ------------------------
+    # sprint_m3_mit produced the project's first real runner (16/16 x 100 m at 3.07 m/s greedy).
+    # m4 frees Y (lateral), m5 frees roll (the historical wall — but every "m5 is a wall" verdict
+    # came from command-objective runs that were never asked to move), m6 is fully free. Identical
+    # kwargs to sprint_m3_mit; warm-chained per seed (m3 -> m4 -> m5 -> m6), so
+    # warmstart_reset_log_std re-inflates the parent's annealed std 0.25 -> 1.0: the new DoF needs
+    # exploration, and each hop's ramps (assist, DR, jitter, sprint line 25->100 m) restart and
+    # re-ease the transition. The std anneal then re-runs inside each rung.
+    "sprint_m4_mit": lambda: _sprint200(
+        "m4",
+        drive_bandwidth_hz=12.0, drive_delay_ms=7.0, ankle_mode="rigid",
+        height_target_offset_m=0.05,
+        imp_enable=True,
+        ent_final=0.0, std_anneal_target=0.25,
+        warmstart_reset_log_std=True,
+        pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    "sprint_m5_mit": lambda: _sprint200(
+        "m5",
+        drive_bandwidth_hz=12.0, drive_delay_ms=7.0, ankle_mode="rigid",
+        height_target_offset_m=0.05,
+        imp_enable=True,
+        ent_final=0.0, std_anneal_target=0.25,
+        warmstart_reset_log_std=True,
+        pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    "sprint_m6_mit": lambda: _sprint200(
+        "m6",
+        drive_bandwidth_hz=12.0, drive_delay_ms=7.0, ankle_mode="rigid",
+        height_target_offset_m=0.05,
+        imp_enable=True,
+        ent_final=0.0, std_anneal_target=0.25,
+        warmstart_reset_log_std=True,
+        pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+    # ----- imp4 (2026-08-30): imp3 + the two gait-quality levers the imp_m3c film demanded ------
+    # imp_m3c opened the command curriculum (first m3 ever) but the film shows a splayed
+    # front-back CREEP, not a gait, in ~2 s bouts. Both root causes are measured, not guessed:
+    #   crouch  height_target_offset_m=0.05 — at the settled height the stance leg is at 99.5%
+    #           reach with 2.7 cm of backward toe reach (CoM at the REAR edge of the workspace):
+    #           an alternating gait is geometrically near-blocked, the splay is what remains.
+    #           5 cm of crouch -> 20.2 cm backward reach for ~+2 N*m (foot-arc study, 2026-08-25).
+    #   holds   cmd_resample_s 4 -> 8 — commands changed every ~4 s in training, so a SUSTAINED
+    #           command was out of distribution at exactly the horizon (~2 s in, per the pinned-
+    #           command test) where the imp_m3c walker falls.
+    # Everything else identical to imp3 to keep the comparison clean.
+    "walk_fwd_m3_mit_imp4": lambda: _walk_fwd3(base_lock=LOCKS["m3"], drive_bandwidth_hz=12.0,
+                                               drive_delay_ms=7.0, ankle_mode="rigid",
+                                               cmd_v_fwd_start=0.20, cmd_v_back_start=0.10,
+                                               gait_cmd_gate=0.10,
+                                               track_yaw_couple=True,
+                                               warmstart_reset_log_std=True,
+                                               height_target_offset_m=0.05,
+                                               cmd_resample_s=8.0,
+                                               imp_enable=True,
+                                               ent_final=0.0, std_anneal_target=0.25,
+                                               w_phase_contact=3.0, w_swing_floor=4.0,
+                                               pitch_assist_kp=100.0, pitch_assist_kd=10.0,
+                                               pitch_assist_ramp_steps=60_000_000,
+                                               **{**_LADDER_RWD, "track_sigma_min": 0.10}),
 })
 
 # ----- THE FOOT-SHAPE ARMS (2026-08-11) ----------------------------------------------------------

@@ -482,6 +482,9 @@ class EntropyCallback(BaseCallback):
         self._air_sum, self._air_n = 0.0, 0
         self._swing_sum, self._swing_n = np.zeros(2), 0
         self.deadline, self.anneal_steps = _size_entropy_schedule(cfg, budget)
+        # forced-std-anneal state: the ACTIVE log_std clamp. Stays at cfg.max_log_std unless
+        # std_anneal_target > 0 lowers it over the gated anneal window (see config).
+        self._log_std_clamp = float(cfg.max_log_std)
 
     def _on_training_start(self) -> None:
         # requeue persistence: restore the gate state so a resumed cluster job continues the
@@ -513,11 +516,11 @@ class EntropyCallback(BaseCallback):
         # which can push log_std back over the cap — without this the whole next rollout samples
         # with an over-cap std.
         with torch.no_grad():
-            self.model.policy.log_std.clamp_(max=self.cfg.max_log_std)
+            self.model.policy.log_std.clamp_(max=self._log_std_clamp)
 
     def _on_rollout_end(self) -> None:
         with torch.no_grad():
-            self.model.policy.log_std.clamp_(max=self.cfg.max_log_std)
+            self.model.policy.log_std.clamp_(max=self._log_std_clamp)
         air = self._air_sum / max(self._air_n, 1)
         # per-foot airborne fraction over the rollout; the gate reads the WORSE foot, so a policy
         # that parks one leg up and hops on the other cannot open it
@@ -561,6 +564,19 @@ class EntropyCallback(BaseCallback):
             self.model.ent_coef = (self._anneal_base
                                    + frac * (self.cfg.ent_final - self._anneal_base))
         self.logger.record("curriculum/ent_coef", float(self.model.ent_coef))
+        # FORCED STD ANNEAL (2026-08-28): both long runs finished with train/std ~1.0 — the
+        # coefficient anneal completed but sigma never left the clamp, so the run never entered a
+        # precision phase. Lower the CLAMP itself over the same gated window. Stateless across
+        # requeues (recomputed from num_timesteps + the persisted anneal_from).
+        _tgt = float(getattr(self.cfg, "std_anneal_target", 0.0))
+        if _tgt > 0.0 and self._anneal_from is not None:
+            frac = min(1.0, (self.num_timesteps - self._anneal_from)
+                       / max(self.anneal_steps, 1))
+            self._log_std_clamp = (float(self.cfg.max_log_std)
+                                   + frac * (float(np.log(_tgt)) - float(self.cfg.max_log_std)))
+            with torch.no_grad():
+                self.model.policy.log_std.clamp_(max=self._log_std_clamp)
+            self.logger.record("curriculum/log_std_clamp", float(self._log_std_clamp))
 
 
 class PlotCallback(BaseCallback):
@@ -773,6 +789,15 @@ def main():
             # 100 rollouts (measured 2026-08-06), i.e. a seed replicate was silently a duplicate
             # and half the compute bought nothing. Re-seed explicitly after loading.
             model.set_random_seed(cfg.seed)
+            # PPO.load also carries the SOURCE run's log_std. A precision-annealed parent (imp_m3b
+            # ended at std 0.25) would hand the new run almost no exploration — fatal when the run
+            # exists to escape the parent's local optimum. Re-inflate to max_log_std; the forced
+            # std anneal takes it back down over the competence-gated window.
+            if getattr(cfg, "warmstart_reset_log_std", False):
+                with torch.no_grad():
+                    model.policy.log_std.fill_(float(cfg.max_log_std))
+                print(f"[train] warm-start log_std reset to max_log_std={cfg.max_log_std:g} "
+                      f"(std {float(np.exp(cfg.max_log_std)):.2f})")
             print(f"[train] warm-started weights <- {warm_ckpt} (ent_coef reset to {cfg.ent_coef}, "
                   f"reseeded to {cfg.seed})")
         else:

@@ -1,0 +1,3 @@
+[eval] using ppo_200000000_steps + vecnormalize.pkl
+episodes=12  ep_len 371+/-391 control steps (max 12000)  mean_return 146.0  mean vx 0.02 m/s  peak vx 0.80 m/s
+wrote walk_mit/monitor/imp_m3b_s0_FINAL_200M.mp4 (4448 frames, 22.2 s)
