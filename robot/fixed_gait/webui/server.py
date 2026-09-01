@@ -249,6 +249,108 @@ def _nan_list(a, nd=2):
     return [None if not np.isfinite(v) else round(float(v), nd) for v in a]
 
 
+# ===================================================================== the streaming transport
+# WHY. Measured on the robot 2026-09-01, idle and LIMP: the 200 Hz loop holds 193 Hz with nothing
+# polling and 107 Hz with a browser open, and the cost tracks REQUEST COUNT rather than payload --
+# roughly 1 Hz of control rate per request per second, whichever endpoint it is. The 2026-08-19
+# process split moved the JSON work out (uiproc.py) but left the shape: three polling endpoints,
+# ~22 upstream requests a second, each paying for a socket accept, an HTTP parse, a Werkzeug
+# request thread and a response assembly INSIDE the interpreter that owes a CAN frame every 5 ms.
+#
+# So collapse them. One connection, opened once by uiproc.py, over which this process pushes a
+# frame every 50 ms. The per-request overhead stops scaling with the browser's poll rate because
+# there are no more per-poll requests: the browser polls uiproc, which answers from memory.
+#
+# FRAMING is deliberately not JSON for the bulk: a length-prefixed header (JSON, small) followed by
+# raw .tobytes() of the arrays. np.save would add a header per array and json would put every float
+# through the interpreter, which is the per-element cost the split exists to avoid.
+#
+#     4 bytes big-endian header length | header JSON | payload
+#
+# ROLLBACK: /api/telemetry_raw, /api/sensors_raw and /api/state_hot are untouched and still work,
+# and uiproc falls back to them the moment the stream drops. Running server.py alone on :8080
+# remains exactly today's robot.
+STREAM_HZ = 20.0
+STREAM_MAX_S = 3600.0                    # a client that stops reading must not pin a thread forever
+
+
+def _telemetry_frame(since):
+    """(header_dict, [arrays]) for the telemetry half. Shared with /api/telemetry_raw so there is
+    one definition of what a telemetry sample IS."""
+    d = _dm()
+    seq, t, data = d.ring.read_since(since)
+    snap = d.get_snapshot()
+    fk = STATE["fk"]
+    linkage = {}
+    for side in paths.SIDES:
+        mm = snap.get("motors", {})
+        cam = (mm.get(f"{side}.cam") or {}).get("pos_norm")
+        thigh = (mm.get(f"{side}.thigh") or {}).get("pos_norm")
+        if fk.available and fk.side_verified(side) and cam is not None and thigh is not None:
+            nodes, valid = fk.interp_nodes(side, cam, thigh)
+            linkage[side] = {"nodes": nodes, "valid": valid, "cam": cam, "thigh": thigh}
+        else:
+            linkage[side] = None
+    arr = np.stack([data[f] for f in d.ring.FIELDS])
+    return ({"seq": seq, "fields": list(d.ring.FIELDS), "mode": str(snap.get("mode")),
+             "linkage": linkage, "n": int(t.size), "shape": list(arr.shape)},
+            [np.ascontiguousarray(t, np.float64), np.ascontiguousarray(arr, np.float32)])
+
+
+def _sensors_frame(since):
+    sh = STATE["sense"]
+    if sh is None:
+        return ({"seq": 0, "fields": [], "n": 0, "shape": [0],
+                 "meta": {"available": False, "error": "sensors disabled (--no-sensors)"}},
+                [np.zeros(0), np.zeros(0, np.float32)])
+    meta = sh.snapshot() or {"available": False, "error": sh.error}
+    seq, t, data = sh.ring.read_since(since)
+    arr = (np.stack([data[f] for f in sh.ring.fields]) if sh.ring.fields
+           else np.zeros((0, 0), np.float32))
+    return ({"seq": seq, "fields": list(sh.ring.fields), "meta": meta,
+             "n": int(np.asarray(t).size), "shape": list(arr.shape)},
+            [np.ascontiguousarray(t, np.float64), np.ascontiguousarray(arr, np.float32)])
+
+
+def _pack_frame(header, blobs):
+    head = json.dumps(header).encode("utf-8")
+    return b"".join([len(head).to_bytes(4, "big"), head] + [b.tobytes() for b in blobs])
+
+
+@app.get("/api/stream")
+def api_stream():
+    """One frame every 50 ms until the client goes away. Replaces the browser's whole poll loop."""
+    try:
+        tel_since = int(request.args.get("since", 0))
+        sen_since = int(request.args.get("sensors_since", 0))
+    except (TypeError, ValueError):
+        tel_since = sen_since = 0
+
+    def gen(tel_since=tel_since, sen_since=sen_since):
+        t_end = time.time() + STREAM_MAX_S
+        period = 1.0 / STREAM_HZ
+        next_t = time.time()
+        while time.time() < t_end:
+            th, tb = _telemetry_frame(tel_since)
+            sh_, sb = _sensors_frame(sen_since)
+            tel_since, sen_since = th["seq"], sh_["seq"]
+            snap = _dm().get_snapshot()
+            snap["daemon_thread_alive"] = _dm().is_alive()
+            yield _pack_frame({"tel": th, "sen": sh_, "state_hot": snap}, tb + sb)
+            next_t += period
+            # sleep releases the GIL, which is the entire point of doing this on a timer rather
+            # than as fast as the socket will take it
+            sleep = next_t - time.time()
+            if sleep > 0:
+                time.sleep(sleep)
+            else:
+                next_t = time.time()
+
+    return Response(gen(), mimetype="application/octet-stream",
+                    headers={"X-Stream-Hz": str(STREAM_HZ),
+                             "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
 @app.get("/api/telemetry_raw")
 def api_telemetry_raw():
     """The SAME data as /api/telemetry, as an .npz of raw arrays instead of JSON.

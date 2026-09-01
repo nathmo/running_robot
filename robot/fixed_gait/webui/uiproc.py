@@ -38,7 +38,9 @@ Stdlib only for HTTP (urllib): the Pi has no internet, so `requests` is not inst
 import argparse
 import io
 import json
+import struct
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -94,6 +96,178 @@ def _nan_list(a, nd=2):
     return lst
 
 
+
+
+# ===================================================================== the upstream feed
+# The browser polls this process ~22 times a second (telemetry 10 Hz, sensors 10 Hz, state 2 Hz,
+# plus a policy dead-man at 5 Hz while a run is live). Until 2026-09-01 each of those became an
+# upstream request into the process that owns the 200 Hz CAN loop. Measured there: roughly 1 Hz of
+# control rate lost per upstream request per second, whichever endpoint it was -- the cost is the
+# socket accept, the HTTP parse, the Werkzeug request thread and the response assembly, not the
+# payload. 193 Hz idle became 107 Hz with one tab open.
+#
+# So: ONE persistent connection, opened here, over which the control process pushes a frame every
+# 50 ms. Browser polls are answered from `FEED` without touching upstream at all. The browser's
+# poll rate stops being something the control loop can feel.
+#
+# The `since` cursor the browser sends is served from a rolling local buffer, because the stream
+# delivers each sample exactly once and a client that reconnects or lags must still be able to ask
+# for a window rather than being told "nothing new since a sequence I never saw".
+#
+# FALLBACK IS THE POINT, not an afterthought: if the stream is not connected -- upstream restarted,
+# this process started first, an old server.py without /api/stream -- every handler below falls
+# back to the request-per-poll path that shipped in 2026-08. Losing the optimisation must never
+# mean losing the UI.
+STREAM_HZ = 20.0
+FEED_KEEP = 1200                 # samples of history kept locally (~60 s of telemetry at 20 Hz)
+
+
+class _Feed:
+    """The latest frame from upstream, plus enough history to answer a `since` cursor."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.connected = False
+        self.err = ""
+        self.frames = 0
+        self.state_hot = None
+        self.mode = None
+        self.linkage = None
+        self.tel = None          # (seq, fields, t[n], arr[f, n, 6])
+        self.sen = None          # (seq, fields, meta, t[m], arr[f, m])
+
+    # -- writer (the reader thread) ----------------------------------------------------------
+    def push(self, header, tel_t, tel_a, sen_t, sen_a):
+        with self.lock:
+            self.state_hot = header.get("state_hot")
+            th, sh_ = header["tel"], header["sen"]
+            self.mode, self.linkage = th.get("mode"), th.get("linkage")
+            self.tel = _append(self.tel, th["seq"], th["fields"], tel_t, tel_a)
+            self.sen = _append(self.sen, sh_["seq"], sh_["fields"], sen_t, sen_a,
+                               meta=sh_.get("meta"))
+            self.frames += 1
+            self.connected = True
+            self.err = ""
+
+    def drop(self, why):
+        with self.lock:
+            self.connected = False
+            self.err = str(why)
+
+    # -- readers (Flask threads) --------------------------------------------------------------
+    def since(self, which, cursor):
+        """(seq, fields, t, arr, meta) for the samples after `cursor`, or None if not streaming.
+
+        Served from local history rather than from the newest frame alone: the stream delivers each
+        sample exactly once, so a browser that reconnects, lags, or asks for a window wider than
+        one frame would otherwise be told there is nothing new since a sequence it never saw."""
+        with self.lock:
+            cur = self.tel if which == "tel" else self.sen
+            if not self.connected or cur is None:
+                return None
+            seq, fields, t, arr, meta = cur
+            try:
+                c = int(cursor or 0)
+            except (TypeError, ValueError):
+                c = 0
+            n = int(t.size)
+            take = min(max(seq - c, 0), n)
+            sl = slice(n - take, n)
+            return seq, fields, t[sl], (arr[:, sl] if arr.ndim >= 2 else arr), meta
+
+
+def _append(prev, seq, fields, t, arr, meta=None):
+    """Concatenate a frame's new samples onto the local history, bounded to FEED_KEEP.
+
+    The sample axis is 1 for both shapes carried here: telemetry is (fields, samples, motors) and
+    sensors is (fields, samples). A frame with no new samples keeps the history it had."""
+    if prev is not None and prev[1] == fields and prev[3].ndim == arr.ndim:
+        if t.size and arr.ndim >= 2:
+            t = np.concatenate([prev[2], t])[-FEED_KEEP:]
+            arr = np.concatenate([prev[3], arr], axis=1)[:, -FEED_KEEP:]
+        else:
+            t, arr = prev[2], prev[3]
+            meta = prev[4] if meta is None else meta
+    return (seq, fields, t, arr, meta)
+
+
+
+FEED = _Feed()
+
+
+def _reader():
+    """One connection, reopened whenever it drops. Never raises out of the thread."""
+    backoff = 0.5
+    while True:
+        try:
+            with FEED.lock:
+                tel_seq = FEED.tel[0] if FEED.tel else 0
+                sen_seq = FEED.sen[0] if FEED.sen else 0
+            url = f"{UPSTREAM}/api/stream?since={tel_seq}&sensors_since={sen_seq}"
+            with urllib.request.urlopen(url, timeout=30) as r:
+                backoff = 0.5
+                while True:
+                    head_len = _read_exactly(r, 4)
+                    if head_len is None:
+                        break
+                    n = struct.unpack(">I", head_len)[0]
+                    if not 0 < n < 4_000_000:
+                        break
+                    raw = _read_exactly(r, n)
+                    if raw is None:
+                        break
+                    header = json.loads(raw.decode("utf-8"))
+                    th, sh_ = header["tel"], header["sen"]
+                    tel_t = _read_array(r, (th["n"],), np.float64)
+                    tel_a = _read_array(r, tuple(th["shape"]), np.float32)
+                    sen_t = _read_array(r, (sh_["n"],), np.float64)
+                    sen_a = _read_array(r, tuple(sh_["shape"]), np.float32)
+                    if tel_t is None or tel_a is None or sen_t is None or sen_a is None:
+                        break
+                    FEED.push(header, tel_t, tel_a, sen_t, sen_a)
+        except Exception as e:                     # noqa: BLE001 -- a dropped feed is not fatal
+            FEED.drop(e)
+        else:
+            FEED.drop("stream closed by upstream")
+        time.sleep(backoff)
+        backoff = min(backoff * 2.0, 5.0)
+
+
+def _read_exactly(fh, n):
+    out = bytearray()
+    while len(out) < n:
+        chunk = fh.read(n - len(out))
+        if not chunk:
+            return None
+        out.extend(chunk)
+    return bytes(out)
+
+
+def _read_array(fh, shape, dtype):
+    count = 1
+    for d in shape:
+        count *= int(d)
+    nbytes = count * np.dtype(dtype).itemsize
+    raw = _read_exactly(fh, nbytes) if nbytes else b""
+    if raw is None:
+        return None
+    return np.frombuffer(raw, dtype=dtype).reshape(shape)
+
+
+def start_feed():
+    threading.Thread(target=_reader, name="upstream-feed", daemon=True).start()
+
+
+@app.get("/api/feed")
+def feed_status():
+    """Is the stream up, and how far behind? Diagnosing 'the UI looks frozen' should not need ssh."""
+    with FEED.lock:
+        return jsonify({"connected": FEED.connected, "frames": FEED.frames, "error": FEED.err,
+                        "tel_seq": FEED.tel[0] if FEED.tel else 0,
+                        "sen_seq": FEED.sen[0] if FEED.sen else 0,
+                        "stream_hz": STREAM_HZ})
+
+
 @app.get("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
@@ -102,24 +276,33 @@ def index():
 @app.get("/api/telemetry")
 def telemetry():
     """Same JSON shape as server.py's /api/telemetry — the browser cannot tell the difference."""
-    try:
-        st, body, hdrs = _fetch("/api/telemetry_raw", request.query_string)
-    except (urllib.error.URLError, OSError) as e:
-        return jsonify({"error": f"control process unreachable: {e}"}), 503
-    if st != 200:
-        return Response(body, status=st, mimetype="application/json")
-    buf = io.BytesIO(body)
-    t = np.load(buf)                       # two flat arrays, read back in the order written
-    arr = np.load(buf)                     # (n_fields, n_samples, N_MOTORS)
-    fields = json.loads(hdrs.get("X-Fields", "[]"))
+    got = FEED.since("tel", request.args.get("since", 0))
+    if got is not None:
+        seq, fields, t, arr, _meta = got
+        mode, linkage = FEED.mode, FEED.linkage
+    else:
+        # stream down: the request-per-poll path, exactly as it was before the feed existed
+        try:
+            st, body, hdrs = _fetch("/api/telemetry_raw", request.query_string)
+        except (urllib.error.URLError, OSError) as e:
+            return jsonify({"error": f"control process unreachable: {e}"}), 503
+        if st != 200:
+            return Response(body, status=st, mimetype="application/json")
+        buf = io.BytesIO(body)
+        t = np.load(buf)                   # two flat arrays, read back in the order written
+        arr = np.load(buf)                 # (n_fields, n_samples, N_MOTORS)
+        fields = json.loads(hdrs.get("X-Fields", "[]"))
+        seq = int(hdrs.get("X-Seq", 0))
+        mode = hdrs.get("X-Mode")
+        linkage = json.loads(hdrs.get("X-Linkage", "null"))
     idx = {f: k for k, f in enumerate(fields)}
-    out = {"seq": int(hdrs.get("X-Seq", 0)), "t": np.round(t, 3).tolist(), "motors": {}}
+    out = {"seq": seq, "t": np.round(t, 3).tolist(), "motors": {}}
     for i, n in enumerate(paths.MOTOR_NAMES):
         out["motors"][n] = {f: _nan_list(arr[idx[f]][:, i])
                             for f in ("pos_norm", "pos_raw", "cmd_norm", "cur", "temp", "spd")
                             if f in idx}
-    out["linkage"] = json.loads(hdrs.get("X-Linkage", "null"))
-    out["mode"] = hdrs.get("X-Mode")
+    out["linkage"] = linkage
+    out["mode"] = mode
     return jsonify(out)
 
 
@@ -140,13 +323,18 @@ def state():
     the process split. It only changes when a human saves, deletes or calibrates — all non-GET —
     so proxy() below drops the cache on any write and the TTL is only a backstop for changes that
     do not come through HTTP."""
-    try:
-        st, body, _ = _fetch("/api/state_hot")
-    except (urllib.error.URLError, OSError) as e:
-        return jsonify({"ok": False, "error": f"control process unreachable: {e}"}), 503
-    if st != 200:
-        return Response(body, status=st, mimetype="application/json")
-    out = json.loads(body)
+    with FEED.lock:
+        hot = FEED.state_hot if FEED.connected else None
+    if hot is not None:
+        out = dict(hot)
+    else:
+        try:
+            st, body, _ = _fetch("/api/state_hot")
+        except (urllib.error.URLError, OSError) as e:
+            return jsonify({"ok": False, "error": f"control process unreachable: {e}"}), 503
+        if st != 200:
+            return Response(body, status=st, mimetype="application/json")
+        out = json.loads(body)
     now = time.monotonic()
     if _cold["body"] is None or now - _cold["at"] > COLD_TTL_S:
         try:
@@ -162,6 +350,14 @@ def state():
 
 @app.get("/api/sensors")
 def sensors():
+    got = FEED.since("sen", request.args.get("since", 0))
+    if got is not None:
+        seq, fields, t, arr, meta = got
+        out = dict(meta or {})
+        out["seq"] = seq
+        out["t"] = np.round(t, 3).tolist()
+        out["series"] = {f: _nan_list(arr[k], 3) for k, f in enumerate(fields) if k < len(arr)}
+        return jsonify(out)
     try:
         st, body, hdrs = _fetch("/api/sensors_raw", request.query_string)
     except (urllib.error.URLError, OSError) as e:
@@ -224,6 +420,7 @@ def main():
     # This process has no real-time work at all, so it does NOT need the 0.5 ms switch interval
     # server.py sets — leaving it at the default keeps its own threads cheap.
     print(f"\nDASH-01 UI front: http://{args.host}:{args.port}/  -> control at {UPSTREAM}")
+    start_feed()          # one upstream connection, opened before the first browser arrives
     app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
 
 
