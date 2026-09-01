@@ -228,11 +228,15 @@ POLICY_UPRIGHT_GRAV = np.array([0.0, 0.0, -1.0])   # --no-imu fallback: faked up
 # THE ROBOT'S PI 3B CANNOT HOLD 200 Hz FOR A POLICY. Measured 2026-09-01, imp_m3d bundle, per tick,
 # single-threaded so the numbers are work and not GIL contention:
 #
-#     controller.step()     4.2 - 5.6 ms      (only ~2.0 ms of it is the neural network)
-#     SafetyGovernor.step() 2.3 ms            (now includes the winding observer)
+#     controller.step()     4.2 ms           (~1.8 ms of it is BLAS and cannot be removed)
+#     SafetyGovernor.step() 1.9 ms           (includes the winding observer)
 #     send prep + 6 frames  0.4 ms
 #     --------------------------------
-#     policy tick core      6.5 - 8 ms        against a 5.0 ms budget
+#     policy tick core      6.0 ms           against a 5.0 ms budget
+#
+# Those are standalone medians. The arm-time probe measures the same call INSIDE this process,
+# where the IMU thread, Flask and the recorder are competing for the GIL, and reads ~6.4 ms -- which
+# is the number the gate should use, because it is the one the robot actually gets.
 #
 # The first measurement was 14 ms, because Debian's numpy was linked against the REFERENCE netlib
 # BLAS: a 593x256 float32 gemv ran at 52 MFLOPS. Installing libopenblas0-pthread (one 3.5 MB
