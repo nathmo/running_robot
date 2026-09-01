@@ -482,6 +482,9 @@ class RobotDaemon(threading.Thread):
         self._slip_count = 0
         self.ring = ringbuffer.TelemetryRing()
         self.snapshot = {"daemon_alive": False, "mode": "LIMP"}
+        self._cap = None                   # latest plain-data capture from the control loop
+        self._cap_ver = 0
+        self._snap_ver = -1                # version self.snapshot was formatted from
         self._started_ok = threading.Event()
 
         # -------- black box + pre-move guard state --------
@@ -1051,8 +1054,8 @@ class RobotDaemon(threading.Thread):
             self._bb_event("daemon.loop_exit", mode=self.mode, ticks=self._tick_count,
                            slip=self._slip_count, loop_error=self.loop_error)
             self._release_and_close()
+            snap = self.get_snapshot()
             with self.lock:
-                snap = dict(self.snapshot)
                 snap["daemon_alive"] = False
                 snap["loop_error"] = self.loop_error
                 snap["blackbox"] = (self.bb.status() if self.bb is not None
@@ -3329,72 +3332,122 @@ class RobotDaemon(threading.Thread):
         self._bb_status = self.bb.status() if self.bb is not None else {"alive": False,
                                                                        "error": "not configured"}
 
+        # ---- CAPTURE, not FORMAT ------------------------------------------------------------
+        # Everything below reads live daemon state, so it has to happen on this thread -- but it
+        # only READS. The rounding, the nesting and the six-motor comprehension that used to sit
+        # here are 1.24 ms of pure Python per call, at 20 Hz, on the thread that owes a CAN frame
+        # every 5 ms. They now happen in _format_snapshot(), on whichever Flask thread asked, and
+        # only when one actually does.
+        #
+        # The capture holds PLAIN DATA ONLY: arrays this method already built, scalars, and dicts
+        # that are copied here rather than referenced. That is the whole thread-safety argument --
+        # a formatter running later on another thread can never observe a half-written _pb or
+        # iterate a dict the control loop is still mutating.
         r = self._rec
         with self.lock:
-            sine_pub = {n: {k: v for k, v in s.items() if not k.startswith("_")}
-                        for n, s in self._sine.items()}
-            override = self._manual_override
-            manual_targets = dict(self._manual_targets)
-            self.snapshot = dict(
-                daemon_alive=True, mode=self.mode, mock=self.mock,
-                estop=dict(latched=self.mode == "ESTOPPED", reason=self.estop_reason),
-                # ticks is here so the ACTUAL loop rate is observable without the recorder.
-                # The 2026-08-10 lesson twice over: nothing measured the tick period, so a
-                # loop running at a third of its rate looked exactly like a healthy one.
-                loop=dict(hz=TICK_HZ, slip=self._slip_count, ticks=self._tick_count),
+            cap = dict(
+                mode=self.mode, mock=self.mock, estop_reason=self.estop_reason,
+                slip=self._slip_count, ticks=self._tick_count, loop_error=self.loop_error,
+                last_reject=self._last_reject, blackbox=self._bb_status,
+                can_errors=canio.send_errors(), can_bus=canio.send_stats(),
+                bypass=dict(self.bypass),
+                # these three already return plain dicts of scalars, and only when their mode has
+                # ever run -- so they cost nothing in the common case and are safe to hand over
                 thermal=self._thermal_pub(now),
                 identify=self._identify_pub(now),
                 policy=self._policy_pub(now),
-                bypass=dict(self.bypass),
-                loop_error=self.loop_error,
-                can_errors=canio.send_errors(), can_bus=canio.send_stats(),
-                last_reject=self._last_reject,
-                # the recorder's own health, so a dead writer thread is visible in the UI rather
-                # than being discovered after the next incident
-                blackbox=self._bb_status,
-                # the pre-move guard: why the last activation was refused, with both raw poses
-                premove=dict(refused=self._guard_latched,
-                             raw_now=self._guard_detail.get("raw_now"),
-                             raw_at_last_zero=self._guard_detail.get("raw_at_last_zero"),
-                             compare=self._guard_detail.get("compare"),
-                             origin_jumps=len(self._raw_jumps),
-                             holding=now < self._hold_until),
-                motors={n: dict(alive=self.by_name[n].pos is not None,
-                                pos_raw=None if np.isnan(raw[i]) else round(float(raw[i]), 2),
-                                pos_norm=None if np.isnan(norm[i]) else round(float(norm[i]), 2),
-                                spd=None if np.isnan(spd[i]) else round(float(spd[i]), 0),
-                                cur=None if np.isnan(cur[i]) else round(float(cur[i]), 2),
-                                temp=None if np.isnan(temp[i]) else int(temp[i]),
-                                err=int(err[i]))
-                        for i, n in enumerate(paths.MOTOR_NAMES)},
-                manual=dict(targets=manual_targets, override=override, slew_dps=self._slew_dps,
-                            sine=sine_pub, homing=self._home_active,
-                            homing_kind=self._home_kind),
-                playback=(None if self._pb is None else dict(
-                    running=self.mode == "PLAYBACK", phase=round(self._pb.get("phase", 0.0), 3),
-                    period=self._pb["period"], mode=self._pb["mode"], sides=self._pb["sides"],
-                    current_limit=self._pb["current_limit"],
-                    max_track_err=self._pb["max_track_err"],
-                    track_err_estop=self._pb["track_err_estop"],
-                    track_err_peak=round(self._pb.get("track_err_peak", 0.0), 1),
-                    track_err_worst=self._pb.get("track_err_worst"),
-                    track_err_over=self._pb.get("track_err_over", False))),
-                measure=(None if self._meas is None else dict(
+                raw=raw, norm=norm, spd=spd, cur=cur, temp=temp, err=err,
+                alive=[self.by_name[n].pos is not None for n in paths.MOTOR_NAMES],
+                guard_refused=self._guard_latched,
+                guard_raw_now=self._guard_detail.get("raw_now"),
+                guard_raw_at_zero=self._guard_detail.get("raw_at_last_zero"),
+                guard_compare=self._guard_detail.get("compare"),
+                origin_jumps=len(self._raw_jumps), holding=now < self._hold_until,
+                manual_targets=dict(self._manual_targets), override=self._manual_override,
+                slew_dps=self._slew_dps, homing=self._home_active, homing_kind=self._home_kind,
+                # copied, not referenced: the sine dicts are mutated by sine_update()
+                sine={n: dict(v) for n, v in self._sine.items()},
+                pb=None if self._pb is None else {
+                    k: self._pb.get(k) for k in
+                    ("phase", "period", "mode", "sides", "current_limit", "max_track_err",
+                     "track_err_estop", "track_err_peak", "track_err_worst", "track_err_over")},
+                meas=None if self._meas is None else dict(
                     running=self._meas["running"], done=self._meas.get("done", False),
                     leg=self._meas["leg"], profile=self._meas["profile"],
-                    duration=self._meas["duration"],
-                    elapsed=round(float(np.clip(now - self._meas.get("t0", now),
-                                                0.0, self._meas["duration"])), 2),
-                    n_samples=len(self._meas["buf_t"]))),
-                recording=dict(kind=r["kind"], active=r["active"], leg=r["leg"],
-                               outside_workspace=r["outside"],
-                               n_samples=len(r["buf_p"]),
-                               takes={s: len(r["takes"][s]) for s in ("right", "left")},
-                               segments={s: len(r["segments"][s]) for s in ("right", "left")},
-                               centers={s: (None if r["centers"][s] is None
-                                            else [round(v, 1) for v in r["centers"][s]])
-                                        for s in ("right", "left")}),
+                    duration=self._meas["duration"], t0=self._meas.get("t0", now),
+                    n_samples=len(self._meas["buf_t"]), now=now),
+                rec=dict(kind=r["kind"], active=r["active"], leg=r["leg"],
+                         outside=r["outside"], n_samples=len(r["buf_p"]),
+                         takes={k: len(v) for k, v in r["takes"].items()},
+                         segments={k: len(v) for k, v in r["segments"].items()},
+                         centers={k: (None if v is None else list(v))
+                                  for k, v in r["centers"].items()}),
             )
+            self._cap = cap
+            self._cap_ver += 1
+
+    @staticmethod
+    def _format_snapshot(cap):
+        """Capture -> the JSON-shaped dict the UI reads. PURE: no daemon state, no locks, no live
+        objects, so it is safe on any thread and cheap to test."""
+        raw, norm = cap["raw"], cap["norm"]
+        spd, cur, temp, err = cap["spd"], cap["cur"], cap["temp"], cap["err"]
+        meas, pb = cap["meas"], cap["pb"]
+        return dict(
+            daemon_alive=True, mode=cap["mode"], mock=cap["mock"],
+            estop=dict(latched=cap["mode"] == "ESTOPPED", reason=cap["estop_reason"]),
+            # ticks is here so the ACTUAL loop rate is observable without the recorder.
+            # The 2026-08-10 lesson twice over: nothing measured the tick period, so a
+            # loop running at a third of its rate looked exactly like a healthy one.
+            loop=dict(hz=TICK_HZ, slip=cap["slip"], ticks=cap["ticks"]),
+            thermal=cap["thermal"], identify=cap["identify"], policy=cap["policy"],
+            bypass=cap["bypass"], loop_error=cap["loop_error"],
+            can_errors=cap["can_errors"], can_bus=cap["can_bus"],
+            last_reject=cap["last_reject"],
+            # the recorder's own health, so a dead writer thread is visible in the UI rather
+            # than being discovered after the next incident
+            blackbox=cap["blackbox"],
+            # the pre-move guard: why the last activation was refused, with both raw poses
+            premove=dict(refused=cap["guard_refused"], raw_now=cap["guard_raw_now"],
+                         raw_at_last_zero=cap["guard_raw_at_zero"],
+                         compare=cap["guard_compare"], origin_jumps=cap["origin_jumps"],
+                         holding=cap["holding"]),
+            motors={n: dict(alive=cap["alive"][i],
+                            pos_raw=None if np.isnan(raw[i]) else round(float(raw[i]), 2),
+                            pos_norm=None if np.isnan(norm[i]) else round(float(norm[i]), 2),
+                            spd=None if np.isnan(spd[i]) else round(float(spd[i]), 0),
+                            cur=None if np.isnan(cur[i]) else round(float(cur[i]), 2),
+                            temp=None if np.isnan(temp[i]) else int(temp[i]),
+                            err=int(err[i]))
+                    for i, n in enumerate(paths.MOTOR_NAMES)},
+            manual=dict(targets=cap["manual_targets"], override=cap["override"],
+                        slew_dps=cap["slew_dps"],
+                        sine={n: {k: v for k, v in sv.items() if not k.startswith("_")}
+                              for n, sv in cap["sine"].items()},
+                        homing=cap["homing"], homing_kind=cap["homing_kind"]),
+            playback=(None if pb is None else dict(
+                running=cap["mode"] == "PLAYBACK", phase=round(pb.get("phase") or 0.0, 3),
+                period=pb["period"], mode=pb["mode"], sides=pb["sides"],
+                current_limit=pb["current_limit"], max_track_err=pb["max_track_err"],
+                track_err_estop=pb["track_err_estop"],
+                track_err_peak=round(pb.get("track_err_peak") or 0.0, 1),
+                track_err_worst=pb.get("track_err_worst"),
+                track_err_over=pb.get("track_err_over") or False)),
+            measure=(None if meas is None else dict(
+                running=meas["running"], done=meas["done"], leg=meas["leg"],
+                profile=meas["profile"], duration=meas["duration"],
+                elapsed=round(float(np.clip(meas["now"] - meas["t0"],
+                                            0.0, meas["duration"])), 2),
+                n_samples=meas["n_samples"])),
+            recording=dict(kind=cap["rec"]["kind"], active=cap["rec"]["active"],
+                           leg=cap["rec"]["leg"], outside_workspace=cap["rec"]["outside"],
+                           n_samples=cap["rec"]["n_samples"],
+                           takes={s: cap["rec"]["takes"][s] for s in ("right", "left")},
+                           segments={s: cap["rec"]["segments"][s] for s in ("right", "left")},
+                           centers={s: (None if cap["rec"]["centers"][s] is None
+                                        else [round(v, 1) for v in cap["rec"]["centers"][s]])
+                                    for s in ("right", "left")}),
+        )
 
     def _thermal_pub(self, now):
         """Live burst state for the panel. None when no burst has been run this session."""
@@ -3418,5 +3471,22 @@ class RobotDaemon(threading.Thread):
         return d
 
     def get_snapshot(self):
+        """The UI-shaped state. Built HERE, on the calling thread, from the control loop's latest
+        capture -- and memoised on the capture version, so the many _ok() envelopes inside one
+        request format it once and a quiet robot formats it never."""
         with self.lock:
-            return dict(self.snapshot)
+            cap, ver = self._cap, self._cap_ver
+            if ver == self._snap_ver and self.snapshot is not None:
+                return dict(self.snapshot)
+        if cap is None:
+            # Before the first capture, hand back the seed -- NOT a freshly-read self.mode. A
+            # snapshot that reports a live mode it has no data for lets a caller believe the loop
+            # has published a state it never published; the identify tests catch exactly that.
+            with self.lock:
+                return dict(self.snapshot)
+        built = self._format_snapshot(cap)      # outside the lock: this is the expensive part
+        with self.lock:
+            # last writer wins, and both wrote the same thing unless a newer capture landed
+            # mid-format, in which case the next call rebuilds
+            self.snapshot, self._snap_ver = built, ver
+        return dict(built)
