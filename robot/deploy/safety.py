@@ -134,6 +134,8 @@ class SafetyGovernor:
         self.stop = STOP_NONE
         self.reasons = []
         self._sat = {}                    # limit name -> consecutive saturated ticks
+        self._sanity_buf = None           # see _sanity_cat
+        self._sanity_slices = None
         self._last_good = None            # target frozen at the moment of a soft stop
         self._ramp = 1.0                  # kp/kd multiplier during a soft stop
         self._t_since_rx = 0.0
@@ -168,6 +170,25 @@ class SafetyGovernor:
         return False
 
     # ------------------------------------------------------------------ the tick
+    def _sanity_cat(self, *arrays):
+        """The seven command/measurement vectors in one buffer, so finiteness is one reduction.
+
+        Preallocated and refilled rather than concatenated: the widths never change after the
+        first tick, and this runs 200 times a second."""
+        buf = self._sanity_buf
+        if buf is None or buf.size != sum(a.size for a in arrays):
+            buf = self._sanity_buf = np.empty(sum(a.size for a in arrays), float)
+            self._sanity_slices = None
+        if self._sanity_slices is None:
+            off, sl = 0, []
+            for a in arrays:
+                sl.append((off, off + a.size))
+                off += a.size
+            self._sanity_slices = sl
+        for (i, j), a in zip(self._sanity_slices, arrays):
+            buf[i:j] = a
+        return buf
+
     def observe(self, current, omega=None, drive_temp=None, t_amb=None):
         """Advance the winding observer one tick and return its estimate (None if there is none).
 
@@ -204,36 +225,52 @@ class SafetyGovernor:
         vel = np.asarray(motor_vel, float)
         clamped = set()
 
+        grav = np.asarray(grav, float)
+        gyro = np.asarray(gyro, float)
+
         # -- 0. SANITY. A NaN reaching the wire encodes to a bit pattern that means something, and
         # whatever it means, nobody chose it. This one can never be a clamp.
-        for label, arr in (("target", target), ("kp", kp), ("kd", kd),
-                           ("motor_pos", pos), ("motor_vel", vel),
-                           ("gravity", np.asarray(grav, float)), ("gyro", np.asarray(gyro, float))):
-            if not np.all(np.isfinite(arr)):
-                self.kill("non-finite {}: {}".format(label, np.asarray(arr).tolist()), hard=True)
-                return self._verdict(target, kp, kd, clamped)
+        #
+        # Checked with ONE reduction over the concatenation instead of seven np.all(np.isfinite())
+        # calls: at six elements each, the dispatch cost several times the arithmetic. The
+        # per-array loop still runs, but only when something is actually wrong -- which is where
+        # naming the offending vector matters and where a few microseconds do not.
+        if not np.isfinite(self._sanity_cat(target, kp, kd, pos, vel, grav, gyro)).all():
+            for label, arr in (("target", target), ("kp", kp), ("kd", kd),
+                               ("motor_pos", pos), ("motor_vel", vel),
+                               ("gravity", grav), ("gyro", gyro)):
+                if not np.isfinite(arr).all():
+                    self.kill("non-finite {}: {}".format(label, np.asarray(arr).tolist()),
+                              hard=True)
+                    return self._verdict(target, kp, kd, clamped)
 
         # -- 5a. WATCHDOGS that must fire before anything is commanded ---------------------------
         if telemetry_age > L.telemetry_stale_s:
             self.kill("telemetry stale by {:.0f} ms -- never command a joint we cannot see"
                       .format(telemetry_age * 1e3), hard=True)
         if drive_err is not None:
-            bad = [self.names[i] for i, e in enumerate(np.asarray(drive_err).ravel()) if e]
+            err_a = np.asarray(drive_err).ravel()
+            bad = [self.names[i] for i, e in enumerate(err_a) if e] if err_a.any() else []
             if bad:
                 self.kill("drive error flag on {}".format(", ".join(bad)), hard=True)
         if drive_temp is not None:
             t = np.asarray(drive_temp, float)
-            hot = [self.names[i] for i in np.flatnonzero(np.isfinite(t) & (t >= L.temp_case_max))]
-            if hot:
-                self.kill("drive case temperature at/over {:.0f} C on {}".format(
-                    L.temp_case_max, ", ".join(hot)), hard=True)
-        gz = float(np.asarray(grav, float)[2])
+            # the common answer is "nothing is hot", and one reduction answers it -- the
+            # flatnonzero and the list comprehension only run when something actually is.
+            # NaN compares False either way, matching the isfinite mask it replaces.
+            if (t >= L.temp_case_max).any():
+                hot = [self.names[i]
+                       for i in np.flatnonzero(np.isfinite(t) & (t >= L.temp_case_max))]
+                if hot:
+                    self.kill("drive case temperature at/over {:.0f} C on {}".format(
+                        L.temp_case_max, ", ".join(hot)), hard=True)
+        gz = float(grav[2])
         if gz > L.tilt_kill:
             # grav is world-DOWN in body axes, so upright is -1 and 0 is on its side
             self.kill("fallen: gravity_z {:+.2f} above the {:+.2f} termination the policy was "
                       "trained to (tilt {:.0f} deg)".format(
                           gz, L.tilt_kill, np.degrees(np.arccos(min(1.0, -gz)))), hard=True)
-        gmax = float(np.max(np.abs(np.asarray(gyro, float))))
+        gmax = float(np.abs(gyro).max())
         if gmax > L.gyro_max:
             self.kill("body rate {:.1f} rad/s over the {:.1f} limit".format(gmax, L.gyro_max),
                       hard=True)
@@ -249,8 +286,8 @@ class SafetyGovernor:
             return self._verdict(target, kp, kd, clamped)
 
         # -- 1. POSITION ---------------------------------------------------------------------
-        lim = np.clip(target, L.pos_lo, L.pos_hi)
-        if np.any(lim != target):
+        lim = np.minimum(np.maximum(target, L.pos_lo), L.pos_hi)
+        if (lim != target).any():
             i = int(np.argmax(np.abs(lim - target)))
             clamped.add("position")
             self._saturate("position", True, "{} wanted {:+.3f} rad, band [{:+.3f}, {:+.3f}]"
@@ -262,8 +299,9 @@ class SafetyGovernor:
         # -- 2. RATE -------------------------------------------------------------------------
         if self._last_good is not None:
             dmax = L.vel_max * self.dt
-            lim = np.clip(target, self._last_good - dmax, self._last_good + dmax)
-            if np.any(lim != target):
+            lim = np.minimum(np.maximum(target, self._last_good - dmax),
+                             self._last_good + dmax)
+            if (lim != target).any():
                 i = int(np.argmax(np.abs(lim - target)))
                 clamped.add("rate")
                 self._saturate("rate", True, "{} wanted {:.1f} rad/s, limit {:.1f}".format(
@@ -280,8 +318,8 @@ class SafetyGovernor:
         tau_max = self._torque_budget()
         err = target - pos
         err_max = tau_max / np.maximum(kp, 1e-6)
-        lim_err = np.clip(err, -err_max, err_max)
-        if np.any(lim_err != err):
+        lim_err = np.minimum(np.maximum(err, -err_max), err_max)
+        if (lim_err != err).any():
             i = int(np.argmax(np.abs(lim_err - err)))
             clamped.add("torque")
             self._saturate("torque", True,
@@ -292,9 +330,9 @@ class SafetyGovernor:
         target = pos + lim_err
 
         # -- 4. GAINS into the wire ranges ----------------------------------------------------
-        kpc = np.clip(kp, L.kp_min, L.kp_max)
-        kdc = np.clip(kd, L.kd_min, L.kd_max)
-        if np.any(kpc != kp) or np.any(kdc != kd):
+        kpc = np.minimum(np.maximum(kp, L.kp_min), L.kp_max)
+        kdc = np.minimum(np.maximum(kd, L.kd_min), L.kd_max)
+        if (kpc != kp).any() or (kdc != kd).any():
             clamped.add("gains")
             # NOT a persistence kill: for the deployed bundle the impedance channel spans exactly
             # kp 40-500 and kd 1.0-5.0, so a clamp here means the bundle changed, not that the
@@ -306,7 +344,7 @@ class SafetyGovernor:
         # -- 5b. TRACKING: the joint is not where it was told to be ----------------------------
         # After the torque cap this is the honest test of "is the machine doing what we asked".
         terr = np.abs(pos - target)
-        if np.any(terr > L.track_err_max):
+        if (terr > L.track_err_max).any():
             i = int(np.argmax(terr))
             self._saturate("tracking", True, "{} is {:.3f} rad from its target (limit {:.3f})"
                            .format(self.names[i], terr[i], L.track_err_max))
@@ -315,10 +353,13 @@ class SafetyGovernor:
 
         # -- thermal trip (the observer is stepped by the caller; we read its verdict) ----------
         if self.thermal is not None:
-            over = np.flatnonzero(self.thermal.t_winding >= self.thermal.t_trip)
+            # t_winding is a property that builds a fresh array; it was read up to three times a
+            # tick here alone
+            t_w = self.thermal.t_winding
+            over = np.flatnonzero(t_w >= self.thermal.t_trip)
             if over.size:
                 self.kill("estimated winding temperature {:.0f} C at/over the {:.0f} C limit on {}"
-                          .format(float(self.thermal.t_winding[over[0]]),
+                          .format(float(t_w[over[0]]),
                                   float(self.thermal.t_trip[over[0]]),
                                   ", ".join(self.names[i] for i in over)), hard=False)
 

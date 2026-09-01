@@ -64,14 +64,40 @@ def action_dim(n_harmonics, n_steer=0):
     return spec_dim(n_harmonics, n_steer) + N_RESIDUAL
 
 
+# assemble() runs at the control rate and used to rebuild these two constants on every call.
+# _weights is a pure function of n_harmonics and the harmonic index vector is a pure function of
+# it too, so both are memoised: same objects, same values, no recomputation. Measured on the
+# robot's Pi 3B this was 0.15 ms of every 5 ms tick.
+_W_CACHE = {}
+_K_CACHE = {}
+
+
 def _weights(n_harmonics):
     """Amplitude budget: offset + harmonic k weighted by 1/sqrt(k), normalized to sum 1.
     Low-harmonic-dominated but with more high-harmonic authority than a 1/k schedule (running
     push-off is impulsive). NOTE the bound is approximate: each harmonic pair reaches sqrt(2) at
     coeffs +-1, so |series| can reach ~1.24 — the +-amp clip in assemble() flat-tops those
-    extremes (intentional: a bounded, still-smooth waveform)."""
-    w = np.array([1.0] + [1.0 / np.sqrt(k) for k in range(1, n_harmonics + 1)])
-    return w / w.sum()
+    extremes (intentional: a bounded, still-smooth waveform).
+
+    Returned READ-ONLY from a cache: the caller must not mutate it, and setting the flag is how
+    that stops being a comment nobody reads."""
+    w = _W_CACHE.get(n_harmonics)
+    if w is None:
+        w = np.array([1.0] + [1.0 / np.sqrt(k) for k in range(1, n_harmonics + 1)])
+        w = w / w.sum()
+        w.flags.writeable = False
+        _W_CACHE[n_harmonics] = w
+    return w
+
+
+def _harmonic_index(n_harmonics):
+    """[1.0, 2.0, ... N] — the k in cos(k phi), memoised for the same reason."""
+    k = _K_CACHE.get(n_harmonics)
+    if k is None:
+        k = np.arange(1.0, n_harmonics + 1.0)
+        k.flags.writeable = False
+        _K_CACHE[n_harmonics] = k
+    return k
 
 
 def decode(action, n_harmonics, n_steer=0):
@@ -98,12 +124,23 @@ def frequency(freq_raw, freq_range):
     return lo + (hi - lo) * 0.5 * (float(freq_raw) + 1.0)
 
 
-def _series(coeffs, phi, weights, n_harmonics):
-    """weighted a0 + sum_k wk*(ak cos k phi + bk sin k phi). coeffs = [a0, a1,b1, a2,b2, ...]."""
+def _series(coeffs, phi, weights, n_harmonics, cosk=None, sink=None):
+    """weighted a0 + sum_k wk*(ak cos k phi + bk sin k phi). coeffs = [a0, a1,b1, a2,b2, ...].
+
+    `cosk`/`sink` are cos(k*phi)/sin(k*phi) for k = 1..N, precomputed by the caller. assemble()
+    evaluates FOUR series at only TWO distinct phases, so computing the trig there turns 4*2*N
+    scalar numpy calls into 2*2 array calls -- each scalar np.cos costs more in dispatch than in
+    arithmetic. The values are the same ufunc on the same inputs, and the accumulation below is
+    still sequential in the same order, so the result is bit identical; the golden trace in
+    robot/deploy/tests asserts exactly that.
+    """
+    if cosk is None:
+        kphi = _harmonic_index(n_harmonics) * phi
+        cosk, sink = np.cos(kphi), np.sin(kphi)
     val = weights[0] * coeffs[0]
     for k in range(1, n_harmonics + 1):
         ak, bk = coeffs[2 * k - 1], coeffs[2 * k]
-        val += weights[k] * (ak * np.cos(k * phi) + bk * np.sin(k * phi))
+        val += weights[k] * (ak * cosk[k - 1] + bk * sink[k - 1])
     return val
 
 
@@ -146,10 +183,17 @@ def assemble(cam_coeffs, thigh_coeffs, reflex, phi, roll, roll_rate, nominal, cf
     # AFTER the clip, so it can reach amp*(1+steer_stride_scale) — bounded, and the env's ctrlrange
     # clip is still the last word.
     ca, ta = cfg.cam_amp, cfg.thigh_amp
-    d_cam = np.clip(ca * _series(cam_coeffs, phi, w, N), -ca, ca)
-    d_thigh = np.clip(ta * _series(thigh_coeffs, phi, w, N), -ta, ta)
-    d_cam_a = np.clip(ca * _series(cam_coeffs, phi + np.pi, w, N), -ca, ca)
-    d_thigh_a = np.clip(ta * _series(thigh_coeffs, phi + np.pi, w, N), -ta, ta)
+    # Two phases, four series. Evaluate the trig once per phase instead of once per series per
+    # harmonic -- see _series. Same values, same accumulation order, bit-identical output.
+    kk = _harmonic_index(N)
+    kphi = kk * phi
+    cos_p, sin_p = np.cos(kphi), np.sin(kphi)
+    kphi_a = kk * (phi + np.pi)
+    cos_a, sin_a = np.cos(kphi_a), np.sin(kphi_a)
+    d_cam = np.clip(ca * _series(cam_coeffs, phi, w, N, cos_p, sin_p), -ca, ca)
+    d_thigh = np.clip(ta * _series(thigh_coeffs, phi, w, N, cos_p, sin_p), -ta, ta)
+    d_cam_a = np.clip(ca * _series(cam_coeffs, phi + np.pi, w, N, cos_a, sin_a), -ca, ca)
+    d_thigh_a = np.clip(ta * _series(thigh_coeffs, phi + np.pi, w, N, cos_a, sin_a), -ta, ta)
     cam_L = nominal[CAM_L] + gL * d_cam
     thigh_L = nominal[THIGH_L] + gL * d_thigh
     cam_R = nominal[CAM_R] - gR * d_cam_a

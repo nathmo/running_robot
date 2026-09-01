@@ -283,15 +283,20 @@ class PolicyController:
 
         # 6) the actuation chain the sim runs inside _run_physics, in the same order
         self._filt_target = self.filter_a * self._filt_target + (1.0 - self.filter_a) * target
-        tgt = np.clip(self._filt_target, self.ctrl_lo, self.ctrl_hi)
+        # np.clip routes through fromnumeric.clip -> _wrapfunc -> _methods._clip before it reaches
+        # the same two ufuncs these call directly. On six-element arrays that dispatch costs more
+        # than the arithmetic. Identical semantics, NaN included: maximum/minimum propagate NaN
+        # exactly as clip does.
+        tgt = np.minimum(np.maximum(self._filt_target, self.ctrl_lo), self.ctrl_hi)
         saturated = bool(np.any(tgt != self._filt_target))
         if self.vel_accel_limited:
             dt = self.control_dt
             v_des = (tgt - self._prev_cmd_pos) / dt
             if self.accel_limit > 0.0:
                 dv = self.accel_limit * dt
-                v_des = np.clip(v_des, self._prev_cmd_vel - dv, self._prev_cmd_vel + dv)
-            np.clip(v_des, -self.vel_limit, self.vel_limit, out=v_des)
+                v_des = np.minimum(np.maximum(v_des, self._prev_cmd_vel - dv),
+                                   self._prev_cmd_vel + dv)
+            np.minimum(np.maximum(v_des, -self.vel_limit, out=v_des), self.vel_limit, out=v_des)
             tgt = self._prev_cmd_pos + v_des * dt
             self._prev_cmd_vel = v_des
             self._prev_cmd_pos = tgt.copy()
