@@ -1,0 +1,11 @@
+[eval] using final_model + vecnormalize.pkl
+episodes=8  ep_len 7007+/-30 control steps (max 12000)  mean_return 6327.7  mean vx 2.87 m/s  peak vx 3.68 m/s
+  dash ep0:  101.1 m of 100 m   line  34.61 s   never stopped   avg 2.89 m/s
+  dash ep1:  100.9 m of 100 m   line  34.67 s   never stopped   avg 2.88 m/s
+  dash ep2:  101.1 m of 100 m   line  34.70 s   never stopped   avg 2.88 m/s
+  dash ep3:  101.3 m of 100 m   line  34.67 s   never stopped   avg 2.89 m/s
+  dash ep4:  101.2 m of 100 m   line  34.74 s   never stopped   avg 2.88 m/s
+  dash ep5:  101.1 m of 100 m   line  34.92 s   never stopped   avg 2.86 m/s
+  dash ep6:  100.8 m of 100 m   line  34.50 s   never stopped   avg 2.90 m/s
+  dash ep7:  101.2 m of 100 m   line  34.53 s   never stopped   avg 2.90 m/s
+wrote walk_mit/monitor/sprint_m5_s0_FINAL_300M.mp4 (8000 frames, 40.0 s)

@@ -1155,7 +1155,7 @@ function updateManualRanges() {
     row.querySelector(".mr-slider").max = hi;
   }
 }
-$("ws-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
+$("ws-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = async () => {
   try {
     $("ws-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
     b.classList.add("active");
@@ -1164,8 +1164,9 @@ $("ws-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
       S.wsLeg === "right" ? "⇄ copy right → left" : "⇄ copy left → right";
     document.querySelectorAll(".wsrec-legname").forEach((s) => s.textContent = S.wsLeg);
     resetWsTrail();
-    loadWsIntoEditor();
-    wsEd.view.render();  // force immediate render after leg switch
+    await refreshWorkspace();  // ensure we have fresh data for the new leg
+    // loadWsIntoEditor is called by refreshWorkspace, but force render to be safe
+    wsEd.view.render();
   } catch (e) {
     console.error("workspace tab switch error:", e);
     setBanner("Error switching workspace leg: " + e.message, "error", 5000);
@@ -1371,13 +1372,14 @@ function updateTrajStats() {
   $("traj-stats").textContent = n ? `stroke: ${n} points — "Use drawn path" smooths + closes it via the standard pipeline` : "";
 }
 
-$("traj-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = () => {
+$("traj-tabs").querySelectorAll(".tab").forEach((b) => b.onclick = async () => {
   try {
     $("traj-tabs").querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
     b.classList.add("active");
     S.trajLeg = b.dataset.leg;
     document.querySelectorAll(".traj-legname").forEach((s) => s.textContent = S.trajLeg);
     trEd.stroke = [];
+    await refreshWorkspace();  // ensure workspace data is fresh for this leg
     fitTrajView();
     trEd.view.render();
   } catch (e) {
