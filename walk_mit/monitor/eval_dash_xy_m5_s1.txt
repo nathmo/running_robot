@@ -1,0 +1,18 @@
+[eval] using final_model + vecnormalize.pkl
+  ep00: x   101.5 m   net  101.5 m   path  101.7 m   line  33.20 s   FELL  at  33.7 s   net 3.02 / path 3.02 m/s
+  ep01: x   101.5 m   net  101.6 m   path  101.8 m   line  33.43 s   FELL  at  34.0 s   net 2.99 / path 3.00 m/s
+  ep02: x   100.1 m   net  100.2 m   path  100.3 m   line  33.44 s   FELL  at  33.5 s   net 2.99 / path 3.00 m/s
+  ep03: x   101.2 m   net  101.3 m   path  101.4 m   line  33.78 s   FELL  at  34.2 s   net 2.96 / path 2.97 m/s
+  ep04: x     0.4 m   net    0.5 m   path    0.5 m   line    DNF   FELL  at   0.7 s   net 0.60 / path 0.70 m/s
+  ep05: x   100.9 m   net  101.0 m   path  101.2 m   line  33.56 s   FELL  at  33.9 s   net 2.98 / path 2.99 m/s
+  ep06: x     5.5 m   net    5.5 m   path    5.7 m   line    DNF   FELL  at   2.1 s   net 2.61 / path 2.67 m/s
+  ep07: x   101.2 m   net  101.3 m   path  101.4 m   line  33.63 s   FELL  at  34.0 s   net 2.98 / path 2.98 m/s
+  ep08: x   101.4 m   net  101.4 m   path  101.6 m   line  34.04 s   FELL  at  34.5 s   net 2.94 / path 2.95 m/s
+  ep09: x   101.4 m   net  101.5 m   path  101.6 m   line  33.61 s   FELL  at  34.1 s   net 2.98 / path 2.98 m/s
+  ep10: x   100.2 m   net  100.2 m   path  100.4 m   line  33.60 s   FELL  at  33.6 s   net 2.98 / path 2.98 m/s
+  ep11: x   100.8 m   net  100.9 m   path  101.0 m   line  33.40 s   FELL  at  33.7 s   net 3.00 / path 3.00 m/s
+  ep12: x   101.3 m   net  101.4 m   path  101.5 m   line  33.60 s   FELL  at  34.1 s   net 2.97 / path 2.98 m/s
+  ep13: x   101.2 m   net  101.3 m   path  101.4 m   line  33.37 s   FELL  at  33.7 s   net 3.00 / path 3.00 m/s
+  ep14: x   101.3 m   net  101.4 m   path  101.5 m   line  33.40 s   FELL  at  33.8 s   net 3.00 / path 3.00 m/s
+  ep15: x   101.0 m   net  101.1 m   path  101.2 m   line  33.50 s   FELL  at  33.8 s   net 2.99 / path 2.99 m/s
+sprint_m5_mit_s1: 16 greedy eps  |  x 88.8+/-32.5 m  |  net 88.9+/-32.5 m  |  path 89.0+/-32.5 m  |  finishes 14/16 (line 33.54+/-0.20 s)  |  falls 16

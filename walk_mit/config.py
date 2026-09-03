@@ -41,11 +41,27 @@ class Config:
     # "speed": endless max-forward-speed on the same plant (debug / gait-shaping runs).
     objective: str = "sprint"
     v_ceiling: float = 3.0              # m/s cap on the speed income (kinematic ceiling ~ stride*cadence)
+    # SPRINT INCOME FRAME (2026-09-03): body-frame forward velocity equals dash progress only
+    # while yaw is locked. sprint_m6_mit (first yaw-free sprint) measured the exploit: 60 s
+    # episodes at body-vx 2.7-3.2 m/s with |world progress| < 21 m — running in CIRCLES collects
+    # speed income forever and never risks the finish (return 9884 vs ~6900 for an honest dash).
+    # With this on, the sprint speed/stop/progress terms use WORLD-X velocity (the dash axis, the
+    # same frame sprint_d measures), so circling pays ~0 by construction. Default off: legacy
+    # runs bit-identical (even m3-m5 differ slightly — body-x tilts with pitch/roll).
+    sprint_world_speed: bool = False
     # income per m/s, linear and SYMMETRIC: clip(vx, -v_ceiling, +v_ceiling). Backward motion must
     # pay negative income — with a one-sided clip(vx, 0, ...) a policy can shuttle back and forth
     # in front of the line forever (forward legs earn, backward legs only pay the clock) and that
     # strictly out-values ever crossing (verified exploit, review 2026-07-17).
     w_fwd_speed: float = 2.0
+    # ANTI-CIRCLING, observable version (2026-09-03 v2): the world-frame income fix
+    # (sprint_world_speed) is UNLEARNABLE with yaw free — the actor obs carry gravity (yaw-
+    # invariant) + gyro (rate only), so absolute heading is invisible and both RUN 8 seeds
+    # collapsed to slow survival (income 4.8 -> 0.2-1.3 by 70M). This penalty is the observable
+    # substitute: circling needs SUSTAINED yaw rate (gyro-z, which the policy sees), so
+    # w_yaw_rate * yaw_rate^2 makes the circle exploit unprofitable while straight running pays
+    # ~0.1-0.4/step. The dash line/finish stay world-x, so veering still forfeits the bonus.
+    w_yaw_rate: float = 0.0
     # anti-lunge: multiply POSITIVE fwd_speed income by an uprightness factor so a toppling robot
     # cannot bank speed reward while falling (the m3_speed_v2 exploit). Inert on m1/m2 (pitch+roll
     # railed -> grav_z~=-1 -> factor 1). Pitch-free presets (m3..m6) set the flag via _extras.
@@ -1070,7 +1086,12 @@ _HZ200 = dict(
 
 def _sprint200(m, **kw):
     """A 200 Hz sprint preset for milestone m: base_lock + m-extras + the _HZ200 rate rescalings,
-    then per-preset overrides. Obs/action DIMS are unchanged vs 50 Hz, so m2->m3 warm-start works."""
+    then per-preset overrides. Obs/action DIMS are unchanged vs 50 Hz, so m2->m3 warm-start works.
+
+    NOTE on actuator limits: the sprint_*_mit campaign presets all pass _SPRINT_MIT_LIMITS
+    (no-load velocity cap + back-EMF torque-speed clamp) since 2026-09-03. They are NOT defaulted
+    here because legacy _sprint200 presets (m3_reactive & co) are recorded history and must stay
+    bit-identical — smoke_test enforces both directions."""
     base = dict(base_lock=LOCKS[m])
     base.update(_extras(m))          # m3+: w_angmom, ent_anneal_deadline_steps, speed_upright_gate
     base.update(_HZ200)
@@ -2221,7 +2242,8 @@ PRESETS.update({
         ent_final=0.0, std_anneal_target=0.25,
         pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
-        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000,
+        **_SPRINT_MIT_LIMITS),
     # ----- RUN 7 (2026-09-01): the milestone ladder on the PROVEN runner ------------------------
     # sprint_m3_mit produced the project's first real runner (16/16 x 100 m at 3.07 m/s greedy).
     # m4 frees Y (lateral), m5 frees roll (the historical wall — but every "m5 is a wall" verdict
@@ -2239,7 +2261,8 @@ PRESETS.update({
         warmstart_reset_log_std=True,
         pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
-        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000,
+        **_SPRINT_MIT_LIMITS),
     "sprint_m5_mit": lambda: _sprint200(
         "m5",
         drive_bandwidth_hz=12.0, drive_delay_ms=7.0, ankle_mode="rigid",
@@ -2249,7 +2272,8 @@ PRESETS.update({
         warmstart_reset_log_std=True,
         pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
-        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000,
+        **_SPRINT_MIT_LIMITS),
     "sprint_m6_mit": lambda: _sprint200(
         "m6",
         drive_bandwidth_hz=12.0, drive_delay_ms=7.0, ankle_mode="rigid",
@@ -2259,7 +2283,27 @@ PRESETS.update({
         warmstart_reset_log_std=True,
         pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
         ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
-        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000),
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000,
+        **_SPRINT_MIT_LIMITS),
+    # ----- RUN 8 (2026-09-03): the actuator-limit fix run ---------------------------------------
+    # The sprint_m3 limits audit measured swing flicks at 2x no-load speed — impossible at any R —
+    # because the whole sprint lineage trained with motor_vel_limit=0 and motor_r_ohm=() (no speed
+    # bound of any kind). _sprint200 now defaults both ON (no-load command cap + back-EMF
+    # torque-speed clamp, datasheet R + 0.065 ohm pack; validated in motor_limit_check.py), so
+    # this preset is just the m6 recipe re-stated — it exists as a named marker for the fix run,
+    # warm from sprint_m6_mit_s0. Unretrained under the clamp, the m6 policy dropped 1/3 episodes:
+    # the retrain re-optimizes the gait inside the reachable envelope.
+    "sprint_m6_mit_lim": lambda: _sprint200(
+        "m6",
+        drive_bandwidth_hz=12.0, drive_delay_ms=7.0, ankle_mode="rigid",
+        height_target_offset_m=0.05,
+        imp_enable=True,
+        ent_final=0.0, std_anneal_target=0.25,
+        warmstart_reset_log_std=True,
+        pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=60_000_000,
+        ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+        jitter_curriculum_gate_ep_len=1600.0, jitter_curriculum_steps=80_000_000,
+        **_SPRINT_MIT_LIMITS),
     # ----- imp4 (2026-08-30): imp3 + the two gait-quality levers the imp_m3c film demanded ------
     # imp_m3c opened the command curriculum (first m3 ever) but the film shows a splayed
     # front-back CREEP, not a gait, in ~2 s bouts. Both root causes are measured, not guessed:
@@ -2350,6 +2394,29 @@ PRESETS.update({
 # a velocity-bounded position servo; it does not stop the joint being back-driven faster, which is
 # correct -- gravity can outrun a motor.
 _NOLOAD_RADS = (10.30, 22.01, 22.01, 10.30, 22.01, 22.01)
+
+# TOTAL circuit resistance per actuator for the back-EMF torque-speed clamp
+# (env._apply_motor_torque_speed): datasheet phase-to-phase R + the measured 48 V pack internal
+# resistance 0.065 ohm in series (user-measured, 2026-09-03). Datasheets (cubemars.com):
+#   AK60-39 V3 KV80: R_ll 0.600 ohm, peak 17 A / 72 Nm  -> hip-roll R_total 0.665
+#   AKE90-8  KV35:   R_ll 0.164 ohm, peak 72 A / 170 Nm -> cam/thigh R_total 0.229
+# Validated by walk_mit/motor_limit_check.py: back-EMF closure (V/Kt vs datasheet no-load) within
+# 0.5%, XML peak torques reachable at 13.1/66.4 A (< datasheet peaks), derate corners 8.4 rad/s
+# (hip-roll) / 15.1 rad/s (cam+thigh) — inside the operating range, so unlike the pre-2026-09
+# no-op estimate this clamp BITES on swing flicks (m3 audit measured flicks at 2x no-load).
+_MOTOR_R_TOTAL_OHM = (0.665, 0.229, 0.229, 0.665, 0.229, 0.229)
+
+# ACTUATOR LIMITS for the sprint campaign (2026-09-03, user decision after the limits audit):
+# hard no-load command cap + back-EMF torque-speed clamp. Every sprint_*_mit preset carries this
+# (referenced from the preset lambdas, resolved at call time; smoke_test enforces presence).
+# Legacy presets (m3_reactive & co) stay unlimited for bit-identity.
+_SPRINT_MIT_LIMITS = dict(motor_vel_limit=_NOLOAD_RADS, motor_r_ohm=_MOTOR_R_TOTAL_OHM,
+                          # anti-circling v2: body-frame income + OBSERVABLE yaw-rate penalty.
+                          # v1 (sprint_world_speed=True) was unlearnable — heading is invisible
+                          # to the actor obs (gravity is yaw-invariant, gyro is rate-only); both
+                          # RUN 8 seeds collapsed to slow survival. Greedy dash evals still
+                          # measure WORLD progress, so a circler cannot pass the final bar.
+                          sprint_world_speed=False, w_yaw_rate=3.0)
 
 # The rebuilt ankle is a 40 g CARBON TUBE. dash01.xml bakes the spring's 249 g into the measured
 # 573 g shin (bare shin 324 g), and ankle_spring_mass_kg is the amount REMOVED from that shin -- so

@@ -72,10 +72,13 @@ def local_jacobians(p1):
     return np.clip(J, -1.15, 1.15)
 
 
-def fz_max_profile(p1, J, v):
+def fz_max_profile(p1, J, v, peak=None, no_load=None):
     """Max sustainable vertical foot force at each arc point while sweeping backward at v:
     tau = J^T F within the per-joint envelope (motoring side derated by the sweep-driven joint
-    speed, braking side full peak), horizontal force free, capped at STRUCT_BW."""
+    speed, braking side full peak), horizontal force free, capped at STRUCT_BW.
+    peak / no_load default to the as-built motor (overridable for sensitivity what-ifs)."""
+    peak = rb.PEAK if peak is None else peak
+    no_load = rb.NO_LOAD if no_load is None else no_load
     xs = p1["x_grid"]
     dqdx = np.column_stack([np.gradient(p1["q_cam"], xs), np.gradient(p1["q_thigh"], xs)])
     w = -v * dqdx
@@ -89,17 +92,17 @@ def fz_max_profile(p1, J, v):
                + b[None, :, None] * fz_grid[None, None, :])
         motoring = tau * w[i][None, :, None] > 0
         cap = np.where(motoring,
-                       rb.PEAK * np.clip(1.0 - np.abs(w[i]) / rb.NO_LOAD, 0.0, 1.0)[None, :, None],
-                       rb.PEAK)
+                       peak * np.clip(1.0 - np.abs(w[i]) / no_load, 0.0, 1.0)[None, :, None],
+                       peak)
         feas = np.any(np.all(np.abs(tau) <= cap, axis=1), axis=0)
         out[i] = fz_grid[feas].max() if feas.any() else 0.0
     return out
 
 
-def measure_t_min(p1, base_h):
+def measure_t_min(p1, base_h, rig_kwargs=None):
     """Measured fastest unloaded periodic foot cycle vs fore-aft stroke b: bang-bang between
     commanded arc poses at mid-arc +- b/2 (same machinery as rail_bound's unconstrained probe),
-    gain-swept, steady-state period."""
+    gain-swept, steady-state period. rig_kwargs = Rig what-if scales (sensitivity runs)."""
     xs, zs = p1["x_grid"], p1["z_of_x"]
     cc, ct = p1["c_cam"], p1["c_thigh"]
     sgn = p1["sgn"]
@@ -118,7 +121,8 @@ def measure_t_min(p1, base_h):
                       x=float(sgn * hi))
         best = None
         for kp, kv in ((300.0, 3.0), (1000.0, 8.0), (2000.0, 10.0), (4000.0, 20.0)):
-            r = rb.pass2_run(end_lo, end_hi, base_h, kp=kp, kv=kv, sim_s=8.0)
+            r = rb.pass2_run(end_lo, end_hi, base_h, kp=kp, kv=kv, sim_s=8.0,
+                             rig_kwargs=rig_kwargs)
             # a real cycle covers the commanded stroke; parking in the fold basin shows up as a
             # near-zero extent + stall-guard period and is rejected. Transiently overflying the
             # fold zone is allowed -- T_min models the SWING half too, and the airborne foot may
@@ -132,22 +136,21 @@ def measure_t_min(p1, base_h):
     return t_min
 
 
-def main():
-    rec, arc_p, p1, base_h = rb.prepare()
-    J = local_jacobians(p1)
+def compute_v_star(p1, J, base_h, mass=M, peak=None, no_load=None, rig_kwargs=None,
+                   v_max=None, dv=0.25):
+    """The flight-inclusive bound v* under optional what-if scalings: motor peak/no-load speed
+    enter the force-at-speed map and V_TOE, rig_kwargs enters the measured cycling limit, mass
+    enters the impulse requirement. Defaults reproduce the headline run bit for bit."""
+    no_load_eff = rb.NO_LOAD if no_load is None else no_load
     xs = p1["x_grid"]
-    v_toe = float((np.abs(J[:, 0, :]).sum(axis=1) * rb.NO_LOAD).max())
-    fz0 = fz_max_profile(p1, J, 0.01)
-    print(f"[flight] static Fz along the arc: median {np.median(fz0) / BW:.2f} BW, "
-          f"max {fz0.max() / BW:.2f} BW (struct cap {STRUCT_BW} BW)")
-    print(f"[flight] touchdown-matching ceiling V_TOE = {v_toe:.1f} m/s")
-    t_min = measure_t_min(p1, base_h)
+    v_toe = float((np.abs(J[:, 0, :]).sum(axis=1) * no_load_eff).max())
+    t_min = measure_t_min(p1, base_h, rig_kwargs=rig_kwargs)
 
-    vs = np.arange(1.0, min(v_toe, 25.0), 0.25)
+    vs = np.arange(1.0, min(v_toe, v_max if v_max is not None else 25.0), dv)
     margin = np.zeros(len(vs))
     detail = None
     for k, v in enumerate(vs):
-        fz = fz_max_profile(p1, J, v)
+        fz = fz_max_profile(p1, J, v, peak=peak, no_load=no_load)
         best = 0.0
         pick = None
         for b, T in t_min.items():
@@ -159,7 +162,7 @@ def main():
             fbar = np.convolve(fz, np.ones(nb) / nb, mode="valid").max()
             t_st = b / v
             T_eff = max(T, 2 * t_st)                     # both feet can't overlap in time > T
-            ratio = 2.0 * t_st * fbar / (M * G * T_eff)
+            ratio = 2.0 * t_st * fbar / (mass * G * T_eff)
             if ratio > best:
                 t_fl = max(0.0, (T_eff - 2 * t_st) / 2)
                 best, pick = ratio, dict(b=b, fbar=fbar / BW, t_st=t_st, T=T_eff,
@@ -169,6 +172,22 @@ def main():
         if best >= 1.0:
             detail = dict(v=float(v), **pick)
     v_star = float(vs[margin >= 1.0].max()) if np.any(margin >= 1.0) else 0.0
+    if v_star and v_star >= vs[-1] - dv / 2:
+        print(f"[flight] WARNING: v* = {v_star:.2f} sits at the top of the scanned grid "
+              f"(v_max {vs[-1]:.2f}) -- rerun with a higher v_max, the bound is not resolved")
+    return dict(v_star=v_star, v_toe=v_toe, t_min=t_min, vs=vs, margin=margin, detail=detail)
+
+
+def main():
+    rec, arc_p, p1, base_h = rb.prepare()
+    J = local_jacobians(p1)
+    fz0 = fz_max_profile(p1, J, 0.01)
+    print(f"[flight] static Fz along the arc: median {np.median(fz0) / BW:.2f} BW, "
+          f"max {fz0.max() / BW:.2f} BW (struct cap {STRUCT_BW} BW)")
+    r = compute_v_star(p1, J, base_h)
+    v_toe, t_min = r["v_toe"], r["t_min"]
+    vs, margin, detail, v_star = r["vs"], r["margin"], r["detail"], r["v_star"]
+    print(f"[flight] touchdown-matching ceiling V_TOE = {v_toe:.1f} m/s")
     d = detail or {}
     print(f"[flight] v* = {v_star:.1f} m/s"
           + (f"  (b={d['b']:.2f} m, Fz_bar={d['fbar']:.2f} BW, t_st={d['t_st'] * 1000:.0f} ms, "

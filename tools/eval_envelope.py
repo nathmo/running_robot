@@ -42,11 +42,19 @@ AXES = {
     "ankle_c":  ("ankle damping x",       [0.3, 0.6, 1.0, 1.5, 2.5], "x"),
     "kp":       ("servo kp x  (GAIN)",    [0.6, 0.7, 0.85, 1.0, 1.2, 1.4, 1.7], "x"),
     "torque":   ("torque limit x",        [0.5, 0.6, 0.75, 0.9, 1.0], "x"),
-    "delay":    ("action delay (steps)",  [2, 3, 4, 5, 6, 8, 10], "abs"),
+    "delay":    ("action delay (steps)",  [0, 1, 2, 3, 4, 5, 6, 8], "abs"),
+    # NOTE nominal delay is cfg.action_delay_steps AFTER DashEnv.__init__ resolved drive_delay_ms
+    # into control steps (7 ms at 200 Hz -> 1 step on walk_mit runs) -- NOT the 4 recorded in
+    # resolved_config.json, which is dumped before construction. The axis must bracket THAT.
     "slope":    ("ground slope (deg)",    [0.0, 2.0, 4.0, 6.0, 8.0], "abs"),
     "com":      ("CoM offset x (m)",      [0.0, 0.01, 0.02, 0.04, 0.06], "abs"),
     "drive_bw": ("drive bandwidth (Hz)",  [0.8, 1.5, 3.0, 6.0, 12.0], "abs"),
+    "push":     ("push impulse dv (m/s)", [0.0, 0.2, 0.35, 0.5, 0.75, 1.0], "abs"),
 }
+
+PUSH_INTERVAL_S = 4.0   # fixed cadence for the push axis (~5 shoves per 20 s episode); the env
+#                         randomizes each gap +-30% and the direction, seeded per episode, so the
+#                         push sequence is paired across operating points like everything else.
 
 CMD_SCHED = [(0.0, 0.0), (0.75, 0.0), (0.5, 0.6), (0.0, 0.0), (-0.5, 0.0), (0.9, 0.0)]
 
@@ -68,7 +76,7 @@ def nominal_value(raw, axis, nominal_delay, nominal_torque):
         return nominal_torque
     if axis == "friction":
         return float(raw._dr.n_friction[:, 0].max())
-    if axis in ("slope", "com"):
+    if axis in ("slope", "com", "push"):
         return 0.0
     if axis == "delay":
         return float(nominal_delay)
@@ -90,6 +98,7 @@ def ankle_k_available(raw):
 def restore_nominal(raw, imp_nom, nominal_delay, nominal_torque):
     raw._dr.restore(raw.model)
     raw.cfg.action_delay_steps = nominal_delay
+    raw.cfg.push_interval_s = 0.0        # the push axis turns shoves on; every other axis is clean
     raw.set_torque_limit(nominal_torque)
     if imp_nom is not None:
         raw._imp_pristine = tuple(p.copy() for p in imp_nom)
@@ -149,6 +158,13 @@ def apply_point(raw, axis, val, imp_nom):
         m.body_ipos[:] = dr.n_ipos + np.array([val, 0.0, 0.0])
     elif axis == "drive_bw":
         raw.set_drive_bandwidth_log10(float(np.log10(val)))
+    elif axis == "push":
+        # dv=0 keeps shoves fully off (interval 0), so the axis' first point IS the nominal run.
+        # cfg.adversity_curriculum would scale push_dv by the DR ramp; the runs swept here have it
+        # False so cfg.push_dv applies verbatim — assert rather than silently sweep a scaled axis.
+        assert not raw.cfg.adversity_curriculum, "push axis assumes unscaled push_dv"
+        raw.cfg.push_dv = float(val)
+        raw.cfg.push_interval_s = PUSH_INTERVAL_S if val > 0 else 0.0
     else:
         raise ValueError(axis)
 

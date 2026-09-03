@@ -1,0 +1,182 @@
+{
+ "run": "walk_mit\\runs\\sprint_m5_mit_s0",
+ "episodes": [
+  {
+   "seed": 1000,
+   "t": 34.99,
+   "fell": true,
+   "x": 100.91,
+   "t_line": 34.69,
+   "net": 100.95,
+   "path": 101.08,
+   "net_speed": 2.88,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1001,
+   "t": 35.12,
+   "fell": true,
+   "x": 101.37,
+   "t_line": 34.67,
+   "net": 101.4,
+   "path": 101.49,
+   "net_speed": 2.89,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1002,
+   "t": 35.09,
+   "fell": true,
+   "x": 101.26,
+   "t_line": 34.67,
+   "net": 101.29,
+   "path": 101.37,
+   "net_speed": 2.89,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1003,
+   "t": 35.06,
+   "fell": true,
+   "x": 101.05,
+   "t_line": 34.71,
+   "net": 101.08,
+   "path": 101.16,
+   "net_speed": 2.88,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1004,
+   "t": 35.2,
+   "fell": true,
+   "x": 101.34,
+   "t_line": 34.77,
+   "net": 101.36,
+   "path": 101.45,
+   "net_speed": 2.88,
+   "path_speed": 2.88
+  },
+  {
+   "seed": 1005,
+   "t": 35.09,
+   "fell": true,
+   "x": 101.24,
+   "t_line": 34.68,
+   "net": 101.27,
+   "path": 101.34,
+   "net_speed": 2.89,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1006,
+   "t": 35.13,
+   "fell": true,
+   "x": 101.08,
+   "t_line": 34.77,
+   "net": 101.11,
+   "path": 101.25,
+   "net_speed": 2.88,
+   "path_speed": 2.88
+  },
+  {
+   "seed": 1007,
+   "t": 34.8,
+   "fell": true,
+   "x": 100.93,
+   "t_line": 34.5,
+   "net": 100.95,
+   "path": 101.01,
+   "net_speed": 2.9,
+   "path_speed": 2.9
+  },
+  {
+   "seed": 1008,
+   "t": 35.16,
+   "fell": true,
+   "x": 101.1,
+   "t_line": 34.79,
+   "net": 101.13,
+   "path": 101.21,
+   "net_speed": 2.88,
+   "path_speed": 2.88
+  },
+  {
+   "seed": 1009,
+   "t": 34.93,
+   "fell": true,
+   "x": 100.74,
+   "t_line": 34.68,
+   "net": 100.77,
+   "path": 100.84,
+   "net_speed": 2.88,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1010,
+   "t": 35.08,
+   "fell": true,
+   "x": 101.18,
+   "t_line": 34.68,
+   "net": 101.21,
+   "path": 101.3,
+   "net_speed": 2.89,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1011,
+   "t": 34.98,
+   "fell": true,
+   "x": 101.21,
+   "t_line": 34.58,
+   "net": 101.25,
+   "path": 101.35,
+   "net_speed": 2.89,
+   "path_speed": 2.9
+  },
+  {
+   "seed": 1012,
+   "t": 34.94,
+   "fell": true,
+   "x": 100.89,
+   "t_line": 34.64,
+   "net": 100.92,
+   "path": 100.99,
+   "net_speed": 2.89,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1013,
+   "t": 34.73,
+   "fell": true,
+   "x": 100.26,
+   "t_line": 34.64,
+   "net": 100.3,
+   "path": 100.39,
+   "net_speed": 2.89,
+   "path_speed": 2.89
+  },
+  {
+   "seed": 1014,
+   "t": 35.09,
+   "fell": true,
+   "x": 101.04,
+   "t_line": 34.74,
+   "net": 101.08,
+   "path": 101.19,
+   "net_speed": 2.88,
+   "path_speed": 2.88
+  },
+  {
+   "seed": 1015,
+   "t": 34.91,
+   "fell": true,
+   "x": 101.0,
+   "t_line": 34.58,
+   "net": 101.04,
+   "path": 101.14,
+   "net_speed": 2.89,
+   "path_speed": 2.9
+  }
+ ],
+ "seed0": 1000
+}

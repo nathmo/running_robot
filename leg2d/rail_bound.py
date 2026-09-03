@@ -595,10 +595,11 @@ def pass2_best_gains(p1, base_h, delay_ms, record_qpos=False, k_max=40.0):
 
 
 # --------------------------------------------------------------- pass 2 (unconstrained probe) ----
-def pass2_run(end_lo, end_hi, base_h, kp=300.0, kv=3.0, sim_s=8.0, record_qpos=False):
+def pass2_run(end_lo, end_hi, base_h, kp=300.0, kv=3.0, sim_s=8.0, record_qpos=False,
+              rig_kwargs=None):
     """Bang-bang between two poses with the real torque-speed envelope. Returns steady-state
     metrics measured over complete switch-to-switch cycles."""
-    rig = Rig(base_h=base_h)
+    rig = Rig(base_h=base_h, **(rig_kwargs or {}))
     m = rig.model
     j_cam = int(m.actuator_trnid[rig.a_cam, 0])
     j_thigh = int(m.actuator_trnid[rig.a_thigh, 0])

@@ -1,0 +1,182 @@
+{
+ "run": "walk_mit\\runs\\sprint_m6_mit_s1",
+ "episodes": [
+  {
+   "seed": 1000,
+   "t": 60.0,
+   "fell": false,
+   "x": -17.97,
+   "t_line": null,
+   "net": 33.94,
+   "path": 191.7,
+   "net_speed": 0.57,
+   "path_speed": 3.19
+  },
+  {
+   "seed": 1001,
+   "t": 60.0,
+   "fell": false,
+   "x": 19.25,
+   "t_line": null,
+   "net": 19.54,
+   "path": 192.28,
+   "net_speed": 0.33,
+   "path_speed": 3.2
+  },
+  {
+   "seed": 1002,
+   "t": 60.0,
+   "fell": false,
+   "x": -26.8,
+   "t_line": null,
+   "net": 40.36,
+   "path": 189.18,
+   "net_speed": 0.67,
+   "path_speed": 3.15
+  },
+  {
+   "seed": 1003,
+   "t": 60.0,
+   "fell": false,
+   "x": -19.9,
+   "t_line": null,
+   "net": 23.04,
+   "path": 190.58,
+   "net_speed": 0.38,
+   "path_speed": 3.18
+  },
+  {
+   "seed": 1004,
+   "t": 60.0,
+   "fell": false,
+   "x": -0.97,
+   "t_line": null,
+   "net": 12.68,
+   "path": 190.49,
+   "net_speed": 0.21,
+   "path_speed": 3.17
+  },
+  {
+   "seed": 1005,
+   "t": 60.0,
+   "fell": false,
+   "x": -16.35,
+   "t_line": null,
+   "net": 16.35,
+   "path": 190.55,
+   "net_speed": 0.27,
+   "path_speed": 3.18
+  },
+  {
+   "seed": 1006,
+   "t": 60.0,
+   "fell": false,
+   "x": -19.96,
+   "t_line": null,
+   "net": 20.05,
+   "path": 191.97,
+   "net_speed": 0.33,
+   "path_speed": 3.2
+  },
+  {
+   "seed": 1007,
+   "t": 60.0,
+   "fell": false,
+   "x": -7.18,
+   "t_line": null,
+   "net": 29.11,
+   "path": 190.89,
+   "net_speed": 0.49,
+   "path_speed": 3.18
+  },
+  {
+   "seed": 1008,
+   "t": 60.0,
+   "fell": false,
+   "x": -22.78,
+   "t_line": null,
+   "net": 24.49,
+   "path": 190.65,
+   "net_speed": 0.41,
+   "path_speed": 3.18
+  },
+  {
+   "seed": 1009,
+   "t": 60.0,
+   "fell": false,
+   "x": 1.34,
+   "t_line": null,
+   "net": 19.04,
+   "path": 191.12,
+   "net_speed": 0.32,
+   "path_speed": 3.19
+  },
+  {
+   "seed": 1010,
+   "t": 60.0,
+   "fell": false,
+   "x": -22.26,
+   "t_line": null,
+   "net": 32.33,
+   "path": 191.47,
+   "net_speed": 0.54,
+   "path_speed": 3.19
+  },
+  {
+   "seed": 1011,
+   "t": 60.0,
+   "fell": false,
+   "x": -14.64,
+   "t_line": null,
+   "net": 15.24,
+   "path": 190.9,
+   "net_speed": 0.25,
+   "path_speed": 3.18
+  },
+  {
+   "seed": 1012,
+   "t": 60.0,
+   "fell": false,
+   "x": 1.95,
+   "t_line": null,
+   "net": 11.81,
+   "path": 191.34,
+   "net_speed": 0.2,
+   "path_speed": 3.19
+  },
+  {
+   "seed": 1013,
+   "t": 60.0,
+   "fell": false,
+   "x": 2.4,
+   "t_line": null,
+   "net": 9.51,
+   "path": 193.29,
+   "net_speed": 0.16,
+   "path_speed": 3.22
+  },
+  {
+   "seed": 1014,
+   "t": 60.0,
+   "fell": false,
+   "x": -11.74,
+   "t_line": null,
+   "net": 11.81,
+   "path": 190.65,
+   "net_speed": 0.2,
+   "path_speed": 3.18
+  },
+  {
+   "seed": 1015,
+   "t": 60.0,
+   "fell": false,
+   "x": -1.21,
+   "t_line": null,
+   "net": 14.13,
+   "path": 190.0,
+   "net_speed": 0.24,
+   "path_speed": 3.17
+  }
+ ],
+ "seed0": 1000
+}

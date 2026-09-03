@@ -1,0 +1,27 @@
+{
+  "scale": 1.5,
+  "m_leg_subtree": 4.686,
+  "base": {
+    "grounded_7ms": 6.3151237557148905,
+    "flight": 6.25
+  },
+  "note_grounded": "grounded values = wide 4-gain bracket + fine k grid, baseline recomputed under the same protocol (not rail_bound.py's 6.55 full-search headline, not rail_sensitivity.json's 2-gain 6.26)",
+  "scenarios": {
+    "leg mass +50%": {
+      "grounded_7ms": 6.074403857803692,
+      "flight": 4.0
+    },
+    "rotor inertia +50%": {
+      "grounded_7ms": 6.989142129090177,
+      "flight": 6.0
+    },
+    "peak torque +50%": {
+      "grounded_7ms": 7.108159906475054,
+      "flight": 9.75
+    },
+    "no-load speed +50%": {
+      "grounded_7ms": 6.496786053554881,
+      "flight": 6.75
+    }
+  }
+}

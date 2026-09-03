@@ -444,6 +444,17 @@ def test_motor_limits():
     check("commanded joint velocity <= 22 rad/s", vmax <= 22.0 + 1e-6, f"max {vmax:.2f}")
     check("commanded joint accel <= 300 rad/s^2", amax <= 300.0 + 1e-6, f"max {amax:.2f}")
     check("m3_reactive limiter off (unclamped)", not DashEnv(get_config("m3_reactive"))._vel_accel_limited)
+    # 2026-09-03 actuator-limit decision: every sprint_*_mit campaign preset must carry BOTH the
+    # no-load velocity cap and the back-EMF torque-speed clamp (datasheet R + 0.065 ohm pack).
+    # Guards the "all future runs are limited" invariant without touching legacy presets.
+    import config as _cfgmod
+    _sprint_mit = [n for n in _cfgmod.PRESETS if n.startswith("sprint_") and n.endswith(
+        ("_mit", "_mit_lim")) or (n.startswith("sprint_m") and "_mit" in n)]
+    for _n in sorted(set(_sprint_mit)):
+        _c = get_config(_n)
+        check(f"{_n} carries the actuator limits",
+              bool(_c.motor_r_ohm) and np.all(np.asarray(_c.motor_vel_limit, float) > 0.0)
+              and _c.motor_bus_volts > 0.0)
 
 
 def test_contact_switch():

@@ -1614,6 +1614,11 @@ class DashEnv(gym.Env):
         c = self.cfg
         v_body = self._vel_body()
         vx = v_body[0]
+        # sprint income frame: pay world-x (the dash axis) instead of body-forward, so a yaw-free
+        # policy cannot bank speed income by circling (measured on sprint_m6_mit — see config).
+        # qvel[0] is the base's world-x DOF in every milestone (locked ones are just constrained).
+        if c.sprint_world_speed and c.objective == "sprint":
+            vx = float(self.data.qvel[0])
         angv = self._ang_vel_body()
         grav = self._gravity_body()
         run_phase = c.objective == "speed" or not self._sprint_crossed
@@ -1647,6 +1652,12 @@ class DashEnv(gym.Env):
         # whatever the pace; sum(-w_time) = -w_time * T). Paid in BOTH sprint phases; never in speed.
         t["time"] = -c.w_time if c.objective == "sprint" else 0.0
         t["alive"] = c.w_alive
+        # anti-circling, observable version: sustained gyro-z is what a circler cannot avoid and
+        # what the policy CAN see (unlike absolute heading — see config.w_yaw_rate). 0 = off.
+        if c.w_yaw_rate > 0.0:
+            t["yaw_rate"] = self._pen(-c.w_yaw_rate * float(angv[2]) ** 2)
+        else:
+            t["yaw_rate"] = 0.0
 
         # ----- gait shaping (anti-skate + phase schedule) -----
         # In command mode the gait terms key off the COMMANDED speed, not a constant: with the old
