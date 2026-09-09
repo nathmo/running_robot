@@ -1,0 +1,94 @@
+{
+ "run": "walk_mit\\runs\\sprint_m6_lim2_s0",
+ "episodes": [
+  {
+   "seed": 1000,
+   "t": 60.0,
+   "fell": false,
+   "x": -11.74,
+   "t_line": null,
+   "net": 18.82,
+   "path": 171.16,
+   "net_speed": 0.31,
+   "path_speed": 2.85
+  },
+  {
+   "seed": 1001,
+   "t": 60.0,
+   "fell": false,
+   "x": 1.53,
+   "t_line": null,
+   "net": 16.01,
+   "path": 171.47,
+   "net_speed": 0.27,
+   "path_speed": 2.86
+  },
+  {
+   "seed": 1002,
+   "t": 60.0,
+   "fell": false,
+   "x": -2.1,
+   "t_line": null,
+   "net": 9.29,
+   "path": 171.6,
+   "net_speed": 0.15,
+   "path_speed": 2.86
+  },
+  {
+   "seed": 1003,
+   "t": 0.83,
+   "fell": true,
+   "x": 0.56,
+   "t_line": null,
+   "net": 0.64,
+   "path": 0.68,
+   "net_speed": 0.77,
+   "path_speed": 0.82
+  },
+  {
+   "seed": 1004,
+   "t": 60.0,
+   "fell": false,
+   "x": -35.73,
+   "t_line": null,
+   "net": 37.77,
+   "path": 170.58,
+   "net_speed": 0.63,
+   "path_speed": 2.84
+  },
+  {
+   "seed": 1005,
+   "t": 60.0,
+   "fell": false,
+   "x": 10.94,
+   "t_line": null,
+   "net": 20.88,
+   "path": 171.19,
+   "net_speed": 0.35,
+   "path_speed": 2.85
+  },
+  {
+   "seed": 1006,
+   "t": 0.53,
+   "fell": true,
+   "x": 0.15,
+   "t_line": null,
+   "net": 0.27,
+   "path": 0.31,
+   "net_speed": 0.51,
+   "path_speed": 0.58
+  },
+  {
+   "seed": 1007,
+   "t": 60.0,
+   "fell": false,
+   "x": -16.92,
+   "t_line": null,
+   "net": 19.23,
+   "path": 171.4,
+   "net_speed": 0.32,
+   "path_speed": 2.86
+  }
+ ],
+ "seed0": 1000
+}
