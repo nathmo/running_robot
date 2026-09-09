@@ -1,0 +1,26 @@
+{
+ "device": "cpu:0",
+ "platform": "cpu",
+ "preset": "v2_s2_free",
+ "env": [
+  {
+   "n_envs": 8,
+   "env_sps": 7.903163644119351,
+   "substeps_per_s": 79.03163644119351,
+   "sim_seconds_per_wall_s": 0.07903163644119351,
+   "reset_s": 13.3262460231781,
+   "compile_s": 32.303996086120605,
+   "step_ms": 1012.2528597712517
+  },
+  {
+   "n_envs": 32,
+   "env_sps": 25.055788178492282,
+   "substeps_per_s": 250.5578817849228,
+   "sim_seconds_per_wall_s": 0.25055788178492283,
+   "reset_s": 14.41753077507019,
+   "compile_s": 30.86443543434143,
+   "step_ms": 1277.1500051021576
+  }
+ ],
+ "ppo": []
+}

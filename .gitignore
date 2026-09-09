@@ -85,3 +85,7 @@ training/runs/
 
 # GPU-port virtualenv (walk_v2/, MJX/JAX) - machine-local
 .venv_v2/
+# walk_v2 (JAX/MJX) local venv, run outputs, mesh copy
+walk_v2/runs/
+walk_v2/model/meshes/
+walk_v2/**/__pycache__/
