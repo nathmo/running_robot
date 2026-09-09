@@ -1,3 +1,39 @@
+# V2 (2026-09-09): DASH-01 Walker v2 chains -- ACTIVE playbook once slurm/launch_v2.sh is submitted
+#
+# CONTEXT: the latched-spec lineage (V2_CONTRACT.md). Two seeds, chained per seed:
+#   v2_s1_s{0,1} (planar sandbox, 300 M cold, 100 Hz) -> v2_s2_s{0,1} (free, warm from S1).
+# The gate job (jed_v2_bench.sbatch, ~30 min) must have printed "ALL OK", a golden-parity line
+# and a bench figure before either chain is trusted; a parity FAIL on the cluster (mujoco 3.11 vs
+# 3.7.0 on the laptop) is EXPECTED to be float-level (obs 1e-4), never on commit/spec_live.
+#
+# Every tick: squeue; for RUNNING runs pull progress.csv last row (total_timesteps, ep_len_mean,
+# ep_rew_mean, reward_terms/fwd_speed, reward_terms/spec_cycle, reward_terms/knob,
+# reward_terms/thermal, reward_terms/lane, diag/freq_hz_median, diag/freq_lo_rail,
+# diag/freq_hi_rail, diag/res_sat, est/vel_rmse, train/sym_loss, train/std,
+# curriculum/dr_scale, curriculum/pitch_assist, fps); grep logs for
+# 'Traceback|fatal|NaN|Early stopping'. One line per run to walk_mit/monitor/status.log.
+#
+# SIGNALS:
+#   - diag/freq_lo_rail + hi_rail: the latch makes the clock-warp exploit unrepresentable, so
+#     rails should sit near 0; a policy parked on the 0.5 Hz floor mid-dash is the slow-clock
+#     billing watch item (artifact §02) -> note, do not kill.
+#   - diag/res_sat: greedy residual saturation must stay rare (< 10 %); sustained saturation on a
+#     legal gait means the residual has become the waveform -> flag for the user.
+#   - reward_terms/spec_cycle ~ 0 and knob ~ 0 late = a settled, mirror-symmetric spec (good).
+#   - reward_terms/thermal < 0 sustained = the gait lives above 0.85 dT_max: the thermal budget
+#     is binding, note the fwd_speed it happens at.
+#   - est/vel_rmse should fall below ~0.15 (VecNormalize units ~ m/s) once the gait is steady.
+#   - train/sym_loss should decay; if it stays flat while knobs drift, mirror the VecNormalize
+#     stats rather than raising w_sym (artifact §13).
+#   - S1: fwd_speed income ~5 (2.5 m/s) is the m3 reference; S2 must first RECOVER from the
+#     roll/yaw release (ep_len collapse at the hop is normal) then climb.
+# HEALTH: as RUN 7 (resubmit ONCE per crash signature; NaN or second identical crash -> stop
+# that chain, note for the user). NEVER edit code/config mid-campaign; a fix = a new --name.
+# FILM: on final_model.zip pull final + vecnormalize + curriculum, greedy N=8 dash-xy eval
+# (tools/eval_dash_xy.py), gait_diag.py --run, 40 s film, contact DUTY per foot before any gait
+# claim, then tools/eval_envelope.py with the v2 axes (push_y, force_x/y, camber, delay_ms,
+# thermal) = the §08 gate.
+
 # RUN 7 (2026-09-01): sprint_m4/m5/m6_mit — THE MILESTONE LADDER — ACTIVE playbook, supersedes below
 #
 # CONTEXT: RUN 6 closed with the project's first real runner (sprint_m3_mit: 16/16 greedy 100 m

@@ -82,3 +82,6 @@ old_runs/
 
 # training run outputs: checkpoints/videos are pulled on demand, not versioned
 training/runs/
+
+# GPU-port virtualenv (walk_v2/, MJX/JAX) - machine-local
+.venv_v2/

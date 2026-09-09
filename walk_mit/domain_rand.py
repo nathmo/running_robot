@@ -71,6 +71,12 @@ class PlantRandomizer:
         self.n_forcerange = model.actuator_forcerange.copy()
         self._jnt_qposadr = model.jnt_qposadr.copy()
         self._jnt_dofadr = model.jnt_dofadr.copy()
+        # v2 plant: the pushrod series-spring slide joints (model/make_v2_plant.py), whose
+        # stiffness is the loop-closure compliance the artifact randomises +-50 %
+        self._loop_slide_j = [j for j in (mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n)
+                                          for n in ("pushrod_slide_L", "pushrod_slide_R",
+                                                    "leg_spring_L", "leg_spring_R")) if j >= 0]
+        self.base_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")
         # the standing pose the ankle preload is defined at (set by the env)
         self.stand_qpos = None
         self.last = {}          # the draw actually applied, for logging / eval reporting
@@ -96,6 +102,11 @@ class PlantRandomizer:
         carries the values the ENV (not the model) has to apply: torque scale and action delay."""
         c = self.cfg
         d = {}
+        # v2 nominal values -- every entry the env reads must exist on the clean plant too
+        d.update(delay_ms=float(c.drive_delay_ms), kappa=float(c.resync_kappa),
+                 theta0=np.zeros(model.nu), thermal_cmax=1.0, loop_k_scale=1.0,
+                 mass_scale=1.0, com_x=0.0, friction=float(self.n_friction[:, 0].max()),
+                 kp_scale=1.0)
         if not self.enabled:
             d["torque_scale"] = 1.0
             d["action_delay_steps"] = int(c.action_delay_steps)
@@ -117,6 +128,8 @@ class PlantRandomizer:
         if c.dr_com_offset > 0:
             off = self._rel(c.dr_com_offset)
             model.body_ipos[:] = self.n_ipos + rng.uniform(-off, off, (model.nbody, 3))
+            if self.base_bid >= 0:
+                d["com_x"] = float(model.body_ipos[self.base_bid, 0] - self.n_ipos[self.base_bid, 0])
         d["dr_scale"] = self.scale
         d["mass_scale"] = float(g)
         d["total_mass"] = float(model.body_mass.sum())
@@ -211,6 +224,32 @@ class PlantRandomizer:
         lo = int(round(nom + (c.dr_delay_steps_range[0] - nom) * self.scale))
         hi = int(round(nom + (c.dr_delay_steps_range[1] - nom) * self.scale))
         d["action_delay_steps"] = int(rng.integers(lo, hi + 1)) if hi > lo else int(nom)
+
+        # ---- v2 draws (artifact §05 / §07): every one contracts toward its nominal by the
+        # same curriculum scale, so the ramp eases them in with the plant ---------------------
+        lo_ms, hi_ms = c.dr_delay_ms_range
+        if hi_ms > lo_ms:
+            nom_ms = float(c.drive_delay_ms)
+            a = nom_ms + (lo_ms - nom_ms) * self.scale
+            b = nom_ms + (hi_ms - nom_ms) * self.scale
+            d["delay_ms"] = float(rng.uniform(a, b))
+        lo_k, hi_k = c.dr_resync_kappa_range
+        if hi_k > lo_k:
+            mid = 0.5 * (lo_k + hi_k)
+            d["kappa"] = float(rng.uniform(mid + (lo_k - mid) * self.scale,
+                                           mid + (hi_k - mid) * self.scale))
+        if c.dr_thermal_hot_max > 0:
+            d["theta0"] = rng.uniform(0.0, self._rel(c.dr_thermal_hot_max), model.nu)
+        if c.dr_thermal_cmax > 0:
+            d["thermal_cmax"] = _u(rng, self._rel(c.dr_thermal_cmax))
+        if c.dr_loop_k > 0 and self._loop_slide_j:
+            ks = _u(rng, self._rel(c.dr_loop_k))
+            for j in self._loop_slide_j:
+                model.jnt_stiffness[j] = self.n_jnt_stiffness[j] * ks
+                # keep the spring's damping ratio: b ~ sqrt(k)
+                dadr = int(self._jnt_dofadr[j])
+                model.dof_damping[dadr] = self.n_dof_damping[dadr] * np.sqrt(ks)
+            d["loop_k_scale"] = float(ks)
 
         self.last = d
         return d

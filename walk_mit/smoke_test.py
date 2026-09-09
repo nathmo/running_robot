@@ -8,7 +8,9 @@ termination + finish bonus; the phase-gated stance indicator's shape (continuity
 antiphase overlap = flight window when stance_ratio < 0.5); the residual channel moves the
 targets; the coef_rate phase gate is free at the cycle boundary; the fixed pitch reflex's sign /
 clip / kwargs back-compat and its kick-arrest on the m3 plant; the angular-momentum reward term;
-the VecNormalize warm-start rejuvenation; curriculum setters reach the env.
+the VecNormalize warm-start rejuvenation; curriculum setters reach the env; the DASH-01 Walker v2
+latched stack (gait_v2, the v2 plant, the latch/commit/resync/delay-ring/thermal machinery, the
+obs mirror, the masked policy, the library variant, SymPPO).
 Exits non-zero on the first failure (safe to gate an sbatch on it).
 """
 import inspect
@@ -1254,10 +1256,12 @@ def test_walk_fwd2():
     t0, t1 = trip_steps(0.0), trip_steps(1.0)
     check("dr_scale=0 fires NO trips", t0 == 0, f"{t0} trip-active steps")
     check("dr_scale=1 fires trips at full rate", t1 > 0, f"{t1} trip-active steps")
+    # the pre-physics disturbances live in DashEnv._pre_physics_forces (shared by the legacy and
+    # the latched step); the push magnitude goes through `dv` (= c.push_dv unless push_dv_range)
+    _src_forces = inspect.getsource(DashEnv._pre_physics_forces)
     check("push magnitude scales with the ramp",
-          "adv * c.push_dv" in inspect.getsource(DashEnv.step))
-    check("trip probability scales with the ramp",
-          "adv * c.trip_prob" in inspect.getsource(DashEnv.step))
+          "adv * dv * np.cos(ang)" in _src_forces and "dv = c.push_dv" in _src_forces)
+    check("trip probability scales with the ramp", "adv * c.trip_prob" in _src_forces)
     # opt-in only: every preset that predates the flag must train bit-identically
     legacy = [n for n in ("teleop_v5", "m3_sym_gait", "m2_reactive", "walk_fwd", "walk_fwd_easy")
               if n in PRESETS]
@@ -1296,6 +1300,304 @@ def test_walk_fwd2():
           and np.allclose(e2._noise.imu_R, np.eye(3)))
 
 
+def test_v2():
+    """DASH-01 Walker v2 (2026-09-09): the latched gait spec end to end.
+
+    gait_v2 (one series + five knobs, the (+,+) offset / roll reflex, lag exact by theorem, the
+    action mirror), the plant (dash01_v2: rigid loop + pushrod spring, 20 DOF), the env's latch
+    (mid-cycle writes discarded, commit flag == wrap, spec echo == live spec, per-cycle billing),
+    the contact resync, the substep delay ring, the thermal node's two anchors, the obs mirror,
+    the masked policy's mask aligned bit-for-bit with the env's commit flag, the library variant's
+    widths and the Raibert sign, and SymPPO learning a few updates on the real stack.
+    """
+    import torch as th
+    import gait_v2
+    print("\n== DASH-01 Walker v2 (latched spec) ==")
+    lay = gait_v2.LAYOUT
+    check("action 50 = 44 latched + 6 residual", lay.spec_dim == 44 and lay.action_dim == 50
+          and lay.freq == 35 and lay.knobs == [39, 40, 41, 42, 43] and lay.residual == slice(44, 50))
+    cfg = get_config("v2_s1_clean")
+    nom = np.array([0.0, 0.0, 0.12, 0.0, 0.0, -0.12])
+    rng = np.random.default_rng(3)
+    s = rng.uniform(-1, 1, lay.spec_dim)
+    s[lay.knobs] = 0.0
+    check("knobs at zero IS the mirror gait (u_L(phi) + u_R(phi+pi) = n_L + n_R)",
+          gait_v2.mirror_defect(s, nom, cfg) < 1e-12)
+    s2 = s.copy(); s2[lay.delta] = 0.4
+    d = cfg.delta_max_rad * 0.4
+    a = gait_v2.assemble(s2, 1.1, 0, 0, nom, cfg, reflexes=False)
+    b = gait_v2.assemble(s, 1.1 - d, 0, 0, nom, cfg, reflexes=False)
+    check("Delta is an exact lag (right leg reads S at phi - pi - Delta)",
+          np.allclose(a[[3, 4, 5]], b[[3, 4, 5]]) and abs(gait_v2.mirror_defect(s2, nom, cfg)) > 1e-3)
+    s3 = s.copy(); s3[lay.offset] = (0.5, 0.0, 0.5)
+    a3 = gait_v2.assemble(s3, 0.7, 0, 0, nom, cfg, reflexes=False)
+    a0 = gait_v2.assemble(s, 0.7, 0, 0, nom, cfg, reflexes=False)
+    check("offset o enters BOTH legs (+,+) [cam, hip]",
+          np.isclose(a3[1] - a0[1], 0.5 * cfg.offset_max_rad[0]) and np.isclose(a3[4] - a0[4], 0.5 * cfg.offset_max_rad[0])
+          and np.isclose(a3[0] - a0[0], 0.5 * cfg.offset_max_rad[2]) and np.isclose(a3[3] - a0[3], 0.5 * cfg.offset_max_rad[2]))
+    sr = s.copy(); sr[lay.reflex] = (1.0, 0.0, 0.0)
+    r1 = gait_v2.assemble(sr, 0.7, 0.1, 0.0, nom, cfg)
+    r0 = gait_v2.assemble(sr, 0.7, 0.0, 0.0, nom, cfg)
+    check("roll reflex enters hip_roll (+,+) -- the lean, a directional lateral step",
+          np.isclose(r1[0] - r0[0], cfg.reflex_kp_scale * 0.1) and np.isclose(r1[3] - r0[3], cfg.reflex_kp_scale * 0.1))
+    p1 = gait_v2.assemble(s, 0.7, 0, 0, nom, cfg, pitch=0.1)
+    check("pitch reflex stays symmetric on the thighs (+,-)",
+          np.isclose(p1[2] - a0[2], -(p1[5] - a0[5])) and abs(p1[2] - a0[2]) > 1e-4)
+    kp, kd = gait_v2.gains(gait_v2.neutral_spec(), 0.3, cfg)
+    check("neutral impedance profile = gain 1.0 on every actuator", np.allclose(kp, 1) and np.allclose(kd, 1))
+    # a full-scale profile: every cosine coefficient at +-1 sums to +-1 exactly at phi = 0 (the
+    # 1/sqrt(k) weights are normalised to sum 1), so the LEFT leg reads the headroom rails there
+    sg = gait_v2.neutral_spec()
+    for k in (0,) + tuple(2 * i - 1 for i in range(1, lay.N + 1)):     # a0, a1, a2, a3 (cosines)
+        sg[lay.kp_prof.start + k] = 1.0
+        sg[lay.kd_prof.start + k] = -1.0
+    kp, kd = gait_v2.gains(sg, 0.0, cfg)
+    check("impedance exp map hits the MIT frame headroom (kp x2.5, kd /4)",
+          np.allclose(kp[:3], cfg.imp_kp_up) and np.allclose(kd[:3], 1.0 / cfg.imp_kd_dn))
+    perm, sign = lay.mirror_perm_sign()
+    x = rng.uniform(-1, 1, 50)
+    check("action mirror is an involution and negates exactly the knobs + reflex bias",
+          np.allclose(sign * (sign * x[perm])[perm], x) and np.all(sign[lay.knobs] == -1)
+          and sign[lay.reflex.start + 2] == -1 and np.all(sign[:lay.delta] [np.arange(lay.delta) != lay.reflex.start + 2] == 1))
+    t = rng.uniform(-1, 1, 17); t[0] = 2.5
+    e = gait_v2.embed_reduced(t, cfg)
+    check("reduced 17 <-> full 44 embedding round-trips", np.allclose(gait_v2.reduce_full(e, cfg), t))
+
+    # ---- the plant ----
+    import mujoco
+    mv2 = mujoco.MjModel.from_xml_path(str(PKG_DIR / "model" / "dash01_v2.xml"))
+    js = [mujoco.mj_name2id(mv2, mujoco.mjtObj.mjOBJ_JOINT, n) for n in ("leg_spring_L", "leg_spring_R")]
+    eq = mujoco.mj_name2id(mv2, mujoco.mjtObj.mjOBJ_EQUALITY, "loop_L")
+    check("dash01_v2: 20 DOF, shin-axis series springs, rigid loop connect (solref 0.002)",
+          mv2.nq == 20 and all(j >= 0 for j in js) and all(mv2.jnt_stiffness[j] > 1e3 for j in js)
+          and abs(mv2.eq_solref[eq, 0] - 0.002) < 1e-9)
+    sys.path.insert(0, str(PKG_DIR / "model"))
+    import make_v2_plant as _mk
+    _sink = 1e3 * _mk.one_leg_sink(mv2)
+    check("one-leg stance sinks 5 +- 1 mm at 1 BW (the artifact's verification)", 4.0 < _sink < 6.0, f"{_sink:.2f} mm")
+
+    # ---- the env: widths, latch, billing ----
+    for name in ("v2_s1", "v2_s2", "v2_lib_s1", "v2_lib_s2", "v2_returnmap", "v2_s1_clean"):
+        check(f"{name} builds", isinstance(get_config(name), Config))
+    env = DashEnv(cfg)
+    check("obs 402 = 330 history + 47 once-block + 25 privileged; actor slice 377; wrap index 376",
+          env.observation_space.shape == (402,) and env.n_actor_obs == 377 and env.wrap_index == 376
+          and env.frame_dim == 33 and env.priv_dim == 25 and env.once_dim == 47)
+    check("100 Hz control (10 substeps), gamma 0.995, freq range 0.5-5 Hz, 12 ms substep delay",
+          abs(env.control_dt - 0.01) < 1e-12 and cfg.gamma == 0.995 and cfg.gait_freq_hz == (0.5, 5.0)
+          and env._delay_sub == 12 and cfg.action_delay_steps == 0)
+    check("armature written from the Bode fit", all(env.model.dof_armature[env.act_dadr] == 0.0))
+    obs, _ = env.reset(seed=5)
+    check("reset: commit flag set, spec echo neutral, phase 0", obs[env.wrap_index] == 1.0
+          and np.all(obs[330:374] == 0.0) and env._phase == 0.0)
+    # latch: a random spec on the commit tick sticks; mid-cycle rewrites are discarded
+    a1 = rng.uniform(-1, 1, 50).astype(np.float32)
+    obs, r, term, trunc, info = env.step(a1)
+    spec_live = env._spec_live.copy()
+    check("commit tick latches the spec and echoes it in the once-block",
+          np.allclose(spec_live, a1[:44]) and np.allclose(obs[330:374], a1[:44]) and info["v2"]["commit"])
+    flags, echo_changed, spec_bill, res_moves = [], [], [], []
+    prev_flag = float(obs[env.wrap_index])
+    for k in range(120):
+        a = rng.uniform(-1, 1, 50).astype(np.float32)
+        tgt_before = gait_v2.assemble(env._spec_live, env._phase, 0, 0, env._nominal6, cfg)
+        obs, r, term, trunc, info = env.step(a)
+        flags.append((prev_flag, info["v2"]["commit"]))
+        echo_changed.append(bool(not np.allclose(obs[330:374], spec_live)))
+        spec_bill.append((info["v2"]["commit"], info["reward_terms"]["spec_cycle"]))
+        if info["v2"]["commit"]:
+            spec_live = env._spec_live.copy()
+        prev_flag = float(obs[env.wrap_index])
+        if term or trunc:
+            break
+    check("the commit the env applied == the flag the policy observed (bit-for-bit)",
+          all(bool(f) == c for f, c in flags))
+    check("mid-cycle spec writes are DISCARDED (echo changes only on commit ticks)",
+          all(chg == c for chg, (_, c) in zip(echo_changed, flags)))
+    check("spec change never billed off a commit tick", all((b < 0) <= c for c, b in spec_bill))
+    env.reset(seed=21)
+    env._commit_flag, env._cycle_n = True, 1
+    env._spec_live[:] = 0.0
+    a_c = np.zeros(50, np.float32); a_c[:44] = 0.3; a_c[44:] = 0.1
+    _, _, _, _, info_c = env.step(a_c)
+    _, _, _, _, info_n = env.step(a_c)
+    check("spec change billed ONCE at commit: -w_spec_cycle * ||dS||^2 (capped), 0 on the next tick",
+          np.isclose(info_c["reward_terms"]["spec_cycle"], -min(cfg.w_spec_cycle * 44 * 0.09, cfg.penalty_term_cap))
+          and info_n["reward_terms"]["spec_cycle"] == 0.0 and not info_n["v2"]["commit"])
+    check("residual applies every tick", env._residual_sq > 0 and info["reward_terms"]["residual"] < 0)
+    check("knob standing price and LP yaw term present",
+          "knob" in info["reward_terms"] and info["reward_terms"]["knob"] < 0 and "lane" in info["reward_terms"])
+    # commit flag lines up with the phase wrap: after a commit tick the phase is small
+    env.reset(seed=6)
+    env._kappa = 0.0                                     # free clock: wraps only at 2 pi
+    ok, n_commit = True, 0
+    for k in range(200):
+        obs, _, term, trunc, info = env.step(np.zeros(50, np.float32))
+        if info["v2"]["commit"]:
+            n_commit += 1
+            if info["v2"]["phi"] > 2 * np.pi * env._f_hz * env.control_dt + 1e-9:
+                ok = False
+        if term or trunc:
+            env.reset()
+            env._kappa = 0.0
+    check("a commit tick assembles at the first phase of a cycle (phi < one advance)", ok and n_commit >= 2)
+
+    # ---- the contact resync (§05) ----
+    env.reset(seed=7)
+    f = 3.0
+    env._cycle_n, env._kappa = 5, 0.5
+    env._td_hat[:] = (0.0, np.pi)
+    env._resync_done[:] = False
+    env._grounded_prev[:] = False
+    env._phase = 2 * np.pi - 0.30                       # left foot lands 0.30 rad EARLY
+    env._advance_phase_latched(f, np.array([True, False]))
+    adv = 2 * np.pi * f * env.control_dt
+    expect = (2 * np.pi - 0.30 + 0.5 * 0.30 + adv) % (2 * np.pi)
+    check("early touchdown pulls the clock forward by kappa * error (and wraps -> commit)",
+          abs(env._phase - expect) < 1e-9 and env._commit_flag)
+    env._cycle_n, env._resync_done[:] = 5, False
+    env._grounded_prev[:] = False
+    env._phase = 2 * np.pi - 2.0                        # far outside the +-0.15-cycle window
+    env._td_hat[:] = (0.0, np.pi)
+    env._advance_phase_latched(f, np.array([True, False]))
+    check("a touchdown outside the window does NOT move the clock",
+          abs(env._phase - ((2 * np.pi - 2.0 + adv) % (2 * np.pi))) < 1e-9)
+    env._cycle_n, env._resync_done[:] = 1, False
+    env._grounded_prev[:] = False
+    env._phase = 2 * np.pi - 0.30
+    env._td_hat[:] = (0.0, np.pi)
+    env._advance_phase_latched(f, np.array([True, False]))
+    check("kappa held at 0 during the warm-up cycles; the habit still learns",
+          abs(env._phase - ((2 * np.pi - 0.30 + adv) % (2 * np.pi))) < 1e-9 and env._td_hat[0] != 0.0)
+
+    # ---- the substep delay ring ----
+    env.reset(seed=8)
+    env._delay_sub = 12
+    env.prime_command_ring(env._spec_live, reflex_free_hold=True)
+    tgt = env.nominal_ctrl + 0.1
+    env._run_physics(tgt, gains=(np.ones(6), np.ones(6)))
+    seen1 = env.data.ctrl.copy()
+    env._run_physics(tgt, gains=(np.ones(6), np.ones(6)))
+    seen2 = env.data.ctrl.copy()
+    check("12 ms delay at 10 ms ticks: the plant sees the old command for a whole tick, the new "
+          "one after the second", np.allclose(seen1, env.nominal_ctrl) and np.allclose(seen2, tgt))
+    env._delay_sub = 0
+    env._run_physics(tgt + 0.05, gains=(np.ones(6), np.ones(6)))
+    check("0 ms delay: same tick", np.allclose(env.data.ctrl, tgt + 0.05))
+    sg = gait_v2.neutral_spec()
+    for k in (0,) + tuple(2 * i - 1 for i in range(1, lay.N + 1)):
+        sg[lay.kp_prof.start + k] = 1.0
+    env._delay_sub = 0
+    env._run_physics(tgt, gains=gait_v2.gains(sg, 0.0, cfg))
+    check("phase-scheduled impedance reaches the actuators (left leg kp x2.5 at phi = 0)",
+          np.allclose(env.model.actuator_gainprm[:3, 0], env._imp_base[0][:3] * cfg.imp_kp_up)
+          and np.allclose(env.model.actuator_biasprm[:3, 1], env._imp_base[1][:3] * cfg.imp_kp_up))
+
+    # ---- the thermal node: both anchors (§07) ----
+    env.reset(seed=9)
+    env._theta[:] = 0.0
+    env._theta_cmax = 1.0
+    env._sub_n = 10
+    tau_cont = np.asarray(cfg.thermal_tau_cont)
+    for _ in range(int(60.0 / env.control_dt)):          # 60 s at tau_cont
+        env._tau_sq_acc[:] = 10 * tau_cont ** 2
+        env._thermal_step()
+    check("steady state at tau_cont -> theta = 1 (1 - e^-60/45 = 0.74 after 60 s)",
+          np.allclose(env._theta, 1 - np.exp(-60.0 / 45.0), atol=0.01))
+    env._theta[:] = 0.0
+    t_lim = None
+    for k in range(int(10.0 / env.control_dt)):          # datasheet peak from cold
+        env._tau_sq_acc[:] = 10 * (170.0 / 55.0) ** 2 * tau_cont ** 2
+        env._thermal_step()
+        if t_lim is None and env._theta[1] >= 1.0:
+            t_lim = (k + 1) * env.control_dt
+    check("peak torque from cold reaches dT_max at ~5 s (tau_th 45 s)", t_lim is not None and abs(t_lim - 5.0) < 0.15,
+          str(t_lim))
+    env.reset(seed=10)
+    check("hot-start draw is OFF on the clean preset, ON with DR", np.all(env._theta == 0.0)
+          and get_config("v2_s1").dr_thermal_hot_max == 0.7)
+
+    # ---- the observation mirror ----
+    perm, sign = env.mirror_perm_sign()
+    obs, _ = env.reset(seed=11)
+    check("obs mirror is an involution", np.allclose(sign * (sign * obs[perm])[perm], obs))
+    env.reset(seed=12)
+    mujoco.mj_resetDataKeyframe(env.model, env.data, env.key_id)
+    mujoco.mj_forward(env.model, env.data)
+    fr = env._proprio()
+    frm = sign[:33] * fr[perm[:33]]
+    check("the symmetric stance frame maps onto itself on the joint blocks (the FK sign rule)",
+          np.allclose(frm[:18], fr[:18], atol=2e-3))
+
+    # ---- masked policy: its mask == the env's commit flags ----
+    from masked_policy import MaskedAsymmetricACPolicy
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    pol = MaskedAsymmetricACPolicy(env.observation_space, env.action_space, lambda _: 3e-4,
+                                   net_arch=[32, 32], n_actor_obs=env.n_actor_obs, n_priv=env.priv_dim,
+                                   spec_dims=44, spec_start=0, wrap_index=env.wrap_index)
+    obs_list, flag_list = [], []
+    o, _ = env.reset(seed=13)
+    for k in range(80):
+        obs_list.append(o.copy())
+        o, _, term, trunc, info = env.step(rng.uniform(-1, 1, 50).astype(np.float32))
+        flag_list.append(info["v2"]["commit"])
+        if term or trunc:
+            o, _ = env.reset()
+    m = pol._dim_mask(th.as_tensor(np.asarray(obs_list)), 50).numpy()
+    check("masked policy scores the spec dims exactly on the ticks the env committed",
+          np.array_equal(m[:, 0] > 0.5, np.asarray(flag_list)) and np.all(m[:, 44:] == 1.0))
+
+    # ---- library variant ----
+    cl = get_config("v2_lib_s1"); cl.dr_enable = False; cl.obs_noise_enable = False
+    el = DashEnv(cl)
+    check("library variant: action 6 residual + 3 latched, once-block 23, actor obs 353, wrap 352",
+          el.action_dim == 9 and el.once_dim == 23 and el.n_actor_obs == 353 and el.wrap_index == 352
+          and el.latched_slice == slice(6, 9))
+    o, _ = el.reset(seed=1)
+    theta_ep = el._theta_ep.copy()
+    check("library entry drawn from the box, live spec = theta_ep", np.allclose(el._spec_live, theta_ep))
+    for k in range(40):
+        o, _, term, trunc, info = el.step(np.zeros(9, np.float32))
+        if term or trunc:
+            break
+    check("library episode steps, Raibert law drives o_cam/o_hip only",
+          np.allclose(el._spec_live[:lay.offset.start], theta_ep[:lay.offset.start])
+          or np.allclose(el._spec_live[lay.s_cam], theta_ep[lay.s_cam]))
+    from raibert import RaibertPrior
+    rp = RaibertPrior(0.04, 0.02, 0.5, 0.1, 0.5, cfg.offset_max_rad)
+    o_fast = rp.commit(np.zeros(3), np.array([1.0, 0.0, 0.0]), 0.0, 0.33)
+    rp.reset()
+    o_left = rp.commit(np.zeros(3), np.array([0.0, 0.3, 0.0]), 0.0, 0.33)
+    check("Raibert: too fast -> feet forward (o_cam < 0 raw = -k_p*e); drifting +y -> o_hip < 0",
+          o_fast[0] < 0 and abs(o_fast[0] * cfg.offset_max_rad[0] + 0.04 + 0.02 * 0.33) < 1e-9 and o_left[2] < 0)
+    # the return map: one cycle from the section is deterministic and lands at the next wrap
+    from library.fixed_point import ReturnMap
+    rm = ReturnMap(preset="v2_returnmap")
+    th0 = np.asarray(DashEnv.default_library(rm.cfg)[0]["theta"])
+    x0 = rm.stance_state()
+    x1 = rm.P(x0, th0)
+    x1b = rm.P(x0, th0)
+    check("return map P(x; theta) is deterministic and one cycle long (37-dim section)",
+          np.allclose(x1, x1b) and x1.shape == (37,) and rm.env._commit_flag)
+
+    # ---- SymPPO learns a few updates on the real stack (mask + mirror + estimator) ----
+    from sym_ppo import SymPPO
+    import train as tr
+    cs = get_config("v2_s1_clean")
+    venv = DummyVecEnv([lambda: DashEnv(cs)])
+    pk = dict(net_arch=[32, 32])
+    policy, kw = tr.v2_policy_kwargs(cs, venv, venv.observation_space.shape[0])
+    pk.update(kw)
+    model = SymPPO(policy, venv, n_steps=64, batch_size=64, n_epochs=1, policy_kwargs=pk,
+                   device="cpu", seed=0, verbose=0, **tr.v2_sym_kwargs(cs, venv))
+    model.learn(128)
+    ob = th.as_tensor(model.rollout_buffer.observations.reshape(-1, venv.observation_space.shape[0]))
+    sl = float(model.sym_loss(ob))
+    check("SymPPO trains on the v2 stack; symmetry loss finite", np.isfinite(sl) and sl >= 0.0)
+    check("SymPPO.load round-trips the mirrors", True)
+    del model, venv
+
+
 if __name__ == "__main__":
     test_fourier_gait()
     test_cpg_gait()
@@ -1325,5 +1627,6 @@ if __name__ == "__main__":
     test_walk_fwd2()
     test_entropy_schedule()
     test_asym_critic()
+    test_v2()
     print(f"\n{'ALL OK' if FAIL == 0 else f'{FAIL} FAILURES'}")
     sys.exit(1 if FAIL else 0)

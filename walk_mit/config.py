@@ -575,6 +575,92 @@ class Config:
     imp_kd_dn: float = 4.0
     w_imp_rate: float = 0.01
 
+    # ----- DASH-01 Walker v2: the LATCHED gait spec (2026-09-09, artifact "DASH-01 Walker v2") --
+    # action_mode="latched" selects gait_v2.py: 44 spec dims (one Fourier series per joint family
+    # + kp(phi)/kd(phi) profiles + frequency + roll-reflex gains + the five relationship knobs
+    # Delta / s / o) that reach the generator ONLY on the tick where the gait phase wraps, plus 6
+    # per-tick residuals. Mid-cycle spec writes are DISCARDED, not penalised, so the m3 clock-warp
+    # exploit is unrepresentable. Every field below is inert unless action_mode == "latched".
+    spec_source: str = "policy"         # "policy": the actor's latched head emits the spec (§02-04)
+    #                                     "library": a per-episode library entry + Raibert law (§09)
+    roll_amp: float = 0.20              # rad, hip_roll series amplitude (bounded by the AK60-39)
+    delta_max_rad: float = 0.6          # Delta knob range: +-0.6 (the CPG arm's value) forbids the
+    #                                     both-legs-in-phase bound; +-pi allows it (open decision §13)
+    offset_max_rad: tuple = (0.06, 0.06, 0.15)   # o_cam, o_thigh, o_hip full-scale (rad)
+    # billing (§02/§10): spec change ONCE per cycle at commit, knobs as a standing price
+    w_spec_cycle: float = 0.0           # w * ||S_k+1 - S_k||^2 on the commit tick
+    w_knob: float = 0.0                 # w * ||(Delta/Delta_max, s, o/o_max)||^2 per step
+    # equivariance loss (§06, sym_ppo.py): mirror the state and the knobs must negate
+    w_sym: float = 0.0                  # weight on ||k(M_o s) + k(s)||^2 (knob dims)
+    w_sym_res: float = 0.0              # same for the residual under the verified sign rule
+    # task encoding: clip(d / this, 0, 1) -- 8 m gives the last 8 m braking resolution (§12)
+    sprint_task_scale_m: float = 100.0
+    # LP yaw (§03/§10): EMA of gyro-z with this time constant, in BOTH the reward and the actor
+    # obs. Bills drift, not gait wobble (RUN 8: 95% of the yaw bill was wobble). 0 = raw gyro.
+    yaw_lp_tau_s: float = 0.0
+    # one-sided height fence (§10): quadratic BELOW the floor only, nothing above (an upper bound
+    # would tax the flight phase). 0 = the legacy two-sided pin to height_target.
+    height_floor_m: float = 0.0
+    w_lane: float = 0.0                 # -w * (|y| - lane_free_m)_+^2 (the 1.22 m lane, §08)
+    lane_free_m: float = 0.25
+    # ----- contact-triggered clock resync (§05) ----------------------------------------------
+    resync_kappa: float = 0.0           # nominal gain (0 = free-running clock)
+    dr_resync_kappa_range: tuple = (0.0, 0.0)   # per-episode draw (0,0 = use resync_kappa)
+    resync_window_cycle: float = 0.15   # +-fraction of a cycle around the expected touchdown
+    resync_n_ema: float = 5.0           # cycles, per-foot touchdown-phase habit estimate
+    resync_warmup_cycles: int = 3       # kappa held at 0 while the habit settles
+    # ----- the measured drive, v2 (§07) --------------------------------------------------------
+    # Substep-granular transport delay on the 6 PD targets + gains (the CAN command path), drawn
+    # per episode in ms. Replaces the whole-action delay-in-control-steps of the legacy path and
+    # the EMA target filter (drive_bandwidth_hz must be 0 here: one lag, not two).
+    drive_delay_substep: bool = False
+    dr_delay_ms_range: tuple = (0.0, 0.0)   # per-episode delay draw (0,0 = fixed drive_delay_ms)
+    # joint armature per motor family (hip_roll, cam/thigh), kg m^2, written at init so the sim's
+    # closed-loop corner matches the Bode (model/fit_drive.py). Empty = keep the model's values.
+    drive_armature: tuple = ()
+    # ----- lumped winding thermal model (§07) --------------------------------------------------
+    #   tau_th * d(theta)/dt = (tau / tau_cont)^2 / c_max - theta,   theta = dT / dT_max
+    # anchored on "steady state at tau_cont = dT_max" and "peak held from cold reaches dT_max at
+    # 5 s" => tau_th = 45 s (NOT 5 s: at peak the drive settles ~10x above the limit, so the limit
+    # is crossed on the linear part of the ramp). One dash at the RUNNER's operating point reaches
+    # 52%; the third back-to-back dash 89%.
+    thermal_enable: bool = False
+    thermal_tau_s: float = 45.0
+    thermal_tau_cont: tuple = (23.0, 55.0, 55.0, 23.0, 55.0, 55.0)   # N*m, actuator order
+    thermal_pen_start: float = 0.85     # quadratic penalty above this fraction of dT_max
+    w_thermal: float = 0.0
+    dr_thermal_hot_max: float = 0.0     # hot-start draw: theta0 ~ U[0, this] per motor per episode
+    dr_thermal_cmax: float = 0.0        # +-rel draw on dT_max (the unknown Kt roll-off)
+    # ----- track margin budget (§08): wind, gusts, lateral impulses ---------------------------
+    wind_force_max_n: float = 0.0       # constant BODY-frame force, x and y ~ U[-max, max] / episode
+    gust_force_n: float = 0.0           # step force (random axis+sign) of gust_duration_s
+    gust_duration_s: float = 1.0
+    gust_interval_s: tuple = (5.0, 10.0)
+    push_dv_range: tuple = (0.0, 0.0)   # per-push |dv| ~ U[lo, hi] (0,0 = the fixed push_dv)
+    # ----- loop-closure series spring (§07): pushrod slide-joint stiffness draw ---------------
+    dr_loop_k: float = 0.0              # +-rel on the pushrod_slide_L/R stiffness (0.5 = 15-45 kN/m)
+    # DR ramp gate, separate from the gait ramps' gate (-1 = share curriculum_gate_ep_len)
+    dr_curriculum_gate_ep_len: float = -1.0
+    # ----- library variant (§09): spec from a solved periodic orbit, policy = stabilizer -------
+    library_path: str = ""              # JSON from library/library_solve.py ("" = built-in entry)
+    library_entry: str = "fastest"      # "fastest" | "random" | a speed "2.0"
+    library_box_amp: float = 0.2        # per-episode box: amplitudes +-20 %
+    library_box_f_hz: float = 0.3       #                  frequency +-0.3 Hz
+    library_box_knob: float = 0.1       #                  knobs +-0.1
+    library_latched_dims: bool = True   # +3 latched action dims (df/f, amplitude, lift), +-scale
+    library_latched_scale: tuple = (0.2, 0.2, 0.2)
+    library_reset_on_orbit: bool = True # reset at the entry's x* (+ noise) when it carries one
+    w_track: float = 0.0                # -w * ||q - q_ref||^2 (small; the stabilizer's tracking bill)
+    raibert_enable: bool = False        # Stage-2 prior on o_cam / o_hip, updated at each commit
+    raibert_kp: float = 0.04            # rad of o_cam per m/s of velocity error
+    raibert_ki: float = 0.02            # rad per (m/s * s) -- absorbs a constant wind
+    raibert_imax: float = 0.5           # |I_v| clip (m/s * s)
+    raibert_ky: float = 0.10            # rad of o_hip per m/s of lateral velocity
+    raibert_kr: float = 0.5             # rad of o_hip per rad of low-passed roll
+    raibert_roll_tau_s: float = 0.3
+    raibert_v_noise: float = 0.0        # m/s noise on the velocity the law reads (sim stand-in
+    #                                     for the estimator; 0 = ground truth)
+
     # ----- sim2real control-timing randomization (2026-07-23; models the Pi inference loop) -----
     # The real Pi control loop has ms-scale timing jitter and occasionally MISSES an inference
     # deadline (the moteus then holds the last command). We randomize both in sim so the policy is
@@ -2459,6 +2545,160 @@ def _walk_fwd3(**kw):
     )
     base.update(kw)
     return _walk_fwd(**base)
+
+
+# ===== DASH-01 Walker v2 (2026-09-09) ============================================================
+# The next lineage, dimensioned by the "DASH-01 Walker v2" artifact (implementation ground truth):
+# 100 Hz control, a per-cycle LATCHED gait spec (gait_v2.py), mirror-symmetry loss, randomized
+# substep delay, thermal budget, the measured plant (rigid loop closure + calibrated pushrod series
+# spring, armature-fit drive), the outdoor margin budget as training coverage, and a two-stage
+# curriculum with a frozen interface (S1 planar = m3 locks, S2 free = m6). Obs 377 actor / 402
+# critic (330 history + once-block 47 [+25 privileged]), action 50 (44 latched + 6 residual).
+#
+# 100 Hz rate rescalings, the _HZ200 recipe halved: same seconds of robot time per schedule, same
+# 2 s reward horizon (gamma 0.995 = 0.9975^2), 60 s episodes = 6000 steps, 300 M steps == the
+# 600 M the RUNNER trained at 200 Hz. No EMA target filter and no whole-action delay: the drive is
+# the substep delay ring + the armature fit (below).
+_HZ100 = dict(
+    control_decimation=10, gamma=0.995, action_delay_steps=0, action_filter=0.0,
+    gait_freq_hz=(0.5, 5.0), residual_scale=0.20,
+    ent_gate_air_time=0.01, ent_gate_swing_frac=0.13,
+    total_steps=300_000_000, gait_curriculum_steps=120_000_000, efficiency_ramp_steps=120_000_000,
+    sprint_curriculum_steps=60_000_000, ent_anneal_steps=40_000_000,
+    ent_anneal_deadline_steps=12_500_000, warmstart_obs_count_cap=100_000.0,
+    episode_s=60.0,
+)
+
+# The v2 plant (§07): measured vs simulated, with the change the build makes.
+#   loop closure   rigid connect (ankle-lock solref) + pushrod series spring calibrated to a 5 mm
+#                  one-leg stance sink (model/make_v2_plant.py + calibrate_loop_spring.py),
+#                  randomised +-50 % (15-45 kN/m foot-referred)
+#   drive          armature per motor family from the Bode fit (model/fit_drive.py), NO EMA target
+#                  filter, 12 ms nominal transport delay drawn U[6, 18] ms per episode at 1 kHz
+#                  substep granularity (the RUNNER's delay margin was ZERO both ways)
+#   torque/speed   no-load command cap + back-EMF clamp (the RUN 8 limits), dr_torque 0.12 for sag
+#   thermal        single-node winding model, tau_th 45 s, hot-start draw, penalty above 0.85
+#   ankle          rigid carbon tube (40 g): lock equalities + the 209 g spring assembly removed
+#   DR ON          mass 0.12 / body 0.15 / CoM 0.03 / friction 0.4-1.3 / gains / tilt 5 deg / homing
+#                  2 deg / IMU mount 2 deg; the sprint lineage's biggest honesty gap was all of
+#                  this being off
+#   sensor noise   from the measured IMU figures (accel 190 ug/rtHz, gyro 0.0097 dps/rtHz -> at a
+#                  50 Hz bandwidth 1.3e-3 g and 1.2e-3 rad/s per sample); accel leak kept
+#   disturbances   fore-aft AND lateral impulses 0.3-0.6 m/s every ~4 s, constant body-frame wind
+#                  +-30 N with 30 N gusts, trips at one per ~12 s (0.0008 / step at 100 Hz)
+# model/fit_drive.py, 2026-09-09 (sim Bode, same protocol as the robot's): at the model's own
+# armature the sim corner is 6.9 Hz @ 200/5 and 16.0 Hz @ 500/5 with ~1 dB of peaking; the
+# two-point fit against the measured 6.3 / 19 Hz (no peaking) is armature -> 0 on both families
+# (6.3 / 17.7 Hz, 0.13 dB). The measured loop behaves as if the drive hid its rotor inertia
+# (damping-dominated, corner = kp/kd), so that is what the plant does. Written by the env at
+# load; model/drive_fit.json keeps the whole sweep.
+_V2_ARMATURE = (0.0, 0.0)
+_V2_PLANT = dict(
+    # ankle_resettle stays OFF (as in every sprint_*_mit run): on the rigid-ankle plant the
+    # re-settle rolls the LEFT hip 6 deg under the as-built asymmetry and hands every episode an
+    # asymmetric nominal, which the mirror loss would then be fighting. The keyframe is rebuilt
+    # by joint name for the v2 plant; workspace_kill grades against the LUT toe reference.
+    model_path="model/dash01_v2.xml", ankle_mode="rigid", ankle_resettle=False,
+    ankle_spring_mass_kg=_SHIN_TUBE_REMOVAL_KG,
+    drive_bandwidth_hz=0.0, drive_delay_ms=12.0, drive_delay_substep=True,
+    dr_delay_ms_range=(6.0, 18.0), drive_armature=_V2_ARMATURE,
+    motor_vel_limit=_NOLOAD_RADS, motor_r_ohm=_MOTOR_R_TOTAL_OHM,
+    thermal_enable=True, thermal_tau_s=45.0, thermal_pen_start=0.85,
+    dr_thermal_hot_max=0.7, dr_thermal_cmax=0.2,
+    dr_enable=True, dr_curriculum_steps=60_000_000, dr_curriculum_gate_ep_len=600.0,
+    dr_com_offset=0.03, dr_friction_range=(0.4, 1.3), dr_gravity_tilt=5.0, dr_loop_k=0.5,
+    dr_joint_zero_deg=2.0, dr_imu_rot_deg=2.0, dr_imu_dropout_prob=0.001,
+    dr_delay_steps_range=(0, 0), dr_ankle_k=0.0, dr_ankle_damping=0.0,
+    obs_noise_enable=True, noise_gyro=0.0012, noise_gyro_bias=0.0005, noise_gyro_walk=2e-5,
+    noise_grav=0.0013, noise_grav_bias=0.005, noise_accel_leak=0.15,
+    trip_prob=0.0008, push_interval_s=4.0, push_dv_range=(0.3, 0.6),
+    wind_force_max_n=30.0, gust_force_n=30.0, gust_duration_s=1.0, gust_interval_s=(5.0, 10.0),
+    adversity_curriculum=True,
+)
+
+# Reward deltas vs sprint_m6_lim2 (§10): per-cycle spec billing at commit (no phase gate anywhere),
+# standing knob price, LP yaw in reward + obs, one-sided height fence at the validated 0.81 m,
+# thermal above 0.85, residual 0.10 / rate 0.02 (every existing policy lived at the bound), the
+# lane term, and the anti-hop/anti-chatter set kept (duty_sym 8, contact_switch 0.2, workspace kill).
+_V2_RWD = dict(
+    w_coef_rate=0.0, w_imp_rate=0.0, w_spec_cycle=0.5, w_knob=0.02, w_sym=0.5, w_sym_res=0.5,
+    w_residual=0.10, w_residual_rate=0.02,
+    w_yaw_rate=3.0, yaw_lp_tau_s=0.7, sprint_world_speed=False,
+    w_height=2.5, height_floor_m=0.81, height_target_offset_m=0.0,
+    w_lane=2.0, lane_free_m=0.25, w_thermal=20.0,
+    w_duty_sym=8.0, w_contact_switch=0.20, workspace_kill=True,
+    sprint_task_scale_m=8.0,
+)
+
+# Networks (§03/§04): 10 x 33 strided history (190 ms) + once-block; privileged critic + estimator.
+_V2_NET = dict(obs_privileged_critic=True, obs_base_vel=False, history_len=10, history_stride=2)
+
+# Training recipe carried from the RUNNER (sprint_m3_mit): forced std anneal to 0.25, entropy to
+# 0, pitch-assist training wheel fading over the first 30 M (sim-only, never a crutch by the time
+# it is gone), jitter/drop hardening once competent (gate 8 s = 800 steps at 100 Hz).
+_V2_TRAIN = dict(
+    ent_final=0.0, std_anneal_target=0.25,
+    pitch_assist_kp=100.0, pitch_assist_kd=10.0, pitch_assist_ramp_steps=30_000_000,
+    ctrl_jitter_ms_final=4.0, ctrl_drop_prob_final=0.05,
+    jitter_curriculum_gate_ep_len=800.0, jitter_curriculum_steps=40_000_000,
+    warmstart_reset_log_std=True,
+)
+
+_V2_STAGE = {"s1": "m3", "s2": "m6"}      # S1 planar (x, z, pitch) / S2 free
+
+
+def _v2(stage, **kw):
+    """DASH-01 Walker v2 preset for curriculum stage `stage` ("s1" planar, "s2" free)."""
+    m = _V2_STAGE[stage]
+    base = dict(base_lock=LOCKS[m])
+    base.update(_extras(m))
+    base.update(_HZ100)
+    base.update(_V2_PLANT)
+    base.update(_V2_RWD)
+    base.update(_V2_NET)
+    base.update(_V2_TRAIN)
+    base.update(action_mode="latched", spec_source="policy", imp_enable=False, steer_enable=False,
+                resync_kappa=0.5, dr_resync_kappa_range=(0.3, 0.7),
+                # the FIXED pitch reflex retuned for the v2 drive (2026-09-09 grid, zero-action
+                # stand on dash01_v2): with the EMA target filter gone and a 12 ms substep delay,
+                # the RUNNER's kp 2 / kd 0.2 on the raw gyro limit-cycles the thighs between the
+                # clip rails every ~50 ms (std of the per-tick thigh command 0.10 rad); kp 1 /
+                # kd 0.1 on a 0.9-EMA rate (~1.7 Hz at 100 Hz) brings it to 0.014 rad with the
+                # sign rule and the clip unchanged. The artifact's "checks out" was the sign.
+                pitch_kp=1.0, pitch_kd=0.1, pitch_reflex_rate_lp=0.9)
+    base.update(kw)
+    return _sprint(**base)
+
+
+# the clean plant: no DR, no noise, no disturbances, nominal delay -- the debugging sandbox and
+# the library solver's return-map plant (Stage 0 needs a deterministic P(x; theta))
+_V2_CLEAN = dict(dr_enable=False, obs_noise_enable=False, trip_prob=0.0, push_interval_s=0.0,
+                 wind_force_max_n=0.0, gust_force_n=0.0, dr_thermal_hot_max=0.0,
+                 dr_thermal_cmax=0.0, dr_delay_ms_range=(0.0, 0.0),
+                 dr_resync_kappa_range=(0.0, 0.0), ctrl_jitter_ms_final=0.0,
+                 ctrl_drop_prob_final=0.0, jitter_curriculum_steps=0)
+
+PRESETS.update({
+    # single-network variant (§02-04): the latched head emits the spec
+    "v2_s1": lambda: _v2("s1"),
+    "v2_s2": lambda: _v2("s2"),
+    "v2_s1_clean": lambda: _v2("s1", **_V2_CLEAN),
+    "v2_s2_clean": lambda: _v2("s2", **_V2_CLEAN),
+    # library variant (§09, the recommended build order): spec = library entry + Raibert law,
+    # action = 6 residual + 3 latched (df/f, amplitude, lift), once-block 23 -> actor obs 353
+    "v2_lib_s1": lambda: _v2("s1", spec_source="library", raibert_enable=True, w_track=0.05,
+                             w_spec_cycle=0.0, w_knob=0.0, w_sym=0.0, w_sym_res=0.5),
+    "v2_lib_s2": lambda: _v2("s2", spec_source="library", raibert_enable=True, w_track=0.05,
+                             w_spec_cycle=0.0, w_knob=0.0, w_sym=0.0, w_sym_res=0.5),
+    # the return-map plant for library/fixed_point.py: open loop, no reflexes, free base, clean
+    "v2_returnmap": lambda: _v2("s2", spec_source="library", raibert_enable=False,
+                                library_latched_dims=False, library_box_amp=0.0,
+                                library_box_f_hz=0.0, library_box_knob=0.0,
+                                library_reset_on_orbit=False, pitch_clip=0.0, resync_kappa=0.0,
+                                w_spec_cycle=0.0, w_knob=0.0, w_sym=0.0, w_sym_res=0.0,
+                                pitch_assist_kp=0.0, pitch_assist_ramp_steps=0,
+                                reset_joint_noise=0.0, **_V2_CLEAN),
+})
 
 
 def get_config(name: str = "default") -> Config:

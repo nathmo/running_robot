@@ -35,6 +35,7 @@ from stable_baselines3.common.utils import safe_mean
 
 from config import Config, config_from_dict, config_to_dict, get_config, PRESETS
 from env import DashEnv
+from gait_diag import ActionDiagCallback
 
 # CPU-cluster learner threads (jed). The sbatch exports OMP_NUM_THREADS=1 so that 64 SubprocVecEnv
 # workers don't each spawn a full BLAS thread pool on a 72-core node (64 x 72 threads = the node
@@ -625,6 +626,49 @@ def matching_vecnormalize(ckpt: Path):
     return ckpt.parent / f"ppo_vecnormalize_{ckpt.stem[4:]}.pkl"
 
 
+def algo_class(cfg):
+    """PPO, or SymPPO (PPO + the mirror-equivariance loss) when the v2 preset asks for it. Both
+    load each other's checkpoints; only the class chosen here runs the symmetry term."""
+    if getattr(cfg, "action_mode", "fourier") == "latched" and (
+            float(getattr(cfg, "w_sym", 0.0)) > 0.0 or float(getattr(cfg, "w_sym_res", 0.0)) > 0.0):
+        from sym_ppo import SymPPO
+        return SymPPO
+    return PPO
+
+
+def v2_policy_kwargs(cfg, base_venv, n_obs):
+    """Policy class + kwargs for the latched (v2) action space: the masked-log-prob asymmetric
+    policy (spec dims scored only on commit ticks), with the widths read from the ENV so the
+    actor slice, the privileged tail and the commit flag can never disagree with it."""
+    from masked_policy import MaskedAsymmetricACPolicy
+    n_priv = int(base_venv.get_attr("priv_dim")[0])
+    wrap = int(base_venv.get_attr("wrap_index")[0])
+    sl = base_venv.get_attr("latched_slice")[0]
+    kw = dict(n_actor_obs=n_obs - n_priv, n_priv=n_priv,
+              spec_dims=int(sl.stop - sl.start), spec_start=int(sl.start), wrap_index=wrap)
+    return MaskedAsymmetricACPolicy, kw
+
+
+def v2_sym_kwargs(cfg, base_venv):
+    """The observation/action mirrors for SymPPO, read from the env + gait_v2's layout."""
+    import gait_v2
+    perm, sign = base_venv.env_method("mirror_perm_sign")[0]
+    lay = gait_v2.Layout(cfg.n_harmonics)
+    if cfg.spec_source == "policy":
+        ap, asg = lay.mirror_perm_sign()
+        knob_idx, res_idx = list(lay.knobs), list(range(lay.residual.start, lay.residual.stop))
+    else:
+        n_act = int(base_venv.get_attr("action_dim")[0])
+        ap = np.arange(n_act)
+        asg = np.ones(n_act)
+        ap[:6] = gait_v2.MIRROR_PERM6
+        asg[:6] = gait_v2.MIRROR_SIGN6
+        knob_idx, res_idx = [], list(range(6))
+    return dict(sym_weight=float(cfg.w_sym), sym_res_weight=float(cfg.w_sym_res),
+                obs_perm=perm, obs_sign=sign, act_perm=ap, act_sign=asg,
+                knob_idx=knob_idx, res_idx=res_idx)
+
+
 def rejuvenate_obs_rms(venv, count_cap, var_floor):
     """Warm-start fix: after VecNormalize.load, keep the prior mean/var but (a) cap the running
     count so newly-freed obs dims re-adapt within ~count_cap fresh samples instead of glacially
@@ -740,6 +784,11 @@ def main():
                             clip_obs=10.0, gamma=cfg.gamma)
 
     reset_counter = True
+    Algo = algo_class(cfg)
+    latched = getattr(cfg, "action_mode", "fourier") == "latched"
+    if latched and not cfg.obs_privileged_critic:
+        raise SystemExit("[train] the v2 (latched) stack needs obs_privileged_critic=True: the "
+                         "critic reads the 25-dim privileged tail and the estimator its target")
     if resume_ckpt is not None:
         vn = matching_vecnormalize(resume_ckpt)
         if vn.exists():
@@ -750,7 +799,7 @@ def main():
         else:
             venv = fresh_vecnorm()
             print(f"[train] WARNING: no VecNormalize stats at {vn}; starting normalization fresh")
-        model = PPO.load(str(resume_ckpt), env=venv)
+        model = Algo.load(str(resume_ckpt), env=venv)
         reset_counter = False        # num_timesteps continues -> ramps + lr schedule continue
         print(f"[train] resumed {resume_ckpt.name} at {model.num_timesteps} steps")
         # rotate the CSV log: SB3's configure() reopens progress.csv in WRITE mode, wiping the
@@ -779,8 +828,13 @@ def main():
                 venv = fresh_vecnorm()
             # PPO.load keeps the checkpoint's OWN hyperparameters (gamma, schedules); milestones
             # share them by design. Fresh step counter: ramps and lr restart for the new stage.
-            model = PPO.load(str(warm_ckpt), env=venv)
+            model = Algo.load(str(warm_ckpt), env=venv)
             model.num_timesteps = 0
+            if Algo is not PPO:
+                # the mirrors are a property of THIS stage's env (S1 -> S2 keeps the widths, so
+                # they are identical, but read them anyway rather than trust the parent's)
+                for k, v in v2_sym_kwargs(cfg, base_venv).items():
+                    setattr(model, k, v)
             # the source stage's ent_coef is typically fully annealed (0.002) — a new milestone
             # needs its exploration back; the EntropyCallback re-anneals once competent again.
             model.ent_coef = cfg.ent_coef
@@ -805,24 +859,36 @@ def main():
             lr = lambda p: cfg.lr_final + p * (cfg.learning_rate - cfg.lr_final)  # p: 1 -> 0
             policy = "MlpPolicy"
             policy_kwargs = dict(net_arch=list(cfg.policy_hidden))
-            if cfg.obs_privileged_critic:
+            n_obs = venv.observation_space.shape[0]
+            algo_kwargs = {}
+            if latched:
+                policy, kw = v2_policy_kwargs(cfg, base_venv, n_obs)
+                policy_kwargs.update(kw)
+                print(f"[train] v2 latched stack: actor sees {kw['n_actor_obs']}, critic sees "
+                      f"{n_obs} (+{kw['n_priv']} privileged); {kw['spec_dims']} latched action "
+                      f"dims at [{kw['spec_start']}:{kw['spec_start'] + kw['spec_dims']}] masked "
+                      f"off non-commit ticks (commit flag = obs[{kw['wrap_index']}])")
+                if Algo is not PPO:
+                    algo_kwargs = v2_sym_kwargs(cfg, base_venv)
+                    print(f"[train] symmetry loss: w_sym {cfg.w_sym} on knobs "
+                          f"{algo_kwargs['knob_idx']}, w_sym_res {cfg.w_sym_res} on residual")
+            elif cfg.obs_privileged_critic:
                 # asymmetric actor-critic + velocity-estimator head; the actor's slice of the obs
                 # is everything BEFORE the privileged tail (see DashEnv.PRIV_DIM)
                 from asym_policy import AsymmetricACPolicy
                 policy = AsymmetricACPolicy
-                n_obs = venv.observation_space.shape[0]
-                policy_kwargs.update(n_actor_obs=n_obs - DashEnv.PRIV_DIM,
-                                     n_priv=DashEnv.PRIV_DIM)
-                print(f"[train] asymmetric critic: actor sees {n_obs - DashEnv.PRIV_DIM}, "
-                      f"critic sees {n_obs} (+{DashEnv.PRIV_DIM} privileged), "
+                n_priv = int(base_venv.get_attr("priv_dim")[0])
+                policy_kwargs.update(n_actor_obs=n_obs - n_priv, n_priv=n_priv)
+                print(f"[train] asymmetric critic: actor sees {n_obs - n_priv}, "
+                      f"critic sees {n_obs} (+{n_priv} privileged), "
                       f"estimator head supervised on true base velocity")
-            model = PPO(
+            model = Algo(
                 policy, venv,
                 n_steps=cfg.n_steps, batch_size=cfg.batch_size, n_epochs=cfg.n_epochs,
                 gamma=cfg.gamma, gae_lambda=cfg.gae_lambda, learning_rate=lr,
                 clip_range=cfg.clip_range, ent_coef=cfg.ent_coef, target_kl=cfg.target_kl,
                 policy_kwargs=policy_kwargs,
-                seed=cfg.seed, verbose=1,
+                seed=cfg.seed, verbose=1, **algo_kwargs,
             )
 
     model.set_logger(configure(str(run), ["stdout", "csv", "tensorboard"]))
@@ -839,6 +905,9 @@ def main():
     ]
     if cfg.obs_privileged_critic:
         cb_list.append(EstimatorCallback())
+    # first-run diagnostics for the latched-spec design (gait_diag.py): frequency rails and
+    # residual saturation of the greedy policy on each rollout's own observations -> diag/*
+    cb_list.append(ActionDiagCallback())
     if cfg.objective == "sprint" and cfg.sprint_curriculum_steps > 0 \
             and cfg.sprint_dist_m > cfg.sprint_dist_start_m:
         cb_list.append(RampCallback("sprint_dist_m", "set_sprint_dist",
@@ -910,9 +979,12 @@ def main():
     # domain-randomization curriculum: widen the PLANT distribution only while the policy can still
     # stand up in it. Same gate + retreat as the gait ramps.
     if cfg.dr_enable and cfg.dr_curriculum_steps > 0:
+        dr_gate = float(getattr(cfg, "dr_curriculum_gate_ep_len", -1.0))
+        if dr_gate < 0:
+            dr_gate = cfg.curriculum_gate_ep_len
         cb_list.append(GatedRampCallback("dr_scale", "set_dr_scale", 0.0, 1.0,
-                                         cfg.dr_curriculum_steps, run,
-                                         cfg.curriculum_gate_ep_len, retreat_frac=rf))
+                                         cfg.dr_curriculum_steps, run, dr_gate,
+                                         retreat_frac=rf if dr_gate > 0 else 0.0))
     # joystick command-range curriculum: widen the commandable box only while the policy tracks
     # the top of it. Persists the resolved m/s box for teleop/eval to map the stick onto.
     if cfg.objective == "command":

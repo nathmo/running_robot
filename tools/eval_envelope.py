@@ -50,7 +50,15 @@ AXES = {
     "com":      ("CoM offset x (m)",      [0.0, 0.01, 0.02, 0.04, 0.06], "abs"),
     "drive_bw": ("drive bandwidth (Hz)",  [0.8, 1.5, 3.0, 6.0, 12.0], "abs"),
     "push":     ("push impulse dv (m/s)", [0.0, 0.2, 0.35, 0.5, 0.75, 1.0], "abs"),
+    # ----- v2 (latched) margin-budget axes, artifact §08; skipped on legacy runs -----
+    "push_y":   ("LATERAL impulse dv (m/s)", [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0], "abs"),
+    "force_x":  ("steady body force x (N)", [-30.0, -15.0, 0.0, 15.0, 30.0], "abs"),
+    "force_y":  ("steady body force y (N)", [-30.0, -15.0, 0.0, 15.0, 30.0], "abs"),
+    "camber":   ("lateral slope (deg)",     [-3.0, -1.5, 0.0, 1.5, 3.0], "abs"),
+    "delay_ms": ("drive delay (ms)",        [0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 24.0], "abs"),
+    "thermal":  ("hot start dT/dT_max",     [0.0, 0.3, 0.5, 0.7, 0.85], "abs"),
 }
+V2_AXES = ("push_y", "force_x", "force_y", "camber", "delay_ms", "thermal")
 
 PUSH_INTERVAL_S = 4.0   # fixed cadence for the push axis (~5 shoves per 20 s episode); the env
 #                         randomizes each gap +-30% and the direction, seeded per episode, so the
@@ -76,10 +84,12 @@ def nominal_value(raw, axis, nominal_delay, nominal_torque):
         return nominal_torque
     if axis == "friction":
         return float(raw._dr.n_friction[:, 0].max())
-    if axis in ("slope", "com", "push"):
+    if axis in ("slope", "com", "push", "push_y", "force_x", "force_y", "camber", "thermal"):
         return 0.0
     if axis == "delay":
         return float(nominal_delay)
+    if axis == "delay_ms":
+        return float(raw.cfg.drive_delay_ms)
     if axis == "drive_bw":
         return float(getattr(raw.cfg, "drive_bandwidth_hz", 0.0))
     raise ValueError(axis)
@@ -102,6 +112,12 @@ def restore_nominal(raw, imp_nom, nominal_delay, nominal_torque):
     raw.set_torque_limit(nominal_torque)
     if imp_nom is not None:
         raw._imp_pristine = tuple(p.copy() for p in imp_nom)
+    if getattr(raw, "latched", False):
+        raw.set_wind(None, None)
+        raw.set_delay_ms(None)
+        raw.set_thermal_hot(None)
+        raw.set_push_axis(None)
+        raw.cfg.push_dv_range = (0.0, 0.0)
 
 
 def apply_point(raw, axis, val, imp_nom):
@@ -158,13 +174,29 @@ def apply_point(raw, axis, val, imp_nom):
         m.body_ipos[:] = dr.n_ipos + np.array([val, 0.0, 0.0])
     elif axis == "drive_bw":
         raw.set_drive_bandwidth_log10(float(np.log10(val)))
-    elif axis == "push":
+    elif axis in ("push", "push_y"):
         # dv=0 keeps shoves fully off (interval 0), so the axis' first point IS the nominal run.
-        # cfg.adversity_curriculum would scale push_dv by the DR ramp; the runs swept here have it
-        # False so cfg.push_dv applies verbatim — assert rather than silently sweep a scaled axis.
-        assert not raw.cfg.adversity_curriculum, "push axis assumes unscaled push_dv"
+        # cfg.adversity_curriculum would scale push_dv by the DR ramp: the v2 presets have it ON,
+        # so the sweep pins the DR scale at 1 (DR itself is disabled here) instead of asserting.
+        if raw.cfg.adversity_curriculum:
+            raw._dr.scale = 1.0
         raw.cfg.push_dv = float(val)
+        raw.cfg.push_dv_range = (0.0, 0.0)
         raw.cfg.push_interval_s = PUSH_INTERVAL_S if val > 0 else 0.0
+        if axis == "push_y":
+            raw.set_push_axis("y")
+    elif axis == "force_x":
+        raw.set_wind(float(val), 0.0)
+    elif axis == "force_y":
+        raw.set_wind(0.0, float(val))
+    elif axis == "camber":
+        g = float(np.linalg.norm(dr.n_gravity))
+        tilt = np.deg2rad(val)
+        m.opt.gravity[:] = g * np.array([0.0, np.sin(tilt), -np.cos(tilt)])
+    elif axis == "delay_ms":
+        raw.set_delay_ms(float(val))
+    elif axis == "thermal":
+        raw.set_thermal_hot(float(val))
     else:
         raise ValueError(axis)
 
@@ -246,6 +278,15 @@ def main():
     max_steps = int(args.seconds / raw.control_dt)
 
     axes = [a.strip() for a in args.axes.split(",")] if args.axes else list(AXES)
+    if getattr(raw, "latched", False):
+        # v2: the delay is a substep ring in ms (delay_ms axis), the drive has no EMA filter
+        for a in ("delay", "drive_bw"):
+            if a in axes:
+                axes.remove(a)
+    else:
+        for a in V2_AXES:
+            if a in axes:
+                axes.remove(a)
     if "drive_bw" in axes and float(getattr(raw.cfg, "drive_bandwidth_hz", 0.0)) <= 0.0:
         axes.remove("drive_bw")
         print("[env] drive_bw axis SKIPPED: this run has no drive model (drive_bandwidth_hz=0)")

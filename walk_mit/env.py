@@ -36,6 +36,8 @@ import mujoco
 from config import Config
 import fourier_gait
 import cpg_gait
+import gait_v2
+from raibert import RaibertPrior
 from domain_rand import PlantRandomizer, SensorNoise
 
 PKG_DIR = Path(__file__).resolve().parent
@@ -56,6 +58,11 @@ class DashEnv(gym.Env):
     # constant because train.py and asym_policy.py must agree with the env on where the actor's
     # slice of the observation ends, and three hardcoded 6s is how that stops being true.
     PRIV_DIM = 6
+    # v2 (action_mode="latched") privileged tail, artifact §03: true base velocity 3, contacts 2,
+    # height above the kill line 1, lateral offset y 1, heading 1, true base acceleration 3,
+    # normal contact force L/R 2, DR draw 5 (mass, CoM, friction, kp, torque), drawn delay 1,
+    # winding dT/dT_max x6 = 25. Instance attribute `priv_dim` is what train.py must read.
+    PRIV_DIM_V2 = 25
 
     def __init__(self, cfg: Config = None, render_mode: str = None):
         self.cfg = cfg or Config()
@@ -75,9 +82,13 @@ class DashEnv(gym.Env):
                        and self.cfg.drive_curriculum_steps > 0)
                    else self.cfg.drive_bandwidth_hz)
             self.set_drive_bandwidth_log10(np.log10(hz0))
-        if self.cfg.drive_delay_ms > 0.0:
+        if self.cfg.drive_delay_ms > 0.0 and not self.cfg.drive_delay_substep:
             self.cfg.action_delay_steps = int(round(
                 float(self.cfg.drive_delay_ms) * 1e-3 / self.control_dt))
+        if self.cfg.drive_delay_substep:
+            # v2: the transport delay rides the PD targets + gains at 1 kHz substep granularity
+            # (see _run_physics), drawn per episode in ms; the whole-action delay-in-steps is off
+            self.cfg.action_delay_steps = 0
         self.max_steps = int(round(self.cfg.episode_s / self.control_dt))
         # rate-invariance: the reward is hand-balanced in raw PER-STEP units at 50 Hz (0.02 s) with
         # normalization OFF, while the fall/finish bonuses are per-EVENT. Scaling the summed per-step
@@ -101,6 +112,15 @@ class DashEnv(gym.Env):
         # com_lower in-frame lowers the whole-robot CoM by ~com_lower. Done once at load, pre-forward.
         if self.cfg.com_lower != 0.0:
             self.model.body_ipos[1:, 2] -= float(self.cfg.com_lower)
+        # v2 drive: joint armature per motor family (hip_roll, cam/thigh) from the Bode fit
+        # (model/fit_drive.py). Written before the DR snapshot so the randomizer's nominal has it.
+        if self.cfg.drive_armature:
+            a_hip, a_ct = (float(x) for x in self.cfg.drive_armature)
+            for a in range(self.nu):
+                name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) or ""
+                if name.startswith("ankle"):
+                    continue
+                self.model.dof_armature[self.act_dadr[a]] = a_hip if name.startswith("hip_roll") else a_ct
         self._gyro_adr = self._sensor_adr("imu_gyro")
 
         # base-DOF locks: 6 <equality><joint> constraints lock_{x,y,z,roll,pitch,yaw}, inactive by
@@ -126,9 +146,24 @@ class DashEnv(gym.Env):
         self._base_pitch_dadr = int(self.model.jnt_dofadr[_pitch_jid])
         # ankle (foot) joints = the only ones with a spring (passive ankle); dof addr for the L/R
         # ankle-torque reflex. Sorted by qpos addr so [0]=Left, [1]=Right (L body precedes R).
-        _ankle_j = sorted((j for j in range(self.model.njnt) if self.model.jnt_stiffness[j] > 0),
+        # The ankle (foot) joints are the hinges of the Foot bodies, identified by BODY NAME rather
+        # than "has a spring": the v2 plant carries a stiff series spring on each pushrod slide
+        # joint (model/make_v2_plant.py), which a jnt_stiffness > 0 test would take for an ankle.
+        _ankle_j = sorted((j for j in range(self.model.njnt)
+                           if (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                                 int(self.model.jnt_bodyid[j])) or "").startswith("Foot")
+                           and self.model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE),
                           key=lambda j: self.model.jnt_qposadr[j])
+        if not _ankle_j:                          # legacy fallback: the sprung joints
+            _ankle_j = sorted((j for j in range(self.model.njnt) if self.model.jnt_stiffness[j] > 0),
+                              key=lambda j: self.model.jnt_qposadr[j])
         self._ankle_dadr = [int(self.model.jnt_dofadr[j]) for j in _ankle_j]
+        # reset-noise targets: the non-base HINGE joints only (a 30 kN/m slide joint must not be
+        # handed 0.03 m of reset noise). Same count as the legacy qpos[hinge_qadr_start:] slice on
+        # every legacy plant, so the RNG stream and the values are unchanged there.
+        self._noise_qadr = np.array([int(self.model.jnt_qposadr[j]) for j in range(self.model.njnt)
+                                     if self.model.jnt_bodyid[j] != self.base_id
+                                     and self.model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE], dtype=int)
         # ride-height -> leg-posture table for m1's per-episode random rail height
         self._lut = None
         if self.cfg.z_rail_randomize:
@@ -173,6 +208,9 @@ class DashEnv(gym.Env):
                         float(self.model.geom_size[g][0])
                         if int(self.model.geom_type[g]) == int(mujoco.mjtGeom.mjGEOM_SPHERE)
                         else float(self._toe_r_nominal))
+        self._col_gids_side = {g: (0 if mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, g)
+                                       .endswith("_L_col") else 1) for g in self._col_gids}
+        self._weight_n = float(np.sum(self.model.body_mass)) * float(-self.model.opt.gravity[2])
         self._air_time = np.zeros(2, np.float32)      # continuous seconds NOT grounded, per foot
         self._contact_time = np.zeros(2, np.float32)  # continuous seconds grounded, per foot
         self._grounded_prev = np.zeros(2, bool)
@@ -184,6 +222,7 @@ class DashEnv(gym.Env):
             _lut = np.load(str(PKG_DIR / "model" / "cpg_foot_lut.npz"), allow_pickle=True)
             self._ws_ref = np.asarray(_lut["nominal_toe"], float)
         self._push_countdown = 0
+        self._push_axis = None          # None = random direction; "x"/"y" = the eval protocol
 
         # nominal standing pose / targets from the keyframe
         self.key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, self.cfg.keyframe)
@@ -228,8 +267,11 @@ class DashEnv(gym.Env):
         # Two gait generators, selected by cfg.action_mode. They have different action widths (and,
         # via prev_action + the phase channel, different obs widths), so a checkpoint never crosses
         # between them — a CPG run only ever warm-starts from a CPG run.
+        self.latched = (self.cfg.action_mode == "latched")
         self.cpg_mode = (self.cfg.action_mode == "cpg")
-        if self.cpg_mode:
+        if self.latched:
+            self._init_latched_action()
+        elif self.cpg_mode:
             self.n_steer = cpg_gait.N_STEER if self.cfg.steer_enable else 0
             self.action_dim = cpg_gait.action_dim(self.n_steer, self.cfg.cpg_residual)
             self.spec_dim = cpg_gait.spec_dim(self.n_steer)
@@ -250,6 +292,10 @@ class DashEnv(gym.Env):
         # gait generator, the reward and the curriculum are the same in both arms; only the ankle
         # differs. (The action WIDTH still changes, so active runs are their own warm-start lineage.)
         self.gait_action_dim = self.action_dim
+        if self.latched and (self.n_ankle_act or self.cfg.imp_enable or self.cfg.steer_enable):
+            raise ValueError("action_mode='latched' carries impedance and steering INSIDE the spec "
+                             "and has no active-ankle tail: imp_enable/steer_enable must be False "
+                             "and the plant passive")
         self.action_dim += self.n_ankle_act
         # PER-STEP IMPEDANCE: per-leg kp/kd multipliers appended after the ankle tail, same
         # bolt-on contract as the ankle (decoders slice from the front; the generator never sees
@@ -307,9 +353,20 @@ class DashEnv(gym.Env):
         # (nu is 6 on the passive plants and 8 with actuated ankles — the ankle servo's encoder and
         # current are real onboard measurements, so the policy sees them like any other joint.)
         self.obs_base_vel = bool(self.cfg.obs_base_vel)
-        self.frame_dim = (3 * self.nu + 3 + 3 + (3 if self.obs_base_vel else 0)
-                          + self.phase_obs_dim + self.task_dim + self.action_dim)
-        obs_dim = self.frame_dim * self.cfg.history_len
+        if self.latched:
+            # v2 per-tick FRAME (33): motor pos/vel/torque 18, gravity 3, gyro 3, LP yaw 1,
+            # phase 2, previous residual 6 -- only what changes every tick is stacked. The latched
+            # spec (or the library reference) and the task are observed ONCE, outside the stack,
+            # in the once-block, together with the commit flag (its last entry = wrap_index).
+            self.frame_dim = 3 * self.nu + 3 + 3 + 1 + self.phase_obs_dim + gait_v2.N_RESIDUAL
+            self.once_dim = self._once_dim() + self.task_dim + 1
+        else:
+            self.frame_dim = (3 * self.nu + 3 + 3 + (3 if self.obs_base_vel else 0)
+                              + self.phase_obs_dim + self.task_dim + self.action_dim)
+            self.once_dim = 0
+        obs_dim = self.frame_dim * self.cfg.history_len + self.once_dim
+        self.n_actor_obs = int(obs_dim)
+        self.wrap_index = int(obs_dim - 1) if self.latched else -1
         # PRIVILEGED CRITIC TAIL (asymmetric actor-critic, standard in the SOTA velocity-command
         # stacks): sim-only ground truth appended AFTER the history block, so the ACTOR's slice is
         # simply obs[:frame_dim*history_len] and the tail never has to exist on hardware. The value
@@ -321,7 +378,8 @@ class DashEnv(gym.Env):
         #         (doubles as the supervised TARGET for the velocity-estimator head)
         #   [3:5] per-foot ground contact (toe OR heel), {0,1}
         #   [5]   base height error vs the settled stance (m)
-        self.priv_dim = self.PRIV_DIM if self.cfg.obs_privileged_critic else 0
+        self.priv_dim = ((self.PRIV_DIM_V2 if self.latched else self.PRIV_DIM)
+                         if self.cfg.obs_privileged_critic else 0)
         obs_dim += self.priv_dim
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
         # strided history: keep (history_len-1)*stride+1 raw frames but expose only every stride-th,
@@ -387,6 +445,9 @@ class DashEnv(gym.Env):
         # substeps (sim_dt = 1 ms, so substeps == ms); drop is the per-step hold-last-action prob.
         self._ctrl_jitter_substeps = 0
         self._ctrl_drop_prob = 0.0
+        # v2 state (latch, resync, thermal, wind, delay ring, library) -- inert on legacy plants
+        if self.latched:
+            self._init_latched_state()
         # optional zero-arg hook fired once per control step (frame capture / metrics / pacing)
         self.on_control_step = None
 
@@ -1023,6 +1084,18 @@ class DashEnv(gym.Env):
             self._noise.step_bias(self.np_random)
             motor_pos, motor_vel, motor_trq, grav, angv = self._noise.apply(
                 self.np_random, motor_pos, motor_vel, motor_trq, grav, angv, accel_body)
+        if self.latched:
+            # v2 FRAME (33). LP yaw from the MEASURED gyro (the Pi computes the same EMA); the
+            # previous residual is the only part of the old prev_action whose history carries
+            # information; the spec/task live in the once-block (see _obs).
+            self._yaw_lp_meas = (self._yaw_lp_a * self._yaw_lp_meas
+                                 + (1.0 - self._yaw_lp_a) * float(angv[2]))
+            self._accel_body_last = accel_body
+            phase_ch = np.array([np.sin(self._phase), np.cos(self._phase)])
+            parts = [motor_pos * s["motor_pos"], motor_vel * s["motor_vel"],
+                     motor_trq * s["motor_torque"], grav * s["gravity"], angv * s["ang_vel"],
+                     np.array([self._yaw_lp_meas * s["ang_vel"]]), phase_ch, self._prev_residual]
+            return np.concatenate(parts).astype(np.float32)
         parts = [motor_pos * s["motor_pos"], motor_vel * s["motor_vel"],
                  motor_trq * s["motor_torque"], grav * s["gravity"], angv * s["ang_vel"]]
         if self.obs_base_vel:                       # privileged; off in command mode
@@ -1038,6 +1111,11 @@ class DashEnv(gym.Env):
 
     def _obs(self):
         hist = self._history[self._hist_idx].reshape(-1)
+        if self.latched:
+            parts = [hist, self._once_block()]
+            if self.priv_dim:
+                parts.append(self._priv_tail_v2())
+            return np.concatenate(parts).astype(np.float32)
         if not self.priv_dim:
             return hist.astype(np.float32)
         # critic-only ground truth; layout documented at the priv_dim definition in __init__
@@ -1078,7 +1156,8 @@ class DashEnv(gym.Env):
                 self._task[:] = 0.0
             else:
                 self._task[0] = 1.0
-                self._task[1] = np.clip((self._sprint_D - self._sprint_d) / 100.0, 0.0, 1.0)
+                self._task[1] = np.clip((self._sprint_D - self._sprint_d)
+                                        / float(c.sprint_task_scale_m), 0.0, 1.0)
         else:                       # speed: run forever
             self._task[:] = 1.0
 
@@ -1116,7 +1195,7 @@ class DashEnv(gym.Env):
         # undo any per-step impedance gain writes from the previous episode BEFORE the DR draw:
         # PlantRandomizer restores its own snapshot when it runs, but on dr_enable=False arms it
         # cannot be relied on to clean up after the impedance channel.
-        if self.imp_dim:
+        if self.imp_dim or self.latched:
             self.model.actuator_gainprm[:self.n_gait_act, 0] = self._imp_pristine[0]
             self.model.actuator_biasprm[:self.n_gait_act, 1] = self._imp_pristine[1]
             self.model.actuator_biasprm[:self.n_gait_act, 2] = self._imp_pristine[2]
@@ -1126,7 +1205,7 @@ class DashEnv(gym.Env):
         self._dr_torque_scale = ep["torque_scale"]
         self._sag_scale, self._sag_state = 1.0, 0.0
         self._apply_torque_limit()
-        if self.imp_dim:
+        if self.imp_dim or self.latched:
             # THIS episode's base gains (post-DR draw): the per-step channel scales these
             self._imp_base = (self.model.actuator_gainprm[:self.n_gait_act, 0].copy(),
                               self.model.actuator_biasprm[:self.n_gait_act, 1].copy(),
@@ -1167,10 +1246,11 @@ class DashEnv(gym.Env):
         mujoco.mj_forward(self.model, self.data)
         self._stand_torque = self.data.actuator_force[:self.nu].copy()
         n = self.cfg.reset_joint_noise
-        self.data.qpos[self.hinge_qadr_start:] += self.np_random.uniform(
-            -n, n, self.model.nq - self.hinge_qadr_start)
+        self.data.qpos[self._noise_qadr] += self.np_random.uniform(-n, n, self._noise_qadr.size)
         self.data.qvel[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
+        if self.latched:
+            self._reset_latched(ep)
         self._prev_action[:] = 0.0
         self._prev_applied[:] = 0.0
         self._prev_motor_cmd[:] = 0.0
@@ -1298,10 +1378,12 @@ class DashEnv(gym.Env):
         progress_frac = float(np.clip(cmd_speed / max(c.cmd_v_fwd_max, 1e-6), 0.0, 1.0))
         return cmd_speed, progress_frac
 
-    def _run_physics(self, target):
+    def _run_physics(self, target, gains=None):
         """One control step of plant: EMA-filter the target, clip to ctrlrange, run
         control_decimation sim substeps (OR-accumulating foot contact so a sub-20 ms hop can't
         pass as continuous flight/contact at the 50 Hz boundary)."""
+        if self.latched:
+            return self._run_physics_latched(target, gains)
         c = self.cfg
         self._filt_target = c.action_filter * self._filt_target + (1 - c.action_filter) * target
         tgt = np.clip(self._filt_target, self.ctrl_lo, self.ctrl_hi)
@@ -1347,7 +1429,82 @@ class DashEnv(gym.Env):
                                      float(np.max(np.abs(self.data.qvel[self._ankle_dof]))))
         return contact_acc
 
+    def _pre_physics_forces(self, pitch, pitch_rate):
+        """Everything that writes qvel / xfrc_applied / qfrc_applied BEFORE the physics runs:
+        pushes, trips, the pitch-assist wheel, the ankle-torque reflex and (v2) the wind. Shared
+        by the legacy and the latched step, in this exact order (the RNG stream is part of the
+        legacy bit-identity)."""
+        c = self.cfg
+        # gentle random shove BEFORE the physics runs (free translational axes only).
+        # Scaled by the DR curriculum: measured on the walk_fwd_easy walker with paired seeds,
+        # pushes alone take it from 3/12 surviving episodes to 0/12 -- the same cost as full-width
+        # plant DR, which HAS a ramp. Leaving them at full width from step 0 is what pinned
+        # walk_fwd2 at 2 s for 300 M steps.
+        adv = self._dr.scale if self.cfg.adversity_curriculum else 1.0
+        self._push_countdown -= 1
+        if self._push_countdown <= 0:
+            ang = self.np_random.uniform(0.0, 2.0 * np.pi)
+            if self._push_axis is not None:          # eval protocol: one body axis, random sign
+                ang = (0.0 if self._push_axis == "x" else 0.5 * np.pi) + (np.pi if ang > np.pi else 0.0)
+            dv = c.push_dv
+            if c.push_dv_range[1] > c.push_dv_range[0]:      # v2: |dv| drawn per push
+                dv = float(self.np_random.uniform(*c.push_dv_range))
+            if not self.base_lock[0]:
+                self.data.qvel[self._base_x_dadr] += adv * dv * np.cos(ang)
+            if not self.base_lock[1]:
+                self.data.qvel[self._base_y_dadr] += adv * dv * np.sin(ang)
+            self._push_countdown = self._next_push_in()
+
+        # TRIP: a swinging toe catches something that isn't in the map. Modelled as a brief force
+        # opposing the swing rather than as terrain geometry, because the point is not to teach
+        # the policy one particular obstacle — it is to make "my foot stopped moving and my torso
+        # is rotating over it" a state the policy has recovered from thousands of times. That is
+        # the RL-native version of a hand-written raise-the-foot reflex, and unlike a detector it
+        # cannot fail to fire.
+        self.data.xfrc_applied[:] = 0.0
+        if self._trip_left > 0:
+            self.data.xfrc_applied[self._trip_body, 0] = self._trip_force
+            self._trip_left -= 1
+        elif c.trip_prob > 0.0 and self.np_random.random() < adv * c.trip_prob:
+            air = ~(self._foot_contacts() | (self._toe_heights() < c.grounded_h))
+            cand = np.flatnonzero(air)
+            if cand.size:
+                i = int(self.np_random.choice(cand))
+                self._trip_body = self._foot_bids[i]
+                # opposes travel, so a forward-running robot gets caught forward-on (the case that
+                # actually matters); sign taken from base velocity, +x when standing still
+                vx_now = float(self._vel_body()[0])
+                self._trip_force = -(1.0 if vx_now >= 0.0 else -1.0) * float(
+                    self.np_random.uniform(*c.trip_force_range))
+                self._trip_left = max(1, int(round(c.trip_duration_s / self.control_dt)))
+
+        # decaying pitch-assist (m2->m3 bridge): external spring-damper torque on the base pitch
+        # joint toward level, scaled by the curriculum (1 -> 0 over training). Written EVERY step
+        # (0 when faded/disabled) so a stale qfrc_applied can never linger; held across the physics
+        # substeps. Sim-only helper -> the final assist=0 policy is hardware-valid.
+        if c.pitch_assist_kp > 0.0:
+            pq = float(self.data.qpos[self._base_pitch_qadr])
+            pqd = float(self.data.qvel[self._base_pitch_dadr])
+            self._assist_torque = -self._pitch_assist * (c.pitch_assist_kp * pq
+                                                         + c.pitch_assist_kd * pqd)
+            self.data.qfrc_applied[self._base_pitch_dadr] = self._assist_torque
+
+        # ankle-torque reflex (emulates an ACTUATED ankle): a pitch-restoring torque at the ankle
+        # joints, applied only to a GROUNDED foot (ankle strategy works only in stance). Mirrored
+        # L/R axes -> +u on L, -u on R. Written every step (0 when off/airborne) so no stale torque.
+        if c.ankle_kp > 0.0:
+            u_ank = -float(np.clip(c.ankle_kp * pitch + c.ankle_kd * pitch_rate,
+                                   -c.ankle_clip, c.ankle_clip))
+            gnd = self._foot_contacts()
+            self.data.qfrc_applied[self._ankle_dadr[0]] = u_ank if gnd[0] else 0.0
+            self.data.qfrc_applied[self._ankle_dadr[1]] = -u_ank if gnd[1] else 0.0
+
+        if self.latched:
+            self._apply_wind()
+
     def step(self, action):
+        if self.latched:
+            return self._step_latched(action)
         c = self.cfg
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
         # dropped inference (sim2real): with prob ctrl_drop_prob the Pi missed its deadline this
@@ -1437,64 +1594,7 @@ class DashEnv(gym.Env):
             self._imp_rate_sq = float(np.sum((ia - self._imp_prev_a) ** 2))
             self._imp_prev_a = ia.copy()
 
-        # gentle random shove BEFORE the physics runs (free translational axes only).
-        # Scaled by the DR curriculum: measured on the walk_fwd_easy walker with paired seeds,
-        # pushes alone take it from 3/12 surviving episodes to 0/12 -- the same cost as full-width
-        # plant DR, which HAS a ramp. Leaving them at full width from step 0 is what pinned
-        # walk_fwd2 at 2 s for 300 M steps.
-        adv = self._dr.scale if self.cfg.adversity_curriculum else 1.0
-        self._push_countdown -= 1
-        if self._push_countdown <= 0:
-            ang = self.np_random.uniform(0.0, 2.0 * np.pi)
-            if not self.base_lock[0]:
-                self.data.qvel[self._base_x_dadr] += adv * c.push_dv * np.cos(ang)
-            if not self.base_lock[1]:
-                self.data.qvel[self._base_y_dadr] += adv * c.push_dv * np.sin(ang)
-            self._push_countdown = self._next_push_in()
-
-        # TRIP: a swinging toe catches something that isn't in the map. Modelled as a brief force
-        # opposing the swing rather than as terrain geometry, because the point is not to teach
-        # the policy one particular obstacle — it is to make "my foot stopped moving and my torso
-        # is rotating over it" a state the policy has recovered from thousands of times. That is
-        # the RL-native version of a hand-written raise-the-foot reflex, and unlike a detector it
-        # cannot fail to fire.
-        self.data.xfrc_applied[:] = 0.0
-        if self._trip_left > 0:
-            self.data.xfrc_applied[self._trip_body, 0] = self._trip_force
-            self._trip_left -= 1
-        elif c.trip_prob > 0.0 and self.np_random.random() < adv * c.trip_prob:
-            air = ~(self._foot_contacts() | (self._toe_heights() < c.grounded_h))
-            cand = np.flatnonzero(air)
-            if cand.size:
-                i = int(self.np_random.choice(cand))
-                self._trip_body = self._foot_bids[i]
-                # opposes travel, so a forward-running robot gets caught forward-on (the case that
-                # actually matters); sign taken from base velocity, +x when standing still
-                vx_now = float(self._vel_body()[0])
-                self._trip_force = -(1.0 if vx_now >= 0.0 else -1.0) * float(
-                    self.np_random.uniform(*c.trip_force_range))
-                self._trip_left = max(1, int(round(c.trip_duration_s / self.control_dt)))
-
-        # decaying pitch-assist (m2->m3 bridge): external spring-damper torque on the base pitch
-        # joint toward level, scaled by the curriculum (1 -> 0 over training). Written EVERY step
-        # (0 when faded/disabled) so a stale qfrc_applied can never linger; held across the physics
-        # substeps. Sim-only helper -> the final assist=0 policy is hardware-valid.
-        if c.pitch_assist_kp > 0.0:
-            pq = float(self.data.qpos[self._base_pitch_qadr])
-            pqd = float(self.data.qvel[self._base_pitch_dadr])
-            self._assist_torque = -self._pitch_assist * (c.pitch_assist_kp * pq
-                                                         + c.pitch_assist_kd * pqd)
-            self.data.qfrc_applied[self._base_pitch_dadr] = self._assist_torque
-
-        # ankle-torque reflex (emulates an ACTUATED ankle): a pitch-restoring torque at the ankle
-        # joints, applied only to a GROUNDED foot (ankle strategy works only in stance). Mirrored
-        # L/R axes -> +u on L, -u on R. Written every step (0 when off/airborne) so no stale torque.
-        if c.ankle_kp > 0.0:
-            u_ank = -float(np.clip(c.ankle_kp * pitch + c.ankle_kd * pitch_rate,
-                                   -c.ankle_clip, c.ankle_clip))
-            gnd = self._foot_contacts()
-            self.data.qfrc_applied[self._ankle_dadr[0]] = u_ank if gnd[0] else 0.0
-            self.data.qfrc_applied[self._ankle_dadr[1]] = -u_ank if gnd[1] else 0.0
+        self._pre_physics_forces(pitch, pitch_rate)
 
         contact_acc = self._run_physics(target)
         self._update_torque_sag()
@@ -1655,7 +1755,10 @@ class DashEnv(gym.Env):
         # anti-circling, observable version: sustained gyro-z is what a circler cannot avoid and
         # what the policy CAN see (unlike absolute heading — see config.w_yaw_rate). 0 = off.
         if c.w_yaw_rate > 0.0:
-            t["yaw_rate"] = self._pen(-c.w_yaw_rate * float(angv[2]) ** 2)
+            # v2: bill the LOW-PASSED yaw rate (drift, not gait wobble) -- the same filtered
+            # signal the actor observes (§03/§10)
+            yaw_sig = self._yaw_lp_true if (self.latched and c.yaw_lp_tau_s > 0.0) else float(angv[2])
+            t["yaw_rate"] = self._pen(-c.w_yaw_rate * yaw_sig ** 2)
         else:
             t["yaw_rate"] = 0.0
 
@@ -1811,6 +1914,12 @@ class DashEnv(gym.Env):
         if self.z_locked:           # height/vz are meaningless when Z is railed
             t["height"] = 0.0
             t["vz"] = 0.0
+        elif c.height_floor_m > 0.0:
+            # v2 (§10): a fence around the validated ride band (LUT feasible band 0.81-1.04 m),
+            # quadratic BELOW the floor only; no upper bound, which would tax the flight phase
+            t["height"] = self._pen(-c.w_height
+                                    * max(0.0, c.height_floor_m - float(self.data.qpos[2])) ** 2)
+            t["vz"] = self._pen(-c.w_vz * self.data.qvel[2] ** 2)
         else:
             t["height"] = self._pen(-c.w_height * (self.data.qpos[2] - self.height_target) ** 2)
             t["vz"] = self._pen(-c.w_vz * self.data.qvel[2] ** 2)
@@ -1833,7 +1942,728 @@ class DashEnv(gym.Env):
             - self.default_motor_pos[self.hip_roll_idx]
         t["hip_roll"] = self._pen(-c.w_hip_roll * float(np.sum(hr ** 2)))
 
+        # ----- v2 terms (artifact §10); every one is exactly 0.0 at the legacy weights -----
+        # lane keeping: the 1.22 m lane is the deliverable's real constraint (§08)
+        t["lane"] = (self._pen(-c.w_lane * max(0.0, abs(float(self.data.qpos[1])) - c.lane_free_m) ** 2)
+                     if c.w_lane > 0.0 else 0.0)
+        # thermal budget: quadratic above thermal_pen_start of dT_max, per motor (§07)
+        if c.w_thermal > 0.0 and self.latched and self._thermal_on:
+            over = np.maximum(self._theta - c.thermal_pen_start, 0.0)
+            t["thermal"] = self._pen(-c.w_thermal * float(np.sum(over ** 2)))
+        else:
+            t["thermal"] = 0.0
+        # spec change billed ONCE per cycle at commit; no phase gate anywhere (the m3 audit rule)
+        t["spec_cycle"] = (self._pen(-c.w_spec_cycle * self._spec_change_sq)
+                           if c.w_spec_cycle > 0.0 and self.latched else 0.0)
+        # standing price on the five relationship knobs: knobs at zero IS the mirror gait
+        t["knob"] = (self._pen(-c.w_knob * float(np.sum(gait_v2.knob_vector(self._spec_live, self._lay) ** 2)))
+                     if c.w_knob > 0.0 and self.latched else 0.0)
+        # library variant: the stabilizer's small tracking bill against the reference (§09 st.3)
+        if c.w_track > 0.0 and self.latched and self._q_ref is not None:
+            dq = self.data.qpos[self.act_qadr[:self.n_gait_act]] - self._q_ref
+            t["track"] = self._pen(-c.w_track * float(np.sum(dq ** 2)))
+        else:
+            t["track"] = 0.0
+
         return float(sum(t.values())), t
+
+
+    # =====================================================================================
+    # DASH-01 Walker v2 -- the LATCHED gait spec (artifact rev 2026-09-09). Everything in this
+    # block is reached only when cfg.action_mode == "latched"; legacy plants never enter it.
+    # =====================================================================================
+    def _init_latched_action(self):
+        c = self.cfg
+        self.n_steer = 0
+        self._cpg_lut = None
+        self.phase_obs_dim = 2
+        self._lay = gait_v2.Layout(c.n_harmonics)
+        self.spec_source = str(c.spec_source)
+        if self.spec_source not in ("policy", "library"):
+            raise ValueError(f"spec_source {self.spec_source!r} not in ('policy', 'library')")
+        if c.drive_bandwidth_hz > 0.0 or c.action_filter > 0.0:
+            raise ValueError("latched mode has ONE drive lag (armature + substep delay): set "
+                             "drive_bandwidth_hz=0 and action_filter=0 (no EMA target filter)")
+        if self.spec_source == "policy":
+            # [0:44] spec, latched at phi-wrap; [44:50] residual, every tick
+            self.spec_dim = self._lay.spec_dim
+            self.action_dim = self._lay.action_dim
+            self.latched_slice = slice(0, self.spec_dim)
+        else:
+            # [0:6] residual, every tick; [6:9] optional latched mods (df/f, amplitude, lift)
+            self.n_lib_latched = 3 if c.library_latched_dims else 0
+            self.spec_dim = 0
+            self.action_dim = gait_v2.N_RESIDUAL + self.n_lib_latched
+            self.latched_slice = slice(gait_v2.N_RESIDUAL, self.action_dim)
+
+    def _once_dim(self):
+        """Width of the once-block MINUS task and commit: the live spec (policy variant) or the
+        library reference q_ref(phi) 6 + qdot_ref(phi) 6 + q_ref(phi + 1/4 cycle) 6 + td_hat 2."""
+        return self.spec_dim if self.spec_source == "policy" else 3 * self.n_gait_act + 2
+
+    def _init_latched_state(self):
+        c = self.cfg
+        lay = self._lay
+        self._spec_live = gait_v2.neutral_spec(lay)
+        self._commit_flag = True             # cycle 0 opens at reset: the first spec commits
+        self._cycle_n = 0
+        self._spec_change_sq = 0.0
+        self._f_hz = gait_v2.frequency(0.0, c.gait_freq_hz)
+        self._q_ref = None
+        # contact-triggered resync (§05)
+        self._kappa = float(c.resync_kappa)
+        self._td_hat = np.array([0.0, np.pi])   # the stance windows' opening phases (L, R)
+        self._resync_done = np.zeros(2, bool)
+        self._td_err_last = np.zeros(2)
+        # LP yaw (true for the reward, measured for the obs)
+        self._yaw_lp_a = (float(np.exp(-self.control_dt / c.yaw_lp_tau_s))
+                          if c.yaw_lp_tau_s > 0.0 else 0.0)
+        self._yaw_lp_true = 0.0
+        self._yaw_lp_meas = 0.0
+        self._accel_body_last = np.zeros(3)
+        # substep-granular command ring: (target 6 | kp scale 6 | kd scale 6) per 1 ms substep
+        self._ring_len = 64
+        self._ring = np.zeros((self._ring_len, 3 * self.nu))
+        self._ring_head = 0
+        self._delay_ms = float(c.drive_delay_ms)
+        self._delay_sub = int(round(self._delay_ms * 1e-3 / self.sim_dt))
+        self._delay_override_ms = None
+        self._sub_n = c.control_decimation
+        # thermal (§07)
+        self._thermal_on = bool(c.thermal_enable)
+        self._tau_cont = np.asarray(c.thermal_tau_cont, dtype=float)[:self.nu]
+        if self._thermal_on and self._tau_cont.size != self.nu:
+            raise ValueError(f"thermal_tau_cont needs {self.nu} entries")
+        self._theta = np.zeros(self.nu)
+        self._theta_cmax = 1.0
+        self._theta_override = None
+        self._tau_sq_acc = np.zeros(self.nu)
+        # wind (§08)
+        self._wind_on = bool(c.wind_force_max_n > 0.0 or c.gust_force_n > 0.0)
+        self._wind_f = np.zeros(2)
+        self._wind_override = None
+        self._gust_left = 0
+        self._gust_countdown = 10 ** 9
+        self._gust_vec = np.zeros(2)
+        self._ep_draw = {}
+        # library variant (§09)
+        self._raibert = None
+        self._lib_entries = None
+        self._lib_override = None
+        self._theta_ep = None
+        self._lib_stand = None
+        self._lib_v_ref = 0.0
+        if self.spec_source == "library":
+            self._lib_entries = self._load_library(c.library_path)
+            if c.raibert_enable:
+                self._raibert = RaibertPrior(c.raibert_kp, c.raibert_ki, c.raibert_imax,
+                                             c.raibert_ky, c.raibert_kr, c.offset_max_rad,
+                                             c.raibert_roll_tau_s)
+
+    # ---- per-episode -----------------------------------------------------------------------
+    def _reset_latched(self, ep):
+        c = self.cfg
+        self._ep_draw = dict(ep)
+        self._spec_live[:] = gait_v2.neutral_spec(self._lay)
+        self._commit_flag = True
+        self._cycle_n = 0
+        self._spec_change_sq = 0.0
+        self._q_ref = None
+        self._td_hat[:] = (0.0, np.pi)
+        self._resync_done[:] = False
+        self._kappa = float(ep.get("kappa", c.resync_kappa))
+        self._yaw_lp_true = 0.0
+        self._yaw_lp_meas = 0.0
+        self._accel_body_last[:] = 0.0
+        self._delay_ms = float(ep.get("delay_ms", c.drive_delay_ms))
+        if self._delay_override_ms is not None:
+            self._delay_ms = float(self._delay_override_ms)
+        self._delay_sub = int(round(self._delay_ms * 1e-3 / self.sim_dt))
+        if self._delay_sub >= self._ring_len:
+            raise ValueError(f"delay {self._delay_ms} ms exceeds the command ring")
+        self._theta[:] = np.asarray(ep.get("theta0", np.zeros(self.nu)), dtype=float)[:self.nu]
+        if self._theta_override is not None:
+            self._theta[:] = self._theta_override
+        self._theta_cmax = float(ep.get("thermal_cmax", 1.0))
+        self._tau_sq_acc[:] = 0.0
+        if self._wind_on:
+            w = float(c.wind_force_max_n)
+            self._wind_f[:] = self.np_random.uniform(-w, w, 2) if w > 0 else 0.0
+            if self._wind_override is not None:
+                self._wind_f[:] = self._wind_override
+            self._gust_left = 0
+            self._gust_countdown = self._next_gust_in()
+        if self.spec_source == "library":
+            self._lib_reset()
+        # the ring holds the last 64 ms of commands: at reset, the stance hold
+        gains0 = (np.ones(self.nu), np.ones(self.nu))
+        self.prime_command_ring(self._spec_live, reflex_free_hold=True)
+        self._set_gains(*gains0)
+
+    def _next_gust_in(self):
+        lo, hi = self.cfg.gust_interval_s
+        if self.cfg.gust_force_n <= 0.0 or hi <= 0.0:
+            return 10 ** 9
+        return max(1, int(round(float(self.np_random.uniform(lo, hi)) / self.control_dt)))
+
+    # ---- the step -------------------------------------------------------------------------
+    def _step_latched(self, action):
+        c = self.cfg
+        lay = self._lay
+        action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        if self._ctrl_drop_prob > 0.0 and self.np_random.random() < self._ctrl_drop_prob:
+            action = self._prev_action.copy()
+        # ---- the LATCH REGISTER: the spec in this action reaches the generator only if this
+        # tick is the first of a cycle (the commit flag the policy just observed); otherwise it
+        # is discarded -- not penalised, discarded, so there is no gate to park the clock against
+        committed = bool(self._commit_flag)
+        self._spec_change_sq = 0.0
+        if self.spec_source == "policy":
+            if committed:
+                new = action[:self.spec_dim].astype(np.float64)
+                if self._cycle_n > 0:
+                    d = new - self._spec_live
+                    self._spec_change_sq = float(np.dot(d, d))
+                self._spec_live[:] = new
+            residual = action[lay.residual].astype(np.float64)
+        else:
+            residual = action[:gait_v2.N_RESIDUAL].astype(np.float64)
+            if committed:
+                self._lib_commit(action[gait_v2.N_RESIDUAL:])
+        spec = self._spec_live
+        f = gait_v2.frequency(spec[lay.freq], c.gait_freq_hz)
+        self._f_hz = f
+        phi = self._phase
+        _, _, delta = gait_v2.leg_phases(phi, spec, c, lay)
+        self._phase_reward = phi
+        self._phase_reward_R = phi + np.pi - delta
+        grav = self._gravity_body()
+        angv = self._ang_vel_body()
+        roll = float(grav[1])
+        roll_rate = float(angv[0])
+        pitch = float(grav[0])
+        pitch_rate = float(angv[1])
+        if c.pitch_reflex_rate_lp > 0.0:
+            self._reflex_prate_filt = (c.pitch_reflex_rate_lp * self._reflex_prate_filt
+                                       + (1.0 - c.pitch_reflex_rate_lp) * pitch_rate)
+            pitch_rate = self._reflex_prate_filt
+        if self._raibert is not None:
+            self._raibert.filter_roll(roll, self.control_dt)
+        target6 = gait_v2.assemble(spec, phi, roll, roll_rate, self._nominal6, c,
+                                   pitch=pitch, pitch_rate=pitch_rate, layout=lay)
+        # the reflex-free reference (a pure function of phi): the tracking bill and once-block
+        self._q_ref = gait_v2.assemble(spec, phi, 0.0, 0.0, self._nominal6, c, layout=lay,
+                                       reflexes=False) if (c.w_track > 0.0) else None
+        target = target6 + c.residual_scale * residual
+        kp_s, kd_s = gait_v2.gains(spec, phi, c, lay)
+        motor_cmd = ((target - self.nominal_ctrl) / c.action_scale).astype(np.float32)
+        self._residual_sq = float(np.sum(residual ** 2))
+        self._residual_rate_sq = float(np.sum((residual - self._prev_residual) ** 2))
+        self._prev_residual[:] = residual
+        self._pre_physics_forces(pitch, pitch_rate)
+        contact_acc = self._run_physics(target, gains=(kp_s, kd_s))
+        self._update_torque_sag()
+        if self._thermal_on:
+            self._thermal_step()
+        self._elapsed_t += self.control_dt
+        finished = c.objective == "sprint" and self._update_sprint()
+        wz = float(self._ang_vel_body()[2])
+        self._yaw_lp_true = self._yaw_lp_a * self._yaw_lp_true + (1.0 - self._yaw_lp_a) * wz
+        # advance the clock (+ the contact resync); this is what sets the NEXT tick's commit flag
+        grounded_now = contact_acc | (self._toe_heights() < c.grounded_h)
+        self._advance_phase_latched(f, grounded_now)
+        self._step_n += 1
+        reward, terms = self._reward(motor_cmd, contact_acc)
+        self._update_task()
+        self._push_frame(self._proprio())
+        reward *= self._reward_dt_scale
+        reward = max(reward, -c.step_reward_floor * self._reward_dt_scale)
+        terminated = self._fallen()
+        if terminated:
+            reward -= c.fall_penalty
+        elif finished:
+            terminated = True
+            reward += c.finish_bonus
+        truncated = self._step_n >= self.max_steps
+        self._prev_action[:] = action
+        self._prev_applied[:] = action           # no action delay in latched mode (gait_diag)
+        self._prev_motor_cmd[:] = motor_cmd
+        if self.on_control_step is not None:
+            self.on_control_step()
+        info = {"reward_terms": terms}
+        _lim = self.model.actuator_forcerange[:self.nu, 1]
+        info["torque_util"] = float(np.mean(
+            np.abs(self.data.actuator_force[:self.nu]) / np.maximum(_lim, 1e-6)))
+        _air = ~(self._foot_contacts() | (self._toe_heights() < c.grounded_h))
+        info["foot_air"] = _air.astype(np.float64)
+        info["swing_frac"] = float(_air.mean())
+        if c.objective == "sprint":
+            info["sprint"] = self._sprint_info(finished)
+        info.update(self._ankle_info())
+        info["v2"] = dict(commit=committed, f_hz=float(f), cycle=int(self._cycle_n), phi=float(phi),
+                          theta_max=float(self._theta.max()) if self._thermal_on else 0.0,
+                          delay_ms=float(self._delay_ms), kappa=float(self._kappa),
+                          td_err=self._td_err_last.copy(), spec_change=self._spec_change_sq)
+        return self._obs(), float(reward), bool(terminated), bool(truncated), info
+
+    def _advance_phase_latched(self, f, grounded_now):
+        """Advance the gait clock at the LATCHED frequency and apply the contact-triggered resync
+        (artifact §05): on the first touchdown of foot j this cycle, the clock closes a fraction
+        kappa of the timing error against that foot's habitual touchdown phase (a slow EMA), but
+        only inside a +-window around it -- a double contact or a stumble does not move the
+        clock. A wrap (free-running or carried across 2pi by the resync) sets the commit flag the
+        next observation carries; the spec then latches from THAT tick's action (+1 tick)."""
+        c = self.cfg
+        two_pi = 2.0 * np.pi
+        phi = float(self._phase)
+        td = grounded_now & ~self._grounded_prev
+        corr = 0.0
+        for j in range(2):
+            if not td[j] or self._resync_done[j]:
+                continue
+            self._resync_done[j] = True
+            err = (phi - self._td_hat[j] + np.pi) % two_pi - np.pi      # wrap(phi_raw - td_hat)
+            self._td_err_last[j] = err
+            inside = abs(err) <= c.resync_window_cycle * two_pi
+            if inside and self._cycle_n >= c.resync_warmup_cycles and self._kappa > 0.0:
+                corr += self._kappa * (-err)                           # kappa * wrap(td_hat - phi)
+            # habit update from the PRE-resync phase; this is the gait's own touchdown timing
+            self._td_hat[j] = (self._td_hat[j] + err / max(c.resync_n_ema, 1.0)) % two_pi
+        phi = max(phi + corr, 0.0)          # never re-enter the previous cycle
+        phi += two_pi * f * self.control_dt
+        if phi >= two_pi:
+            phi -= two_pi
+            self._commit_flag = True
+            self._cycle_n += 1
+            self._resync_done[:] = False
+        else:
+            self._commit_flag = False
+        self._phase = phi % two_pi
+
+    # ---- plant pieces ---------------------------------------------------------------------
+    def _set_gains(self, kp_s, kd_s):
+        ng = self.n_gait_act
+        self.model.actuator_gainprm[:ng, 0] = self._imp_base[0] * kp_s[:ng]
+        self.model.actuator_biasprm[:ng, 1] = self._imp_base[1] * kp_s[:ng]
+        self.model.actuator_biasprm[:ng, 2] = self._imp_base[2] * kd_s[:ng]
+
+    def _run_physics_latched(self, target, gains):
+        """The v2 drive: clip, slew-limit (no-load speed cap), homing offset, then push the
+        (target, kp, kd) command through the substep delay ring so what the plant sees is the
+        command from delay_ms ago -- one transport delay, at 1 kHz granularity, on the same
+        frame the gains ride. Substep torque is accumulated for the thermal node."""
+        c = self.cfg
+        tgt = np.clip(target, self.ctrl_lo, self.ctrl_hi)
+        if self._vel_accel_limited:
+            dt = self.control_dt
+            v_des = (tgt - self._prev_cmd_pos) / dt
+            if c.motor_accel_limit > 0.0:
+                dv = c.motor_accel_limit * dt
+                v_des = np.clip(v_des, self._prev_cmd_vel - dv, self._prev_cmd_vel + dv)
+            np.clip(v_des, -self._motor_vel_limit, self._motor_vel_limit, out=v_des)
+            tgt = self._prev_cmd_pos + v_des * dt
+            self._prev_cmd_vel = v_des
+            self._prev_cmd_pos = tgt.copy()
+        if c.dr_joint_zero_deg > 0.0:
+            tgt = tgt + self._noise.zero_offset[:len(tgt)]
+        kp_s, kd_s = gains
+        cmd = np.concatenate([tgt, kp_s, kd_s])
+        n = c.control_decimation
+        if self._ctrl_jitter_substeps > 0:
+            n = max(1, n + int(self.np_random.integers(
+                -self._ctrl_jitter_substeps, self._ctrl_jitter_substeps + 1)))
+        contact_acc = np.zeros(2, bool)
+        ring, L, nu = self._ring, self._ring_len, self.nu
+        for _ in range(n):
+            ring[self._ring_head] = cmd
+            ap = ring[(self._ring_head - self._delay_sub) % L]
+            self._ring_head = (self._ring_head + 1) % L
+            self.data.ctrl[:] = ap[:nu]
+            self._set_gains(ap[nu:2 * nu], ap[2 * nu:])
+            if self._motor_ts_curve:
+                self._apply_motor_torque_speed()
+            mujoco.mj_step(self.model, self.data)
+            if not contact_acc.all():
+                contact_acc |= self._foot_contacts()
+            if self._thermal_on:
+                self._tau_sq_acc += self.data.actuator_force[:nu] ** 2
+        self._sub_n = n
+        return contact_acc
+
+    def prime_command_ring(self, spec, reflex_free_hold=False):
+        """Fill the delay ring with what the generator WOULD have commanded over the last
+        ring_len substeps at `spec` (phases phi = -k * 2 pi f dt_sub), so a periodic orbit's
+        delayed commands are consistent at the section (the return-map solver) and an episode
+        does not start with 64 ms of zeros. reflex_free_hold: the standing hold (targets at the
+        nominal, gains neutral) -- what a fresh episode starts from."""
+        c = self.cfg
+        lay = self._lay
+        f = gait_v2.frequency(spec[lay.freq], c.gait_freq_hz)
+        nu = self.nu
+        for k in range(self._ring_len):
+            if reflex_free_hold:
+                tgt = np.asarray(self.nominal_ctrl, dtype=float).copy()
+                kp_s, kd_s = np.ones(nu), np.ones(nu)
+            else:
+                ph = -(self._ring_len - k) * 2.0 * np.pi * f * self.sim_dt
+                tgt = gait_v2.assemble(spec, ph, 0.0, 0.0, self._nominal6, c, layout=lay,
+                                       reflexes=False)
+                kp_s, kd_s = gait_v2.gains(spec, ph, c, lay)
+            self._ring[k] = np.concatenate([np.clip(tgt, self.ctrl_lo, self.ctrl_hi), kp_s, kd_s])
+        self._ring_head = 0
+        # the slew limiter's memory: the last two ticks of the same trajectory
+        if reflex_free_hold:
+            self._prev_cmd_pos[:] = self.nominal_ctrl
+            self._prev_cmd_vel[:] = 0.0
+        else:
+            dphi = 2.0 * np.pi * f * self.control_dt
+            t1 = gait_v2.assemble(spec, -dphi, 0.0, 0.0, self._nominal6, c, layout=lay, reflexes=False)
+            t2 = gait_v2.assemble(spec, -2 * dphi, 0.0, 0.0, self._nominal6, c, layout=lay, reflexes=False)
+            self._prev_cmd_pos[:] = np.clip(t1, self.ctrl_lo, self.ctrl_hi)
+            self._prev_cmd_vel[:] = (t1 - t2) / self.control_dt
+
+    def _thermal_step(self):
+        """One control tick of the single-node winding model per motor (artifact §07):
+        tau_th * dtheta/dt = (tau_rms / tau_cont)^2 / c_max - theta, theta = dT / dT_max."""
+        c = self.cfg
+        n = max(int(self._sub_n), 1)
+        q = (self._tau_sq_acc / n) / (self._tau_cont ** 2) / max(self._theta_cmax, 1e-6)
+        self._theta += (self.control_dt / c.thermal_tau_s) * (q - self._theta)
+        self._tau_sq_acc[:] = 0.0
+
+    def _apply_wind(self):
+        """Constant body-frame force (steady wind) + gust steps, on the base (artifact §08)."""
+        if not self._wind_on:
+            return
+        c = self.cfg
+        adv = self._dr.scale if c.adversity_curriculum else 1.0
+        f_body = self._wind_f.copy()
+        if self._gust_left > 0:
+            f_body += self._gust_vec
+            self._gust_left -= 1
+        else:
+            self._gust_countdown -= 1
+            if self._gust_countdown <= 0 and c.gust_force_n > 0.0:
+                axis = int(self.np_random.integers(0, 2))
+                sign = 1.0 if self.np_random.random() < 0.5 else -1.0
+                self._gust_vec[:] = 0.0
+                self._gust_vec[axis] = sign * c.gust_force_n
+                self._gust_left = max(1, int(round(c.gust_duration_s / self.control_dt)))
+                self._gust_countdown = self._next_gust_in()
+                f_body += self._gust_vec
+        if not np.any(f_body):
+            return
+        R = self._base_rot()
+        self.data.xfrc_applied[self.base_id, 0:3] += adv * (R @ np.array([f_body[0], f_body[1], 0.0]))
+
+    def _contact_normal_forces(self):
+        """Per-foot normal ground force (N), toe + heel, from the constraint solver."""
+        out = np.zeros(2)
+        f6 = np.zeros(6)
+        for i in range(self.data.ncon):
+            con = self.data.contact[i]
+            pair = (con.geom1, con.geom2)
+            if self.floor_gid not in pair:
+                continue
+            g = pair[1] if pair[0] == self.floor_gid else pair[0]
+            if g not in self._col_gids:
+                continue
+            mujoco.mj_contactForce(self.model, self.data, i, f6)
+            side = self._col_gids_side[g]
+            out[side] += abs(float(f6[0]))
+        return out
+
+    # ---- observation pieces ----------------------------------------------------------------
+    def _once_block(self):
+        c = self.cfg
+        lay = self._lay
+        commit = np.array([1.0 if self._commit_flag else 0.0], dtype=np.float64)
+        if self.spec_source == "policy":
+            # the LIVE latched spec: what is driving the legs, not what the policy last emitted
+            return np.concatenate([self._spec_live, self._task, commit])
+        s = c.obs_scales
+        spec = self._spec_live
+        phi = float(self._phase)
+        f = gait_v2.frequency(spec[lay.freq], c.gait_freq_hz)
+        nom = np.asarray(self._nominal6, dtype=float)
+        q0 = gait_v2.assemble(spec, phi, 0.0, 0.0, nom, c, layout=lay, reflexes=False)
+        eps = 1e-3
+        qp = gait_v2.assemble(spec, phi + eps, 0.0, 0.0, nom, c, layout=lay, reflexes=False)
+        qm = gait_v2.assemble(spec, phi - eps, 0.0, 0.0, nom, c, layout=lay, reflexes=False)
+        qdot = (qp - qm) / (2.0 * eps) * (2.0 * np.pi * f)
+        q4 = gait_v2.assemble(spec, phi + 0.5 * np.pi, 0.0, 0.0, nom, c, layout=lay, reflexes=False)
+        td = np.array([(self._td_hat[0] + np.pi) % (2 * np.pi) - np.pi,
+                       (self._td_hat[1] - np.pi + np.pi) % (2 * np.pi) - np.pi]) / np.pi
+        return np.concatenate([(q0 - nom) * s["motor_pos"], qdot * s["motor_vel"],
+                               (q4 - nom) * s["motor_pos"], td, self._task, commit])
+
+    def _priv_tail_v2(self):
+        c = self.cfg
+        s = c.obs_scales
+        d = self._ep_draw
+        tail = np.empty(self.PRIV_DIM_V2)
+        tail[0:3] = self._vel_body() * s["base_vel"]
+        tail[3:5] = (self._foot_contacts() | (self._toe_heights() < c.grounded_h)).astype(float)
+        tail[5] = float(self.data.qpos[2]) - c.term_height
+        tail[6] = float(self.data.qpos[1])
+        tail[7] = float(self.data.qpos[5])
+        tail[8:11] = self._accel_body_last / 9.81
+        tail[11:13] = self._contact_normal_forces() / max(self._weight_n, 1e-6)
+        tail[13] = float(d.get("mass_scale", 1.0))
+        tail[14] = 10.0 * float(d.get("com_x", 0.0))
+        tail[15] = float(d.get("friction", 1.0))
+        tail[16] = float(d.get("kp_scale", 1.0))
+        tail[17] = float(d.get("torque_scale", 1.0))
+        tail[18] = self._delay_ms / 10.0
+        tail[19:25] = self._theta[:6]
+        return tail
+
+    def mirror_perm_sign(self):
+        """(perm, sign) of the L/R mirror on the FULL observation, obs_m = sign * obs[perm]:
+        swap+negate every joint block (the FK sign rule), negate y-ish quantities (grav_y,
+        gyro_x/z, LP yaw, y, heading, vy, ay), shift the phase by pi, negate the five knobs and
+        the reflex bias, leave S / profiles / frequency / task / commit alone. Used by the
+        equivariance loss (sym_ppo.py); an involution."""
+        nu = self.nu
+        fp, fs = [], []
+        swap = list(gait_v2.MIRROR_PERM6)
+        for _ in range(3):                                  # pos, vel, torque
+            fp += [len(fp) - len(fp) % nu + i for i in swap]
+            fs += [-1.0] * nu
+        base = len(fp)
+        fp += [base, base + 1, base + 2]; fs += [1.0, -1.0, 1.0]            # gravity
+        base = len(fp)
+        fp += [base, base + 1, base + 2]; fs += [-1.0, 1.0, -1.0]           # gyro
+        fp += [len(fp)]; fs += [-1.0]                                       # LP yaw
+        base = len(fp)
+        fp += [base, base + 1]; fs += [-1.0, -1.0]                          # (sin, cos) -> phi + pi
+        base = len(fp)
+        fp += [base + i for i in swap]; fs += [-1.0] * 6                    # previous residual
+        assert len(fp) == self.frame_dim, (len(fp), self.frame_dim)
+        perm, sign = [], []
+        H = self.cfg.history_len
+        for k in range(H):
+            perm += [k * self.frame_dim + i for i in fp]
+            sign += fs
+        base = H * self.frame_dim
+        lay = self._lay
+        if self.spec_source == "policy":
+            op = list(range(lay.spec_dim))
+            os_ = [1.0] * lay.spec_dim
+            for i in lay.knobs:
+                os_[i] = -1.0
+            os_[lay.reflex.start + 2] = -1.0
+        else:
+            op, os_ = [], []
+            for _ in range(3):
+                b = len(op)
+                op += [b + i for i in swap]; os_ += [-1.0] * 6
+            b = len(op)
+            op += [b + 1, b]; os_ += [1.0, 1.0]                             # td_hat L<->R
+        perm += [base + i for i in op]; sign += os_
+        base = len(perm)
+        perm += list(range(base, base + self.task_dim + 1)); sign += [1.0] * (self.task_dim + 1)
+        if self.priv_dim:
+            base = len(perm)
+            tp = [0, 1, 2, 4, 3, 5, 6, 7, 8, 9, 10, 12, 11, 13, 14, 15, 16, 17, 18] + [19 + i for i in swap]
+            ts = [1, -1, 1, 1, 1, 1, -1, -1, 1, -1, 1, 1, 1, 1, 1, 1, 1, 1, 1] + [1.0] * 6
+            perm += [base + i for i in tp]; sign += [float(x) for x in ts]
+        perm = np.asarray(perm, dtype=np.int64)
+        sign = np.asarray(sign, dtype=np.float32)
+        assert perm.size == self.observation_space.shape[0], (perm.size, self.observation_space.shape)
+        return perm, sign
+
+    # ---- library variant (§09) -------------------------------------------------------------
+    @staticmethod
+    def default_library(cfg):
+        """A placeholder library until library/library_solve.py writes a real one: a symmetric
+        3 Hz sinusoidal gait (cam-led, thigh a quarter cycle behind for lift) and the stand."""
+        lay = gait_v2.Layout(cfg.n_harmonics)
+        run = gait_v2.neutral_spec(lay, freq_raw=gait_v2.freq_raw_of(3.0, cfg.gait_freq_hz))
+        run[lay.s_cam.start + 1] = 0.6           # cam a1 (cos)
+        run[lay.s_thigh.start + 2] = 0.35        # thigh b1 (sin)
+        stand = gait_v2.neutral_spec(lay, freq_raw=gait_v2.freq_raw_of(2.0, cfg.gait_freq_hz))
+        return [dict(v=2.0, theta=run.tolist(), x_star=None, lambda_max=None, source="placeholder"),
+                dict(v=0.0, theta=stand.tolist(), x_star=None, lambda_max=None, source="placeholder")]
+
+    def _load_library(self, path):
+        import json
+        if not path:
+            entries = self.default_library(self.cfg)
+        else:
+            d = json.loads(Path(_resolve(path)).read_text())
+            entries = d["entries"] if isinstance(d, dict) else d
+        out = []
+        for e in entries:
+            th = np.clip(np.asarray(e["theta"], dtype=float), -1.0, 1.0)
+            if th.size != self._lay.spec_dim:
+                raise ValueError(f"library entry has {th.size} spec dims, need {self._lay.spec_dim}")
+            xs = e.get("x_star")
+            out.append(dict(v=float(e.get("v", 0.0)), theta=th,
+                            x_star=None if xs is None else np.asarray(xs, dtype=float)))
+        if not out:
+            raise ValueError("empty gait library")
+        return out
+
+    def set_library_entry(self, theta, v=None, x_star=None):
+        """Override the library with ONE running entry (the search / absorption tools). Applies
+        from the next reset; None restores the file/default library."""
+        if theta is None:
+            self._lib_override = None
+            return
+        self._lib_override = dict(v=float(v if v is not None else 1.0),
+                                  theta=np.clip(np.asarray(theta, dtype=float), -1.0, 1.0),
+                                  x_star=None if x_star is None else np.asarray(x_star, dtype=float))
+
+    def _lib_pick(self):
+        if self._lib_override is not None:
+            return self._lib_override
+        c = self.cfg
+        run = [e for e in self._lib_entries if e["v"] > 0.0] or self._lib_entries
+        if c.library_entry == "random":
+            return run[int(self.np_random.integers(0, len(run)))]
+        if c.library_entry == "fastest":
+            return max(run, key=lambda e: e["v"])
+        v = float(c.library_entry)
+        return min(run, key=lambda e: abs(e["v"] - v))
+
+    def _lib_reset(self):
+        c = self.cfg
+        lay = self._lay
+        rng = self.np_random
+        entry = self._lib_pick()
+        th = entry["theta"].copy()
+        # the per-episode box around the entry: amplitudes, frequency, knobs
+        if c.library_box_amp > 0.0:
+            for sl in (lay.s_cam, lay.s_thigh, lay.s_hip):
+                th[sl] *= float(rng.uniform(1.0 - c.library_box_amp, 1.0 + c.library_box_amp))
+        if c.library_box_f_hz > 0.0:
+            f = gait_v2.frequency(th[lay.freq], c.gait_freq_hz) + float(
+                rng.uniform(-c.library_box_f_hz, c.library_box_f_hz))
+            th[lay.freq] = gait_v2.freq_raw_of(f, c.gait_freq_hz)
+        if c.library_box_knob > 0.0:
+            th[lay.knobs] += rng.uniform(-c.library_box_knob, c.library_box_knob, len(lay.knobs))
+        self._theta_ep = np.clip(th, -1.0, 1.0)
+        self._lib_v_ref = float(entry["v"])
+        stand = [e for e in self._lib_entries if e["v"] == 0.0]
+        if stand:
+            self._lib_stand = stand[0]["theta"].copy()
+        else:                                    # stopping is an amplitude decision: S -> 0
+            self._lib_stand = self._theta_ep.copy()
+            for sl in (lay.s_cam, lay.s_thigh, lay.s_hip):
+                self._lib_stand[sl] = 0.0
+        self._spec_live[:] = self._theta_ep
+        if self._raibert is not None:
+            self._raibert.reset()
+        # start ON the orbit when the entry carries its section state (Stage-3 episodes)
+        if c.library_reset_on_orbit and entry.get("x_star") is not None \
+                and not self.z_locked and self._fixed_base_h is None:
+            self.set_section_state(entry["x_star"], self._theta_ep, keep_xy=True)
+            n = c.reset_joint_noise
+            self.data.qpos[self._noise_qadr] += rng.uniform(-n, n, self._noise_qadr.size)
+            mujoco.mj_forward(self.model, self.data)
+
+    def _lib_commit(self, mods):
+        """Per-cycle spec for the library variant: the episode's theta (or the stand entry in
+        the stop phase), the optional latched mods, then the Raibert prior on o_cam / o_hip."""
+        c = self.cfg
+        lay = self._lay
+        run_phase = c.objective == "speed" or not self._sprint_crossed
+        spec = (self._theta_ep if run_phase else self._lib_stand).copy()
+        v_ref = self._lib_v_ref if run_phase else 0.0
+        mods = np.asarray(mods, dtype=float)
+        if mods.size >= 3:
+            sc = c.library_latched_scale
+            f = gait_v2.frequency(spec[lay.freq], c.gait_freq_hz) * (1.0 + sc[0] * mods[0])
+            spec[lay.freq] = gait_v2.freq_raw_of(f, c.gait_freq_hz)
+            amp = 1.0 + sc[1] * mods[1]
+            for sl in (lay.s_cam, lay.s_thigh, lay.s_hip):
+                spec[sl] *= amp
+            lift = sc[2] * mods[2]
+            spec[lay.offset.start] += lift
+            spec[lay.offset.start + 1] += lift
+        if self._raibert is not None:
+            v_hat = self._vel_body().copy()
+            if c.raibert_v_noise > 0.0:
+                v_hat += self.np_random.normal(0.0, c.raibert_v_noise, 3)
+            T = 1.0 / max(gait_v2.frequency(spec[lay.freq], c.gait_freq_hz), 1e-6)
+            spec[lay.offset] = self._raibert.commit(spec[lay.offset], v_hat, v_ref, T)
+        self._spec_live[:] = np.clip(spec, -1.0, 1.0)
+
+    # ---- section / return-map hooks (library/fixed_point.py) -------------------------------
+    def section_dims(self):
+        """qpos indices kept in the section state (all but the cyclic x, y, yaw) + every qvel."""
+        keep = [i for i in range(self.model.nq) if i not in (0, 1, 5)]
+        return np.asarray(keep, dtype=int), self.model.nv
+
+    def section_state(self):
+        keep, _ = self.section_dims()
+        return np.concatenate([self.data.qpos[keep], self.data.qvel])
+
+    def set_section_state(self, x, spec, keep_xy=False):
+        """Put the plant at section state x (phi = 0+, start of a cycle) under `spec`, with the
+        command ring and slew memory primed as if the previous cycle of the same gait had just
+        ended. keep_xy leaves the base x/y/yaw where they are (episode resets)."""
+        keep, nv = self.section_dims()
+        x = np.asarray(x, dtype=float)
+        if not keep_xy:
+            self.data.qpos[[0, 1, 5]] = 0.0
+        self.data.qpos[keep] = x[:len(keep)]
+        self.data.qvel[:] = x[len(keep):len(keep) + nv]
+        self._spec_live[:] = np.clip(np.asarray(spec, dtype=float), -1.0, 1.0)
+        self._phase = 0.0
+        self._commit_flag = True
+        self._resync_done[:] = False
+        self.prime_command_ring(self._spec_live)
+        # controller / solver memory that is not part of x: the reflex rate filter, the thermal
+        # accumulator, and MuJoCo's constraint warm-start (a history-dependent initial guess that
+        # would make P(x) differ at the 1e-6 level between two calls from the same x)
+        self._reflex_prate_filt = 0.0
+        self._tau_sq_acc[:] = 0.0
+        self.data.qacc_warmstart[:] = 0.0
+        self.data.qacc[:] = 0.0
+        self.data.xfrc_applied[:] = 0.0
+        self.data.qfrc_applied[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        self._grounded_prev = self._foot_contacts() | (self._toe_heights() < self.cfg.grounded_h)
+        self._prev_toe_xy = self.data.geom_xpos[self.foot_gids_arr, 0:2].copy()
+
+    def run_cycle(self, action=None, record=None):
+        """Step until the clock wraps once (P(x; theta)); returns the section state after it.
+        `record(env)` is called after every tick (envelope flags)."""
+        a = np.zeros(self.action_dim, np.float32) if action is None else action
+        n_max = int(4.0 / (max(self._f_hz, 0.5) * self.control_dt)) + 8
+        for _ in range(n_max):
+            self.step(a)
+            if record is not None:
+                record(self)
+            if self._commit_flag:
+                break
+        return self.section_state()
+
+    # ---- eval / margin-protocol setters (tools/eval_envelope.py) ----------------------------
+    def set_delay_ms(self, ms):
+        """Fix the drive transport delay (ms) for every following episode; None = the draw."""
+        self._delay_override_ms = None if ms is None else float(ms)
+
+    def set_wind(self, fx, fy):
+        """Fix the constant body-frame force (N) for every following episode; None = the draw."""
+        self._wind_override = None if fx is None else np.array([float(fx), float(fy)])
+        if self._wind_override is not None:
+            self._wind_on = True
+
+    def set_thermal_hot(self, theta0):
+        """Fix the hot-start winding state (fraction of dT_max, all motors); None = the draw."""
+        self._theta_override = None if theta0 is None else float(theta0)
+
+    def set_push_axis(self, axis):
+        """Restrict pushes to one body axis ("x"/"y", random sign) for the margin protocol."""
+        self._push_axis = None if axis is None else str(axis)
+
+    def set_resync_kappa(self, kappa):
+        self.cfg.resync_kappa = float(kappa)
+        self.cfg.dr_resync_kappa_range = (0.0, 0.0)
+        self._kappa = float(kappa)
 
     def _sprint_info(self, finished):
         """Dash telemetry for eval tooling."""
