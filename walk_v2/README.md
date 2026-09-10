@@ -94,11 +94,11 @@ sbatch --export=ALL,PRESET=v2_s1_planar,NAME=v2_s1_planar_s0,SEED=0 walk_v2/slur
 
 Checkpoints: `runs/<name>/ckpt_<steps>.msgpack` (+ `.json` with the curriculum state), `final.msgpack`;
 `--resume auto` continues, `--warm-start <file>` carries weights + obs stats into a new stage
-(count capped, variance floored, log_std re-inflated — the walk_mit warm-start rules).
+(count capped, variance floored, log_std re-inflated â€” the walk_mit warm-start rules).
 
-PPO sizing follows `walk_mit/V2_CONTRACT.md` §PPO so both arms take the same gradient updates per
-sample: rollout 18 432 samples (1024 envs × 18 steps here = 64 × 288 there), minibatch 4096, 4 epochs.
-The first Izar runs used 2048 × 64 / 16 384 (4× fewer updates per sample) and learned visibly slower
+PPO sizing follows `walk_mit/V2_CONTRACT.md` Â§PPO so both arms take the same gradient updates per
+sample: rollout 18 432 samples (1024 envs Ã— 18 steps here = 64 Ã— 288 there), minibatch 4096, 4 epochs.
+The first Izar runs used 2048 Ã— 64 / 16 384 (4Ã— fewer updates per sample) and learned visibly slower
 per step (ep_len 105 vs ~400 at 13 M steps); they were restarted.
 
 ## Throughput on the V100 (2026-09-10, `results/`)
@@ -107,30 +107,39 @@ Two things had to be fixed before the GPU port was faster than the CPU arm at al
 
 1. **The bench recompiled inside the timed call.** `bench_env` warmed up with a 3-step scan and timed
    a 64-step scan with the length static; the ~40 s compile showed up as a batch-independent
-   ~600 ms/step floor on CPU and GPU alike (the first numbers, 1.7–2.5k env steps/s, were ~15× low).
+   ~600 ms/step floor on CPU and GPU alike (the first numbers, 1.7â€“2.5k env steps/s, were ~15Ã— low).
    The PPO-iteration and training-rollout numbers never had this problem.
 2. **Under `jax.vmap` the Newton solver runs to the slowest env.** The XML carries classic MuJoCo's
    `iterations=100 ls_iterations=50`. Healthy states converge in one iteration (bare physics: 37k env
-   ticks/s at 2048–4096 envs), but one flailing env makes the whole batch iterate: the training rollout
+   ticks/s at 2048â€“4096 envs), but one flailing env makes the whole batch iterate: the training rollout
    went from 826 to 250 ms/step at 2048 envs as the policy stopped falling. `Config.mjx_iterations /
-   mjx_ls_iterations` (default 16 × 8) cap this at model load. The batched-MJX recipe of 1–2 iterations
-   does NOT work on this plant: the stiff loop closure (solref 0.002) needs a converged solve — the
-   held stance explodes and the golden replay ends at tick 13 instead of 64. 8×8 to 100×8 replay the
+   mjx_ls_iterations` (default 16 Ã— 8) cap this at model load. The batched-MJX recipe of 1â€“2 iterations
+   does NOT work on this plant: the stiff loop closure (solref 0.002) needs a converged solve â€” the
+   held stance explodes and the golden replay ends at tick 13 instead of 64. 8Ã—8 to 100Ã—8 replay the
    CPU fixture identically to the XML settings and hold a stance to 3e-3 rad over 3 s.
 
 Tools: `tools/profile_step.py` (bare physics per solver variant + held-stance drift),
 `tools/profile_env.py` (env step with the physics / auto-reset stubbed out), `bench.py --iterations N
 --ls-iterations M --ppo`, `tools/replay_golden.py --iterations N --ls-iterations M` (the accuracy gate).
 
-Measured (2048 envs, random actions, fixed bench; PPO iteration = rollout + 4 epochs):
+Measured on the V100 (`results/bench3_izar_solver_*`; env = 2048 envs under random actions with the
+fixed bench, the flailing worst case; PPO iteration = rollout 32 steps + 4 epochs):
 
-| solver cap | env steps/s | PPO steps/s | golden replay |
+| solver cap | env steps/s | PPO steps/s | golden replay / stance drift |
 |---|---|---|---|
-| 100 × 50 (XML) | 3 940 | 2 990 | identical |
-| 1 × 4 | 56 090 | — | plant explodes |
-| 16 × 8 (default) | see `results/bench3_izar_solver_*` | | identical |
+| 100 Ã— 50 (XML) | 3 940 | 2 990 | reference |
+| 100 Ã— 8 | 5 016 | 3 308 | identical / 3e-3 rad |
+| 32 Ã— 8 | 8 389 | | identical / 3e-3 rad |
+| 16 Ã— 8 (default) | see `bench3_*_16_8.json` | | identical / 3e-3 rad |
+| 1 Ã— 4 | 56 090 | | plant explodes (NaN) |
 
-CPU arm (JED, 64 envs × 288 steps on 72 cores): 4 660–4 760 env steps/s (`walk_mit/runs/v2_s1_s*`).
+Training regime (`runs/v2_s1_planar_s*`, 1024 Ã— 18, cap 16 Ã— 8, first 0.3 M steps): rollout 2.17 s
+(120 ms/step), update 0.16 s, GAE + estimator 0.02 s, i.e. **7 600â€“7 700 env steps/s per V100**, and the
+rollout gets cheaper as the policy stops falling (the archived 2048 Ã— 64 runs went from 2 200 to
+7 800 steps/s over their first 13 M steps). Because the batched rollout is latency-bound (solver
+loops), more envs per rollout cost little: 2048 Ã— 9 would roughly double this at the same rollout size.
+
+CPU arm (JED, 64 envs Ã— 288 steps on 72 cores): 4 660â€“4 760 env steps/s (`walk_mit/runs/v2_s1_s*`).
 
 ## Cross-checking against the CPU implementation
 
@@ -151,9 +160,11 @@ Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from it
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
   masked PPO update, estimator, symmetry loss, entropy/std anneal, curricula, eval, checkpoint).
-* Izar (V100): full smoke test passes on the GPU; `v2_s1_planar` seeds 0/1 train (jobs 3144677/78
-  with the old 2048 × 64 sizing reached 13 M steps at 7.8k steps/s, ep_len 105; restarted with the
-  contract sizing and the 16 × 8 cap — see the training section of the report / `runs/`).
+* Izar (V100): full smoke test passes on the GPU. `v2_s1_planar` seeds 0/1 are training (jobs
+  3144881/82, contract sizing 1024 Ã— 18, cap 16 Ã— 8, 300 M steps, ~7.7k steps/s each at the start).
+  The first attempt (2048 Ã— 64 / minibatch 16 384, 4Ã— fewer updates per sample) reached 13 M steps
+  at 7.8k steps/s but learned slower per step than the CPU arm (ep_len 105 vs 430â€“540 at 13 M);
+  archived on Izar as `runs/*_2048x64`. Compare curves with `tools/compare_cpu_gpu.py`.
 * Cross-check with the CPU arm: golden fixture `walk_mit/golden/v2_s1_clean_seed0.npz` replays with
   exact commit flags and rewards identical over the first 20 ticks; control-law agreement 5e-6 on the
   traces. Policy-level comparison (same preset, seed, budget; greedy dash eval) pending the runs.
