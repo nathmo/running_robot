@@ -2677,7 +2677,8 @@ _V2B = dict(
 # every "bang-bang" signature and the determinism gap. v2c = v2b + the bounds loss, bidirectional
 # (competence-tracked) DR/jitter ramps, and a 0.7 std cap so the pre-anneal policy is not a noise
 # machine.
-_V2C = dict(_V2B, w_bound=1.0, curriculum_retreat_frac=0.7, max_log_std=-0.3567)   # ln 0.7
+_V2C = dict(_V2B, w_bound=1.0, curriculum_retreat_frac=0.7, max_log_std=-0.3567,   # ln 0.7
+            w_assist_penalty=0.005)          # round-4 anti-crutch: pay for the assist torque you provoke
 
 _V2_STAGE = {"s1": "m3", "s2": "m6"}      # S1 planar (x, z, pitch) / S2 free
 

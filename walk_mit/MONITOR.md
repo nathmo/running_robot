@@ -1,3 +1,24 @@
+# V2C (2026-09-10 09:00): readout-2 -- ACTIVE playbook (supersedes V2B below)
+#
+# CONTEXT: v2b_s1 was a greedy 100 m dash finisher at 23 M (assist 0.8, nominal plant) and collapsed
+# by 50 M under the clock-driven assist fade + std anneal + DR/jitter (V2_CONTRACT.md "Readout-2").
+# v2c = v2b + bounds loss (means inside [-1,1]) + bidirectional DR/jitter ramps + std cap 0.7 +
+# the anti-crutch assist penalty. Cold chains v2c_s1_s{0,1} -> v2c_s2_s{0,1}; one WARM arm
+# (v2cw_s1_s0) from walk_mit/runs/v2b_s1_s0/ppo_23000000_steps.zip tests hardening a finisher.
+#
+# Every tick (hourly cron):  ssh jed 'bash ~/running_robot/walk_mit/monitor/v2_check.sh'
+# SIGNATURE (greedy_peek, nominal + run DR): "end=finish" episodes = the deliverable; watch
+#   train/mu_out_frac (should stay ~0 with the bounds loss), curriculum.json dr_scale (must RETREAT
+#   when ep_len drops below 840), pitch_assist (monotone fade after its gate), reward_terms/assist_pen
+#   (the policy should stop leaning on the wheel BEFORE it is gone).
+# TWO PROBE TRAPS (both fixed 2026-09-10): evaluate.build ran DR runs at scale 1.0 (restored now);
+#   greedy_peek's hook re-called _workspace_violation() and halved the grace (recorded now).
+#   A checkpoint that "dies at reset" in a new probe is a probe bug until proven otherwise.
+# KEEP: walk_mit/runs/v2b_s1_s{0,1}/ppo_23000000_steps.zip (+ vecnormalize) = the first greedy
+#   dash finishers of the v2 lineage (assist 0.8, nominal plant).
+# DECISION POINTS: 30 M -- greedy dash finishes on the nominal plant WITHOUT assist (assist 0
+#   override) on at least one seed; 60 M -- 8-episode dash-xy eval + envelope at the run's DR.
+
 # V2B (2026-09-10): readout-1 fixes -- ACTIVE playbook (supersedes the V2 block below for the v2b chains)
 #
 # CONTEXT: v2_s1 (artifact-literal) peaked at 19 M and regressed; its committed spec was bang-bang,

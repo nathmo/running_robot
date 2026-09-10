@@ -12,7 +12,7 @@ cd "${REPO:-$HOME/running_robot}"
 export OMP_NUM_THREADS=2
 STATE=walk_mit/monitor/.v2_check_state
 touch "$STATE"
-RUNS="${RUNS:-v2b_s1_s0 v2b_s1_s1 v2b_s2_s0 v2b_s2_s1 v2_s1_s0 v2_s1_s1}"
+RUNS="${RUNS:-v2c_s1_s0 v2c_s1_s1 v2cw_s1_s0 v2c_s2_s0 v2c_s2_s1}"
 echo "== $(date '+%F %T') queue"
 squeue -u "$USER" -o "%.10i %.14j %.3t %.11M %R" | tail -n +2
 for r in $RUNS; do

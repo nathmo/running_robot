@@ -178,6 +178,33 @@ curriculum rows are training-side only. Evaluation harness fixes that came with 
 `evaluate.build` now restores `dr_scale` and `pitch_assist` from curriculum.json (the env builds
 its randomizer at full width), and the train-time clock diagnostic counts commit ticks only.
 
+## Readout-2 deltas — the `v2c_*` presets (2026-09-10)
+
+`v2b_s1` reached a stochastic ep_len of 1466–2421 at 23 M and, re-evaluated with the fixed probe,
+**finished 3/3 greedy 100 m dashes on the nominal plant at 1.8–1.9 m/s** (pitch assist still at
+0.8 of its 100 N·m/rad). It then collapsed to ep_len ~25 by 50 M while the assist faded to 0.2,
+the std annealed 0.77 → 0.4 and DR / jitter ramped — all clock-driven once their gates had opened
+(`curriculum_retreat_frac` was 0). `walk_mit/monitor/mean_bounds_probe.py` on the 23 M policy:
+68–79 % of the spec means and 53–60 % of the residual means lie outside [−1, 1] (median |μ| ≈ 2,
+p90 ≈ 3.9). The DiagGaussian is sampled unbounded and clipped by the env, so once a rail pays every
+mean beyond it earns the same clipped sample: the "bang-bang spec", the clock parked on its
+ceiling and the saturated residual are all clip(μ) of drifted means, and greedy clip(μ) no longer
+equals the effective action E[clip(μ+ε)] the policy was trained on.
+
+| knob | v2b | v2c | why |
+|---|---|---|---|
+| `w_bound` (SymPPO bounds loss, w·mean(relu(|μ|−1)²)) | — | 1.0 | keep the means inside the box; logs `train/bound_loss`, `train/mu_out_frac` |
+| `curriculum_retreat_frac` | 0.0 | 0.7 | DR / jitter ramps advance only while ep_len ≥ gate, hold between, retreat below 0.7·gate |
+| `max_log_std` | 0 (std ≤ 1.0) | ln 0.7 | the pre-anneal policy is not a noise machine |
+| `w_assist_penalty` | 0 | see config | the round-4 anti-crutch term: a fading wheel alone breeds dependence |
+
+The GPU port is unaffected by these rows (all training-side); parity for a `v2c` policy is on the
+`v2b` action/obs rows above. Probe fixes that came with this readout: `greedy_peek.py` no longer
+calls `_workspace_violation()` from its hook (that method advances the per-foot grace timer on
+every call, so the hook halved the 0.10 s grace and killed healthy gaits at 13–19 ticks — every
+"ws at reset" verdict before 2026-09-10 08:40 was the probe), and `mean_bounds_probe.py` reports
+the pre-clip means per action group.
+
 ## Parity fixture
 
 `golden_v2.py` records/checks a deterministic trace (`golden/*.npz`): commit flags and the live
