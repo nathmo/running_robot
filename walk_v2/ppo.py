@@ -105,6 +105,9 @@ class PPO:
         n_updates = self.n_rollouts_total * cfg.n_epochs * self.n_minibatches
         self.lr = optax.linear_schedule(cfg.learning_rate, cfg.lr_final, n_updates)
         self.tx = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), optax.adam(self.lr))
+        if bool(getattr(cfg, "grad_guard", False)):
+            # skip an update whose gradients are not finite instead of corrupting the params
+            self.tx = optax.apply_if_finite(self.tx, max_consecutive_errors=20)
         self.opt_state = self.tx.init(self.params)
         est_mask = jax.tree_util.tree_map_with_path(
             lambda path, _: any(getattr(p, "key", None) == "estimator" for p in path), self.params)
@@ -614,7 +617,7 @@ class PPO:
             "train/n_minibatch_updates": n_mb, "train/early_stop": float(stop),
             "train/ent_coef": self.ent_coef, "train/log_std_clamp": self.log_std_clamp,
             "train/std_mean": float(np.exp(np.asarray(self.params["params"]["log_std"])).mean()),
-            "train/lr": float(self.lr(int(np.asarray(self.opt_state[1][0].count)))),
+            "train/lr": float(self.lr(_adam_count(self.opt_state))),
             "est/vel_rmse": float(np.sqrt(float(est_last))) if est_last is not None else float("nan"),
         }
         for kk, v in m["reward_terms"].items():
@@ -753,6 +756,14 @@ class PPO:
             self.cur = meta.get("curriculum", {})
             self.env_params = EnvParams(**meta["env_params"])
         print(f"[ppo] resumed {path.name} at {self.step:,} steps")
+
+
+def _adam_count(opt_state) -> int:
+    """Adam's step counter wherever it sits in the optimizer state (chain / apply_if_finite wrappers)."""
+    for leaf in jax.tree_util.tree_leaves(opt_state, is_leaf=lambda x: isinstance(x, optax.ScaleByAdamState)):
+        if isinstance(leaf, optax.ScaleByAdamState):
+            return int(np.asarray(leaf.count))
+    return 0
 
 
 def _clamp_log_std(params, clamp, fill=False):

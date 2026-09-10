@@ -618,6 +618,10 @@ class DashEnvV2:
         term_tip = grav[2] > c.term_gravity_z
         fallen = (~finite) | term_low | term_tip | floor_viol | ws_kill
         reward = reward - c.fall_penalty * fallen + c.finish_bonus * (finished & ~fallen)
+        # a non-finite plant state (an unconverged capped solver step can blow up) ends the episode
+        # above; the reward computed from that state is NaN and would poison GAE, the value loss and
+        # the params for good (v2c_s1_planar_fast_s0 died this way at 36.5 M) -- bill it as a fall
+        reward = jnp.where(finite, reward, -c.fall_penalty)
         step_n = state.step_n + 1
         truncated = step_n >= self.max_steps
         done = fallen | finished | truncated
@@ -654,7 +658,7 @@ class DashEnvV2:
         rs_state, rs_obs = self._reset_one(k_reset, params, Override())
         sel = lambda a, b: jnp.where(done, a, b)
         out_state = jax.tree_util.tree_map(sel, rs_state, new_state)
-        out_obs = jnp.where(done, rs_obs, obs)
+        out_obs = jnp.nan_to_num(jnp.where(done, rs_obs, obs))
         return out_state, out_obs, reward.astype(jnp.float32), done, info
 
     # ------------------------------------------------------------------ reward

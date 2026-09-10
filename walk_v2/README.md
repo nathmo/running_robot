@@ -187,6 +187,15 @@ call) then dominates the update, hence the fused per-epoch `lax.scan` inside one
 (`_update_epoch_p`, target-KL early stop carried inside). Izar's second 4-GPU node is held by a
 30-hour job, so the 4 × 2048 run replaced the 4 × 512 one on `ixl01`.
 
+Two lessons from the first 4 × 2048 run (`v2c_fast_dp4x_s0`, 42–44k steps/s): (1) the recipe's
+step-based schedules are really iteration counts — the CPU arm's 40 M entropy deadline is 2170 policy
+updates at 18 432 samples per rollout, and at 4× the rollout it arrived after a quarter of the updates
+and froze a policy that had not yet left the low rail (ep_len 80–150 at 45 M); `v2c_s1_planar_dp4`
+scales those schedules ×2, the learning rate by √4, and runs 450 M steps (~3 h). (2) An unconverged
+8 × 8 solver step can produce a non-finite plant state; the episode ended correctly but the reward of
+that tick was NaN and poisoned the update (`v2c_s1_planar_fast_s0` died at 36.5 M): the env now bills
+a non-finite state as a fall and `grad_guard` (optax.apply_if_finite) skips a non-finite update.
+
 ## Run
 
 ```bash

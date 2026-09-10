@@ -279,6 +279,7 @@ class Config:
     target_kl: float = 0.03
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
+    grad_guard: bool = False                # optax.apply_if_finite around the optimizer (new runs only)
     ent_coef: float = 0.01
     ent_final: float = 0.0
     ent_anneal_steps: int = 40_000_000
@@ -340,6 +341,17 @@ _V2C = dict(_V2B, w_bound=1.0, curriculum_retreat_frac=0.7, max_log_std=-0.3567,
 # 8 x 8 solver cap adds ~29 % in the flailing regime and replays the golden fixture identically.
 _FAST = dict(n_envs=2048, n_steps=9, mjx_iterations=8, mjx_ls_iterations=8)
 
+# 4-GPU sizing (8192 envs x 9 = 73 728-sample rollouts): the recipe's step-based schedules are really
+# iteration counts (the CPU arm's 40 M entropy deadline = 2170 policy updates at 18 432/rollout); at 4x
+# the rollout they arrive after a quarter of the updates and froze an incompetent policy at 40 M
+# (v2c_fast_dp4x_s0). Scale them x2 (a compromise between iterations and wall-clock), lr x sqrt(4)
+# for the 4x batch, 450 M steps (~3 h at 42k steps/s), and guard the update against non-finite grads.
+_DP4 = dict(_FAST, n_envs=8192, learning_rate=6.0e-4, lr_final=2.0e-4, total_steps=450_000_000,
+            ent_anneal_deadline_steps=80_000_000, ent_anneal_steps=80_000_000,
+            pitch_assist_ramp_steps=60_000_000, sprint_curriculum_steps=120_000_000,
+            gait_curriculum_steps=240_000_000, efficiency_ramp_steps=240_000_000,
+            dr_curriculum_steps=120_000_000, jitter_curriculum_steps=80_000_000, grad_guard=True)
+
 PRESETS = {
     "default": Config,
     # S1 "planar" (= m3): x, z, pitch free; y, roll, yaw absent from the model. Iteration sandbox.
@@ -362,6 +374,8 @@ PRESETS = {
     "v2c_s2_free": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C),
     "v2c_s1_planar_fast": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2C, **_FAST),
     "v2c_s2_free_fast": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST),
+    "v2c_s1_planar_dp4": lambda: _v2(model_path="model/dash01_v2_planar.xml", **{**_V2C, **_DP4}),
+    "v2c_s2_free_dp4": lambda: _v2(model_path="model/dash01_v2_free.xml", **{**_V2C, **_DP4}),
     # Δ_max = pi: the bound becomes reachable (§13 open decision, priced not forbidden)
     "v2_s2_free_wide": lambda: _v2(model_path="model/dash01_v2_free.xml", delta_max=3.14159265),
     # honesty-off debug arms: nominal plant, no noise, no disturbances (fast signal on latch/reward)
