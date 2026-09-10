@@ -305,6 +305,94 @@ v2_s2_free_easy`: 65 ticks on both arms (same fall tick), commit flags exact, pe
 identical, per-channel newest-frame differences at the S1 level (torque 0.04, base rate 0.06-0.13
 normalised units by tick 5, solver-level drift), phase channels in the known swapped order.
 
+## Deploying a v2 policy on the robot
+
+`walk_v2/export.py` writes a **version 2** bundle (`robot/deploy/bundle.py`), and the Pi runtime
+for it is `robot/deploy/controller_v2.py` + `gait_v2.py` -- a numpy copy of `gait.py` with jax
+removed, under the same safety governor, winding observer and joint map as the v1 (walk_mit) path.
+`robot/deploy/README.md` has the full comparison; the three things specific to v2:
+
+* **100 Hz out of the webui daemon's 200 Hz CAN loop.** The control law gets every second tick at
+  its own `control_dt` and the force-control frame it produced is re-streamed on the one in
+  between. This is what makes v2 deployable on the Pi 3B at all: the tick budget doubles to 10 ms
+  while the nets get *smaller* than v1's (232k MACs against 305k), because the once-block replaced
+  213 dims of stacked history. Only integer ratios are accepted.
+* **The command is the task channel's run flag, not a velocity.** The panel's RUN / STOP pair
+  writes `task[0]`, which is exactly the stoplight signal: RUN is the green light, STOP is a red
+  one, and the policy keeps running at full gains and is asked to bring itself to a halt. A run
+  always comes up STOPPED -- the approach crawls to the stance, the policy holds it, and nothing
+  moves off until somebody presses RUN. Ending the run is a separate pair of buttons; the two are
+  never the same thing. Headless: `run_policy.py --command-file /tmp/dash_command`.
+* **The clock free-runs.** DASH-01 has no foot contact sensor, so the touchdown resync
+  (`resync_kappa`) cannot happen on the robot. `controller_v2.note_contact()` is the hook if one
+  ever exists.
+
+Verification without torch, MuJoCo or jax: `robot/deploy/tests/test_v2_deploy.py` replays
+`results/trace_mjx.json` -- the same fixture the two arms cross-check on -- through the deployed
+runtime and diffs its targets, gains, clock and 33-dim observation frames against what the trainer
+produced. Agreement is at the float32 rounding floor (~1e-5). It also pins the two things a port
+gets wrong silently: the frame's phase channels are `[cos, sin]` on this arm (the CPU arm's
+V2_CONTRACT.md documents the opposite order for its own implementation -- the known swapped-order
+difference), and `pitch_reflex_rate_lp` is read from the bundle rather than assumed, because the
+lineage has shipped both 0.9 and 0.0 and the difference is 0.4 rad of thigh target.
+
+## Bring-up: holding the robot, starting the policy, letting go
+
+The deployment question (2026-09-10): the operator holds the base on its stand, feet on the floor,
+trunk roughly vertical, starts the policy, and releases a few seconds later. Training starts every
+episode from one point -- the settled keyframe, at rest, feet flat, clock phase 0 -- so both the
+held seconds and the release are off distribution.
+
+`cfg.hold_enable` (opt-in, off in every preset; the contract presets are byte-identical) clamps the
+six base DOFs to (key x/y/yaw, `hold_z`, `hold_roll`, `hold_pitch`) at every 1 kHz substep for
+`EnvParams.hold_s` seconds -- an infinitely stiff hand, no fall scored while held -- then releases
+with zero base velocity; `start_red_s` brings the episode up on a RED light. A kinematic clamp, not
+a spring: the 1000 N m/rad three-wheel probe went NaN in 0.1 s. `tools/bringup_probe.py` sweeps the
+release conditions and reports which termination fired. All numbers below: the best S2 runner
+(`v2c_s2_free_dp2x_s0` `best_88473600.msgpack`), greedy, 16 envs, 8 s after the release.
+
+* **The nominal case works, if the hold is long enough.** Held upright with both feet at the
+  touching height: **16/16 for every hold >= 1 s** (1, 2, 3, 5, 10 s), running off at 3.2 m/s.
+* **A sub-second release is a lottery**: 0.00 s 16/16, 0.02 s 16/16, 0.05 s 2/16, 0.10 s 16/16,
+  0.15 s 8/16, 0.20 s 0/16, 0.30 s 14/16, 0.40 s 4/16, 0.60 s 0/16, 0.80 s 0/16. Release in the
+  same tick the policy starts, or hold a full second -- never in between.
+* **Attitude is the binding constraint and it is asymmetric.** Leaning BACK is fine (-5 deg 16/16,
+  -10 deg 11/16); leaning FORWARD is fatal (+5 deg 0/16, *all 16 floor violations* -- the foot
+  drives through the ground; +10 deg 0/16). Every roll is fatal (+-5, +-10 deg: 0/16) because a
+  roll lifts one foot: 35 mm at 5 deg, 70 mm at 10 deg. The asymmetry, not the angle, is what
+  kills: **both** feet 20 mm high is 16/16, **one** foot 35 mm high is 0/16, and -7 pitch / +7 roll
+  (one foot up but leaning back) recovers to 12/16. The +-10 deg the operator can hold by hand is
+  NOT inside the envelope -- it is roughly -5..0 deg of pitch and a couple of degrees of roll.
+* **Height is forgiving**: -5 to +20 mm about the touching height is 16/16; +40 mm and +100 mm are
+  0/16 (a real drop), -10 mm 11/16 and -20 mm 10/16 (feet pressed into the floor while held).
+* **While held it marches in place** -- thighs 22 deg peak-to-peak, cams 13-16, hip rolls 11, toes
+  lifting to 9 cm at 4 Hz, 22 % of peak torque, feet nearly stationary horizontally (0.12 m/s).
+  It is not quiet in the operator's hands, and a human hold is compliant where this probe is rigid.
+* **There is no passive stance to release into.** Zero action (the drive PD on `nominal_ctrl` plus
+  the reflexes) falls in 1.0-1.3 s, 0/16, so "let go, let it stand, then start the policy" is not
+  available on this plant: every hand-over variant (policy at +0.0, +0.2, +0.5, +1, +3 s) is 0/16.
+* **The STOP flag does not stop it -- it makes it faster.** Brought up with the run flag DOWN
+  (`task[0]` = 0, exactly what the runtime does -- "a run always comes up STOPPED"), the 88.5 M
+  policy sprints anyway: never pressing RUN still gives 7.2 m at up to **4.2 m/s** before it tips
+  (0/16), and pressing RUN at +2.0 / +0.5 / +0.0 s gives 8/16, 4/16, 3/16 at 4.1-5.0 m/s -- faster
+  than the 3.2 m/s it runs on a green light, because `task[0]` = 0 with distance still to go is a
+  state it only ever met past the finish line, where it never survived. That checkpoint predates
+  the stop curriculum, so the runtime's STOPPED bring-up is fictional here **and the STOP button is
+  not a brake**: a bench start on this policy is a runaway. Re-run this probe on the
+  `v2c_s2_free_dp2x_stop_s*` seeds before trusting the RUN / STOP pair with a robot in hand.
+* **None of it survives the randomization.** Paired on the same plants, no-hold vs held 3 s:
+  `dr_scale` 0 (nominal plant, sensor noise only) **15/16 vs 9/16** -- the hold costs real margin as
+  soon as the observation is noisy -- then 0.25: 0/16 vs 0/16, 0.50: 0/16, 0.75: 0/16, and at 1.0 a
+  plain start dies 0.17 s in. For THIS checkpoint the binding constraint is its own robustness, not
+  the bring-up (the 147 M robust runner, the one trained with the full DR / jitter / drop
+  curricula, was lost in the quota outage between the 140 M and 145 M checkpoints).
+
+Verdict: **no hand bring-up with the current policy.** The cheapest fix is a reset distribution
+rather than a new curriculum -- initial base height, +-10 deg of tilt, a small base velocity, a
+random clock phase and a red-light start, so that every release condition an operator can produce
+is in distribution. Until then a release jig that drops both feet together, upright to slightly
+back, is the only repeatable option.
+
 ## Status (2026-09-10)
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
@@ -347,6 +435,16 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
   running gait forms. Verified locally: the minimum action gives 3.00 / 2.25 / 1.50 Hz at the three
   curriculum points and the contract preset still gives 1.50. Preset `v2c_s2_free_fast_floorstop` = floor
   (60 M) + the stop curriculum, i.e. the cold-S2 "no S1 stage" recipe; seeds `runs/v2c_s2_floorstop_s8/s9`.
+* **Deployment note for the stop curriculum (for whoever owns `robot/deploy/controller_v2.py`)**: a
+  policy trained with the lights obeys the *observation*, not the distance -- `task[0]` (the run flag,
+  actor obs, the once-block) is 1 while running and 0 while it should brake, and `task[1]` is the
+  clipped distance-to-go. So the runtime gets a live STOP command for free: drive `task[0]` to 0 and the
+  policy decelerates to a standstill wherever it is, then hold it at 0 to keep it standing; set it back
+  to 1 to run again. That is exactly what the red/green phases train. A policy trained WITHOUT the
+  lights (every checkpoint before 2026-09-10 23:00, including the 88.5 M runner being exported now) has
+  only ever seen `task[0]` drop at the 100 m line and will not brake on command -- do not expose a stop
+  button backed by it. `stop_speed_eps` / `stop_hold_s` (0.15 m/s for 1.0 s, 0.25 m/s in the hard preset)
+  are the environment's own "stopped" test and are the sensible defaults for the panel's readout.
 * **Stop curriculum (2026-09-10, 22:30) -- red light / green light**: no runner on either arm ever
   stops: the post-line phase is a cliff it meets once per episode at 3 m/s and never survives, so the
   finish bonus is unreachable. New opt-in preset `v2c_s2_free_fast_stoplight` (all fields default off;
@@ -355,7 +453,7 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
   (obs task[0] -> 0 while task[1], the distance countdown, stays > 0), the speed income stops and the
   stop term pays for tracking a target speed that ramps from the speed at the switch to 0 over
   `stop_decel_s` = 1.5 s, then for standing still; after 3-8 s the light turns green and the income
-  resumes. The line is one more red light with the same deceleration target. `evaluate.py --stoplight P`
+  resumes. The line is one more red light with the same deceleration target. `evaluate.py --stoplight P` puts lights into an eval.
   puts lights into an eval. Decision (user): S1 is dropped -- the S1 -> S2 warm start carries nothing --
   and S2 is trained cold at 220 M steps (~3 h on two V100s); seeds `runs/v2c_s2_free_dp2x_stop_s{0,1,2}`.
   `train.py --resume auto` now falls back to the previous checkpoint when the newest is truncated (four
