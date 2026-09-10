@@ -769,7 +769,10 @@ class PPO:
         if js.exists():
             meta = json.loads(js.read_text())
             self.cur = meta.get("curriculum", {})
-            self.env_params = EnvParams(**meta["env_params"])
+            if "env_params" in meta:
+                self.env_params = EnvParams(**meta["env_params"])
+            else:       # a sidecar without run state (e.g. an eval summary): keep the defaults
+                print(f"[ppo] {js.name} carries no env_params; keeping the config's curriculum start")
         print(f"[ppo] resumed {path.name} at {self.step:,} steps")
 
 

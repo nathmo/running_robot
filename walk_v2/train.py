@@ -159,7 +159,7 @@ def main():
     print(f"[train] reset {agent.n_envs} envs on {agent.n_dev} device(s) in {time.time() - t:.1f}s")
 
     best_score = None
-    _bj = run / "best.json"
+    _bj = run / "best_eval.json"
     if _bj.exists():
         _b = json.loads(_bj.read_text())
         best_score = (int(_b.get("finishes", 0)), float(_b.get("dist_mean", 0.0)))
@@ -209,7 +209,7 @@ def main():
             if _score[1] == _score[1] and (best_score is None or _score > best_score):
                 best_score = _score
                 agent.save(run / "best.msgpack")
-                (run / "best.json").write_text(json.dumps({"step": agent.step, "finishes": _score[0],
+                (run / "best_eval.json").write_text(json.dumps({"step": agent.step, "finishes": _score[0],
                                                            "dist_mean": _score[1], **{k: float(v) for k, v in ev.items()
                                                                                        if isinstance(v, (int, float))}}, indent=1))
                 print(f"[train] best checkpoint -> best.msgpack (step {agent.step:,}, finishes {_score[0]}, dist {_score[1]:.1f} m)")
