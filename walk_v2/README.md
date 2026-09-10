@@ -316,8 +316,23 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
   starts at stochastic ep_len ~80 on the free plant at std 0.70 (the S1 runner trained at 0.21) and
   climbs slowly (s0 166 at 6.6 M). Everything above this line in time was S1 (planar) only.
   The 4-GPU seed `v2c_fast_dp4z_s4` (4 x 1024) never stood (ep_len ~60 at 46 M, one KL 2.1 spike) and
-  was cancelled; `v2c_fast_dp2x_s2` is past its 73.7 M peak (greedy 99 m at 88 M, 1.8 m at 103 M,
-  stochastic ep_len back to ~1050 at 117 M) and continues to 300 M for the stop phase.
+  was cancelled.
+* **S2 findings so far (2026-09-10, 15:00)**. (1) The S1 runner (73.7 M) on the free plant, greedy, falls
+  sideways in 0.7-1.4 s with the pitch wheel at full and in 0.7-1.2 s without it
+  (`runs/v2c_s2_free_dp2x_s0/greedy_s1best_on_free_assist{1.0,0.0}.json`): the S1 policy carries no lateral
+  balance, so the contract's warm start gives S2 nothing to stand on and the three contract seeds start at
+  ep_len ~80 (the CPU arm has not run S2 yet; no S2 golden fixture existed either, see the cross-check
+  section). (2) The contract seed 1 nevertheless climbed to stochastic ep_len 618 at 31 M and its
+  pitch-wheel fade opened there; seed 0 sits at ~160; seed 2 and the keep-std hedge were stopped.
+  (3) New opt-in preset `v2c_s2_free_fast_rollassist` (`roll_assist_kp/kd` 100/10 on the base roll DOF,
+  same fade scalar as the pitch wheel, billed in `assist_pen`, ignored on the planar plant): seeds
+  `runs/v2c_s2_free_dp2x_roll_s0/s1` warm-started from the 73.7 M runner. Whether the S1 runner runs on the
+  free plant when both wheels hold it is being measured (`greedy_s1best_bothwheels`).
+* **S1 keeps improving past the fade**: `v2c_fast_dp2x_s2` at 130 M (greedy, wheel-free) runs 16 of 16
+  to ~103 m in ~36 s at 2.88 m/s (`results/v2c_fast_dp2x_s2_greedy_130M.mp4`, checkpoint
+  `ckpt_130351104.msgpack`), after a 103 M collapse to 1.8 m and a 118 M policy at 2.06 m/s that drifted
+  to 112 m; 135 M is back at 2.43 m/s. Still no stop phase (falls at the line). `train.py` now also keeps
+  `best_speed.msgpack` (fastest eval covering the full 100 m) next to the distance-first `best.msgpack`.
 * **Best GPU-arm policy so far:** `v2c_fast_dp2x_s2` (2 × 2048 envs × 9, contract schedules) at 73.7 M
   steps, ~63 min of training on two V100s: the wheel-free greedy eval runs 16 of 16 envs to 102–105 m
   in ~38 s at 2.66–2.76 m/s, then falls at the line (no stop phase learned yet — the CPU arm's
