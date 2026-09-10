@@ -320,10 +320,17 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
 * **First S2 runner on this arm (2026-09-10, 16:00)**: contract seed 0 (`runs/v2c_s2_free_dp2x_s0`,
   `v2c_s2_free_fast` warm-started from the 73.7 M S1 runner, 2 x 2048 envs x 9, ~21k steps/s) at 73.7 M
   steps: wheel-free greedy on the FREE plant (roll + yaw free) covers 94.6 m mean at 3.02 m/s over 16
-  envs, 15 falls (one survives), no finish; `best.msgpack` there. That is ~1 h of S2 training on two V100s,
-  ~2 h 05 for S1 + S2 end to end. Seed 1 at 73.7 M stands wheel-free (0 falls in 60 s) but walks
-  backwards (-19.7 m); seed 2 (resumed) at 33 M is still at ep_len 135; the roll-wheel seed 0 at 53 M has
-  ep_len 761 with the wheels still fading.
+  envs, 15 falls (one survives), no finish. The standalone greedy eval of that checkpoint
+  (`results/v2c_s2_free_dp2x_s0_greedy_best.mp4`): all 16 envs reach 99.2-100.2 m in 30.8-31.8 s at
+  3.15-3.25 m/s and fall at the line -- faster than the best S1 runner (2.88 m/s), as the free base
+  allowed in RUN 8. That is ~1 h of S2 training on two V100s, ~2 h 05 for S1 + S2 end to end. The keeper
+  then took 88.5 M (102.4 m at 2.99 m/s, 16/16 to the line; `best_88473600.msgpack`, local copy in
+  `runs/v2c_s2_free_dp2x_s0/`). Seed 1 stood wheel-free at 73.7 M (0 falls, walking backwards) and then
+  collapsed to the 1.5 Hz rail at 98 M (ep_len 44), as did the roll-wheel seed 0 at 72 M (ep_len 25):
+  both cancelled, replaced by contract seed 3 and by seed 4 warm-started from the S2 88.5 M runner
+  (`v2c_s2_free_dp2x_s2warm_s4`). Seed 2 (resumed) and the roll-wheel seed 1 are at ep_len ~370 / ~780.
+  The rigid-hold probe (all three wheels at 1000 N m/rad) is numerically unstable (NaN within 0.1 s), so the
+  transfer question stays at: the S1 gait does not survive on the free plant under 100 N m/rad holds.
 * **S2 findings (2026-09-10, 15:00)**. (1) The S1 runner (73.7 M) on the free plant, greedy, falls
   sideways in 0.7-1.4 s with the pitch wheel at full and in 0.7-1.2 s without it
   (`runs/v2c_s2_free_dp2x_s0/greedy_s1best_on_free_assist{1.0,0.0}.json`): the S1 policy carries no lateral
