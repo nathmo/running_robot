@@ -7,13 +7,14 @@
 set -euo pipefail
 cd "${REPO:-$HOME/running_robot}"
 STEPS="${STEPS:-300000000}"
+FAM="${FAM:-v2}"        # preset family: v2 (artifact-literal) or v2b (readout-1 fixes); run names follow
 if [ "${BENCH:-0}" = "1" ]; then
     sbatch --parsable --job-name=dash-v2-bench --time=00:40:00 \
         --export=ALL,PRESET=v2_s1,STEPS=2000000,SEED=0,NAME=v2_bench walk_mit/slurm/jed_v2_bench.sbatch
     exit 0
 fi
-S1S0=$(sbatch --parsable --export=ALL,PRESET=v2_s1,STEPS=$STEPS,SEED=0,NAME=v2_s1_s0 walk_mit/slurm/jed_train.sbatch)
-S1S1=$(sbatch --parsable --export=ALL,PRESET=v2_s1,STEPS=$STEPS,SEED=1,NAME=v2_s1_s1 walk_mit/slurm/jed_train.sbatch)
-S2S0=$(sbatch --parsable --dependency=afterany:$S1S0 --export=ALL,PRESET=v2_s2,STEPS=$STEPS,SEED=0,NAME=v2_s2_s0,WARM=walk_mit/runs/v2_s1_s0 walk_mit/slurm/jed_train.sbatch)
-S2S1=$(sbatch --parsable --dependency=afterany:$S1S1 --export=ALL,PRESET=v2_s2,STEPS=$STEPS,SEED=1,NAME=v2_s2_s1,WARM=walk_mit/runs/v2_s1_s1 walk_mit/slurm/jed_train.sbatch)
-echo "v2 chains: s0 S1=$S1S0 -> S2=$S2S0   s1 S1=$S1S1 -> S2=$S2S1"
+S1S0=$(sbatch --parsable --export=ALL,PRESET=${FAM}_s1,STEPS=$STEPS,SEED=0,NAME=${FAM}_s1_s0 walk_mit/slurm/jed_train.sbatch)
+S1S1=$(sbatch --parsable --export=ALL,PRESET=${FAM}_s1,STEPS=$STEPS,SEED=1,NAME=${FAM}_s1_s1 walk_mit/slurm/jed_train.sbatch)
+S2S0=$(sbatch --parsable --dependency=afterany:$S1S0 --export=ALL,PRESET=${FAM}_s2,STEPS=$STEPS,SEED=0,NAME=${FAM}_s2_s0,WARM=walk_mit/runs/${FAM}_s1_s0 walk_mit/slurm/jed_train.sbatch)
+S2S1=$(sbatch --parsable --dependency=afterany:$S1S1 --export=ALL,PRESET=${FAM}_s2,STEPS=$STEPS,SEED=1,NAME=${FAM}_s2_s1,WARM=walk_mit/runs/${FAM}_s1_s1 walk_mit/slurm/jed_train.sbatch)
+echo "$FAM chains: s0 S1=$S1S0 -> S2=$S2S0   s1 S1=$S1S1 -> S2=$S2S1"

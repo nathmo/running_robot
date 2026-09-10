@@ -1,3 +1,30 @@
+# V2B (2026-09-10): readout-1 fixes -- ACTIVE playbook (supersedes the V2 block below for the v2b chains)
+#
+# CONTEXT: v2_s1 (artifact-literal) peaked at 19 M and regressed; its committed spec was bang-bang,
+# its clock pinned at 5 Hz, its residual 60 % of the motion (V2_CONTRACT.md "Readout-1 deltas").
+# v2b_s1_s{0,1} (JED 66423606/7) -> v2b_s2_s{0,1} (66423608/9) run the fixed presets; the v2_s1
+# jobs 66421817/8 stay up as controls (their S2 dependents were cancelled).
+#
+# Every tick (hourly cron):  ssh jed 'bash ~/running_robot/walk_mit/monitor/v2_check.sh'
+#   = queue + progress every 5 M + curriculum.json + greedy_peek on every NEW 5 M checkpoint
+#     (3 greedy episodes on the nominal plant and 3 at the run's DR scale) + job-log counters.
+# NEVER trust rollout/ep_len_mean alone (stochastic, and the v2_s1_s0 policy was noise-driven);
+# NEVER evaluate a DR run without evaluate.build's dr_scale restore (env default is full width).
+#
+# SIGNATURE (per greedy_peek line):
+#   - "f_hz med" on commits: must NOT sit at 4.00 (the new ceiling) or 1.50 on 100 % of commits.
+#   - "spec rms cam/thigh/hip/kp/kd": < 0.8 = the Fourier channel carries shape; ~1.0 = bang-bang.
+#   - "residual share of target deviation": < 0.4 healthy; > 0.6 = the residual is the gait.
+#   - greedy ep_len on the nominal plant should be within ~2x of rollout/ep_len_mean once std < 0.5.
+#   - curriculum.json: pitch_assist must still be 1.0 until the gate opens (ep_len > 600 x 5
+#     rollouts); ent_anneal_from should NOT appear before ~10 M (gate) or 40 M (deadline).
+# HEALTH: resubmit ONCE per crash signature (Traceback in dash-mit-<job>.out); NaN or a second
+# identical crash -> stop that chain, report. No code/config edits mid-campaign (monitor tools ok);
+# a fix = a new preset family + new run names (v2c...).
+# DECISION POINTS: 20 M -- if the signature is still bang-bang/rail/residual-led on BOTH seeds,
+# report and propose the next lever (clock price, spec-magnitude price, or the library variant);
+# 60 M -- greedy 8-episode dash-xy eval of the best checkpoint; S1 end -- S2 warm start is automatic.
+
 # V2 (2026-09-09): DASH-01 Walker v2 chains -- ACTIVE playbook once slurm/launch_v2.sh is submitted
 #
 # CONTEXT: the latched-spec lineage (V2_CONTRACT.md). Two seeds, chained per seed:

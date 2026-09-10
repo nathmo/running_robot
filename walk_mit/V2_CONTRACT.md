@@ -24,12 +24,12 @@ policy trained on either side must load and act identically given these.
 | 14:21 | S hip_roll | yes | ±`roll_amp` 0.20 |
 | 21:28 | kp(φ) profile | yes | series → exp map, ×2.5 / ÷3 |
 | 28:35 | kd(φ) profile | yes | series → exp map, ×1.0 / ÷4 (soften-only) |
-| 35 | freq_raw | yes | linear → [0.5, 5.0] Hz |
+| 35 | freq_raw | yes | linear → [0.5, 5.0] Hz (`v2b_*`: [1.5, 4.0] Hz, neutral 2.75 Hz unchanged) |
 | 36:39 | roll reflex kp, kd, bias | yes | u = 0.5·kp·roll + 0.1·kd·roll̇ + 0.2·bias, enters hip_roll **(+,+)** |
 | 39 | Δ (lag) | yes | × `delta_max_rad` 0.6; right leg reads S at φ − π − Δ |
 | 40 | s (stride asym.) | yes | g_L = 1+s, g_R = 1−s |
 | 41:44 | o cam, thigh, hip | yes | × (0.06, 0.06, 0.15) rad, enters both legs **(+,+)** |
-| 44:50 | residual r0..r5 | no | × `residual_scale` 0.20 rad, actuator order hip_roll_L cam_L thigh_L hip_roll_R cam_R thigh_R |
+| 44:50 | residual r0..r5 | no | × `residual_scale` 0.20 rad (`v2b_*`: 0.10 rad), actuator order hip_roll_L cam_L thigh_L hip_roll_R cam_R thigh_R |
 
 Generator (per family, A = family amplitude, n = per-episode stance nominal = keyframe ctrl):
 
@@ -152,6 +152,31 @@ with `--warm-start` (log σ re-inflated). Ramps at 100 Hz: sprint line 25→100 
 stance ratio 0.65→0.42 over 120 M, efficiency 0→1 over 120 M, pitch assist 100 N·m/rad fading
 over 30 M, DR 0→1 over 60 M gated at ep_len 600, jitter/drop after ep_len 800, entropy anneal
 deadline 12.5 M, 300 M total.
+
+## Readout-1 deltas — the `v2b_*` presets (2026-09-10)
+
+The first v2_s1 chains (JED 66421817/8, artifact-literal) were measured at 33 M with
+`walk_mit/monitor/greedy_peek.py` (commit-tick statistics, greedy episodes at the run's DR scale
+and on the nominal plant). What they committed: every Fourier family at rms 0.93–1.0 (bang-bang
+spec), knobs at the rails, the clock at exactly 5.00 Hz on 100 % of commits, the residual 60–67 %
+of the joint-target deviation with 45 % of ticks at its bound — THE RUNNER's pathology inside the
+latched design. Both seeds regressed from ep_len ~700 at 19 M to ~150 by 33 M while the
+clock-driven assist fade, the DR ramp (gate 600) and the std anneal (opened at 92 k steps by the
+swing-fraction gate, which reads 0.4 on a falling robot) overlapped. `v2b_*` keeps the plant, the
+obs and action layout and the reward set, and changes only:
+
+| knob | v2 (artifact) | v2b | why |
+|---|---|---|---|
+| `gait_freq_hz` | (0.5, 5.0) | (1.5, 4.0) | no 5 Hz max-commit rail, no 0.5 Hz freeze; neutral 2.75 Hz kept |
+| `residual_scale` / `w_residual` | 0.20 rad / 0.10 | 0.10 rad / 0.20 | half the per-tick authority, twice the bill |
+| pitch assist fade | clock, from step 0 | `pitch_assist_gate_ep_len` 600, then 30 M monotonic | fade the wheel once the policy runs on it |
+| entropy / std anneal gate | swing_frac 0.13 | + `ent_gate_ep_len` 600, deadline 40 M | a falling robot has both feet airborne |
+| DR gate / jitter gate | 600 / 800 | 1200 / 1200 | harden a runner, not a stander |
+
+The GPU port must mirror the first two rows to stay in parity with a `v2b` policy; the three
+curriculum rows are training-side only. Evaluation harness fixes that came with the readout:
+`evaluate.build` now restores `dr_scale` and `pitch_assist` from curriculum.json (the env builds
+its randomizer at full width), and the train-time clock diagnostic counts commit ticks only.
 
 ## Parity fixture
 

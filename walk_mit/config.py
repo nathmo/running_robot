@@ -686,6 +686,10 @@ class Config:
     pitch_assist_kp: float = 0.0        # N*m per rad of base pitch angle (restoring toward level)
     pitch_assist_kd: float = 0.0        # N*m per rad/s of base pitch rate (damping)
     pitch_assist_ramp_steps: int = 0    # env steps to linearly fade the assist SCALE 1 -> 0; 0 = off
+    pitch_assist_gate_ep_len: float = 0.0   # >0: HOLD full help until rollout ep_len_mean exceeds this
+    #                                     (5 rollouts), THEN fade 1 -> 0 over the ramp. Only the OPEN is
+    #                                     gated; the fade stays monotonic (a retreating wheel is the
+    #                                     crutch the round-4 note warns of). 0 = clock-driven from step 0.
     # anti-crutch (round 4, 2026-07-23): a decaying assist ALONE breeds crutch-dependence — the
     # policy maxes out the wheel at every fade level (assist=0 eval collapsed to ep_len 14-50) since
     # nothing rewards NOT needing it. This penalizes the assist torque the policy provokes: balance
@@ -917,6 +921,10 @@ class Config:
     # the ground, averaged over the rollout. Standing is 0.0; a walking gait is 0.3-0.4. It is
     # invariant to reward weights, to dt and to the control rate, so it cannot drift like this.
     ent_gate_swing_frac: float = 0.0
+    ent_gate_ep_len: float = 0.0        # >0: the competence gate ALSO requires rollout ep_len_mean above
+    #                                     this. swing_frac alone reads 0.3-0.5 on a FALLING robot (both
+    #                                     feet airborne while it topples), so on short episodes it is
+    #                                     trivially open: v2_s1 opened its std anneal at 92 k steps.
     ent_anneal_deadline_steps: int = 0  # hard fallback: begin the ent_coef anneal by this many env
     #                                     steps even if the air_time competence gate never opens
     #                                     (num_timesteps-based; 0 = disabled, gate-only). Without it
@@ -2644,6 +2652,21 @@ _V2_TRAIN = dict(
     warmstart_reset_log_std=True,
 )
 
+# Readout-1 fixes (2026-09-10, walk_mit/monitor/greedy_peek.py on v2_s1 at 33 M): the committed
+# spec was BANG-BANG (every Fourier family at rms 0.93-1.0, knobs at the rails), the clock sat at
+# exactly 5.00 Hz on 100 % of commits, the residual was 60-67 % of the joint motion with 45 % of
+# steps at its bound -- the RUNNER's pathology inside the latched design -- and both seeds regressed
+# from ep_len ~700 at 19 M to ~150 by 33 M while the CLOCK-DRIVEN assist faded out, DR opened at
+# ep_len 600 and the std anneal (opened at 92 k steps by the swing-frac gate) all overlapped.
+# v2b keeps the artifact's plant, obs, action layout and reward set and changes only these:
+_V2B = dict(
+    gait_freq_hz=(1.5, 4.0),                 # neutral stays 2.75 Hz; no 5 Hz max-commit rail, no 0.5 Hz freeze
+    residual_scale=0.10, w_residual=0.20,    # half the per-tick authority, twice the bill
+    pitch_assist_gate_ep_len=600.0,          # fade the wheel once the policy runs on it, then 30 M monotonic
+    ent_gate_ep_len=600.0, ent_anneal_deadline_steps=40_000_000,   # precision phase on competence, not falls
+    dr_curriculum_gate_ep_len=1200.0, jitter_curriculum_gate_ep_len=1200.0,   # harden a runner, not a stander
+)
+
 _V2_STAGE = {"s1": "m3", "s2": "m6"}      # S1 planar (x, z, pitch) / S2 free
 
 
@@ -2684,6 +2707,11 @@ PRESETS.update({
     "v2_s2": lambda: _v2("s2"),
     "v2_s1_clean": lambda: _v2("s1", **_V2_CLEAN),
     "v2_s2_clean": lambda: _v2("s2", **_V2_CLEAN),
+    # readout-1 fixes on top (see _V2B); the v2_* presets above stay the artifact-literal reference
+    "v2b_s1": lambda: _v2("s1", **_V2B),
+    "v2b_s2": lambda: _v2("s2", **_V2B),
+    "v2b_s1_clean": lambda: _v2("s1", **_V2B, **_V2_CLEAN),
+    "v2b_s2_clean": lambda: _v2("s2", **_V2B, **_V2_CLEAN),
     # library variant (§09, the recommended build order): spec = library entry + Raibert law,
     # action = 6 residual + 3 latched (df/f, amplitude, lift), once-block 23 -> actor obs 353
     "v2_lib_s1": lambda: _v2("s1", spec_source="library", raibert_enable=True, w_track=0.05,

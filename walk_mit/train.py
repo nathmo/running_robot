@@ -541,6 +541,12 @@ class EntropyCallback(BaseCallback):
                 competent = swing > gate_swing
             else:
                 competent = air > self.cfg.ent_gate_air_time
+            # v2b: a falling robot has both feet airborne, so swing_frac alone opens on falls
+            gate_len = float(getattr(self.cfg, "ent_gate_ep_len", 0.0))
+            if gate_len > 0.0:
+                ep_len = (safe_mean([ep["l"] for ep in self.model.ep_info_buffer])
+                          if len(self.model.ep_info_buffer) > 0 else 0.0)
+                competent = competent and ep_len > gate_len
             self._streak = self._streak + 1 if competent else 0
             gate_open = self._streak >= self.patience
             # hard fallback: if the competence gate never opens (air_time stuck below the gate
@@ -952,8 +958,16 @@ def main():
     # decaying pitch-assist training-wheel (m2->m3 bridge): fade the SCALE 1 -> 0 (clock-driven so
     # the help always retreats and the policy must take over pitch balance; never competence-gated).
     if cfg.pitch_assist_ramp_steps > 0 and cfg.pitch_assist_kp > 0:
-        cb_list.append(RampCallback("pitch_assist", "set_pitch_assist",
-                                    1.0, 0.0, cfg.pitch_assist_ramp_steps, run))
+        agate = float(getattr(cfg, "pitch_assist_gate_ep_len", 0.0))
+        if agate > 0:
+            # v2b: competence-gated OPEN (hold full help until the policy runs on it), monotonic
+            # fade after -- retreat_frac stays 0 because a wheel that comes back is the crutch
+            cb_list.append(GatedRampCallback("pitch_assist", "set_pitch_assist",
+                                             1.0, 0.0, cfg.pitch_assist_ramp_steps, run, agate,
+                                             retreat_frac=0.0))
+        else:
+            cb_list.append(RampCallback("pitch_assist", "set_pitch_assist",
+                                        1.0, 0.0, cfg.pitch_assist_ramp_steps, run))
     # pitch slow-motion: fade the extra base-pitch armature 1 -> 0 (clock-driven, like the assist).
     if cfg.pitch_armature_ramp_steps > 0 and cfg.pitch_armature > 0:
         cb_list.append(RampCallback("pitch_armature", "set_pitch_armature",
