@@ -50,13 +50,14 @@ class EnvParams(NamedTuple):
     ctrl_jitter_ms: float = 0.0
     ctrl_drop_prob: float = 0.0
     pitch_assist: float = 0.0
+    stoplight_prob: float = 0.0
 
     @classmethod
     def final(cls, cfg):
         return cls(dr_scale=1.0, sprint_dist_m=float(cfg.sprint_dist_m),
                    stance_ratio=float(cfg.stance_ratio_final), eff_scale=float(cfg.efficiency_target),
                    ctrl_jitter_ms=float(cfg.ctrl_jitter_ms_final),
-                   ctrl_drop_prob=float(cfg.ctrl_drop_prob_final), pitch_assist=0.0)
+                   ctrl_drop_prob=float(cfg.ctrl_drop_prob_final), pitch_assist=0.0, stoplight_prob=0.0)
 
 
 @struct.dataclass
@@ -112,6 +113,10 @@ class EnvState:
     crossed: jnp.ndarray
     t_line: jnp.ndarray
     stop_hold: jnp.ndarray
+    light_red: jnp.ndarray       # stop curriculum: red phase active (before the line)
+    light_left: jnp.ndarray      # seconds left in the current light phase (inf = no lights this episode)
+    light_v0: jnp.ndarray        # forward speed when the last red / the line started (decel target start)
+    light_t: jnp.ndarray         # seconds since that switch
     # library variant
     theta: jnp.ndarray           # (44,) this episode's gait (box-perturbed library entry)
     v_ref: jnp.ndarray
@@ -310,7 +315,7 @@ class DashEnvV2:
                            lp_yaw_obs=lp_yaw_obs), accel, v_body
 
     def _task(self, state, params):
-        run = jnp.where(state.crossed, 0.0, 1.0)
+        run = jnp.where(state.crossed | state.light_red, 0.0, 1.0)
         d_to_go = jnp.clip((params.sprint_dist_m - state.sprint_d) / self.cfg.task_brake_m, 0.0, 1.0)
         if self.cfg.objective == "speed":
             return jnp.array([1.0, 1.0])
@@ -349,7 +354,7 @@ class DashEnvV2:
     # ------------------------------------------------------------------ reset
     def _reset_one(self, key, params: EnvParams, ov: Override):
         c, p, gp = self.cfg, self.plant, self.gp
-        k_draw, k_noise, k_pose, k_lib, k_push, k_gust, k_next, k_frame = jax.random.split(key, 8)
+        k_draw, k_noise, k_pose, k_lib, k_push, k_gust, k_next, k_frame, k_light = jax.random.split(key, 9)
         draw = draw_plant(k_draw, c, p, params.dr_scale, ov)
         mx_i = model_with(p, draw.fields)
         qpos = jnp.asarray(p.key_qpos)
@@ -399,6 +404,11 @@ class DashEnvV2:
             gust_countdown=self._next_gust(k_gust), gust_dir=jnp.array([1.0, 0.0]),
             x0=data.qpos[p.base_q["x"]], sprint_d=jnp.zeros(()), crossed=jnp.zeros((), bool),
             t_line=jnp.full((), -1.0), stop_hold=jnp.zeros(()),
+            light_red=jnp.zeros((), bool),
+            light_left=jnp.where(jax.random.uniform(k_light) < params.stoplight_prob,
+                                 jax.random.uniform(k_next, (), minval=c.stoplight_green_s[0],
+                                                    maxval=c.stoplight_green_s[1]), jnp.inf),
+            light_v0=jnp.zeros(()), light_t=jnp.zeros(()),
             theta=jnp.clip(theta, -1.0, 1.0), v_ref=v_ref, raibert_i=jnp.zeros(()),
             ep_return=jnp.zeros(()), ep_len=jnp.zeros((), jnp.int32),
         )
@@ -444,7 +454,7 @@ class DashEnvV2:
         c, p, gp = self.cfg, self.plant, self.gp
         dt = self.control_dt
         dr = state.draw
-        key, k_drop, k_push, k_trip, k_gust, k_jit, k_frame, k_reset, k_int = jax.random.split(state.key, 9)
+        key, k_drop, k_push, k_trip, k_gust, k_jit, k_frame, k_reset, k_int, k_light = jax.random.split(state.key, 10)
         action = jnp.clip(action, -1.0, 1.0)
         drop = jax.random.uniform(k_drop) < params.ctrl_drop_prob
         action = jnp.where(drop, state.prev_action, action)
@@ -612,13 +622,26 @@ class DashEnvV2:
         stopped = jnp.abs(vx_stop) <= c.stop_speed_eps
         stop_hold = jnp.where(crossed & stopped, state.stop_hold + dt, 0.0)
         finished = crossed & (stop_hold >= c.stop_hold_s) if c.objective == "sprint" else jnp.zeros((), bool)
+        # ---- stop curriculum: red light / green light phases (only before the line)
+        kl1, kl2 = jax.random.split(k_light)
+        light_left = state.light_left - dt
+        toggle = (light_left <= 0.0) & (~crossed)
+        green_dur = jax.random.uniform(kl1, (), minval=c.stoplight_green_s[0], maxval=c.stoplight_green_s[1])
+        red_dur = jax.random.uniform(kl2, (), minval=c.stoplight_red_s[0], maxval=c.stoplight_red_s[1])
+        light_red = jnp.where(toggle, ~state.light_red, state.light_red)
+        light_left = jnp.where(toggle, jnp.where(state.light_red, green_dur, red_dur), light_left)
+        go_red = (toggle & ~state.light_red) | newly_crossed
+        light_v0 = jnp.where(go_red, v_body[0], state.light_v0)
+        light_t = jnp.where(go_red, 0.0, state.light_t + dt)
+        stop_now = crossed | light_red
+        v_target = (light_v0 * jnp.maximum(0.0, 1.0 - light_t / c.stop_decel_s)) if c.stop_decel_s > 0 else jnp.zeros(())
         # ---- reward
         lp = float(np.exp(-dt / c.lp_yaw_tau_s))
         lp_yaw_true = lp * state.lp_yaw_true + (1.0 - lp) * gyro[2]
         roll_lp = 0.95 * state.roll_lp + 0.05 * grav[1]
         rw = self._reward(state, params, data, mx_i, spec, spec_change, residual, motor_cmd, tau_last,
                           grounded, heights, fn, v_body, grav, gyro, lp_yaw_true, crossed, sprint_d,
-                          thermal_x, assist, phi)
+                          thermal_x, assist, phi, stop_now, v_target)
         reward, terms, book = rw
         reward = reward * self.reward_dt_scale
         reward = jnp.maximum(reward, -c.step_reward_floor * self.reward_dt_scale)
@@ -653,6 +676,7 @@ class DashEnvV2:
             trip_foot=trip_foot, trip_force=trip_force, gust_left=gust_left,
             gust_countdown=gust_countdown, gust_dir=gust_dir, sprint_d=sprint_d, crossed=crossed,
             t_line=t_line, stop_hold=stop_hold,
+            light_red=light_red, light_left=light_left, light_v0=light_v0, light_t=light_t,
             raibert_i=jnp.clip(state.raibert_i + (v_body[0] - state.v_ref) * dt,
                                -c.raibert_imax, c.raibert_imax),
             ep_return=state.ep_return + reward, ep_len=state.ep_len + 1, **ns)
@@ -666,6 +690,7 @@ class DashEnvV2:
             freq_hz=f, spec_change=spec_change, resync=can.any(),
             residual_sat=jnp.mean(jnp.abs(residual) >= 0.95), lateral_y=self._y(data),
             term_low=term_low, term_tip=term_tip, term_floor=floor_viol, term_ws=ws_kill, term_nan=~finite,
+            light_red=light_red.astype(jnp.float32),
         )
         # ---- auto-reset
         rs_state, rs_obs = self._reset_one(k_reset, params, Override())
@@ -677,15 +702,17 @@ class DashEnvV2:
     # ------------------------------------------------------------------ reward
     def _reward(self, state, params, data, mx_i, spec, spec_change, residual, motor_cmd, tau,
                 grounded, heights, fn, v_body, grav, gyro, lp_yaw_true, crossed, sprint_d,
-                thermal_x, assist, phi):
+                thermal_x, assist, phi, stop_now=None, v_target=None):
         c, p, gp = self.cfg, self.plant, self.gp
+        if stop_now is None:
+            stop_now, v_target = crossed, jnp.zeros(())
         dt = self.control_dt
         cap = c.penalty_term_cap
         pen = lambda v: jnp.maximum(v, -cap)
         vx = v_body[0]
         if c.sprint_world_speed:
             vx = self._vel_world(data)[0]
-        run_phase = (c.objective == "speed") | (~crossed)
+        run_phase = (c.objective == "speed") | (~stop_now)
         t = {}
         # ---- objective income
         income = c.w_fwd_speed * jnp.clip(vx, -c.v_ceiling, c.v_ceiling)
@@ -693,7 +720,9 @@ class DashEnvV2:
             u = jnp.clip((-grav[2] - c.speed_upright_c0) / (1.0 - c.speed_upright_c0), 0.0, 1.0)
             income = jnp.where(income > 0.0, income * u ** c.speed_upright_k, income)
         t["fwd_speed"] = jnp.where(run_phase, income, 0.0)
-        t["stop"] = jnp.where(run_phase, 0.0, c.w_stop_vel * jnp.exp(-(vx / c.stop_sigma) ** 2))
+        # stop term: track the deceleration target while it is > 0 (stop_decel_s), then be still
+        sig = jnp.where(v_target > 0.0, c.decel_sigma, c.stop_sigma)
+        t["stop"] = jnp.where(run_phase, 0.0, c.w_stop_vel * jnp.exp(-((vx - v_target) / sig) ** 2))
         over = jnp.maximum(0.0, sprint_d - (params.sprint_dist_m + c.sprint_brake_m))
         t["overrun"] = jnp.where(run_phase, 0.0, pen(-c.w_overrun * over))
         t["time"] = -c.w_time if c.objective == "sprint" else 0.0

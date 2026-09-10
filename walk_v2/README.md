@@ -331,6 +331,19 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
   (`v2c_s2_free_dp2x_s2warm_s4`). Seed 2 (resumed) and the roll-wheel seed 1 are at ep_len ~370 / ~780.
   The rigid-hold probe (all three wheels at 1000 N m/rad) is numerically unstable (NaN within 0.1 s), so the
   transfer question stays at: the S1 gait does not survive on the free plant under 100 N m/rad holds.
+* **Stop curriculum (2026-09-10, 22:30) -- red light / green light**: no runner on either arm ever
+  stops: the post-line phase is a cliff it meets once per episode at 3 m/s and never survives, so the
+  finish bonus is unreachable. New opt-in preset `v2c_s2_free_fast_stoplight` (all fields default off;
+  the contract presets are byte-identical in behaviour): in a competence-gated fraction of episodes
+  (0 -> 0.5 over 20 M once ep_len > 600) the run flag drops at random times before the line for 2-4 s
+  (obs task[0] -> 0 while task[1], the distance countdown, stays > 0), the speed income stops and the
+  stop term pays for tracking a target speed that ramps from the speed at the switch to 0 over
+  `stop_decel_s` = 1.5 s, then for standing still; after 3-8 s the light turns green and the income
+  resumes. The line is one more red light with the same deceleration target. `evaluate.py --stoplight P`
+  puts lights into an eval. Decision (user): S1 is dropped -- the S1 -> S2 warm start carries nothing --
+  and S2 is trained cold at 220 M steps (~3 h on two V100s); seeds `runs/v2c_s2_free_dp2x_stop_s{0,1,2}`.
+  `train.py --resume auto` now falls back to the previous checkpoint when the newest is truncated (four
+  were, by the outage).
 * **Outage 2026-09-10 16:52-21:50**: every training job died with `OSError: [Errno 122] Disk quota exceeded`
   (the Izar home is shared with the CPU arm's history: `walk_mit/runs` 71 GB, old `dash-mit-*.out` logs
   5 GB, pip + uv caches 34 GB, venvs 28 GB; `walk_v2/runs` was 5.3 GB). The VPN was down at the same time,

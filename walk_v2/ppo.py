@@ -426,6 +426,9 @@ class PPO:
                                                c.jitter_curriculum_steps, jg, rf, d_steps)
             kw["ctrl_drop_prob"] = self._gated("ctrl_drop_prob", ep_len, 0.0, c.ctrl_drop_prob_final,
                                                c.jitter_curriculum_steps, jg, rf, d_steps)
+        if getattr(c, "stoplight_prob_final", 0.0) > 0 and c.stoplight_curriculum_steps > 0:
+            kw["stoplight_prob"] = self._gated("stoplight_prob", ep_len, 0.0, c.stoplight_prob_final,
+                                               c.stoplight_curriculum_steps, c.stoplight_gate_ep_len, rf, d_steps)
         if c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0:
             pg = float(getattr(c, "pitch_assist_gate_ep_len", 0.0))
             if pg <= 0:

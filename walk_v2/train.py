@@ -149,7 +149,22 @@ def main():
     eval_env = None if args.no_eval else make_eval_env(cfg, args.eval_envs)
     agent = PPO(cfg, env, run, total, seed=cfg.seed, eval_env=eval_env, n_devices=args.devices)
     if resume_ckpt is not None:
-        agent.load(resume_ckpt)
+        # a checkpoint truncated by a full disk (the 2026-09-10 quota outage) must not kill the resume:
+        # fall back to the previous one, oldest last
+        cands = [resume_ckpt] + [c for c in sorted(run.glob("ckpt_*.msgpack"),
+                                                     key=lambda q: -int(q.stem.split("_")[1])) if c != resume_ckpt]
+        for ck in cands:
+            try:
+                agent.load(ck)
+                if ck != resume_ckpt:
+                    print(f"[train] resumed from {ck.name} instead")
+                break
+            except Exception as e:      # noqa: BLE001 -- flax/msgpack raise ValueError on a partial file
+                bad = ck.with_suffix(".msgpack.corrupt")
+                print(f"[train] checkpoint {ck.name} unreadable ({e}); renaming to {bad.name}")
+                ck.rename(bad)
+        else:
+            raise SystemExit("[train] no readable checkpoint to resume from")
     elif warm is not None:
         agent.load(warm, warm_start=True)
 

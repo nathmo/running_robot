@@ -188,6 +188,20 @@ class Config:
     stop_speed_eps: float = 0.15
     stop_hold_s: float = 1.0
     finish_bonus: float = 100.0
+    # ----- stop curriculum (2026-09-10 evening): every runner on both arms crossed the line at full
+    # speed and fell (the post-line phase is never experienced; the finish bonus is unreachable).
+    # Red light / green light: in a fraction of episodes the run flag drops at random times before
+    # the line (obs task[0] -> 0 with task[1] still > 0), the speed income stops and the stop term
+    # pays for tracking a target speed that ramps from the speed at the switch to 0 over stop_decel_s
+    # (then the plain stop term), then the light turns green again. The final line is one more red.
+    # All off by default (contract behaviour); the *_stoplight presets turn it on.
+    stoplight_prob_final: float = 0.0       # fraction of episodes with red/green cycles
+    stoplight_curriculum_steps: int = 0     # ramp 0 -> final, competence-gated like DR
+    stoplight_gate_ep_len: float = 600.0
+    stoplight_green_s: tuple = (3.0, 8.0)   # green phase duration, uniform
+    stoplight_red_s: tuple = (2.0, 4.0)     # red phase duration, uniform
+    stop_decel_s: float = 0.0               # > 0: target speed ramps to 0 over this after a red / the line
+    decel_sigma: float = 0.6                # width (m/s) of the tracking reward while the target is > 0
     fall_penalty: float = 100.0
     penalty_term_cap: float = 2.0
     step_reward_floor: float = 1.0
@@ -391,6 +405,10 @@ PRESETS = {
     # S2 warm-start experiment: keep the S1 policy's std (contract re-inflates log sigma; the seeds start at ep_len 77)
     "v2c_s2_free_fast_keepstd": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                             warmstart_reset_log_std=False),
+    # the stop curriculum (red light / green light + deceleration target), cold S2
+    "v2c_s2_free_fast_stoplight": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                              stoplight_prob_final=0.5, stoplight_curriculum_steps=20_000_000,
+                                              stoplight_gate_ep_len=600.0, stop_decel_s=1.5),
     # S2 with the roll wheel (pitch + roll held at the start, both faded once ep_len > 600 for 5 rollouts)
     "v2c_s2_free_fast_rollassist": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                                roll_assist_kp=100.0, roll_assist_kd=10.0),

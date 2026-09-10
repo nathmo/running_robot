@@ -40,10 +40,11 @@ def load_run(run, checkpoint=None, n_envs=16, dr=False, keep_assist=False):
     return cfg, env, agent
 
 
-def rollout(env, agent, seed, n_max, record=False, assist=0.0):
+def rollout(env, agent, seed, n_max, record=False, assist=0.0, stoplight=0.0):
     """Greedy rollout of all envs; returns per-env dash stats (+ env-0 qpos trajectory)."""
     params = EnvParams.final(agent.cfg)._replace(dr_scale=1.0 if env.cfg.dr_enable else 0.0,
-                                                 ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0, pitch_assist=float(assist))
+                                                 ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0, pitch_assist=float(assist),
+                                                 stoplight_prob=float(stoplight))
     key = jax.random.PRNGKey(seed)
     state, obs = env.reset(key, params)
     act = agent._act_greedy
@@ -102,13 +103,16 @@ def main():
     ap.add_argument("--seconds", type=float, default=None, help="cap per episode (default: cfg.episode_s)")
     ap.add_argument("--video", default=None)
     ap.add_argument("--dr", action="store_true", help="evaluate on the randomized training plant")
+    ap.add_argument("--stoplight", type=float, default=0.0,
+                    help="fraction of eval episodes with red/green light phases (stop curriculum check)")
     ap.add_argument("--assist", type=float, default=0.0,
                     help="pitch-assist level (0 = deployable test; the CPU arm reads out at the training level)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
     cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=args.dr, keep_assist=args.assist > 0)
     n_max = int(round((args.seconds or cfg.episode_s) / env.control_dt))
-    stats, qs = rollout(env, agent, args.seed, n_max, record=args.video is not None, assist=args.assist)
+    stats, qs = rollout(env, agent, args.seed, n_max, record=args.video is not None, assist=args.assist,
+                        stoplight=args.stoplight)
     fin = stats["finished"]
     print(f"episodes={args.episodes}  finishes {fin.sum()}/{args.episodes}  falls {stats['fell'].sum()}  "
           f"timeouts {stats['alive'].sum()}")
