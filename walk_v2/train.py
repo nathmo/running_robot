@@ -164,6 +164,12 @@ def main():
     if _bj.exists():
         _b = json.loads(_bj.read_text())
         best_score = (int(_b.get("finishes", 0)), float(_b.get("dist_mean", 0.0)))
+    # second keeper: the FASTEST checkpoint that covers the full dash (mean distance >= the line); the
+    # distance-first keeper above preferred a 2.06 m/s policy that drifted to 112 m over a 2.91 m/s one
+    best_speed = None
+    _bs = run / "best_speed_eval.json"
+    if _bs.exists():
+        best_speed = float(json.loads(_bs.read_text()).get("speed_mean", 0.0))
     log = CsvLog(run / "progress.csv")
     evlog = CsvLog(run / "eval.csv")
     tb = None
@@ -214,6 +220,15 @@ def main():
                                                            "dist_mean": _score[1], **{k: float(v) for k, v in ev.items()
                                                                                        if isinstance(v, (int, float))}}, indent=1))
                 print(f"[train] best checkpoint -> best.msgpack (step {agent.step:,}, finishes {_score[0]}, dist {_score[1]:.1f} m)")
+            _spd = float(ev.get("speed_mean", float("nan")))
+            if _score[1] >= float(cfg.sprint_dist_m) and _spd == _spd and (best_speed is None or _spd > best_speed):
+                best_speed = _spd
+                agent.save(run / "best_speed.msgpack")
+                (run / "best_speed_eval.json").write_text(json.dumps({"step": agent.step, "finishes": _score[0],
+                                                                 "dist_mean": _score[1], "speed_mean": _spd,
+                                                                 **{k: float(v) for k, v in ev.items()
+                                                                    if isinstance(v, (int, float))}}, indent=1))
+                print(f"[train] fastest full-dash checkpoint -> best_speed.msgpack (step {agent.step:,}, {_spd:.2f} m/s over {_score[1]:.1f} m)")
 
         if agent.step - last_ckpt >= cfg.checkpoint_every_steps:
             agent.save(run / f"ckpt_{agent.step}.msgpack")
