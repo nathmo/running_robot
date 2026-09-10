@@ -91,6 +91,25 @@ artifact-literal reference. Fixed at the same time: the stance-ratio and efficie
 clock-driven from step 0 as on the CPU arm (they were gated at ep_len 600 here, so the CPU arm
 paid the efficiency terms from 1 M steps while this side paid nothing).
 
+## Readout 2 (2026-09-10 evening): v2b collapses on both arms when the wheel goes
+
+Matched at steps, `v2b_s1` on both arms (CPU: `walk_mit/runs/v2b_s1_s*`; GPU: `runs/v2b_s1_planar_s*`):
+
+| | CPU s0 / s1 | GPU s0 / s1 |
+|---|---|---|
+| peak episode length | 1893 (22 M) / 920 (22 M) | 676 (40 M) / never above 115 |
+| at 80 M | 23 / 24 | 19 / 108 |
+| clock | 4.0 Hz on 100 % of commits | 4.0 Hz on 100 % / 1.5 Hz on 67 % |
+| greedy eval without assist (GPU) | | 0/16, falls within 1 s at every checkpoint |
+
+Both collapses coincide with the pitch-assist fade running out (v2: clock fade 0→30 M, collapse
+~30 M on both arms; v2b: fade opened at ep_len 600, collapse 20–30 M later on both arms), and the
+greedy eval with the assist removed never stood at all. The policy balances on the 100 N·m/rad
+pitch spring and has no per-tick authority to replace it once the spec is latched (residual 0.10 rad
+in v2b). Experiments running: `v2b_s1_planar_noassist` (seeds 0/1, no wheel from step 0: does the
+latched design learn balance at all?) and `v2b_s1_planar_stiff` (seed 0, 10× leg spring = the CPU
+arm's effectively rigid rod, isolating the plant compliance in the per-step lag).
+
 ## Run
 
 ```bash
@@ -186,11 +205,10 @@ Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from it
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
   masked PPO update, estimator, symmetry loss, entropy/std anneal, curricula, eval, checkpoint).
-* Izar (V100): full smoke test passes on the GPU. Four runs: `v2_s1_planar` seeds 0/1 (jobs
-  3144977/78, artifact-literal, resumed at 5 M with the eval fix; clock parked on the 0.5 Hz rail)
-  and `v2b_s1_planar` seeds 0/1 (jobs 3145016/17, the readout-1 preset, the usable-policy
-  candidates). Contract sizing 1024 × 18, cap 16 × 8, ~7.7k steps/s each at the start. The CPU
-  arm runs `v2b_s1_s0/s1` on JED in parallel. Compare curves with `tools/compare_cpu_gpu.py`.
+* Izar (V100): full smoke test passes on the GPU. Completed/stopped: `v2_s1_planar` s0/s1 (parked on
+  the 0.5 Hz rail, collapsed by 52 M like the CPU arm's v2), `v2b_s1_planar` s0/s1 (peak 676 at 40 M,
+  collapsed by 60 M; checkpoints on Izar). Running: `v2b_s1_planar_noassist` s0/s1 and
+  `v2b_s1_planar_stiff` s0 (readout 2 above). Contract sizing 1024 × 18, cap 16 × 8, ~7.7k steps/s.
 * Cross-check with the CPU arm: golden fixture `walk_mit/golden/v2_s1_clean_seed0.npz` replays with
   exact commit flags and rewards identical over the first 20 ticks; control-law agreement 5e-6 on the
   traces. Policy-level comparison (same preset, seed, budget; greedy dash eval) pending the runs.

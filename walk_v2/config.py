@@ -334,6 +334,14 @@ PRESETS = {
     # readout-1 fixes on top (see _V2B); the v2_* presets stay the artifact-literal reference
     "v2b_s1_planar": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2B),
     "v2b_s2_free": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2B),
+    # plant experiment (2026-09-10): the CPU arm's literal 30 kN/m rod spring yields ~nothing under load, so
+    # its leg is effectively rigid; this side has the measured 5 mm/BW compliance. 10x stiffer (0.5 mm/BW)
+    # isolates whether the per-step learning lag vs the CPU arm is the plant.
+    "v2b_s1_planar_stiff": lambda: _v2(model_path="model/dash01_v2_planar_stiff.xml", **_V2B),
+    # the wheel question (2026-09-10): v2 and v2b collapse on BOTH arms exactly when the pitch-assist fade
+    # runs out, and the greedy eval without the wheel falls within a second at every checkpoint. No
+    # assist from step 0: does the latched design learn balance at all?
+    "v2b_s1_planar_noassist": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2B, pitch_assist_kp=0.0),
     # Δ_max = pi: the bound becomes reachable (§13 open decision, priced not forbidden)
     "v2_s2_free_wide": lambda: _v2(model_path="model/dash01_v2_free.xml", delta_max=3.14159265),
     # honesty-off debug arms: nominal plant, no noise, no disturbances (fast signal on latch/reward)
