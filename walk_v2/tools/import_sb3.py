@@ -78,6 +78,7 @@ def main():
     ap.add_argument("--preset", default="v2c_s1_planar")
     ap.add_argument("--out", default=None, help="walk_v2 run dir to write (import step)")
     ap.add_argument("--no-phase-swap", action="store_true", help="assume identical frame layouts")
+    ap.add_argument("--model-path", default=None, help="override the preset's plant XML (e.g. the stiff leg)")
     ap.add_argument("--dump", default=None, help="torch-venv step: write this .npz and exit")
     args = ap.parse_args()
     if args.dump:
@@ -92,6 +93,9 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     cfg = get_config(args.preset)
+    if args.model_path:
+        import dataclasses
+        cfg = dataclasses.replace(cfg, model_path=args.model_path)
     env = DashEnvV2(cfg, n_envs=1)
     agent = PPO(cfg, env, out, cfg.total_steps, seed=0, eval_env=None)
     sd = torch_state_dict(args.zip)

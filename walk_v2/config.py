@@ -334,6 +334,12 @@ _V2B = dict(
 _V2C = dict(_V2B, w_bound=1.0, curriculum_retreat_frac=0.7, max_log_std=-0.3567,   # ln 0.7
             w_assist_penalty=0.005)
 
+# GPU throughput sizing (2026-09-10, goal: a policy in < 3 h on one arm). The batched step is latency-bound
+# (solver loops), so more envs per rollout cost little: 2048 x 9 keeps the contract's 18 432-sample rollout
+# (same updates per sample) at ~1.8x the samples/s of 1024 x 18, with a 9-tick (90 ms) GAE horizon; the
+# 8 x 8 solver cap adds ~29 % in the flailing regime and replays the golden fixture identically.
+_FAST = dict(n_envs=2048, n_steps=9, mjx_iterations=8, mjx_ls_iterations=8)
+
 PRESETS = {
     "default": Config,
     # S1 "planar" (= m3): x, z, pitch free; y, roll, yaw absent from the model. Iteration sandbox.
@@ -354,6 +360,8 @@ PRESETS = {
     # readout-2 fixes on top (see _V2C): the CPU arm finishes 3/3 greedy dashes at 30 M with these
     "v2c_s1_planar": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2C),
     "v2c_s2_free": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C),
+    "v2c_s1_planar_fast": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2C, **_FAST),
+    "v2c_s2_free_fast": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST),
     # Δ_max = pi: the bound becomes reachable (§13 open decision, priced not forbidden)
     "v2_s2_free_wide": lambda: _v2(model_path="model/dash01_v2_free.xml", delta_max=3.14159265),
     # honesty-off debug arms: nominal plant, no noise, no disturbances (fast signal on latch/reward)

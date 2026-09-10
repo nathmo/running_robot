@@ -91,6 +91,19 @@ def main():
     print(f"  newest-frame phase (cos,sin vs their sin,cos swapped) max|diff| {np.abs(ph_o[:, :] - ph_z).max():.2e}"
           if False else f"  frame phase channels compared with the order swapped: max|diff| "
           f"{np.abs(O[:, 297 + 25:297 + 27] - Z[:, 297 + 25:297 + 27][:, ::-1]).max():.2e}")
+    # per-channel diff of the NEWEST frame over the first ticks (phase swapped): a scale or lag
+    # mismatch in a channel that is zero at reset (velocities, torques, residual) hides under the
+    # phase diff in the block maxima above
+    chan = ([f"q{i}" for i in range(6)] + [f"qd{i}" for i in range(6)] + [f"tau{i}" for i in range(6)]
+            + ["gx", "gy", "gz", "wx", "wy", "wz", "yaw_lp", "ph_a", "ph_b"] + [f"res{i}" for i in range(6)])
+    Oz = O[:, 297:330].copy(); Zz = Z[:, 297:330].copy()
+    Zz[:, 25:27] = Zz[:, 25:27][:, ::-1]
+    kt = min(6, nn)
+    print("  newest frame per channel |diff| (ticks 0..%d, phase swapped):" % (kt - 1))
+    for t in range(kt):
+        e = np.abs(Oz[t] - Zz[t])
+        top = np.argsort(-e)[:5]
+        print("    tick %d: " % t + ", ".join(f"{chan[i]} {e[i]:.3f}" for i in top if e[i] > 1e-4) or "    tick %d: all < 1e-4" % t)
     r_err = np.abs(np.asarray(rew[:nn]) - z["reward"][:nn])
     print(f"  reward         max|diff| first 20 ticks {r_err[:20].max():.3f}, all {r_err.max():.3f}")
     names = [str(x) for x in z["term_names"]]

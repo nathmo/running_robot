@@ -147,6 +147,27 @@ and **with the assist forced to 0 it still runs all three episodes: 182 / 146 / 
 curriculum.json with pitch_assist 0) — the first policy that stands without the wheel. Presets `v2c_s1_planar` / `v2c_s2_free`; the GPU-side training
 of `v2c_s1_planar` seeds 0/1 is the parity run (Izar 3145269/70).
 
+## Cross-load (contract parity step 3) and the fast GPU sizing (2026-09-10, afternoon)
+
+`tools/import_sb3.py` loads a walk_mit SB3 checkpoint into a walk_v2 bundle (two steps: the torch
+venv dumps `policy.pth` + VecNormalize to npz, the JAX venv builds the bundle; the graphs are
+identical, the one layout difference — frames carry (cos φ, sin φ) here, (sin φ, cos φ) there —
+is folded into the first layers). The 42 M `v2c_s1_s0` policy that runs 60 s wheel-free in classic
+MuJoCo **falls within 0.1–1.8 s in MJX**, on the soft leg and on the 10× stiff leg alike. The
+interface is not the cause: `replay_golden.py` now prints the newest frame per channel over the
+first ticks (phase swapped) and shows no channel beyond the 0.05–0.13 trajectory divergence (the
+torque channel differs by 0.04 on the reset frame, where this side reports zero). What remains is
+the plant build itself (their literal rod spring and near-zero armature vs the measured fits here,
+the folded ankle) — the open-loop traces already diverge to 0.1 rad within 0.7 s. So "the same
+policy" is a matched-training statistics comparison, not a checkpoint swap, until the two plant
+builds are reconciled.
+
+Fast sizing for the 3-hour goal: `v2c_s1_planar_fast` = v2c + 2048 × 9 (the contract's 18 432-sample
+rollout kept) + the 8 × 8 solver cap: **11.0–11.2k steps/s on one V100** (1.45× the parity sizing),
+early learning unchanged. `--devices N` (train.py) splits the envs over N GPUs with pmapped rollouts
+and lax.pmean gradient averaging (Izar `gpu-xl` has two 4 × V100 nodes; Kuma's H100 nodes need the
+same QOS enablement as Lyra).
+
 ## Run
 
 ```bash
