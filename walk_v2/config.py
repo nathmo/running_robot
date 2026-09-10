@@ -377,6 +377,9 @@ PRESETS = {
     "v2c_s2_free": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C),
     "v2c_s1_planar_fast": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2C, **_FAST),
     "v2c_s2_free_fast": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST),
+    # S2 warm-start experiment: keep the S1 policy's std (contract re-inflates log sigma; the seeds start at ep_len 77)
+    "v2c_s2_free_fast_keepstd": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                            warmstart_reset_log_std=False),
     "v2c_s1_planar_dp4": lambda: _v2(model_path="model/dash01_v2_planar.xml", **{**_V2C, **_DP4}),
     # the end-of-fade cliff (v2c_s1_planar_s1 at 47 M: KL early-stop storm, means drifting out of the box):
     # KL-adaptive lr instead of the early stop throttling learning
