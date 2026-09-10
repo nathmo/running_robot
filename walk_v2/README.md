@@ -303,8 +303,14 @@ Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from it
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
   masked PPO update, estimator, symmetry loss, entropy/std anneal, curricula, eval, checkpoint).
 * **S2 (free base, roll + yaw) started 2026-09-10 14:10**: `v2c_s2_free_fast` warm-started from the best S1
-  checkpoint below, seeds 0/1 on 2 GPUs each (`runs/v2c_s2_free_dp2x_s0/s1`). Everything above this line
-  in time was S1 (planar) only.
+  checkpoint below, seeds 0/1/2 on 2 GPUs each (`runs/v2c_s2_free_dp2x_s0/s1/s2`, ~20.7k steps/s) plus one
+  hedge `v2c_s2_free_dp2x_keepstd_s0` (preset `v2c_s2_free_fast_keepstd`: the warm start keeps the S1
+  policy's std instead of re-inflating log sigma as the contract prescribes). The warm-started policy
+  starts at stochastic ep_len ~80 on the free plant at std 0.70 (the S1 runner trained at 0.21) and
+  climbs slowly (s0 166 at 6.6 M). Everything above this line in time was S1 (planar) only.
+  The 4-GPU seed `v2c_fast_dp4z_s4` (4 x 1024) never stood (ep_len ~60 at 46 M, one KL 2.1 spike) and
+  was cancelled; `v2c_fast_dp2x_s2` is past its 73.7 M peak (greedy 99 m at 88 M, 1.8 m at 103 M,
+  stochastic ep_len back to ~1050 at 117 M) and continues to 300 M for the stop phase.
 * **Best GPU-arm policy so far:** `v2c_fast_dp2x_s2` (2 × 2048 envs × 9, contract schedules) at 73.7 M
   steps, ~63 min of training on two V100s: the wheel-free greedy eval runs 16 of 16 envs to 102–105 m
   in ~38 s at 2.66–2.76 m/s, then falls at the line (no stop phase learned yet — the CPU arm's
