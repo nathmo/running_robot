@@ -435,6 +435,19 @@ back, is the only repeatable option.
   running gait forms. Verified locally: the minimum action gives 3.00 / 2.25 / 1.50 Hz at the three
   curriculum points and the contract preset still gives 1.50. Preset `v2c_s2_free_fast_floorstop` = floor
   (60 M) + the stop curriculum, i.e. the cold-S2 "no S1 stage" recipe; seeds `runs/v2c_s2_floorstop_s8/s9`.
+* **The deceleration demand was 7x the requirement (2026-09-11, 01:00)** -- the reason the stop still
+  would not train. With the continuous command AND 5x the stop reward, `v2c_s2_stophard_s14` still fell on
+  red 16/16, spending 0% of the red phase slow; it only survived longer (1.2 s vs 0.8 s). The arithmetic
+  from 2.9 m/s: `stop_decel_s` 2.0 asks 1.45 m/s^2 and stops in 2.9 m -- a hard stop, which needs a capture
+  step (foot planted AHEAD of the CoM). No policy in this project has ever learned one; walk_mit m3 measured
+  feet landing ~8 cm BEHIND the CoM while falling. The stated requirement -- stop within ~20 m of the line --
+  is 0.21 m/s^2 over ~14 s. `v2c_s2_free_fast_stopgentle`: `stop_decel_s` 8.0 (0.36 m/s^2, ~11.6 m, inside
+  the budget), red phases 10-14 s so the stop can be completed AND held (`stop_hold_s` 1.0 at
+  `stop_speed_eps` 0.25 = a finish), green 6-12 s, `sprint_brake_m` 20.0 so coasting past the line is not
+  billed. Seeds `runs/v2c_s2_stopgentle_s16/17/18`, warm-started from the 2.95 m/s runner below.
+  Runners banked from the 2 s-decel round (all `best_speed_44M.msgpack`, 44 M steps ~= 40 min on two V100s):
+  s14 103.4 m at **2.95 m/s** (the fastest policy this project has produced on the free base), s15 103.3 m
+  at 2.65, s13 97.9 m at 2.84.
 * **The binary run flag is a step disturbance (2026-09-11, 00:10) -- measured, and the reason the first
   stop curriculum taught nothing.** `v2c_s2_stopwarm_s6` warm-started from the 88.5 M S2 runner reached a
   wheel-free greedy runner FASTER than any run so far -- 99.5 m at 2.65 m/s at 59 M (~55 min on two V100s),
