@@ -326,8 +326,13 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
   pitch-wheel fade opened there; seed 0 sits at ~160; seed 2 and the keep-std hedge were stopped.
   (3) New opt-in preset `v2c_s2_free_fast_rollassist` (`roll_assist_kp/kd` 100/10 on the base roll DOF,
   same fade scalar as the pitch wheel, billed in `assist_pen`, ignored on the planar plant): seeds
-  `runs/v2c_s2_free_dp2x_roll_s0/s1` warm-started from the 73.7 M runner. Whether the S1 runner runs on the
-  free plant when both wheels hold it is being measured (`greedy_s1best_bothwheels`).
+  `runs/v2c_s2_free_dp2x_roll_s0/s1` warm-started from the 73.7 M runner. (4) With pitch AND roll held
+  at full the greedy S1 runner still falls in 1.4-1.8 s (`greedy_s1best_bothwheels`): the frames show the
+  base yawing ~90 deg within the first second, i.e. the gait's yaw impulse, absorbed by the planar tree,
+  spins it on the free plant. Added a yaw wheel (`yaw_assist_kp/kd`, preset `v2c_s2_free_fast_basewheels`
+  = all three base wheels on the same fade) and a three-wheels probe of the S1 runner
+  (`runs/v2c_s2_free_probe_basewheels`). The roll-wheel seed 0 became a long-lived stander early
+  (ep_len 1785 at 32 M, return ~-100: standing, not running).
 * **S1 keeps improving past the fade**: `v2c_fast_dp2x_s2` at 130 M (greedy, wheel-free) runs 16 of 16
   to ~103 m in ~36 s at 2.88 m/s (`results/v2c_fast_dp2x_s2_greedy_130M.mp4`, checkpoint
   `ckpt_130351104.msgpack`), after a 103 M collapse to 1.8 m and a 118 M policy at 2.06 m/s that drifted
