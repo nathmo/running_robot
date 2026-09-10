@@ -291,12 +291,14 @@ Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from it
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
   masked PPO update, estimator, symmetry loss, entropy/std anneal, curricula, eval, checkpoint).
-* Izar (V100): full smoke test passes on the GPU. Stopped (checkpoints kept): `v2_s1_planar` s0/s1
-  (0.5 Hz rail, collapsed by 52 M), `v2b_s1_planar` s0/s1 (peak 676 at 40 M, collapsed by 60 M),
-  `v2b_s1_planar_stiff` s0 (collapsed with the assist fade like the soft leg). Running:
-  `v2b_s1_planar_noassist` s0/s1 (the wheel-free baseline, ep_len ~150–170 at 84 M) and
-  `v2c_s1_planar` s0/s1 (the parity run for the CPU arm's working policy). Contract sizing
-  1024 × 18, cap 16 × 8, ~7.7–8.2k steps/s per GPU.
+* Izar (V100): full smoke test passes on the GPU. **First wheel-free runner on this arm:**
+  `v2c_s1_planar` seed 1 (contract sizing, one V100, 1 h 45 min) — the in-training greedy eval at
+  44.2 M with the assist at 0 averages 70.5 m at 1.44 m/s over 16 envs (the CPU arm's 42 M
+  checkpoint: 146–189 m at 2.4–3.1 m/s). Seed 0 (low rail) is at ep_len 932 / return +356 at 47 M.
+  Speed runs: `v2c_fast_dp4y_s1` (4 × 2048, scaled recipe, 42k steps/s) and the 2-GPU hedge seeds
+  `v2c_fast_dp2x_s1/s2` (~21k steps/s each). Stopped (checkpoints kept): `v2_*`, `v2b_*`, the
+  stiff/no-assist experiments, `v2c_s1_planar_fast_s0` (NaN at 36.5 M, fixed) / `_s1`,
+  `v2c_fast_dp4_s0`, `v2c_fast_dp4x_s0`, `v2c_fast_dp2x_s0`.
 * Cross-check with the CPU arm: golden fixture `walk_mit/golden/v2_s1_clean_seed0.npz` replays with
   exact commit flags and rewards identical over the first 20 ticks; control-law agreement 5e-6 on the
   traces. Policy-level comparison (same preset, seed, budget; greedy dash eval) pending the runs.
