@@ -7,7 +7,7 @@
 #
 # One GPU = half an Izar node; asking for more cores strands the node's other GPU (SCITAS asked
 # us not to, 2026-08-10). The V100 (sm_70, 32 GB) runs the pip CUDA-12 jax wheels on the 535
-# driver; NENVS 2048 x NSTEPS 64 keeps the same 131 072-sample rollout as the Lyra sizing.
+# driver; NENVS 1024 x NSTEPS 18 = the contract's 18 432-sample rollout (64 x 288 on the CPU arm).
 #SBATCH --job-name=dash-v2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -25,8 +25,8 @@ source "${VENV:-$HOME/venvs/dash-v2}/bin/activate"
 REPO="${REPO:-$HOME/running_robot}"
 PRESET="${PRESET:?set PRESET}"
 STEPS="${STEPS:-300000000}"
-NENVS="${NENVS:-2048}"
-NSTEPS="${NSTEPS:-64}"
+NENVS="${NENVS:-1024}"
+NSTEPS="${NSTEPS:-18}"
 NAME="${NAME:-$PRESET}"
 WARM="${WARM:-}"
 SEED="${SEED:-}"

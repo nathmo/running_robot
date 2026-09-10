@@ -23,6 +23,14 @@ class Config:
     model_path: str = "model/dash01_v2_free.xml"
     control_decimation: int = 10            # 1 kHz physics / 10 = 100 Hz control (§07)
     keyframe: str = "stand"
+    # MJX solver cap (0 = keep the XML's classic-MuJoCo values). Under jax.vmap the Newton loop runs to
+    # the WORST env's iteration count for the whole batch: with the XML's 100 x 50 line-search cap one
+    # env in a garbage state (falling, penetrating) costs every env ~5000 sequential solver kernels per
+    # substep. Healthy states converge (tolerance 1e-8) in a few iterations either way.
+    # 16 x 8 replays the CPU golden fixture identically to the XML (100 x 50) and holds a stance to
+    # 3e-3 rad over 3 s; 1-4 iterations break the plant (tools/replay_golden.py, profile_step.py).
+    mjx_iterations: int = 16
+    mjx_ls_iterations: int = 8
     episode_s: float = 60.0                 # ep cap 6000 ticks
     # ----- who emits the gait spec (§09) -------------------------------------------------------
     # "policy": the single-network variant (§02-§04): action 50 = 44 latched + 6 residual.
@@ -252,10 +260,12 @@ class Config:
     w_assist_penalty: float = 0.0
 
     # ----- PPO (§04) ---------------------------------------------------------------------------
-    n_envs: int = 4096
-    n_steps: int = 32                       # per env per rollout: 4096 x 32 = 131 072 samples
+    n_envs: int = 1024
+    n_steps: int = 18                       # per env per rollout: 1024 x 18 = 18 432 samples = the contract's
+                                            # 64 x 288 (V2_CONTRACT �PPO): same rollout size, same minibatch,
+                                            # hence the same gradient updates per sample as the CPU arm
     total_steps: int = 300_000_000
-    batch_size: int = 16384
+    batch_size: int = 4096
     n_epochs: int = 4
     gamma: float = 0.995                    # 2 s horizon at 100 Hz (was 0.9975 @200 Hz)
     gae_lambda: float = 0.95

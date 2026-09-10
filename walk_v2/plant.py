@@ -39,6 +39,10 @@ class Plant:
         self.cfg = cfg
         self.m = mujoco.MjModel.from_xml_path(resolve(cfg.model_path))
         m = self.m
+        if int(getattr(cfg, 'mjx_iterations', 0)) > 0:
+            m.opt.iterations = int(cfg.mjx_iterations)
+        if int(getattr(cfg, 'mjx_ls_iterations', 0)) > 0:
+            m.opt.ls_iterations = int(cfg.mjx_ls_iterations)
         self.mx = mjx.put_model(m)
         self.nq, self.nv, self.nu = m.nq, m.nv, m.nu
         self.sim_dt = float(m.opt.timestep)

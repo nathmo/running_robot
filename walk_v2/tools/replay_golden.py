@@ -39,11 +39,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("npz")
     ap.add_argument("--preset", default="v2_s1_planar_easy")
+    ap.add_argument("--iterations", type=int, default=0, help="MJX solver cap override (0 = preset/XML)")
+    ap.add_argument("--ls-iterations", type=int, default=0)
     args = ap.parse_args()
     z = dict(np.load(args.npz, allow_pickle=False))
     acts = z["action"]
     n = len(acts)
     cfg = get_config(args.preset)
+    if args.iterations or args.ls_iterations:
+        import dataclasses
+        cfg = dataclasses.replace(cfg, mjx_iterations=args.iterations or cfg.mjx_iterations,
+                                  mjx_ls_iterations=args.ls_iterations or cfg.mjx_ls_iterations)
+        print(f'[replay] solver cap iterations={cfg.mjx_iterations} ls={cfg.mjx_ls_iterations}')
     cfg.reset_joint_noise = 0.0
     cfg.resync_enable = False if int(z["commit"].sum()) <= 1 else cfg.resync_enable
     env = make_eval_env(cfg, n=1, keep_assist=True)

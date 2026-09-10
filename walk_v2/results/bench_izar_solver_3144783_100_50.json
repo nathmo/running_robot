@@ -1,0 +1,19 @@
+{
+ "device": "cuda:0",
+ "platform": "gpu",
+ "preset": "v2_s2_free",
+ "env": [
+  {
+   "n_envs": 2048,
+   "env_sps": 1635.7232864501764,
+   "substeps_per_s": 16357.232864501764,
+   "sim_seconds_per_wall_s": 16.357232864501764,
+   "reset_s": 18.839714288711548,
+   "compile_s": 38.82480812072754,
+   "step_ms": 1252.0455121994019
+  }
+ ],
+ "ppo": [],
+ "mjx_iterations": 100,
+ "mjx_ls_iterations": 50
+}

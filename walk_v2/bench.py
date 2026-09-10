@@ -10,6 +10,7 @@ walk_mit at 64 SubprocVecEnv workers on a 72-core JED node ~ 1,500-2,500 env ste
 200 Hz (i.e. ~2x fewer sim-seconds per env step than here at 100 Hz).
 """
 import argparse
+import dataclasses
 import json
 import sys
 import time
@@ -27,7 +28,7 @@ from config import get_config
 from env import DashEnvV2, EnvParams
 
 
-def bench_env(cfg, n_envs, n_steps=64, n_warm=3):
+def bench_env(cfg, n_envs, n_steps=64, n_warm=2):
     env = DashEnvV2(cfg, n_envs=n_envs)
     params = EnvParams.final(cfg)
     key = jax.random.PRNGKey(0)
@@ -49,10 +50,15 @@ def bench_env(cfg, n_envs, n_steps=64, n_warm=3):
         (state, obs, key), rs = jax.lax.scan(body, (state, obs, key), None, length=n)
         return state, obs, key, rs
 
+    # warm up with the SAME static length: a different n recompiles, and that compile (~40 s on a
+    # V100) used to land inside the timed call as a fake ~600 ms/step floor
     t = time.time()
-    state, obs, key, _ = run(state, obs, key, n_warm)
+    state, obs, key, _ = run(state, obs, key, n_steps)
     obs.block_until_ready()
     t_compile = time.time() - t
+    for _ in range(n_warm - 1):
+        state, obs, key, _ = run(state, obs, key, n_steps)
+    obs.block_until_ready()
     t = time.time()
     state, obs, key, rs = run(state, obs, key, n_steps)
     rs.block_until_ready()
@@ -89,13 +95,20 @@ def main():
     ap.add_argument("--n-envs", type=int, nargs="*", default=None)
     ap.add_argument("--steps", type=int, default=64)
     ap.add_argument("--ppo", action="store_true")
+    ap.add_argument("--iterations", type=int, default=0, help="MJX solver cap override (0 = preset/XML)")
+    ap.add_argument("--ls-iterations", type=int, default=0)
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
     cfg = get_config(args.preset)
+    if args.iterations or args.ls_iterations:
+        cfg = dataclasses.replace(cfg, mjx_iterations=args.iterations or cfg.mjx_iterations,
+                                  mjx_ls_iterations=args.ls_iterations or cfg.mjx_ls_iterations)
     dev = jax.devices()[0]
     sizes = args.n_envs or ([8, 32] if dev.platform == "cpu" else [256, 1024, 2048, 4096, 8192])
-    print(f"[bench] {dev.platform} {getattr(dev, 'device_kind', dev)}  preset {args.preset}")
-    out = dict(device=str(dev), platform=dev.platform, preset=args.preset, env=[], ppo=[])
+    print(f"[bench] {dev.platform} {getattr(dev, 'device_kind', dev)}  preset {args.preset}  "
+          f"solver cap iterations={cfg.mjx_iterations or 'xml'} ls={cfg.mjx_ls_iterations or 'xml'}")
+    out = dict(device=str(dev), platform=dev.platform, preset=args.preset, env=[], ppo=[],
+               mjx_iterations=cfg.mjx_iterations, mjx_ls_iterations=cfg.mjx_ls_iterations)
     for n in sizes:
         r = bench_env(cfg, n, n_steps=args.steps)
         out["env"].append(r)

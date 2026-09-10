@@ -1,0 +1,36 @@
+{
+ "device": "cuda:0",
+ "batched_timestep": true,
+ "rows": [
+  {
+   "variant": "xml",
+   "n_envs": 2048,
+   "tick_ms": 54.624176025390625,
+   "env_substeps_per_s": 374925.56392027595,
+   "env_ticks_per_s": 37492.5563920276,
+   "compile_s": 12.1618013381958,
+   "nefc": 62,
+   "ncon_max": 8,
+   "solver": 2,
+   "iterations": 100,
+   "ls_iterations": 50,
+   "cone": 1,
+   "integrator": 3
+  },
+  {
+   "variant": "newton8",
+   "n_envs": 2048,
+   "tick_ms": 41.79854393005371,
+   "env_substeps_per_s": 489969.220800407,
+   "env_ticks_per_s": 48996.922080040706,
+   "compile_s": 11.478589534759521,
+   "nefc": 62,
+   "ncon_max": 8,
+   "solver": 2,
+   "iterations": 8,
+   "ls_iterations": 8,
+   "cone": 1,
+   "integrator": 3
+  }
+ ]
+}

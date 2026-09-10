@@ -330,8 +330,13 @@ class PPO:
         (self.env_state, self.obs, _, tr, last_value, metrics,
          (b_mean, b_var, b_n)) = self._rollout(self.params, self.stats, self.env_state, self.obs, k,
                                               self.env_params)
-        adv, ret = self._gae(tr, last_value, float(cfg.gamma), float(cfg.gae_lambda))
+        jax.block_until_ready(tr.reward)          # async dispatch: stamp the phases honestly
         t_roll = time.time() - t0
+        t1 = time.time()
+        adv, ret = self._gae(tr, last_value, float(cfg.gamma), float(cfg.gae_lambda))
+        jax.block_until_ready(ret)
+        t_gae = time.time() - t1
+        t1 = time.time()
         # ---- PPO update
         stats_used = self.stats
         flat = lambda x: x.reshape((self.batch,) + x.shape[2:])
@@ -354,6 +359,9 @@ class PPO:
                     break
             if stop:
                 break
+        jax.block_until_ready(self.params)
+        t_update = time.time() - t1
+        t1 = time.time()
         # ---- estimator (supervised, own optimizer, estimator subtree only)
         est_last = None
         for _ in range(cfg.est_epochs):
@@ -363,6 +371,9 @@ class PPO:
                 idx = perm[i * cfg.est_batch:(i + 1) * cfg.est_batch]
                 self.params, self.est_opt_state, est_last = self._est_update(self.params, self.est_opt_state,
                                                                              data[0][idx])
+        jax.block_until_ready(self.params)
+        t_est = time.time() - t1
+        t1 = time.time()
         # ---- obs stats (after the update, from the rollout's raw observations)
         self.stats = self.stats.update(b_mean, b_var, float(b_n))
         if getattr(cfg, "sym_obs_stats", True) and not self.env.library_mode:
@@ -386,7 +397,8 @@ class PPO:
         f_at_commit = freq_raw[commit] if commit.any() else freq_raw.reshape(-1)
         res = acts[..., gait.SPEC_DIM:] if not self.env.library_mode else acts[..., :6]
         log = {
-            "time/env_steps": self.step, "time/rollout_s": t_roll, "time/iter_s": time.time() - t0,
+            "time/env_steps": self.step, "time/rollout_s": t_roll, "time/gae_s": t_gae,
+            "time/update_s": t_update, "time/est_s": t_est, "time/iter_s": time.time() - t0,
             "time/sps": d_steps / max(time.time() - t0, 1e-9),
             "rollout/ep_len_mean": ep_len, "rollout/ep_ret_mean": ep_ret, "rollout/episodes": n_done,
             "rollout/finishes": finishes, "rollout/falls": falls,
