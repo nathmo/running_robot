@@ -672,7 +672,8 @@ def v2_sym_kwargs(cfg, base_venv):
         knob_idx, res_idx = [], list(range(6))
     return dict(sym_weight=float(cfg.w_sym), sym_res_weight=float(cfg.w_sym_res),
                 obs_perm=perm, obs_sign=sign, act_perm=ap, act_sign=asg,
-                knob_idx=knob_idx, res_idx=res_idx)
+                knob_idx=knob_idx, res_idx=res_idx,
+                bound_weight=float(getattr(cfg, "w_bound", 0.0)))
 
 
 def rejuvenate_obs_rms(venv, count_cap, var_floor):

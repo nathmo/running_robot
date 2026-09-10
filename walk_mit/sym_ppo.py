@@ -29,9 +29,20 @@ class SymPPO(PPO):
     (they live in __dict__, which SB3 saves), so `SymPPO.load` restores them."""
 
     def __init__(self, *args, sym_weight=0.0, sym_res_weight=0.0, obs_perm=None, obs_sign=None,
-                 act_perm=None, act_sign=None, knob_idx=(), res_idx=(), **kwargs):
+                 act_perm=None, act_sign=None, knob_idx=(), res_idx=(), bound_weight=0.0,
+                 bound_soft=1.0, **kwargs):
         self.sym_weight = float(sym_weight)
         self.sym_res_weight = float(sym_res_weight)
+        # ACTION-MEAN BOUNDS LOSS (2026-09-10, v2c). The DiagGaussian is sampled unbounded and the
+        # env clips to [-1, 1]; once a rail pays, every mean beyond it earns the same clipped
+        # sample, so nothing stops the means from drifting out of the box. Measured on v2b at 23 M:
+        # 68-79 % of the spec means and 53-60 % of the residual means were outside [-1, 1],
+        # median |mu| ~ 2, p90 ~ 3.9 -- the "bang-bang spec", the clock parked on its ceiling and
+        # the saturated residual were all this one artifact, and the greedy action clip(mu) no
+        # longer matches the effective action E[clip(mu + eps)] the policy was trained on (the
+        # determinism gap). w * mean(relu(|mu| - soft)^2), the rl_games "bounds_loss".
+        self.bound_weight = float(bound_weight)
+        self.bound_soft = float(bound_soft)
         self.obs_perm = None if obs_perm is None else np.asarray(obs_perm, dtype=np.int64)
         self.obs_sign = None if obs_sign is None else np.asarray(obs_sign, dtype=np.float32)
         self.act_perm = None if act_perm is None else np.asarray(act_perm, dtype=np.int64)
@@ -84,6 +95,7 @@ class SymPPO(PPO):
 
         entropy_losses = []
         pg_losses, value_losses, sym_losses = [], [], []
+        bound_losses, out_fracs = [], []
         clip_fractions = []
 
         continue_training = True
@@ -129,6 +141,13 @@ class SymPPO(PPO):
                     s_loss = self.sym_loss(rollout_data.observations)
                     sym_losses.append(s_loss.item())
                     loss = loss + s_loss
+                if getattr(self, "bound_weight", 0.0) > 0.0:
+                    mu = self.policy.get_distribution(rollout_data.observations).distribution.mean
+                    excess = th.relu(mu.abs() - self.bound_soft)
+                    b_loss = self.bound_weight * (excess ** 2).mean()
+                    bound_losses.append(b_loss.item())
+                    out_fracs.append((mu.abs() > 1.0).float().mean().item())
+                    loss = loss + b_loss
 
                 with th.no_grad():
                     log_ratio = log_prob - rollout_data.old_log_prob
@@ -157,6 +176,9 @@ class SymPPO(PPO):
         self.logger.record("train/value_loss", np.mean(value_losses))
         if sym_losses:
             self.logger.record("train/sym_loss", np.mean(sym_losses))
+        if bound_losses:
+            self.logger.record("train/bound_loss", np.mean(bound_losses))
+            self.logger.record("train/mu_out_frac", np.mean(out_fracs))
         self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())

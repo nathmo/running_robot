@@ -921,6 +921,8 @@ class Config:
     # the ground, averaged over the rollout. Standing is 0.0; a walking gait is 0.3-0.4. It is
     # invariant to reward weights, to dt and to the control rate, so it cannot drift like this.
     ent_gate_swing_frac: float = 0.0
+    w_bound: float = 0.0                # SymPPO action-mean bounds loss: w * mean(relu(|mu| - 1)^2).
+    #                                     0 = off (legacy). See sym_ppo.py for the measurement.
     ent_gate_ep_len: float = 0.0        # >0: the competence gate ALSO requires rollout ep_len_mean above
     #                                     this. swing_frac alone reads 0.3-0.5 on a FALLING robot (both
     #                                     feet airborne while it topples), so on short episodes it is
@@ -2667,6 +2669,16 @@ _V2B = dict(
     dr_curriculum_gate_ep_len=1200.0, jitter_curriculum_gate_ep_len=1200.0,   # harden a runner, not a stander
 )
 
+# Readout-2 fixes (2026-09-10, v2b at 23-85 M): v2b peaked at a STOCHASTIC ep_len of 1466-2421 at
+# 23 M (std 0.77-0.79) and collapsed to ~25 by 50 M while the std anneal, the assist fade, DR and
+# jitter all ramped monotonically (curriculum_retreat_frac was 0: once a gate opened, every ramp
+# was clock-driven again). mean_bounds_probe.py at 23 M: 68-79 % of the spec means and 53-60 % of
+# the residual means OUTSIDE [-1, 1] (median |mu| ~ 2) -- the clipped-Gaussian drift that made
+# every "bang-bang" signature and the determinism gap. v2c = v2b + the bounds loss, bidirectional
+# (competence-tracked) DR/jitter ramps, and a 0.7 std cap so the pre-anneal policy is not a noise
+# machine.
+_V2C = dict(_V2B, w_bound=1.0, curriculum_retreat_frac=0.7, max_log_std=-0.3567)   # ln 0.7
+
 _V2_STAGE = {"s1": "m3", "s2": "m6"}      # S1 planar (x, z, pitch) / S2 free
 
 
@@ -2712,6 +2724,11 @@ PRESETS.update({
     "v2b_s2": lambda: _v2("s2", **_V2B),
     "v2b_s1_clean": lambda: _v2("s1", **_V2B, **_V2_CLEAN),
     "v2b_s2_clean": lambda: _v2("s2", **_V2B, **_V2_CLEAN),
+    # readout-2 fixes on top (see _V2C)
+    "v2c_s1": lambda: _v2("s1", **_V2C),
+    "v2c_s2": lambda: _v2("s2", **_V2C),
+    "v2c_s1_clean": lambda: _v2("s1", **_V2C, **_V2_CLEAN),
+    "v2c_s2_clean": lambda: _v2("s2", **_V2C, **_V2_CLEAN),
     # library variant (§09, the recommended build order): spec = library entry + Raibert law,
     # action = 6 residual + 3 latched (df/f, amplitude, lift), once-block 23 -> actor obs 353
     "v2_lib_s1": lambda: _v2("s1", spec_source="library", raibert_enable=True, w_track=0.05,
