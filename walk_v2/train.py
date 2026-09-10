@@ -33,6 +33,10 @@ from env import DashEnvV2
 from ppo import PPO
 
 
+# config fields a resumed run may change: they schedule evaluation/checkpoints, not the learning
+RESUME_FREE_FIELDS = {"eval_every_rollouts", "checkpoint_every_steps"}
+
+
 def latest_checkpoint(run: Path):
     ck = sorted(run.glob("ckpt_*.msgpack"), key=lambda p: int(p.stem.split("_")[1]))
     if ck:
@@ -119,8 +123,14 @@ def main():
         if old != cfg:
             from dataclasses import fields
             diff = [f.name for f in fields(cfg) if getattr(cfg, f.name) != getattr(old, f.name)]
-            raise SystemExit(f"[train] refusing to resume '{name}' with a different config "
-                             f"(differs in {diff}); use a fresh --name or --config {rc}")
+            free = [f for f in diff if f in RESUME_FREE_FIELDS]     # bookkeeping only, not the learning
+            diff = [f for f in diff if f not in RESUME_FREE_FIELDS]
+            if diff:
+                raise SystemExit(f"[train] refusing to resume '{name}' with a different config "
+                                 f"(differs in {diff}); use a fresh --name or --config {rc}")
+            if free:
+                print(f"[train] resuming with new bookkeeping settings {free}: "
+                      + ", ".join(f"{f} {getattr(old, f)} -> {getattr(cfg, f)}" for f in free))
     rc.write_text(json.dumps({"config": config_to_dict(cfg), "n_envs": cfg.n_envs,
                               "total_steps": total, "preset": args.preset}, indent=1))
     if args.description:

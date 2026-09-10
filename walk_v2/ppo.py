@@ -457,7 +457,8 @@ class PPO:
     # ---------------------------------------------------------------- greedy eval
     def evaluate(self, n_max_steps=None, override=None, seed=1000):
         """Greedy dash on the eval env (nominal plant): finishes, t_line, mean speed, falls.
-        The scan is jitted once per (env, n_max) and takes params/stats as arguments."""
+        The loop is jitted once per (env, n_max), exits when every env has ended, and takes
+        params/stats as arguments."""
         env = self.eval_env or self.env
         n_max = int(n_max_steps or min(env.max_steps, 6000))
         params = EnvParams.final(self.cfg)._replace(dr_scale=0.0, ctrl_jitter_ms=0.0,
@@ -472,8 +473,11 @@ class PPO:
                 stats = ObsStats(mean=mean, var=var, count=count)
                 state, obs = env.reset(key, params, ov)
 
-                def body(carry, _):
-                    state, obs, alive, first_end, dist, tline, fin, fell = carry
+                # a while_loop that stops when every env has ended (or at n_max): a fixed
+                # n_max-step scan cost the full 60 s episode cap (~200 s on a V100) even when all
+                # 16 greedy envs fell within a second, 63% of the wall clock early in training
+                def body(carry):
+                    state, obs, alive, first_end, dist, tline, fin, fell, t = carry
                     a = jnp.clip(net.apply(p, stats.normalize(obs), method=net.actor_mean), -1.0, 1.0)
                     state2, obs2, r, done, info = env.step(state, a, params)
                     ending = alive & done
@@ -482,13 +486,16 @@ class PPO:
                     tline = jnp.where(ending & info["finished"], info["t_line"], tline)
                     fin = fin | (ending & info["finished"])
                     fell = fell | (ending & info["fallen"])
-                    return (state2, obs2, alive & ~done, first_end, dist, tline, fin, fell), None
+                    return (state2, obs2, alive & ~done, first_end, dist, tline, fin, fell, t + 1)
+
+                def cond(carry):
+                    return carry[2].any() & (carry[8] < n_max)
 
                 n = env.n_envs
                 init = (state, obs, jnp.ones(n, bool), jnp.zeros(n, jnp.int32), jnp.zeros(n),
-                        jnp.full(n, -1.0), jnp.zeros(n, bool), jnp.zeros(n, bool))
-                carry, _ = jax.lax.scan(body, init, None, length=n_max)
-                _, _, alive, first_end, dist, tline, fin, fell = carry
+                        jnp.full(n, -1.0), jnp.zeros(n, bool), jnp.zeros(n, bool), jnp.zeros((), jnp.int32))
+                carry = jax.lax.while_loop(cond, body, init)
+                _, _, alive, first_end, dist, tline, fin, fell, _ = carry
                 return alive, first_end, dist, tline, fin, fell
 
             self._eval_fns[key_] = jax.jit(run)

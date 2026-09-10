@@ -118,6 +118,12 @@ Two things had to be fixed before the GPU port was faster than the CPU arm at al
    held stance explodes and the golden replay ends at tick 13 instead of 64. 8×8 to 100×8 replay the
    CPU fixture identically to the XML settings and hold a stance to 3e-3 rad over 3 s.
 
+3. **The greedy eval ran the full 60 s episode cap.** A fixed 6000-step scan cost ~200 s on the V100
+   every 50 rollouts (~120 s of training) even when all 16 envs fell within a second: 63% of the wall
+   clock early in training (2.5k steps/s wall-clock against 7.7k in the loop). `PPO.evaluate` now
+   exits when every env has ended, evals run every 400 rollouts (7.4 M steps), and a resumed run may
+   change these two bookkeeping settings without being refused.
+
 Tools: `tools/profile_step.py` (bare physics per solver variant + held-stance drift),
 `tools/profile_env.py` (env step with the physics / auto-reset stubbed out), `bench.py --iterations N
 --ls-iterations M --ppo`, `tools/replay_golden.py --iterations N --ls-iterations M` (the accuracy gate).

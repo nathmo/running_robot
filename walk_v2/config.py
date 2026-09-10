@@ -297,7 +297,8 @@ class Config:
     warmstart_reset_log_std: bool = True
     warmstart_obs_count_cap: float = 100_000.0
     warmstart_var_floor: float = 1.0e-2
-    eval_every_rollouts: int = 50           # greedy 16-env dash eval (the determinism-gap rule)
+    eval_every_rollouts: int = 400          # greedy 16-env dash eval (the determinism-gap rule): every
+                                            # 7.4 M steps; a full 60 s greedy episode costs ~200 s on a V100
     checkpoint_every_steps: int = 5_000_000
 
 
