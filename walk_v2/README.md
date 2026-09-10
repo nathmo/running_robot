@@ -169,6 +169,24 @@ and lax.pmean gradient averaging, verified on two emulated CPU devices
 (`XLA_FLAGS=--xla_force_host_platform_device_count=2`); the 4 × V100 runs are `runs/v2c_fast_dp4_s*`
 (Izar `gpu-xl`, jobs 3145282/83). Kuma's H100 nodes need the same QOS enablement as Lyra.
 
+## Multi-GPU scaling for the 3-hour goal (2026-09-10, measured on Izar)
+
+| run | devices × envs | rollout samples | update | steps/s |
+|---|---|---|---|---|
+| `v2c_s1_planar` (parity sizing) | 1 × 1024 × 18 | 18 432 | per-minibatch | 7 600–7 900 |
+| `v2c_s1_planar_fast` | 1 × 2048 × 9, cap 8 × 8 | 18 432 | per-minibatch | 11 000–11 200 |
+| `v2c_fast_dp4` | 4 × 512 × 9 | 18 432 | per-minibatch pmap | 15 700–18 500 |
+| `v2c_fast_dp2x` | 2 × 2048 × 9 | 36 864 | per-minibatch pmap | 18 000 |
+| `v2c_fast_dp4x` | 4 × 2048 × 9 | 73 728 | fused per-epoch scan | see `runs/v2c_fast_dp4x_s0` |
+
+The batched step is latency-bound, so splitting a fixed 18 432-sample rollout over more devices
+barely helps (73 ms/step at 512 envs vs 155 ms at 2048): the rollout must grow with the devices
+(2048 envs per device), keeping the minibatch and epochs — the same gradient updates per sample
+as the contract, a larger batch per policy iteration. The per-minibatch pmap dispatch (~18 ms a
+call) then dominates the update, hence the fused per-epoch `lax.scan` inside one pmap call
+(`_update_epoch_p`, target-KL early stop carried inside). Izar's second 4-GPU node is held by a
+30-hour job, so the 4 × 2048 run replaced the 4 × 512 one on `ixl01`.
+
 ## Run
 
 ```bash
