@@ -31,8 +31,9 @@ class SymPPO(PPO):
     def __init__(self, *args, sym_weight=0.0, sym_res_weight=0.0, obs_perm=None, obs_sign=None,
                  act_perm=None, act_sign=None, knob_idx=(), res_idx=(), bound_weight=0.0,
                  bound_soft=1.0, **kwargs):
-        self.sym_weight = float(sym_weight)
-        self.sym_res_weight = float(sym_res_weight)
+        self.set_mirrors(sym_weight=sym_weight, sym_res_weight=sym_res_weight, obs_perm=obs_perm,
+                         obs_sign=obs_sign, act_perm=act_perm, act_sign=act_sign,
+                         knob_idx=knob_idx, res_idx=res_idx)
         # ACTION-MEAN BOUNDS LOSS (2026-09-10, v2c). The DiagGaussian is sampled unbounded and the
         # env clips to [-1, 1]; once a rail pays, every mean beyond it earns the same clipped
         # sample, so nothing stops the means from drifting out of the box. Measured on v2b at 23 M:
@@ -43,13 +44,27 @@ class SymPPO(PPO):
         # determinism gap). w * mean(relu(|mu| - soft)^2), the rl_games "bounds_loss".
         self.bound_weight = float(bound_weight)
         self.bound_soft = float(bound_soft)
+        super().__init__(*args, **kwargs)
+
+    def set_mirrors(self, sym_weight=0.0, sym_res_weight=0.0, obs_perm=None, obs_sign=None,
+                    act_perm=None, act_sign=None, knob_idx=(), res_idx=(), bound_weight=None,
+                    bound_soft=None):
+        """(Re)configure the mirrors with the array conversions __init__ applies. train.py calls
+        this after a warm start (the mirrors belong to the NEW stage's env); setting the raw
+        kwargs with setattr handed _sym_on a plain list (v2cw_s1_s0, 2026-09-10: `'list' object
+        has no attribute 'size'` on the first train())."""
+        self.sym_weight = float(sym_weight)
+        self.sym_res_weight = float(sym_res_weight)
         self.obs_perm = None if obs_perm is None else np.asarray(obs_perm, dtype=np.int64)
         self.obs_sign = None if obs_sign is None else np.asarray(obs_sign, dtype=np.float32)
         self.act_perm = None if act_perm is None else np.asarray(act_perm, dtype=np.int64)
         self.act_sign = None if act_sign is None else np.asarray(act_sign, dtype=np.float32)
         self.knob_idx = np.asarray(list(knob_idx), dtype=np.int64)
         self.res_idx = np.asarray(list(res_idx), dtype=np.int64)
-        super().__init__(*args, **kwargs)
+        if bound_weight is not None:
+            self.bound_weight = float(bound_weight)
+        if bound_soft is not None:
+            self.bound_soft = float(bound_soft)
 
     # ---- the mirror --------------------------------------------------------------------------
     @property

@@ -2729,6 +2729,9 @@ PRESETS.update({
     "v2c_s1": lambda: _v2("s1", **_V2C),
     "v2c_s2": lambda: _v2("s2", **_V2C),
     "v2c_s1_clean": lambda: _v2("s1", **_V2C, **_V2_CLEAN),
+    # S1 -> S1 warm start (e.g. from a v2b finisher): no VecNormalize rejuvenation -- that fix is
+    # for a milestone hop that frees a base DOF; here the stats are the parent's and must stay
+    "v2c_s1_warm": lambda: _v2("s1", **_V2C, warmstart_obs_count_cap=0.0, warmstart_var_floor=0.0),
     "v2c_s2_clean": lambda: _v2("s2", **_V2C, **_V2_CLEAN),
     # library variant (§09, the recommended build order): spec = library entry + Raibert law,
     # action = 6 residual + 3 latched (df/f, amplitude, lift), once-block 23 -> actor obs 353

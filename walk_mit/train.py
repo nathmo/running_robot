@@ -840,8 +840,7 @@ def main():
             if Algo is not PPO:
                 # the mirrors are a property of THIS stage's env (S1 -> S2 keeps the widths, so
                 # they are identical, but read them anyway rather than trust the parent's)
-                for k, v in v2_sym_kwargs(cfg, base_venv).items():
-                    setattr(model, k, v)
+                model.set_mirrors(**v2_sym_kwargs(cfg, base_venv))
             # the source stage's ent_coef is typically fully annealed (0.002) — a new milestone
             # needs its exploration back; the EntropyCallback re-anneals once competent again.
             model.ent_coef = cfg.ent_coef
