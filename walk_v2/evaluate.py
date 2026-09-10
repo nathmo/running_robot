@@ -27,13 +27,13 @@ from ppo import PPO
 from train import make_eval_env, latest_checkpoint
 
 
-def load_run(run, checkpoint=None, n_envs=16, dr=False):
+def load_run(run, checkpoint=None, n_envs=16, dr=False, keep_assist=False):
     run = Path(run)
     cfg = config_from_dict(json.loads((run / "resolved_config.json").read_text())["config"])
     ck = Path(checkpoint) if checkpoint else latest_checkpoint(run)
     if ck is None:
         raise FileNotFoundError(f"no checkpoint in {run}")
-    env = DashEnvV2(cfg, n_envs=n_envs) if dr else make_eval_env(cfg, n_envs)
+    env = DashEnvV2(cfg, n_envs=n_envs) if dr else make_eval_env(cfg, n_envs, keep_assist=keep_assist)
     agent = PPO(cfg, env, run, cfg.total_steps, seed=0, eval_env=None)
     agent.load(ck)
     print(f"[eval] {ck.name} @ {agent.step:,} steps  plant {'DR' if dr else 'nominal'}")
@@ -106,7 +106,7 @@ def main():
                     help="pitch-assist level (0 = deployable test; the CPU arm reads out at the training level)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
-    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=args.dr)
+    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=args.dr, keep_assist=args.assist > 0)
     n_max = int(round((args.seconds or cfg.episode_s) / env.control_dt))
     stats, qs = rollout(env, agent, args.seed, n_max, record=args.video is not None, assist=args.assist)
     fin = stats["finished"]
