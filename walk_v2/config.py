@@ -280,6 +280,9 @@ class Config:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     grad_guard: bool = False                # optax.apply_if_finite around the optimizer (new runs only)
+    lr_kl_adaptive: bool = False            # rl_games adaptive lr on the mean KL (x1.5 / /1.5 around target_kl)
+    lr_kl_min: float = 1.0e-5
+    lr_kl_max: float = 1.0e-3
     ent_coef: float = 0.01
     ent_final: float = 0.0
     ent_anneal_steps: int = 40_000_000
@@ -375,6 +378,12 @@ PRESETS = {
     "v2c_s1_planar_fast": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2C, **_FAST),
     "v2c_s2_free_fast": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST),
     "v2c_s1_planar_dp4": lambda: _v2(model_path="model/dash01_v2_planar.xml", **{**_V2C, **_DP4}),
+    # the end-of-fade cliff (v2c_s1_planar_s1 at 47 M: KL early-stop storm, means drifting out of the box):
+    # KL-adaptive lr instead of the early stop throttling learning
+    "v2c_s1_planar_fast_kl": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2C, **_FAST,
+                                         lr_kl_adaptive=True, grad_guard=True),
+    "v2c_s1_planar_dp4_kl": lambda: _v2(model_path="model/dash01_v2_planar.xml", **{**_V2C, **_DP4},
+                                        lr_kl_adaptive=True),
     "v2c_s2_free_dp4": lambda: _v2(model_path="model/dash01_v2_free.xml", **{**_V2C, **_DP4}),
     # Δ_max = pi: the bound becomes reachable (§13 open decision, priced not forbidden)
     "v2_s2_free_wide": lambda: _v2(model_path="model/dash01_v2_free.xml", delta_max=3.14159265),

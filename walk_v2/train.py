@@ -158,6 +158,11 @@ def main():
     agent.obs.block_until_ready()
     print(f"[train] reset {agent.n_envs} envs on {agent.n_dev} device(s) in {time.time() - t:.1f}s")
 
+    best_score = None
+    _bj = run / "best.json"
+    if _bj.exists():
+        _b = json.loads(_bj.read_text())
+        best_score = (int(_b.get("finishes", 0)), float(_b.get("dist_mean", 0.0)))
     log = CsvLog(run / "progress.csv")
     evlog = CsvLog(run / "eval.csv")
     tb = None
@@ -198,6 +203,17 @@ def main():
             print(f"[eval @ {agent.step:,}] greedy: {ev['finishes']}/{ev['n']} finish, {ev['falls']} falls, "
                   f"t_line {ev['t_line_mean']:.2f} s, dist {ev['dist_mean']:.1f} m, "
                   f"speed {ev['speed_mean']:.2f} m/s ({time.time() - t:.0f}s)", flush=True)
+            # keep the best greedy checkpoint (finishes first, then distance): a later collapse (the
+            # end-of-fade cliff, v2c_s1_planar_s1 at 47 M) must not lose a usable policy
+            _score = (int(ev.get("finishes", 0)), float(ev.get("dist_mean", float("nan"))))
+            if _score[1] == _score[1] and (best_score is None or _score > best_score):
+                best_score = _score
+                agent.save(run / "best.msgpack")
+                (run / "best.json").write_text(json.dumps({"step": agent.step, "finishes": _score[0],
+                                                           "dist_mean": _score[1], **{k: float(v) for k, v in ev.items()
+                                                                                       if isinstance(v, (int, float))}}, indent=1))
+                print(f"[train] best checkpoint -> best.msgpack (step {agent.step:,}, finishes {_score[0]}, dist {_score[1]:.1f} m)")
+
         if agent.step - last_ckpt >= cfg.checkpoint_every_steps:
             agent.save(run / f"ckpt_{agent.step}.msgpack")
             last_ckpt = agent.step

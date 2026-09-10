@@ -104,7 +104,15 @@ class PPO:
         self.params = self.net.init(k, jnp.zeros((1, env.obs_dim)))
         n_updates = self.n_rollouts_total * cfg.n_epochs * self.n_minibatches
         self.lr = optax.linear_schedule(cfg.learning_rate, cfg.lr_final, n_updates)
-        self.tx = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), optax.adam(self.lr))
+        self.lr_kl_adaptive = bool(getattr(cfg, "lr_kl_adaptive", False))
+        if self.lr_kl_adaptive:
+            # rl_games' adaptive schedule: the step shrinks when the KL overshoots the target and grows
+            # when it undershoots, instead of the early stop throttling learning to one minibatch
+            self.lr_now = float(cfg.learning_rate)
+            self.tx = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm),
+                                  optax.inject_hyperparams(optax.adam)(learning_rate=self.lr_now))
+        else:
+            self.tx = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), optax.adam(self.lr))
         if bool(getattr(cfg, "grad_guard", False)):
             # skip an update whose gradients are not finite instead of corrupting the params
             self.tx = optax.apply_if_finite(self.tx, max_consecutive_errors=20)
@@ -566,6 +574,13 @@ class PPO:
             metrics = jax.tree_util.tree_map(
                 lambda x: np.moveaxis(np.asarray(x), 0, 1).reshape((x.shape[1], x.shape[0] * x.shape[2]) + x.shape[3:]),
                 metrics)
+        if self.lr_kl_adaptive and n_mb > 0 and cfg.target_kl > 0:
+            kl_mean = aux_acc.get("kl", 0.0) / n_mb
+            if kl_mean > 2.0 * cfg.target_kl:
+                self.lr_now = max(self.lr_now / 1.5, float(cfg.lr_kl_min))
+            elif kl_mean < 0.5 * cfg.target_kl:
+                self.lr_now = min(self.lr_now * 1.5, float(cfg.lr_kl_max))
+            self.opt_state = _set_lr(self.opt_state, self.lr_now)
         # ---- obs stats (after the update, from the rollout's raw observations)
         self.stats = self.stats.update(b_mean, b_var, float(b_n))
         if getattr(cfg, "sym_obs_stats", True) and not self.env.library_mode:
@@ -617,7 +632,7 @@ class PPO:
             "train/n_minibatch_updates": n_mb, "train/early_stop": float(stop),
             "train/ent_coef": self.ent_coef, "train/log_std_clamp": self.log_std_clamp,
             "train/std_mean": float(np.exp(np.asarray(self.params["params"]["log_std"])).mean()),
-            "train/lr": float(self.lr(_adam_count(self.opt_state))),
+            "train/lr": float(self.lr_now) if self.lr_kl_adaptive else float(self.lr(_adam_count(self.opt_state))),
             "est/vel_rmse": float(np.sqrt(float(est_last))) if est_last is not None else float("nan"),
         }
         for kk, v in m["reward_terms"].items():
@@ -764,6 +779,17 @@ def _adam_count(opt_state) -> int:
         if isinstance(leaf, optax.ScaleByAdamState):
             return int(np.asarray(leaf.count))
     return 0
+
+
+def _set_lr(opt_state, lr):
+    """Set the learning rate inside an optax.inject_hyperparams state (wherever it sits in the chain)."""
+    def fix(leaf):
+        if isinstance(leaf, optax.InjectHyperparamsState):
+            hp = dict(leaf.hyperparams)
+            hp["learning_rate"] = jnp.asarray(lr, jnp.float32)
+            return leaf._replace(hyperparams=hp)
+        return leaf
+    return jax.tree_util.tree_map(fix, opt_state, is_leaf=lambda x: isinstance(x, optax.InjectHyperparamsState))
 
 
 def _clamp_log_std(params, clamp, fill=False):
