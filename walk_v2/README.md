@@ -331,6 +331,20 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
   (`v2c_s2_free_dp2x_s2warm_s4`). Seed 2 (resumed) and the roll-wheel seed 1 are at ep_len ~370 / ~780.
   The rigid-hold probe (all three wheels at 1000 N m/rad) is numerically unstable (NaN within 0.1 s), so the
   transfer question stays at: the S1 gait does not survive on the free plant under 100 N m/rad holds.
+* **Outage 2026-09-10 16:52-21:50**: every training job died with `OSError: [Errno 122] Disk quota exceeded`
+  (the Izar home is shared with the CPU arm's history: `walk_mit/runs` 71 GB, old `dash-mit-*.out` logs
+  5 GB, pip + uv caches 34 GB, venvs 28 GB; `walk_v2/runs` was 5.3 GB). The VPN was down at the same time,
+  so the monitor could not see it. Freed: the pip/uv caches and every intermediate `ckpt_*` of finished
+  runs (kept: `best*`, the newest one or two per run, the 130 M S1 runner) -> `walk_v2/runs` 1.6 GB; the
+  four S2 runs resumed from their last checkpoints (s0 175 M, s2 135 M, s3 70 M, s2warm_s4 80 M).
+  Lost in the gap: the S2 seed-0 policy at 147 M that ran 16/16 to the line at 2.48 m/s **with the full
+  randomization, jitter and drop curricula active** (the first robust runner on either arm) sat between the
+  140 M and 145 M checkpoints (which stand / walk at 0.25 m/s) and the distance-first keeper preferred the
+  88.5 M policy by 0.4 m; the resumed run now has the `best_speed.msgpack` keeper. S2 seed 0 collapsed at
+  117 M when its randomization ramp reached full strength (all the late collapses follow the DR / jitter /
+  drop gates opening at ep_len 1200, then the gait clock slides to the 1.5 Hz rail) and recovered by 147 M.
+  Seed 4, warm-started from the S2 88.5 M runner, reached ep_len 483 at 15 M and 99.7 m at 2.29 m/s greedy
+  at 73.7 M: warm starts transfer within the same plant, only the planar-to-free jump carried nothing.
 * **S2 findings (2026-09-10, 15:00)**. (1) The S1 runner (73.7 M) on the free plant, greedy, falls
   sideways in 0.7-1.4 s with the pitch wheel at full and in 0.7-1.2 s without it
   (`runs/v2c_s2_free_dp2x_s0/greedy_s1best_on_free_assist{1.0,0.0}.json`): the S1 policy carries no lateral
