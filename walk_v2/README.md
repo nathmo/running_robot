@@ -177,7 +177,7 @@ and lax.pmean gradient averaging, verified on two emulated CPU devices
 | `v2c_s1_planar_fast` | 1 × 2048 × 9, cap 8 × 8 | 18 432 | per-minibatch | 11 000–11 200 |
 | `v2c_fast_dp4` | 4 × 512 × 9 | 18 432 | per-minibatch pmap | 15 700–18 500 |
 | `v2c_fast_dp2x` | 2 × 2048 × 9 | 36 864 | per-minibatch pmap | 18 000 |
-| `v2c_fast_dp4x` | 4 × 2048 × 9 | 73 728 | fused per-epoch scan | see `runs/v2c_fast_dp4x_s0` |
+| `v2c_fast_dp4x` | 4 × 2048 × 9 | 73 728 | fused per-epoch scan | **42 300** (rollout 1.38 s, update 0.16 s) |
 
 The batched step is latency-bound, so splitting a fixed 18 432-sample rollout over more devices
 barely helps (73 ms/step at 512 envs vs 155 ms at 2048): the rollout must grow with the devices
