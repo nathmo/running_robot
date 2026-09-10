@@ -26,6 +26,7 @@ ap.add_argument("--seed0", type=int, default=1000)
 ap.add_argument("--dr", type=float, default=None, help="override dr_scale (default: the run's curriculum value)")
 ap.add_argument("--assist", type=float, default=None, help="override the pitch-assist scale")
 ap.add_argument("--sprint", type=float, default=None, help="override the sprint line distance (m)")
+ap.add_argument("--assist-off-at", type=float, default=None, help="seconds into each episode after which the assist is set to 0")
 args = ap.parse_args()
 run = Path(args.run)
 model, venv, raw = build(run, None, str(run / args.ckpt))
@@ -79,8 +80,13 @@ for e in range(args.episodes):
     obs = venv.reset()
     cause_buf.clear()
     fhz, res, fam, dev, td = [], [], [], [], []
+    grounded, xs = [], []
     ncommit, n, sprint, theta = 0, 0, None, 0.0
+    if args.assist is not None:
+        raw.set_pitch_assist(args.assist)
     while True:
+        if args.assist_off_at is not None and n * raw.control_dt >= args.assist_off_at:
+            raw.set_pitch_assist(0.0)
         a, _ = model.predict(obs, deterministic=det)
         obs, r, d, info = venv.step(a)
         a0 = np.clip(a[0], -1, 1)
@@ -95,9 +101,12 @@ for e in range(args.episodes):
                         np.sqrt(np.mean(sl[21:28] ** 2)), np.sqrt(np.mean(sl[28:35] ** 2)), *sl[39:44]])
         dev.append(raw._ring[(raw._ring_head - 1) % raw._ring_len][:6] - nom)
         td.append(v2.get("td_err", np.nan))
+        grounded.append(np.asarray(raw._grounded_prev, dtype=bool).copy())
+        xs.append(float(raw.data.qpos[0]))
         theta = max(theta, v2.get("theta_max", 0.0))
         sprint = info[0].get("sprint", sprint)
         if d[0]:
+            xs.pop(); grounded.pop()        # the post-done state is the auto-reset, not the episode
             trunc = bool(info[0].get("TimeLimit.truncated", False))
             finished = sprint is not None and sprint.get("t_line") is not None
             break
@@ -121,6 +130,30 @@ for e in range(args.episodes):
     print(f"        spec rms  cam {fam[0]:.2f} thigh {fam[1]:.2f} hip {fam[2]:.2f} kp {fam[3]:.2f} kd {fam[4]:.2f} | "
           f"knobs delta {fam[5]:+.2f} s {fam[6]:+.2f} o {fam[7]:+.2f},{fam[8]:+.2f},{fam[9]:+.2f} | "
           f"residual share of target deviation {auth:.2f}  target-dev rms {dev_rms:.3f} rad", flush=True)
+    G = np.asarray(grounded, dtype=bool)
+    if len(G) > 50:
+        dt = raw.control_dt
+        duty = G.mean(axis=0)
+        flight = float(np.mean(~G.any(axis=1)))
+        double = float(np.mean(G.all(axis=1)))
+        td_l = int(np.sum((~G[:-1, 0]) & G[1:, 0]))
+        td_r = int(np.sum((~G[:-1, 1]) & G[1:, 1]))
+        stride_hz = 0.5 * (td_l + td_r) / (len(G) * dt)
+        line = f"        contacts  duty L {duty[0]:.2f} R {duty[1]:.2f}  flight {flight:.2f}  double-support {double:.2f}  touchdowns L {td_l} R {td_r}  stride {stride_hz:.2f} Hz"
+        tl = None if sprint is None else sprint.get("t_line")
+        if tl is not None:
+            k0 = int(round(tl / dt))
+            x = np.asarray(xs)
+            v = np.gradient(x, dt) if len(x) > 2 else np.zeros_like(x)
+            w = 50
+            vs = np.convolve(v, np.ones(w) / w, mode="same")
+            after = vs[k0:]
+            slow = np.where(np.abs(after) < 0.3)[0]
+            t_stop = None if len(slow) == 0 else slow[0] * dt
+            line += (f"\n        after line: {len(after) * dt:.1f} s upright, mean speed {np.mean(after):+.2f} m/s, "
+                     f"speed at +2 s {vs[min(len(vs) - 1, k0 + 200)]:+.2f} m/s, first < 0.3 m/s after "
+                     f"{'never' if t_stop is None else f'{t_stop:.1f} s'}, drift after line {x[-1] - x[k0]:+.1f} m")
+        print(line, flush=True)
 T = np.array([r["t"] for r in rows])
 D = np.array([r["dist"] for r in rows])
 print(f"  MEAN: {T.mean():6.2f} s  {np.nanmean(D):6.2f} m  {np.nanmean(D) / T.mean():.2f} m/s  "
