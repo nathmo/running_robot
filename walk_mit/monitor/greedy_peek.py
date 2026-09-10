@@ -38,36 +38,36 @@ if args.sprint is not None:
     raw.set_sprint_dist(args.sprint)
 
 cause_buf = []
-
-
-def snap():
-    """After each tick's physics, BEFORE the env's termination checks: read-only state only."""
-    d = raw.data
-    z = float(d.qpos[2])
-    cause_buf.append(dict(low=z < cfg.term_height, tip=raw._gravity_body()[2] > cfg.term_gravity_z,
-                          floor=False, ws=False, nan=not np.all(np.isfinite(d.qpos)),
-                          z=z, pitch=float(d.qpos[4])))
-
-
-raw.on_control_step = snap
-_ws_orig, _fl_orig = raw._workspace_violation, raw._floor_violation
+_last = {"ws": False, "floor": False}
+_ws_orig, _fl_orig, _fallen_orig = raw._workspace_violation, raw._floor_violation, raw._fallen
 
 
 def _ws_rec():
     r = _ws_orig()
-    if cause_buf:
-        cause_buf[-1]["ws"] = bool(r)
+    _last["ws"] = bool(r)
     return r
 
 
 def _fl_rec():
     r = _fl_orig()
-    if cause_buf:
-        cause_buf[-1]["floor"] = bool(r)
+    _last["floor"] = bool(r)
     return r
 
 
-raw._workspace_violation, raw._floor_violation = _ws_rec, _fl_rec
+def _fallen_rec():
+    """The env's own decision, recorded at the moment and state it is taken. _fallen() short-
+    circuits, so floor/ws are reset first and only carry the values it actually evaluated."""
+    _last["ws"], _last["floor"] = False, False
+    r = _fallen_orig()
+    d = raw.data
+    z = float(d.qpos[2])
+    cause_buf.append(dict(low=z < cfg.term_height, tip=raw._gravity_body()[2] > cfg.term_gravity_z,
+                          floor=_last["floor"], ws=_last["ws"], nan=not np.all(np.isfinite(d.qpos)),
+                          z=z, pitch=float(d.qpos[4]), fallen=bool(r)))
+    return r
+
+
+raw._workspace_violation, raw._floor_violation, raw._fallen = _ws_rec, _fl_rec, _fallen_rec
 
 det = not args.stochastic
 print(f"[{run.name} {args.ckpt}] {'stochastic' if args.stochastic else 'greedy'}, {args.episodes} eps, "
@@ -108,7 +108,7 @@ for e in range(args.episodes):
     dev_rms = float(np.sqrt(np.mean(dev ** 2)))
     auth = float(np.sqrt(np.mean((cfg.residual_scale * res) ** 2)) / max(1e-9, dev_rms))
     c = cause_buf[-1]
-    cause = "finish" if finished else ("timeout" if trunc else ",".join(k for k in ("low", "tip", "floor", "ws", "nan") if c[k]) or "?")
+    cause = "finish" if finished else ("timeout" if trunc else ",".join(k for k in ("low", "tip", "floor", "ws", "nan") if c[k]) or ("fallen?" if c.get("fallen") else "?"))
     dist = np.nan if sprint is None else sprint["d"]
     t = n * raw.control_dt
     sat = float(np.mean(np.abs(res) >= 0.95))

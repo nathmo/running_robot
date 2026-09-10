@@ -4,7 +4,7 @@ rows = [r for r in csv.DictReader(open(path)) if r.get("time/total_timesteps")]
 cols = list(rows[0].keys())
 print("COLUMNS:", ", ".join(cols))
 want = ["rollout/ep_len_mean", "rollout/ep_rew_mean", "curriculum/pitch_assist", "curriculum/dr_scale", "curriculum/sprint_dist_m",
-        "train/std", "train/ent_coef", "train/approx_kl", "train/clip_fraction", "train/explained_variance", "train/sym_loss"]
+        "train/std", "train/ent_coef", "train/approx_kl", "train/clip_fraction", "train/explained_variance", "train/sym_loss", "train/bound_loss", "train/mu_out_frac", "reward_terms/assist_pen"]
 # fuzzy-resolve the rest by suffix
 def find(sfx):
     for c in cols:
