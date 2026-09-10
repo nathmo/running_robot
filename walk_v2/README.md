@@ -129,9 +129,12 @@ fixed bench, the flailing worst case; PPO iteration = rollout 32 steps + 4 epoch
 |---|---|---|---|
 | 100 × 50 (XML) | 3 940 | 2 990 | reference |
 | 100 × 8 | 5 016 | 3 308 | identical / 3e-3 rad |
-| 32 × 8 | 8 389 | | identical / 3e-3 rad |
-| 16 × 8 (default) | see `bench3_*_16_8.json` | | identical / 3e-3 rad |
+| 32 × 8 | 8 389 | 2 186* | identical / 3e-3 rad |
+| 16 × 8 (default) | 9 783 | | identical / 3e-3 rad |
 | 1 × 4 | 56 090 | | plant explodes (NaN) |
+
+\* `bench_ppo` carries ~13 s per iteration that the training runs do not show (their update is
+0.16 s for the same minibatch count); the training runs' own phase timers below are the reference.
 
 Training regime (`runs/v2_s1_planar_s*`, 1024 × 18, cap 16 × 8, first 0.3 M steps): rollout 2.17 s
 (120 ms/step), update 0.16 s, GAE + estimator 0.02 s, i.e. **7 600–7 700 env steps/s per V100**, and the
