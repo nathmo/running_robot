@@ -298,6 +298,13 @@ make the two implementations comparable:
 
 Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from its progress.csv.
 
+S2 (free base) parity, 2026-09-10: the CPU arm had a golden fixture for S1 only, so before trusting
+the S2 runs an S2 fixture was recorded with its `golden_v2.py --preset v2_s2_clean` (kept as
+`results/golden_v2_s2_clean_seed0.npz`) and replayed through `tools/replay_golden.py --preset
+v2_s2_free_easy`: 65 ticks on both arms (same fall tick), commit flags exact, per-tick reward
+identical, per-channel newest-frame differences at the S1 level (torque 0.04, base rate 0.06-0.13
+normalised units by tick 5, solver-level drift), phase channels in the known swapped order.
+
 ## Status (2026-09-10)
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
