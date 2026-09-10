@@ -260,11 +260,30 @@ class ActionDiagCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         env = self.training_env
-        self._lay = action_layout(env.get_attr("cfg")[0], env.get_attr("spec_dim")[0],
-                                  env.get_attr("gait_action_dim")[0])
+        cfg = env.get_attr("cfg")[0]
+        self._lay = action_layout(cfg, env.get_attr("spec_dim")[0], env.get_attr("gait_action_dim")[0])
+        # Latched policy variant: the spec dims (the clock included) are masked out of the loss on
+        # every non-commit tick, so their means there are untrained extrapolation. A rail statistic
+        # over ALL rows read ~45% on BOTH rails on v2_s1 whatever the policy committed; only the
+        # rows whose obs carries commit=1 say what the clock actually does.
+        self._wrap = None
+        if getattr(cfg, "action_mode", "fourier") == "latched" and                 getattr(cfg, "spec_source", "policy") == "policy":
+            self._wrap = int(env.get_attr("wrap_index")[0])
 
     def _on_step(self) -> bool:
         return True
+
+    def _commit_rows(self, obs):
+        """Boolean mask of the rows whose (normalized) obs carries commit=1, or None when every
+        row counts (non-latched action spaces, library variant)."""
+        if self._wrap is None:
+            return None
+        col = np.asarray(obs[:, self._wrap], dtype=float)
+        vn = self.training_env
+        rms = getattr(vn, "obs_rms", None)
+        if rms is not None:                     # VecNormalize: undo the scaling of the flag column
+            col = col * np.sqrt(rms.var[self._wrap] + getattr(vn, "epsilon", 1e-8)) + rms.mean[self._wrap]
+        return col > 0.5
 
     def _on_rollout_end(self) -> None:
         import torch
@@ -279,11 +298,16 @@ class ActionDiagCallback(BaseCallback):
         mean = np.clip(mean, -1.0, 1.0)
         sampled = np.clip(acts, -1.0, 1.0)
         lay = self._lay
+        sel = self._commit_rows(obs)
         if lay["freq"]:
-            f = freq_stats(mean[:, lay["freq"]], lay["freq_range"], sequential=False)
-            self.logger.record("diag/freq_hz_median", f["median_hz"])
-            self.logger.record("diag/freq_lo_rail", f["lo_rail"])
-            self.logger.record("diag/freq_hi_rail", f["hi_rail"])
+            m = mean if sel is None else mean[sel]
+            if len(m):
+                f = freq_stats(m[:, lay["freq"]], lay["freq_range"], sequential=False)
+                self.logger.record("diag/freq_hz_median", f["median_hz"])
+                self.logger.record("diag/freq_lo_rail", f["lo_rail"])
+                self.logger.record("diag/freq_hi_rail", f["hi_rail"])
+            if sel is not None:
+                self.logger.record("diag/commit_rows", int(sel.sum()))
         if lay["residual"] is not None:
             r = residual_stats(mean[:, lay["residual"]], sequential=False)
             rs = residual_stats(sampled[:, lay["residual"]], sequential=False)

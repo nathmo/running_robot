@@ -102,6 +102,17 @@ def build(run: Path, preset, checkpoint):
             raw.set_drive_bandwidth_log10(d["drive_bw_log10"])
             print(f"[eval] drive bandwidth restored to {10 ** d['drive_bw_log10']:.2f} Hz "
                   f"(resolved_config start was {cfg.drive_bandwidth_start_hz:.1f} Hz)")
+        # FIFTH instance: PlantRandomizer is constructed at scale 1.0 (full-width DR) and the pitch
+        # assist at 0; only the training callbacks ramp them. A v2 checkpoint trained at dr_scale
+        # 0.27 and evaluated at 1.0 (5 deg floor tilt, hot motors, 2 deg homing offsets) dies in
+        # 9 ticks under ZERO action -- the workspace kill fires on the toppling plant. The
+        # curriculum value is the plant the policy was trained on; restore it and the assist.
+        # A nominal-plant measurement calls set_dr_scale(0.0) explicitly afterwards.
+        if "dr_scale" in d:
+            raw.set_dr_scale(d["dr_scale"])
+            print(f"[eval] dr_scale restored to {d['dr_scale']:.3f} (env default is 1.0)")
+        if "pitch_assist" in d:
+            raw.set_pitch_assist(d["pitch_assist"])
     venv = DummyVecEnv([lambda: raw])
     model_path = pick_model(run, checkpoint)
     vn = pick_vecnormalize(run, model_path)
