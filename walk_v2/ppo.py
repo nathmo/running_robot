@@ -198,10 +198,19 @@ class PPO:
             else:
                 sym = jnp.zeros(())
             knob = jnp.mean(jnp.sum(nets.knob_slice(mu, library) ** 2, axis=-1)) if not library else 0.0
-            total = pg + cfg.vf_coef * vf - ent_coef * ent + cfg.w_sym * sym + cfg.w_knob_loss * knob
+            # action-mean bounds loss (v2c, the CPU arm's SymPPO w_bound = rl_games "bounds_loss"): the
+            # Gaussian is sampled unbounded and clipped by the env, so means that drift past the box
+            # all earn the same clipped sample (bang-bang spec, parked clock, saturated residual) and
+            # greedy clip(mu) stops matching the trained E[clip(mu + eps)]. w * mean(relu(|mu| - soft)^2)
+            over = jnp.maximum(jnp.abs(mu) - float(cfg.bound_soft), 0.0)
+            bound = jnp.mean(over ** 2)
+            mu_out = jnp.mean((jnp.abs(mu) > 1.0).astype(jnp.float32))
+            total = (pg + cfg.vf_coef * vf - ent_coef * ent + cfg.w_sym * sym + cfg.w_knob_loss * knob
+                     + cfg.w_bound * bound)
             approx_kl = jnp.mean((ratio - 1.0) - jnp.log(ratio))
             clipfrac = jnp.mean((jnp.abs(ratio - 1.0) > clip_range).astype(jnp.float32))
-            return total, dict(pg=pg, vf=vf, ent=ent, sym=sym, kl=approx_kl, clipfrac=clipfrac)
+            return total, dict(pg=pg, vf=vf, ent=ent, sym=sym, kl=approx_kl, clipfrac=clipfrac,
+                               bound=bound, mu_out=mu_out)
 
         def update_mb(params, opt_state, stats, batch, clip_range, ent_coef, log_std_clamp):
             obs, act, old_lp, adv, ret, mask = batch
@@ -431,6 +440,8 @@ class PPO:
             "train/loss_vf": aux_acc.get("vf", 0.0) / max(n_mb, 1),
             "train/entropy": aux_acc.get("ent", 0.0) / max(n_mb, 1),
             "train/loss_sym": aux_acc.get("sym", 0.0) / max(n_mb, 1),
+            "train/bound_loss": aux_acc.get("bound", 0.0) / max(n_mb, 1),
+            "train/mu_out_frac": aux_acc.get("mu_out", 0.0) / max(n_mb, 1),
             "train/approx_kl": aux_acc.get("kl", 0.0) / max(n_mb, 1),
             "train/clipfrac": aux_acc.get("clipfrac", 0.0) / max(n_mb, 1),
             "train/n_minibatch_updates": n_mb, "train/early_stop": float(stop),

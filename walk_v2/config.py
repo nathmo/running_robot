@@ -298,6 +298,8 @@ class Config:
     w_sym: float = 0.5
     w_sym_res: float = 0.5                  # + ||r(M_o s) - M_r r(s)||^2 on the residual (contract)
     w_knob_loss: float = 0.0
+    w_bound: float = 0.0                    # v2c: action-mean bounds loss w*mean(relu(|mu|-bound_soft)^2)
+    bound_soft: float = 1.0
     mask_spec_logprob: bool = True          # §04: spec dims scored only on commit ticks
     seed: int = 0
     warmstart_reset_log_std: bool = True
@@ -325,6 +327,13 @@ _V2B = dict(
     curriculum_gate_ep_len=1200.0, jitter_curriculum_gate_ep_len=1200.0,   # harden a runner, not a stander
 )
 
+# Readout-2 deltas (V2_CONTRACT.md): v2b finished 3/3 greedy dashes at 23 M with the wheel at 0.8 and then
+# collapsed; 68-79 % of the spec means and 53-60 % of the residual means lay OUTSIDE [-1, 1] (clip(mu) of
+# drifted means = bang-bang spec, parked clock, saturated residual). v2c = v2b + the bounds loss, a
+# retreating curriculum (0.7), a 0.7 std cap before the anneal, and the anti-crutch assist torque bill.
+_V2C = dict(_V2B, w_bound=1.0, curriculum_retreat_frac=0.7, max_log_std=-0.3567,   # ln 0.7
+            w_assist_penalty=0.005)
+
 PRESETS = {
     "default": Config,
     # S1 "planar" (= m3): x, z, pitch free; y, roll, yaw absent from the model. Iteration sandbox.
@@ -342,6 +351,9 @@ PRESETS = {
     # runs out, and the greedy eval without the wheel falls within a second at every checkpoint. No
     # assist from step 0: does the latched design learn balance at all?
     "v2b_s1_planar_noassist": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2B, pitch_assist_kp=0.0),
+    # readout-2 fixes on top (see _V2C): the CPU arm finishes 3/3 greedy dashes at 30 M with these
+    "v2c_s1_planar": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2C),
+    "v2c_s2_free": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C),
     # Δ_max = pi: the bound becomes reachable (§13 open decision, priced not forbidden)
     "v2_s2_free_wide": lambda: _v2(model_path="model/dash01_v2_free.xml", delta_max=3.14159265),
     # honesty-off debug arms: nominal plant, no noise, no disturbances (fast signal on latch/reward)

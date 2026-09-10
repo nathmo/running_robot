@@ -129,6 +129,21 @@ with the greedy policy creeping 1.1 m at 0.8 m/s (seed 0), and the 40 M entropy 
 annealing the std toward 0.25, which will freeze whatever exists by ~80 M. The wheel runs' episode
 lengths were never the policy's own: everything above ~100 ticks was the 100 N·m/rad pitch spring.
 
+## v2c: the readout-2 deltas (2026-09-10) — the first working policy
+
+The CPU arm's readout of v2b at 23 M found 68–79 % of the spec means and 53–60 % of the residual
+means OUTSIDE [−1, 1]: the Gaussian is sampled unbounded and clipped by the env, so every mean past a
+rail earns the same clipped sample (bang-bang spec, parked clock, saturated residual are all
+`clip(μ)` of drifted means, and greedy `clip(μ)` no longer matches the trained `E[clip(μ+ε)]`).
+`v2c` = v2b + the action-mean bounds loss `w·mean(relu(|μ|−1)²)` (w_bound 1.0, logged as
+`train/bound_loss` / `train/mu_out_frac`), a retreating curriculum (0.7), a 0.7 std cap before the
+anneal, and the anti-crutch assist-torque bill (w_assist_penalty 0.005, the env already billed
+−w·τ²). On the CPU arm `v2c_s1` seed 0 at 30 M finishes 3/3 greedy dashes at 2.3–2.5 m/s with the
+wheel at 0.47 (`walk_mit/monitor/v2c_s1_s0_30M_greedy.mp4`, rendered here from the pulled
+checkpoint: 138.7 m in 60 s, line at 38.9 s, peak 3.17 m/s); wheel-dependence at 30 M is the open
+risk while it fades to 0 by ~45 M. Presets `v2c_s1_planar` / `v2c_s2_free`; the GPU-side training
+of `v2c_s1_planar` seeds 0/1 is the parity run (Izar 3145269/70).
+
 ## Run
 
 ```bash
@@ -224,10 +239,12 @@ Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from it
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
   masked PPO update, estimator, symmetry loss, entropy/std anneal, curricula, eval, checkpoint).
-* Izar (V100): full smoke test passes on the GPU. Completed/stopped: `v2_s1_planar` s0/s1 (parked on
-  the 0.5 Hz rail, collapsed by 52 M like the CPU arm's v2), `v2b_s1_planar` s0/s1 (peak 676 at 40 M,
-  collapsed by 60 M; checkpoints on Izar). Running: `v2b_s1_planar_noassist` s0/s1 and
-  `v2b_s1_planar_stiff` s0 (readout 2 above). Contract sizing 1024 × 18, cap 16 × 8, ~7.7k steps/s.
+* Izar (V100): full smoke test passes on the GPU. Stopped (checkpoints kept): `v2_s1_planar` s0/s1
+  (0.5 Hz rail, collapsed by 52 M), `v2b_s1_planar` s0/s1 (peak 676 at 40 M, collapsed by 60 M),
+  `v2b_s1_planar_stiff` s0 (collapsed with the assist fade like the soft leg). Running:
+  `v2b_s1_planar_noassist` s0/s1 (the wheel-free baseline, ep_len ~150–170 at 84 M) and
+  `v2c_s1_planar` s0/s1 (the parity run for the CPU arm's working policy). Contract sizing
+  1024 × 18, cap 16 × 8, ~7.7–8.2k steps/s per GPU.
 * Cross-check with the CPU arm: golden fixture `walk_mit/golden/v2_s1_clean_seed0.npz` replays with
   exact commit flags and rewards identical over the first 20 ticks; control-law agreement 5e-6 on the
   traces. Policy-level comparison (same preset, seed, budget; greedy dash eval) pending the runs.
