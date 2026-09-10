@@ -187,6 +187,17 @@ call) then dominates the update, hence the fused per-epoch `lax.scan` inside one
 (`_update_epoch_p`, target-KL early stop carried inside). Izar's second 4-GPU node is held by a
 30-hour job, so the 4 × 2048 run replaced the 4 × 512 one on `ixl01`.
 
+**Sizing verdict (2026-09-10, 13:30):** PPO here is iteration-bound, not sample-bound. At 4× the
+contract rollout (8192 × 9) the 4-GPU run sat at ep_len ~150 from 30 M to 70 M steps (28 min), no
+better per wall-clock than the single-GPU contract run at 20 min, with or without the √4 learning-rate
+and ×2 schedule scaling. At 2× the rollout (2 × 2048) learning per step held (ep_len 776 at 35 M in
+27 min — faster per wall-clock than one GPU). So the 4-GPU configuration is 4 × 1024 envs × 9 (36 864
+samples, contract schedules): `v2c_fast_dp4z_s2`. Protections added on the way: the best greedy
+checkpoint is kept as `best.msgpack` (the end-of-fade cliff at 47 M erased a working policy from the
+training curve, not from disk), and `lr_kl_adaptive` (rl_games' schedule) is under test on
+`v2c_fastkl_dp2x_s3` against the target-KL early stop, which fired every iteration through that cliff
+while the CPU arm's run sailed through the same phase (its KL stayed at 0.01–0.03).
+
 Two lessons from the first 4 × 2048 run (`v2c_fast_dp4x_s0`, 42–44k steps/s): (1) the recipe's
 step-based schedules are really iteration counts — the CPU arm's 40 M entropy deadline is 2170 policy
 updates at 18 432 samples per rollout, and at 4× the rollout it arrived after a quarter of the updates
