@@ -302,6 +302,9 @@ Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from it
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
   masked PPO update, estimator, symmetry loss, entropy/std anneal, curricula, eval, checkpoint).
+* **S2 (free base, roll + yaw) started 2026-09-10 14:10**: `v2c_s2_free_fast` warm-started from the best S1
+  checkpoint below, seeds 0/1 on 2 GPUs each (`runs/v2c_s2_free_dp2x_s0/s1`). Everything above this line
+  in time was S1 (planar) only.
 * **Best GPU-arm policy so far:** `v2c_fast_dp2x_s2` (2 × 2048 envs × 9, contract schedules) at 73.7 M
   steps, ~63 min of training on two V100s: the wheel-free greedy eval runs 16 of 16 envs to 102–105 m
   in ~38 s at 2.66–2.76 m/s, then falls at the line (no stop phase learned yet — the CPU arm's
