@@ -140,8 +140,11 @@ rail earns the same clipped sample (bang-bang spec, parked clock, saturated resi
 anneal, and the anti-crutch assist-torque bill (w_assist_penalty 0.005, the env already billed
 −w·τ²). On the CPU arm `v2c_s1` seed 0 at 30 M finishes 3/3 greedy dashes at 2.3–2.5 m/s with the
 wheel at 0.47 (`walk_mit/monitor/v2c_s1_s0_30M_greedy.mp4`, rendered here from the pulled
-checkpoint: 138.7 m in 60 s, line at 38.9 s, peak 3.17 m/s); wheel-dependence at 30 M is the open
-risk while it fades to 0 by ~45 M. Presets `v2c_s1_planar` / `v2c_s2_free`; the GPU-side training
+checkpoint: 138.7 m in 60 s, line at 38.9 s, peak 3.17 m/s); wheel-dependence at 30 M was the open
+risk; at 42 M (assist 0.09) the pulled checkpoint runs the full 60 s greedy (146 m, line 33.5 s),
+and **with the assist forced to 0 it still runs all three episodes: 182 / 146 / 189 m, lines at
+25.0 / 33.6 / 25.9 s, 2.4–3.1 m/s, peak 3.8 m/s** (`walk_mit/runs/v2c_s1_s0_42M_noassist`,
+curriculum.json with pitch_assist 0) — the first policy that stands without the wheel. Presets `v2c_s1_planar` / `v2c_s2_free`; the GPU-side training
 of `v2c_s1_planar` seeds 0/1 is the parity run (Izar 3145269/70).
 
 ## Run
