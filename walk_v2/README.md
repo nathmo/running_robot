@@ -317,7 +317,14 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
   climbs slowly (s0 166 at 6.6 M). Everything above this line in time was S1 (planar) only.
   The 4-GPU seed `v2c_fast_dp4z_s4` (4 x 1024) never stood (ep_len ~60 at 46 M, one KL 2.1 spike) and
   was cancelled.
-* **S2 findings so far (2026-09-10, 15:00)**. (1) The S1 runner (73.7 M) on the free plant, greedy, falls
+* **First S2 runner on this arm (2026-09-10, 16:00)**: contract seed 0 (`runs/v2c_s2_free_dp2x_s0`,
+  `v2c_s2_free_fast` warm-started from the 73.7 M S1 runner, 2 x 2048 envs x 9, ~21k steps/s) at 73.7 M
+  steps: wheel-free greedy on the FREE plant (roll + yaw free) covers 94.6 m mean at 3.02 m/s over 16
+  envs, 15 falls (one survives), no finish; `best.msgpack` there. That is ~1 h of S2 training on two V100s,
+  ~2 h 05 for S1 + S2 end to end. Seed 1 at 73.7 M stands wheel-free (0 falls in 60 s) but walks
+  backwards (-19.7 m); seed 2 (resumed) at 33 M is still at ep_len 135; the roll-wheel seed 0 at 53 M has
+  ep_len 761 with the wheels still fading.
+* **S2 findings (2026-09-10, 15:00)**. (1) The S1 runner (73.7 M) on the free plant, greedy, falls
   sideways in 0.7-1.4 s with the pitch wheel at full and in 0.7-1.2 s without it
   (`runs/v2c_s2_free_dp2x_s0/greedy_s1best_on_free_assist{1.0,0.0}.json`): the S1 policy carries no lateral
   balance, so the contract's warm start gives S2 nothing to stand on and the three contract seeds start at
