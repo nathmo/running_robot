@@ -49,26 +49,46 @@ def rollout(env, agent, seed, n_max, record=False, assist=0.0, stoplight=0.0):
     state, obs = env.reset(key, params)
     act = agent._act_greedy
 
+    dt = env.control_dt
+
     def body(carry, _):
-        state, obs, alive, dist, tline, fin, fell, tend, vsum = carry
+        (state, obs, alive, dist, tline, fin, fell, tend, red_n, red_slow, fell_red,
+         v_min_post, t_post, crossed_any) = carry
         a = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
         state2, obs2, r, done, info = env.step(state, a, params)
         ending = alive & done
+        vx = (info["sprint_d"] - dist) / dt                     # world-x speed this tick
         dist = jnp.where(alive, info["sprint_d"], dist)
         tline = jnp.where(ending & info["finished"], info["t_line"], tline)
         fin = fin | (ending & info["finished"])
         fell = fell | (ending & info["fallen"])
-        tend = jnp.where(ending, state.t + env.control_dt, tend)
+        tend = jnp.where(ending, state.t + dt, tend)
+        # stop statistics: red-light phases (before the line) and the post-line phase
+        red = alive & (info["light_red"] > 0.5)
+        red_n = red_n + red
+        red_slow = red_slow + (red & (jnp.abs(vx) < 0.3))
+        fell_red = fell_red | (ending & info["fallen"] & (info["light_red"] > 0.5))
+        post = alive & (info["t_line"] >= 0.0)
+        crossed_any = crossed_any | post
+        v_min_post = jnp.where(post, jnp.minimum(v_min_post, jnp.abs(vx)), v_min_post)
+        t_post = t_post + jnp.where(post, dt, 0.0)
         alive2 = alive & ~done
         q0 = state.data.qpos[0] if record else jnp.zeros(1)
-        return (state2, obs2, alive2, dist, tline, fin, fell, tend, vsum), q0
+        return (state2, obs2, alive2, dist, tline, fin, fell, tend, red_n, red_slow, fell_red,
+                v_min_post, t_post, crossed_any), q0
 
     n = env.n_envs
     init = (state, obs, jnp.ones(n, bool), jnp.zeros(n), jnp.full(n, -1.0), jnp.zeros(n, bool),
-            jnp.zeros(n, bool), jnp.full(n, n_max * env.control_dt), jnp.zeros(n))
-    (_, _, alive, dist, tline, fin, fell, tend, _), qs = jax.lax.scan(body, init, None, length=n_max)
+            jnp.zeros(n, bool), jnp.full(n, n_max * dt), jnp.zeros(n, jnp.int32), jnp.zeros(n, jnp.int32),
+            jnp.zeros(n, bool), jnp.full(n, jnp.inf), jnp.zeros(n), jnp.zeros(n, bool))
+    (_, _, alive, dist, tline, fin, fell, tend, red_n, red_slow, fell_red,
+     v_min_post, t_post, crossed_any), qs = jax.lax.scan(body, init, None, length=n_max)
     return dict(dist=np.asarray(dist), t_line=np.asarray(tline), finished=np.asarray(fin),
-                fell=np.asarray(fell), t_end=np.asarray(tend), alive=np.asarray(alive)), np.asarray(qs)
+                fell=np.asarray(fell), t_end=np.asarray(tend), alive=np.asarray(alive),
+                red_s=np.asarray(red_n) * dt, red_slow_frac=np.asarray(red_slow) / np.maximum(np.asarray(red_n), 1),
+                fell_red=np.asarray(fell_red), crossed=np.asarray(crossed_any),
+                v_min_post=np.where(np.asarray(crossed_any), np.asarray(v_min_post), np.nan),
+                t_post=np.asarray(t_post)), np.asarray(qs)
 
 
 def render_video(cfg, qs, t_end, path, seconds=None, fps=None):
@@ -119,8 +139,12 @@ def main():
     for i in range(args.episodes):
         line = f"line {stats['t_line'][i]:6.2f} s" if fin[i] else "line    DNF"
         how = "finished" if fin[i] else ("FELL" if stats["fell"][i] else "timeout")
+        post = (f"  post-line {stats['t_post'][i]:4.1f} s min|v| {stats['v_min_post'][i]:.2f}"
+                if stats["crossed"][i] else "")
+        red = (f"  red {stats['red_s'][i]:4.1f} s slow {100 * stats['red_slow_frac'][i]:3.0f}%"
+               + ("  FELL-ON-RED" if stats["fell_red"][i] else "")) if stats["red_s"][i] > 0 else ""
         print(f"  ep{i:02d}: {stats['dist'][i]:6.1f} m in {stats['t_end'][i]:6.2f} s  {line}  {how}  "
-              f"avg {stats['dist'][i] / max(stats['t_end'][i], 1e-6):.2f} m/s")
+              f"avg {stats['dist'][i] / max(stats['t_end'][i], 1e-6):.2f} m/s{post}{red}")
     if fin.any():
         print(f"  mean t_line {stats['t_line'][fin].mean():.2f} s  mean speed "
               f"{(cfg.sprint_dist_m / stats['t_line'][fin]).mean():.2f} m/s")
