@@ -75,13 +75,23 @@ class Transition(NamedTuple):
 
 # ------------------------------------------------------------------ the trainer
 class PPO:
-    def __init__(self, cfg, env: DashEnvV2, run_dir, total_steps, seed=0, eval_env=None):
+    def __init__(self, cfg, env: DashEnvV2, run_dir, total_steps, seed=0, eval_env=None, n_devices=1):
         self.cfg, self.env, self.run = cfg, env, Path(run_dir)
         self.total_steps = int(total_steps)
-        self.n_envs, self.n_steps = env.n_envs, int(cfg.n_steps)
+        # data parallelism: `env` is built PER DEVICE (n_envs // n_devices envs); each device runs its own
+        # rollout, the minibatch gradients are averaged with lax.pmean, params stay identical everywhere
+        self.n_dev = int(n_devices)
+        self.devices = jax.local_devices()[:self.n_dev]
+        assert len(self.devices) == self.n_dev, f"asked for {self.n_dev} devices, have {jax.local_devices()}"
+        self.n_envs_dev, self.n_steps = env.n_envs, int(cfg.n_steps)
+        self.n_envs = self.n_envs_dev * self.n_dev
         self.batch = self.n_envs * self.n_steps
+        self.batch_dev = self.n_envs_dev * self.n_steps
         self.n_minibatches = max(1, self.batch // int(cfg.batch_size))
         self.mb_size = self.batch // self.n_minibatches
+        assert self.mb_size % self.n_dev == 0 and int(cfg.est_batch) % self.n_dev == 0, "minibatch not divisible by devices"
+        self.mb_dev = self.mb_size // self.n_dev
+        self.est_batch_dev = max(1, int(cfg.est_batch) // self.n_dev)
         self.n_rollouts_total = max(1, math.ceil(self.total_steps / self.batch))
         self.eval_env = eval_env
         self.key = jax.random.PRNGKey(int(seed))
@@ -236,6 +246,54 @@ class PPO:
 
         self._est_update = jax.jit(est_update)
         self._act_greedy = jax.jit(lambda params, nobs: net.apply(params, nobs, method=net.actor_mean))
+        if self.n_dev > 1:
+            devs = self.devices
+            self._rollout_p = jax.pmap(rollout, axis_name="dev", in_axes=(None, None, 0, 0, 0, None), devices=devs)
+            self._gae_p = jax.pmap(gae, axis_name="dev", static_broadcasted_argnums=(2, 3), devices=devs)
+
+            def update_mb_p(params, opt_state, stats, data, idx, clip_range, ent_coef, log_std_clamp):
+                mb = tuple(x[idx] for x in data)
+                (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+                    params, stats, *mb, clip_range, ent_coef)
+                grads = jax.lax.pmean(grads, "dev")
+                aux = jax.lax.pmean(aux, "dev")
+                loss = jax.lax.pmean(loss, "dev")
+                updates, opt_state = self.tx.update(grads, opt_state, params)
+                params = optax.apply_updates(params, updates)
+                params = _clamp_log_std(params, log_std_clamp)
+                return params, opt_state, loss, aux
+
+            self._update_mb_p = jax.pmap(update_mb_p, axis_name="dev",
+                                         in_axes=(0, 0, None, 0, 0, None, None, None), devices=devs)
+
+            def est_update_p(params, est_opt_state, obs, idx):
+                loss, grads = jax.value_and_grad(est_loss)(params, obs[idx])
+                grads = jax.lax.pmean(grads, "dev")
+                loss = jax.lax.pmean(loss, "dev")
+                updates, est_opt_state = self.est_tx.update(grads, est_opt_state, params)
+                params = optax.apply_updates(params, updates)
+                return params, est_opt_state, loss
+
+            self._est_update_p = jax.pmap(est_update_p, axis_name="dev", in_axes=(0, 0, 0, 0), devices=devs)
+            self._reset_p = jax.pmap(lambda k, prm: env.reset(k, prm), in_axes=(0, None), devices=devs)
+
+    def _replicate(self, tree):
+        """A leading device axis for pmap, placed with the sharding pmap expects (a committed single-
+        device array is refused by pmap in jax 0.11; jax.device_put_replicated is gone)."""
+        if not hasattr(self, "_rep_sharding"):
+            from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+            self._rep_sharding = NamedSharding(Mesh(np.array(self.devices), ("dev",)), P("dev"))
+        sh = self._rep_sharding
+        return jax.tree_util.tree_map(
+            lambda x: jax.device_put(np.broadcast_to(np.asarray(x), (self.n_dev,) + np.shape(x)), sh), tree)
+
+    def reset_envs(self, key):
+        """Reset every env (all devices); env_state/obs carry a leading device axis when n_dev > 1."""
+        if self.n_dev == 1:
+            self.env_state, self.obs = self.env.reset(key, self.env_params)
+        else:
+            self.env_state, self.obs = self._reset_p(jax.random.split(key, self.n_dev), self.env_params)
+        return self.env_state, self.obs
 
     # ---------------------------------------------------------------- schedules
     @staticmethod
@@ -348,54 +406,118 @@ class PPO:
     def iterate(self):
         cfg = self.cfg
         t0 = time.time()
-        self.key, k = jax.random.split(self.key)
-        (self.env_state, self.obs, _, tr, last_value, metrics,
-         (b_mean, b_var, b_n)) = self._rollout(self.params, self.stats, self.env_state, self.obs, k,
-                                              self.env_params)
-        jax.block_until_ready(tr.reward)          # async dispatch: stamp the phases honestly
-        t_roll = time.time() - t0
-        t1 = time.time()
-        adv, ret = self._gae(tr, last_value, float(cfg.gamma), float(cfg.gae_lambda))
-        jax.block_until_ready(ret)
-        t_gae = time.time() - t1
-        t1 = time.time()
-        # ---- PPO update
-        stats_used = self.stats
-        flat = lambda x: x.reshape((self.batch,) + x.shape[2:])
-        data = (flat(tr.obs), flat(tr.action), flat(tr.log_prob), flat(adv), flat(ret), flat(tr.mask))
-        aux_acc, n_mb, stop = {}, 0, False
-        for epoch in range(cfg.n_epochs):
+        if self.n_dev == 1:
             self.key, k = jax.random.split(self.key)
-            perm = jax.random.permutation(k, self.batch)
-            for i in range(self.n_minibatches):
-                idx = perm[i * self.mb_size:(i + 1) * self.mb_size]
-                mb = tuple(x[idx] for x in data)
-                self.params, self.opt_state, loss, aux = self._update_mb(
-                    self.params, self.opt_state, stats_used, mb, float(cfg.clip_range),
-                    float(self.ent_coef), float(self.log_std_clamp))
-                n_mb += 1
-                for kk, v in aux.items():
-                    aux_acc[kk] = aux_acc.get(kk, 0.0) + float(v)
-                if cfg.target_kl > 0 and float(aux["kl"]) > 1.5 * cfg.target_kl:
-                    stop = True
+            (self.env_state, self.obs, _, tr, last_value, metrics,
+             (b_mean, b_var, b_n)) = self._rollout(self.params, self.stats, self.env_state, self.obs, k,
+                                                  self.env_params)
+            jax.block_until_ready(tr.reward)          # async dispatch: stamp the phases honestly
+            t_roll = time.time() - t0
+            t1 = time.time()
+            adv, ret = self._gae(tr, last_value, float(cfg.gamma), float(cfg.gae_lambda))
+            jax.block_until_ready(ret)
+            t_gae = time.time() - t1
+            t1 = time.time()
+            # ---- PPO update
+            stats_used = self.stats
+            flat = lambda x: x.reshape((self.batch,) + x.shape[2:])
+            data = (flat(tr.obs), flat(tr.action), flat(tr.log_prob), flat(adv), flat(ret), flat(tr.mask))
+            aux_acc, n_mb, stop = {}, 0, False
+            for epoch in range(cfg.n_epochs):
+                self.key, k = jax.random.split(self.key)
+                perm = jax.random.permutation(k, self.batch)
+                for i in range(self.n_minibatches):
+                    idx = perm[i * self.mb_size:(i + 1) * self.mb_size]
+                    mb = tuple(x[idx] for x in data)
+                    self.params, self.opt_state, loss, aux = self._update_mb(
+                        self.params, self.opt_state, stats_used, mb, float(cfg.clip_range),
+                        float(self.ent_coef), float(self.log_std_clamp))
+                    n_mb += 1
+                    for kk, v in aux.items():
+                        aux_acc[kk] = aux_acc.get(kk, 0.0) + float(v)
+                    if cfg.target_kl > 0 and float(aux["kl"]) > 1.5 * cfg.target_kl:
+                        stop = True
+                        break
+                if stop:
                     break
-            if stop:
-                break
-        jax.block_until_ready(self.params)
-        t_update = time.time() - t1
-        t1 = time.time()
-        # ---- estimator (supervised, own optimizer, estimator subtree only)
-        est_last = None
-        for _ in range(cfg.est_epochs):
+            jax.block_until_ready(self.params)
+            t_update = time.time() - t1
+            t1 = time.time()
+            # ---- estimator (supervised, own optimizer, estimator subtree only)
+            est_last = None
+            for _ in range(cfg.est_epochs):
+                self.key, k = jax.random.split(self.key)
+                perm = jax.random.permutation(k, self.batch)
+                for i in range(max(1, self.batch // cfg.est_batch)):
+                    idx = perm[i * cfg.est_batch:(i + 1) * cfg.est_batch]
+                    self.params, self.est_opt_state, est_last = self._est_update(self.params, self.est_opt_state,
+                                                                                 data[0][idx])
+            jax.block_until_ready(self.params)
+            t_est = time.time() - t1
+            t1 = time.time()
+        else:
             self.key, k = jax.random.split(self.key)
-            perm = jax.random.permutation(k, self.batch)
-            for i in range(max(1, self.batch // cfg.est_batch)):
-                idx = perm[i * cfg.est_batch:(i + 1) * cfg.est_batch]
-                self.params, self.est_opt_state, est_last = self._est_update(self.params, self.est_opt_state,
-                                                                             data[0][idx])
-        jax.block_until_ready(self.params)
-        t_est = time.time() - t1
-        t1 = time.time()
+            keys = jax.random.split(k, self.n_dev)
+            (self.env_state, self.obs, _, tr, last_value, metrics,
+             (b_mean_d, b_var_d, b_n_d)) = self._rollout_p(self.params, self.stats, self.env_state, self.obs, keys,
+                                                        self.env_params)
+            jax.block_until_ready(tr.reward)
+            t_roll = time.time() - t0
+            t1 = time.time()
+            adv, ret = self._gae_p(tr, last_value, float(cfg.gamma), float(cfg.gae_lambda))
+            jax.block_until_ready(ret)
+            t_gae = time.time() - t1
+            t1 = time.time()
+            stats_used = self.stats
+            flat = lambda x: x.reshape((self.n_dev, self.batch_dev) + x.shape[3:])     # (dev, T, N, ..) -> (dev, T*N, ..)
+            data = (flat(tr.obs), flat(tr.action), flat(tr.log_prob), flat(adv), flat(ret), flat(tr.mask))
+            p_rep = self._replicate(self.params)
+            opt_rep = self._replicate(self.opt_state)
+            aux_acc, n_mb, stop = {}, 0, False
+            for epoch in range(cfg.n_epochs):
+                self.key, k = jax.random.split(self.key)
+                perm = jnp.stack([jax.random.permutation(kd, self.batch_dev) for kd in jax.random.split(k, self.n_dev)])
+                for i in range(self.n_minibatches):
+                    idx = perm[:, i * self.mb_dev:(i + 1) * self.mb_dev]
+                    p_rep, opt_rep, loss, aux = self._update_mb_p(
+                        p_rep, opt_rep, stats_used, data, idx, float(cfg.clip_range),
+                        float(self.ent_coef), float(self.log_std_clamp))
+                    n_mb += 1
+                    for kk, v in aux.items():
+                        aux_acc[kk] = aux_acc.get(kk, 0.0) + float(v[0])
+                    if cfg.target_kl > 0 and float(aux["kl"][0]) > 1.5 * cfg.target_kl:
+                        stop = True
+                        break
+                if stop:
+                    break
+            jax.block_until_ready(p_rep)
+            t_update = time.time() - t1
+            t1 = time.time()
+            est_rep = self._replicate(self.est_opt_state)
+            est_last = None
+            for _ in range(cfg.est_epochs):
+                self.key, k = jax.random.split(self.key)
+                perm = jnp.stack([jax.random.permutation(kd, self.batch_dev) for kd in jax.random.split(k, self.n_dev)])
+                for i in range(max(1, self.batch_dev // self.est_batch_dev)):
+                    idx = perm[:, i * self.est_batch_dev:(i + 1) * self.est_batch_dev]
+                    p_rep, est_rep, est_l = self._est_update_p(p_rep, est_rep, data[0], idx)
+                    est_last = est_l[0]
+            unrep = lambda t: jax.tree_util.tree_map(lambda x: x[0], t)
+            self.params, self.opt_state, self.est_opt_state = unrep(p_rep), unrep(opt_rep), unrep(est_rep)
+            jax.block_until_ready(self.params)
+            t_est = time.time() - t1
+            t1 = time.time()
+            # pooled moments of the raw observations across devices
+            n_d = np.asarray(b_n_d, np.float64)
+            mu_d, var_d = np.asarray(b_mean_d, np.float64), np.asarray(b_var_d, np.float64)
+            b_n = float(n_d.sum())
+            b_mean = (n_d[:, None] * mu_d).sum(0) / b_n
+            b_var = (n_d[:, None] * (var_d + mu_d ** 2)).sum(0) / b_n - b_mean ** 2
+            b_mean, b_var = jnp.asarray(b_mean, jnp.float32), jnp.asarray(np.maximum(b_var, 0.0), jnp.float32)
+            # metrics: (dev, T, N, ...) -> (T, dev*N, ...)
+            metrics = jax.tree_util.tree_map(
+                lambda x: np.moveaxis(np.asarray(x), 0, 1).reshape((x.shape[1], x.shape[0] * x.shape[2]) + x.shape[3:]),
+                metrics)
         # ---- obs stats (after the update, from the rollout's raw observations)
         self.stats = self.stats.update(b_mean, b_var, float(b_n))
         if getattr(cfg, "sym_obs_stats", True) and not self.env.library_mode:

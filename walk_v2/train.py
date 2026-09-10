@@ -79,6 +79,7 @@ def main():
     ap.add_argument("--name", default=None)
     ap.add_argument("--steps", type=int, default=None, help="TOTAL env steps (absolute target)")
     ap.add_argument("--n-envs", type=int, default=None)
+    ap.add_argument("--devices", type=int, default=1, help="data-parallel GPUs (n_envs split across them)")
     ap.add_argument("--n-steps", type=int, default=None, help="rollout length per env")
     ap.add_argument("--resume", default=None, help="'auto' or a ckpt_*.msgpack of THIS run")
     ap.add_argument("--warm-start", default=None, help="another run's .msgpack (weights + obs stats)")
@@ -137,12 +138,14 @@ def main():
         (run / "description.txt").write_text(args.description)
 
     print(f"[train] jax {jax.__version__} devices {jax.devices()}")
-    env = DashEnvV2(cfg, n_envs=cfg.n_envs)
-    print(f"[train] env: {cfg.model_path} spec_source={cfg.spec_source} n_envs={env.n_envs} "
+    if cfg.n_envs % args.devices:
+        raise SystemExit(f"[train] n_envs {cfg.n_envs} not divisible by --devices {args.devices}")
+    env = DashEnvV2(cfg, n_envs=cfg.n_envs // args.devices)
+    print(f"[train] env: {cfg.model_path} spec_source={cfg.spec_source} n_envs={env.n_envs}x{args.devices} "
           f"actor_obs={env.actor_dim} obs={env.obs_dim} action={env.action_dim} "
           f"control {1 / env.control_dt:.0f} Hz")
     eval_env = None if args.no_eval else make_eval_env(cfg, args.eval_envs)
-    agent = PPO(cfg, env, run, total, seed=cfg.seed, eval_env=eval_env)
+    agent = PPO(cfg, env, run, total, seed=cfg.seed, eval_env=eval_env, n_devices=args.devices)
     if resume_ckpt is not None:
         agent.load(resume_ckpt)
     elif warm is not None:
@@ -151,9 +154,9 @@ def main():
     # env reset (a resumed run restarts its episodes; the plant draws are fresh)
     agent.key, k = jax.random.split(agent.key)
     t = time.time()
-    agent.env_state, agent.obs = env.reset(k, agent.env_params)
+    agent.reset_envs(k)
     agent.obs.block_until_ready()
-    print(f"[train] reset {env.n_envs} envs in {time.time() - t:.1f}s")
+    print(f"[train] reset {agent.n_envs} envs on {agent.n_dev} device(s) in {time.time() - t:.1f}s")
 
     log = CsvLog(run / "progress.csv")
     evlog = CsvLog(run / "eval.csv")

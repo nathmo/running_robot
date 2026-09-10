@@ -165,8 +165,9 @@ builds are reconciled.
 Fast sizing for the 3-hour goal: `v2c_s1_planar_fast` = v2c + 2048 × 9 (the contract's 18 432-sample
 rollout kept) + the 8 × 8 solver cap: **11.0–11.2k steps/s on one V100** (1.45× the parity sizing),
 early learning unchanged. `--devices N` (train.py) splits the envs over N GPUs with pmapped rollouts
-and lax.pmean gradient averaging (Izar `gpu-xl` has two 4 × V100 nodes; Kuma's H100 nodes need the
-same QOS enablement as Lyra).
+and lax.pmean gradient averaging, verified on two emulated CPU devices
+(`XLA_FLAGS=--xla_force_host_platform_device_count=2`); the 4 × V100 runs are `runs/v2c_fast_dp4_s*`
+(Izar `gpu-xl`, jobs 3145282/83). Kuma's H100 nodes need the same QOS enablement as Lyra.
 
 ## Run
 

@@ -31,6 +31,7 @@ NAME="${NAME:-$PRESET}"
 WARM="${WARM:-}"
 SEED="${SEED:-}"
 EVAL_ENVS="${EVAL_ENVS:-16}"
+DEVICES="${DEVICES:-1}"        # data-parallel GPUs; submit with --gres=gpu:$DEVICES (--partition gpu-xl for 4)
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
@@ -54,5 +55,5 @@ fi
 python walk_v2/smoke_test.py --quick
 
 python walk_v2/train.py --preset "$PRESET" --steps "$STEPS" --n-envs "$NENVS" --n-steps "$NSTEPS" \
-    --resume auto --name "$NAME" --eval-envs "$EVAL_ENVS" \
+    --resume auto --name "$NAME" --eval-envs "$EVAL_ENVS" --devices "$DEVICES" \
     ${WARM:+--warm-start "$WARM"} ${SEED:+--seed "$SEED"}
