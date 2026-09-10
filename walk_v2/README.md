@@ -331,6 +331,22 @@ normalised units by tick 5, solver-level drift), phase channels in the known swa
   (`v2c_s2_free_dp2x_s2warm_s4`). Seed 2 (resumed) and the roll-wheel seed 1 are at ep_len ~370 / ~780.
   The rigid-hold probe (all three wheels at 1000 N m/rad) is numerically unstable (NaN within 0.1 s), so the
   transfer question stays at: the S1 gait does not survive on the free plant under 100 N m/rad holds.
+* **Cold S2 loses to the slow-cadence rail (2026-09-10, 23:00)** -- the finding that governs the recipe.
+  Four cold S2 seeds (three with the stop curriculum, one plain-contract control) all parked the gait
+  clock on its 1.5 Hz lower rail and stopped learning (ep_len 42-62 at 14-32 M, greedy 0/16). The control
+  rules the stop curriculum out, and an old-vs-new env parity test on a deterministic plant is exact
+  (max |d reward| and |d obs| = 0 over 40 steps, both presets), so the patch is inert with the lights off.
+  Clock history (Hz, median): cold S1 PLANAR 3.6 at 2 M then 4.0 for ever; warm S2 free 4.0, dips to 1.5
+  at 18-22 M, recovers to 3.8 by 30 M; cold S2 free 4.0 at 6 M then 1.5 from 10 M on (or straight to 1.5).
+  So **the rail is a free-plant attractor**: the planar stage is where a 4 Hz gait is discoverable, and a
+  warm start (from S1 *or* from an S2 runner) is what keeps a free-plant seed off the rail. This corrects
+  the earlier "S1 carries nothing over": the S1 policy transfers no *balance* (it falls in ~1 s on the free
+  plant) but its *cadence prior* is load-bearing. No S1 stage needs re-training -- the runners are on disk.
+* **Frequency-floor curriculum** (the structural fix for the rail, opt-in): `gait_freq_lo_start` (3.0) ramps
+  down to `gait_freq_hz[0]` (1.5) over `gait_freq_floor_steps`, so a slow gait is not selectable while the
+  running gait forms. Verified locally: the minimum action gives 3.00 / 2.25 / 1.50 Hz at the three
+  curriculum points and the contract preset still gives 1.50. Preset `v2c_s2_free_fast_floorstop` = floor
+  (60 M) + the stop curriculum, i.e. the cold-S2 "no S1 stage" recipe; seeds `runs/v2c_s2_floorstop_s8/s9`.
 * **Stop curriculum (2026-09-10, 22:30) -- red light / green light**: no runner on either arm ever
   stops: the post-line phase is a cliff it meets once per episode at 3 m/s and never survives, so the
   finish bonus is unreachable. New opt-in preset `v2c_s2_free_fast_stoplight` (all fields default off;

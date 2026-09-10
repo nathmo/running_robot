@@ -195,6 +195,12 @@ class Config:
     # pays for tracking a target speed that ramps from the speed at the switch to 0 over stop_decel_s
     # (then the plain stop term), then the light turns green again. The final line is one more red.
     # All off by default (contract behaviour); the *_stoplight presets turn it on.
+    # ----- gait-frequency floor curriculum (2026-09-10 night): the low rail (gait_freq_hz[0]) is a
+    # free-plant attractor -- cold S2 seeds park the clock there and never run. Start the lower rail
+    # at gait_freq_lo_start and ramp it down to gait_freq_hz[0] over gait_freq_floor_steps, so a slow
+    # gait is simply not selectable while the running gait forms. 0 steps = off (every other preset).
+    gait_freq_lo_start: float = 3.0
+    gait_freq_floor_steps: int = 0
     stoplight_prob_final: float = 0.0       # fraction of episodes with red/green cycles
     stoplight_curriculum_steps: int = 0     # ramp 0 -> final, competence-gated like DR
     stoplight_gate_ep_len: float = 600.0
@@ -287,6 +293,13 @@ class Config:
     # tree, spins it); a heading spring-damper, same fade scalar
     yaw_assist_kp: float = 0.0
     yaw_assist_kd: float = 0.0
+    # ----- bring-up hold (probe only, off in every preset) --------------------------------------
+    # Deployment question: the operator holds the base on its stand, feet on the floor, starts the
+    # policy, and lets go a few seconds later. With this on, EnvParams.hold_s clamps the six base
+    # DOFs to (key x/y/yaw, hold_z, hold_roll, hold_pitch) at every 1 kHz substep -- an infinitely
+    # stiff hand -- and suppresses fall termination while held; at t = hold_s the base is released
+    # with zero velocity. A kinematic clamp, not a spring: the 1000 N m/rad wheel probe went NaN.
+    hold_enable: bool = False
 
     # ----- PPO (§04) ---------------------------------------------------------------------------
     n_envs: int = 1024
@@ -407,6 +420,12 @@ PRESETS = {
                                             warmstart_reset_log_std=False),
     # the stop curriculum (red light / green light + deceleration target), cold S2
     "v2c_s2_free_fast_stoplight": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                              stoplight_prob_final=0.5, stoplight_curriculum_steps=20_000_000,
+                                              stoplight_gate_ep_len=600.0, stop_decel_s=1.5),
+    # cold S2, the whole recipe: frequency floor (no slow-gait rail while the gait forms) + the stop
+    # curriculum. This is the "no S1 stage" configuration.
+    "v2c_s2_free_fast_floorstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                              gait_freq_lo_start=3.0, gait_freq_floor_steps=60_000_000,
                                               stoplight_prob_final=0.5, stoplight_curriculum_steps=20_000_000,
                                               stoplight_gate_ep_len=600.0, stop_decel_s=1.5),
     # S2 with the roll wheel (pitch + roll held at the start, both faded once ep_len > 600 for 5 rollouts)

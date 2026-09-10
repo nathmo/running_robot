@@ -51,13 +51,19 @@ class EnvParams(NamedTuple):
     ctrl_drop_prob: float = 0.0
     pitch_assist: float = 0.0
     stoplight_prob: float = 0.0
+    gait_freq_lo: float = 0.0        # curriculum lower rail of the gait clock (0 = the config value)
+    hold_s: float = 0.0          # bring-up probe (cfg.hold_enable): seconds the base is held
+    hold_z: float = 0.0          # base height while held (<= 0: the keyframe height)
+    hold_pitch: float = 0.0      # base pitch while held (rad, + = nose up)
+    hold_roll: float = 0.0       # base roll while held (rad)
 
     @classmethod
     def final(cls, cfg):
         return cls(dr_scale=1.0, sprint_dist_m=float(cfg.sprint_dist_m),
                    stance_ratio=float(cfg.stance_ratio_final), eff_scale=float(cfg.efficiency_target),
                    ctrl_jitter_ms=float(cfg.ctrl_jitter_ms_final),
-                   ctrl_drop_prob=float(cfg.ctrl_drop_prob_final), pitch_assist=0.0, stoplight_prob=0.0)
+                   ctrl_drop_prob=float(cfg.ctrl_drop_prob_final), pitch_assist=0.0, stoplight_prob=0.0,
+                   gait_freq_lo=float(cfg.gait_freq_hz[0]))
 
 
 @struct.dataclass
@@ -452,6 +458,8 @@ class DashEnvV2:
 
     def _step_one(self, state: EnvState, action, params: EnvParams):
         c, p, gp = self.cfg, self.plant, self.gp
+        if c.gait_freq_floor_steps > 0:      # static branch: presets without the curriculum are untouched
+            gp = gp._replace(freq_lo=params.gait_freq_lo)
         dt = self.control_dt
         dr = state.draw
         key, k_drop, k_push, k_trip, k_gust, k_jit, k_frame, k_reset, k_int, k_light = jax.random.split(state.key, 10)
@@ -565,6 +573,18 @@ class DashEnvV2:
         kt = jnp.asarray(c.motor_kt_joint)
         r_ohm = jnp.asarray(c.motor_r_ohm)
 
+        # bring-up hold: the base is on the operator's stand for the first hold_s seconds
+        if c.hold_enable:
+            names = [n for n in ("x", "y", "z", "roll", "pitch", "yaw") if p.base_q[n] >= 0]
+            hold_qadr = np.array([p.base_q[n] for n in names])
+            hold_dadr = np.array([p.base_d[n] for n in names])
+            held_at = dict(x=p.key_qpos[p.base_q["x"]], y=0.0, yaw=0.0,
+                           z=jnp.where(params.hold_z > 0.0, params.hold_z,
+                                       p.key_qpos[p.base_q["z"]]),
+                           roll=params.hold_roll, pitch=params.hold_pitch)
+            hold_qval = jnp.stack([jnp.asarray(held_at[n], jnp.float32) for n in names])
+            hold = state.t < params.hold_s
+
         def substep(carry, k):
             d, tau_sq, con_acc, _ = carry
             live = drive.live_command(k, dr.delay_ms, cmd_buf)
@@ -574,6 +594,9 @@ class DashEnvV2:
             tau = drive.pd_torque(q, qd, live[:6], live[6:12], live[12:18], lim)
             d = d.replace(ctrl=tau)
             d = mjx.step(mx_i, d)
+            if c.hold_enable:
+                d = d.replace(qpos=jnp.where(hold, d.qpos.at[hold_qadr].set(hold_qval), d.qpos),
+                              qvel=jnp.where(hold, d.qvel.at[hold_dadr].set(0.0), d.qvel))
             con, _, _ = self._contacts(d)
             return (d, tau_sq + tau ** 2, con_acc | con, tau), None
 
@@ -653,6 +676,8 @@ class DashEnvV2:
         term_low = self._base_pos(data)[2] < c.term_height
         term_tip = grav[2] > c.term_gravity_z
         fallen = (~finite) | term_low | term_tip | floor_viol | ws_kill
+        if c.hold_enable:
+            fallen = fallen & ~hold          # held: the stand is what carries it, not a fall
         reward = reward - c.fall_penalty * fallen + c.finish_bonus * (finished & ~fallen)
         # a non-finite plant state (an unconverged capped solver step can blow up) ends the episode
         # above; the reward computed from that state is NaN and would poison GAE, the value loss and

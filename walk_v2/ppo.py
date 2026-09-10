@@ -379,7 +379,9 @@ class PPO:
                          eff_scale=0.0 if c.efficiency_ramp_steps > 0 else float(c.efficiency_target),
                          ctrl_jitter_ms=0.0 if c.jitter_curriculum_steps > 0 else float(c.ctrl_jitter_ms_final),
                          ctrl_drop_prob=0.0 if c.jitter_curriculum_steps > 0 else float(c.ctrl_drop_prob_final),
-                         pitch_assist=1.0 if (c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0) else 0.0)
+                         pitch_assist=1.0 if (c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0) else 0.0,
+                         gait_freq_lo=float(c.gait_freq_lo_start if c.gait_freq_floor_steps > 0
+                                            else c.gait_freq_hz[0]))
 
     def _gated(self, key, ep_len, start, target, warmup, gate, retreat, d_steps):
         """Competence-gated, retreating ramp (walk_mit GatedRampCallback): progress in [0,1]."""
@@ -426,6 +428,9 @@ class PPO:
                                                c.jitter_curriculum_steps, jg, rf, d_steps)
             kw["ctrl_drop_prob"] = self._gated("ctrl_drop_prob", ep_len, 0.0, c.ctrl_drop_prob_final,
                                                c.jitter_curriculum_steps, jg, rf, d_steps)
+        if getattr(c, "gait_freq_floor_steps", 0) > 0:
+            kw["gait_freq_lo"] = self._clock(c.gait_freq_lo_start, float(c.gait_freq_hz[0]),
+                                             c.gait_freq_floor_steps)
         if getattr(c, "stoplight_prob_final", 0.0) > 0 and c.stoplight_curriculum_steps > 0:
             kw["stoplight_prob"] = self._gated("stoplight_prob", ep_len, 0.0, c.stoplight_prob_final,
                                                c.stoplight_curriculum_steps, c.stoplight_gate_ep_len, rf, d_steps)
