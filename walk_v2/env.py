@@ -533,6 +533,13 @@ class DashEnvV2:
             qfrc = qfrc.at[p.base_d["pitch"]].set(assist)
         else:
             assist = jnp.zeros(())
+        if c.roll_assist_kp > 0.0 and p.base_d["roll"] >= 0:
+            # S2 roll wheel: same fade scalar, own gains; billed with the pitch torque (assist_pen = w*(ap^2+ar^2))
+            rq = data.qpos[p.base_q["roll"]]
+            rqd = data.qvel[p.base_d["roll"]]
+            assist_r = -params.pitch_assist * (c.roll_assist_kp * rq + c.roll_assist_kd * rqd)
+            qfrc = qfrc.at[p.base_d["roll"]].set(assist_r)
+            assist = jnp.sqrt(assist ** 2 + assist_r ** 2)
         data = data.replace(qvel=qvel, xfrc_applied=xfrc, qfrc_applied=qfrc)
         # ---- physics: 10 substeps at a jittered timestep (the Pi's loop vs the gait clock)
         jit_ms = params.ctrl_jitter_ms * jax.random.uniform(k_jit, (), minval=-1.0, maxval=1.0)

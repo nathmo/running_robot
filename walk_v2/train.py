@@ -68,7 +68,8 @@ def make_eval_env(cfg, n=16, keep_assist=False):
     from dataclasses import replace
     c = replace(cfg, dr_enable=False, obs_noise_enable=False, push_interval_s=0.0,
                 wind_force_max=0.0, wind_gust_n=0.0, trip_prob=0.0, thermal_hot_start_max=0.0,
-                pitch_assist_kp=cfg.pitch_assist_kp if keep_assist else 0.0)
+                pitch_assist_kp=cfg.pitch_assist_kp if keep_assist else 0.0,
+                roll_assist_kp=cfg.roll_assist_kp if keep_assist else 0.0)
     return DashEnvV2(c, n_envs=n)
 
 

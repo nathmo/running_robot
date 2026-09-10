@@ -262,6 +262,12 @@ class Config:
     pitch_assist_gate_ep_len: float = 0.0   # 0 = clock fade from step 0 (v2); >0 = full help until
                                             # ep_len > gate for 5 rollouts, then a monotonic fade (v2b)
     w_assist_penalty: float = 0.0
+    # S2 roll wheel (2026-09-10): the S1 runner falls sideways in 0.7-1.4 s on the free plant, greedy,
+    # with or without the pitch wheel, so a warm-started S2 starts from nothing; a roll spring-damper on
+    # the base, driven by the SAME fade scalar as the pitch wheel, carries the S1 competence over.
+    # 0 = off (every existing preset); ignored on the planar plant (no base_roll joint)
+    roll_assist_kp: float = 0.0
+    roll_assist_kd: float = 0.0
 
     # ----- PPO (§04) ---------------------------------------------------------------------------
     n_envs: int = 1024
@@ -380,6 +386,9 @@ PRESETS = {
     # S2 warm-start experiment: keep the S1 policy's std (contract re-inflates log sigma; the seeds start at ep_len 77)
     "v2c_s2_free_fast_keepstd": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                             warmstart_reset_log_std=False),
+    # S2 with the roll wheel (pitch + roll held at the start, both faded once ep_len > 600 for 5 rollouts)
+    "v2c_s2_free_fast_rollassist": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                               roll_assist_kp=100.0, roll_assist_kd=10.0),
     "v2c_s1_planar_dp4": lambda: _v2(model_path="model/dash01_v2_planar.xml", **{**_V2C, **_DP4}),
     # the end-of-fade cliff (v2c_s1_planar_s1 at 47 M: KL early-stop storm, means drifting out of the box):
     # KL-adaptive lr instead of the early stop throttling learning
