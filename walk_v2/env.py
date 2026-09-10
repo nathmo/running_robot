@@ -54,8 +54,10 @@ class EnvParams(NamedTuple):
     gait_freq_lo: float = 0.0        # curriculum lower rail of the gait clock (0 = the config value)
     hold_s: float = 0.0          # bring-up probe (cfg.hold_enable): seconds the base is held
     hold_z: float = 0.0          # base height while held (<= 0: the keyframe height)
-    hold_pitch: float = 0.0      # base pitch while held (rad, + = nose up)
+    hold_pitch: float = 0.0      # base pitch while held (rad, + = nose down)
     hold_roll: float = 0.0       # base roll while held (rad)
+    start_red_s: float = 0.0     # >0: episode starts on a RED light (task[0]=0, the deployed
+                                 # runtime's STOPPED bring-up) and turns green after this long
 
     @classmethod
     def final(cls, cfg):
@@ -321,11 +323,17 @@ class DashEnvV2:
                            lp_yaw_obs=lp_yaw_obs), accel, v_body
 
     def _task(self, state, params):
-        run = jnp.where(state.crossed | state.light_red, 0.0, 1.0)
+        stop_now = state.crossed | state.light_red
+        if self.cfg.stop_cmd_continuous and self.cfg.stop_decel_s > 0:
+            # the same ramp the stop reward tracks, recomputed from the state (v0 at the switch, time since)
+            v_tgt = state.light_v0 * jnp.maximum(0.0, 1.0 - state.light_t / self.cfg.stop_decel_s)
+            run = jnp.where(stop_now, jnp.clip(v_tgt / self.cfg.v_ceiling, 0.0, 1.0), 1.0)
+        else:
+            run = jnp.where(stop_now, 0.0, 1.0)
         d_to_go = jnp.clip((params.sprint_dist_m - state.sprint_d) / self.cfg.task_brake_m, 0.0, 1.0)
         if self.cfg.objective == "speed":
             return jnp.array([1.0, 1.0])
-        return jnp.stack([run, jnp.where(state.crossed, 0.0, d_to_go)])
+        return jnp.stack([run, jnp.where(stop_now, 0.0, d_to_go)])
 
     def _once(self, state, params, phase_next, commit_next):
         if not self.library_mode:
@@ -410,10 +418,15 @@ class DashEnvV2:
             gust_countdown=self._next_gust(k_gust), gust_dir=jnp.array([1.0, 0.0]),
             x0=data.qpos[p.base_q["x"]], sprint_d=jnp.zeros(()), crossed=jnp.zeros((), bool),
             t_line=jnp.full((), -1.0), stop_hold=jnp.zeros(()),
-            light_red=jnp.zeros((), bool),
+            light_red=(params.start_red_s > 0.0) if c.hold_enable else jnp.zeros((), bool),
             light_left=jnp.where(jax.random.uniform(k_light) < params.stoplight_prob,
                                  jax.random.uniform(k_next, (), minval=c.stoplight_green_s[0],
-                                                    maxval=c.stoplight_green_s[1]), jnp.inf),
+                                                    maxval=c.stoplight_green_s[1]), jnp.inf)
+            if not c.hold_enable else
+            jnp.where(params.start_red_s > 0.0, params.start_red_s,
+                      jnp.where(jax.random.uniform(k_light) < params.stoplight_prob,
+                                jax.random.uniform(k_next, (), minval=c.stoplight_green_s[0],
+                                                   maxval=c.stoplight_green_s[1]), jnp.inf)),
             light_v0=jnp.zeros(()), light_t=jnp.zeros(()),
             theta=jnp.clip(theta, -1.0, 1.0), v_ref=v_ref, raibert_i=jnp.zeros(()),
             ep_return=jnp.zeros(()), ep_len=jnp.zeros((), jnp.int32),

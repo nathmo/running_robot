@@ -207,6 +207,12 @@ class Config:
     stoplight_green_s: tuple = (3.0, 8.0)   # green phase duration, uniform
     stoplight_red_s: tuple = (2.0, 4.0)     # red phase duration, uniform
     stop_decel_s: float = 0.0               # > 0: target speed ramps to 0 over this after a red / the line
+    # The binary run flag is a STEP DISTURBANCE: measured on v2c_s2_stopwarm_s6 at 59 M, the greedy
+    # policy falls 0.7-0.8 s after every red light in 16/16 episodes and never slows (slow 0%). With
+    # this on, task[0] carries the TARGET SPEED (normalised) instead: 1 while running, then the same
+    # ramp the stop reward tracks, so the command is continuous and is a speed command a deployment
+    # panel can drive directly. Off = the contract's binary flag.
+    stop_cmd_continuous: bool = False
     decel_sigma: float = 0.6                # width (m/s) of the tracking reward while the target is > 0
     fall_penalty: float = 100.0
     penalty_term_cap: float = 2.0
@@ -429,7 +435,8 @@ PRESETS = {
     "v2c_s2_free_fast_stoplight_hard": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                                    stoplight_prob_final=0.35, stoplight_curriculum_steps=20_000_000,
                                                    stoplight_gate_ep_len=600.0, stop_decel_s=2.0,
-                                                   w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25),
+                                                   w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25,
+                                                   stop_cmd_continuous=True),
     # cold S2, the whole recipe: frequency floor (no slow-gait rail while the gait forms) + the stop
     # curriculum. This is the "no S1 stage" configuration.
     "v2c_s2_free_fast_floorstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,

@@ -435,9 +435,23 @@ back, is the only repeatable option.
   running gait forms. Verified locally: the minimum action gives 3.00 / 2.25 / 1.50 Hz at the three
   curriculum points and the contract preset still gives 1.50. Preset `v2c_s2_free_fast_floorstop` = floor
   (60 M) + the stop curriculum, i.e. the cold-S2 "no S1 stage" recipe; seeds `runs/v2c_s2_floorstop_s8/s9`.
+* **The binary run flag is a step disturbance (2026-09-11, 00:10) -- measured, and the reason the first
+  stop curriculum taught nothing.** `v2c_s2_stopwarm_s6` warm-started from the 88.5 M S2 runner reached a
+  wheel-free greedy runner FASTER than any run so far -- 99.5 m at 2.65 m/s at 59 M (~55 min on two V100s),
+  100.5 m at 2.84 m/s at 73.7 M (`best_speed_73728000.msgpack`) -- then railed at 84 M. But with the lights
+  on (`--stoplight 1.0`) that same policy **falls 0.7-0.8 s after every red light, 16/16 episodes, spending
+  0% of the red phase slow**: it never brakes, and `reward_terms/stop` stayed ~0.004 against ~4.7 of running
+  income for 45 M steps. Two causes, both now addressed in `v2c_s2_free_fast_stoplight_hard`:
+  1. **Incentive**: at the contract `w_stop_vel` 0.4 a red phase pays at most 0.4/step against ~5 for
+     running, so braking was worth almost nothing and hard to find. Now 2.0, `decel_sigma` 0.8,
+     `stop_decel_s` 2.0, and only 35% of episodes lit so the running signal stays strong.
+  2. **Interface**: `task[0]` flipped 1 -> 0 in a single tick, a step change on an input the whole gait is
+     conditioned on. With `stop_cmd_continuous` the channel carries the TARGET SPEED instead (normalised by
+     `v_ceiling`): 1 while running, then the same ramp the stop reward tracks, down to 0. Continuous to
+     learn, and it is exactly the speed command a deployment panel would drive.
 * **Deployment note for the stop curriculum (for whoever owns `robot/deploy/controller_v2.py`)**: a
-  policy trained with the lights obeys the *observation*, not the distance -- `task[0]` (the run flag,
-  actor obs, the once-block) is 1 while running and 0 while it should brake, and `task[1]` is the
+  policy trained with the lights obeys the *observation*, not the distance -- `task[0]` (actor obs, the once-block) is 1 while running and, under
+  `stop_cmd_continuous`, the normalised target speed while it should brake (0 = stand), and `task[1]` is the
   clipped distance-to-go. So the runtime gets a live STOP command for free: drive `task[0]` to 0 and the
   policy decelerates to a standstill wherever it is, then hold it at 0 to keep it standing; set it back
   to 1 to run again. That is exactly what the red/green phases train. A policy trained WITHOUT the
