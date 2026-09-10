@@ -540,6 +540,12 @@ class DashEnvV2:
             assist_r = -params.pitch_assist * (c.roll_assist_kp * rq + c.roll_assist_kd * rqd)
             qfrc = qfrc.at[p.base_d["roll"]].set(assist_r)
             assist = jnp.sqrt(assist ** 2 + assist_r ** 2)
+        if c.yaw_assist_kp > 0.0 and p.base_d["yaw"] >= 0:
+            yq = data.qpos[p.base_q["yaw"]]
+            yqd = data.qvel[p.base_d["yaw"]]
+            assist_y = -params.pitch_assist * (c.yaw_assist_kp * yq + c.yaw_assist_kd * yqd)
+            qfrc = qfrc.at[p.base_d["yaw"]].set(assist_y)
+            assist = jnp.sqrt(assist ** 2 + assist_y ** 2)
         data = data.replace(qvel=qvel, xfrc_applied=xfrc, qfrc_applied=qfrc)
         # ---- physics: 10 substeps at a jittered timestep (the Pi's loop vs the gait clock)
         jit_ms = params.ctrl_jitter_ms * jax.random.uniform(k_jit, (), minval=-1.0, maxval=1.0)

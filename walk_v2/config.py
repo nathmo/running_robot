@@ -268,6 +268,11 @@ class Config:
     # 0 = off (every existing preset); ignored on the planar plant (no base_roll joint)
     roll_assist_kp: float = 0.0
     roll_assist_kd: float = 0.0
+    # yaw wheel: the S1 runner on the free plant with pitch AND roll held still falls in 1.4-1.8 s -- the
+    # frames show the base yawing ~90 deg in the first second (the gait's yaw impulse, absorbed by the planar
+    # tree, spins it); a heading spring-damper, same fade scalar
+    yaw_assist_kp: float = 0.0
+    yaw_assist_kd: float = 0.0
 
     # ----- PPO (§04) ---------------------------------------------------------------------------
     n_envs: int = 1024
@@ -389,6 +394,10 @@ PRESETS = {
     # S2 with the roll wheel (pitch + roll held at the start, both faded once ep_len > 600 for 5 rollouts)
     "v2c_s2_free_fast_rollassist": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                                roll_assist_kp=100.0, roll_assist_kd=10.0),
+    # all three base wheels (pitch, roll, yaw) held at the start and faded together
+    "v2c_s2_free_fast_basewheels": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                               roll_assist_kp=100.0, roll_assist_kd=10.0,
+                                               yaw_assist_kp=100.0, yaw_assist_kd=10.0),
     "v2c_s1_planar_dp4": lambda: _v2(model_path="model/dash01_v2_planar.xml", **{**_V2C, **_DP4}),
     # the end-of-fade cliff (v2c_s1_planar_s1 at 47 M: KL early-stop storm, means drifting out of the box):
     # KL-adaptive lr instead of the early stop throttling learning
