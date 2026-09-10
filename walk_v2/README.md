@@ -302,6 +302,10 @@ Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from it
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
   masked PPO update, estimator, symmetry loss, entropy/std anneal, curricula, eval, checkpoint).
+* **Best GPU-arm policy so far:** `v2c_fast_dp2x_s2` (2 × 2048 envs × 9, contract schedules) at 73.7 M
+  steps, ~63 min of training on two V100s: the wheel-free greedy eval averages 103.4 m at 2.72 m/s over
+  16 envs (`runs/v2c_fast_dp2x_s2/best.msgpack`, video `results/v2c_fast_dp2x_s2_greedy_best73M.mp4`) —
+  in the CPU arm's speed band (2.4–3.1 m/s at 42 M).
 * Izar (V100): full smoke test passes on the GPU. **First wheel-free runner on this arm:**
   `v2c_s1_planar` seed 1 (contract sizing, one V100, 1 h 45 min) — the 45 M checkpoint, greedy with the
   assist at 0, runs 15 of 16 envs to ~100–108 m in 60 s at 1.66–1.81 m/s (`slurm/izar_eval.sbatch`,
