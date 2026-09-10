@@ -262,7 +262,7 @@ class Config:
     # ----- PPO (§04) ---------------------------------------------------------------------------
     n_envs: int = 1024
     n_steps: int = 18                       # per env per rollout: 1024 x 18 = 18 432 samples = the contract's
-                                            # 64 x 288 (V2_CONTRACT �PPO): same rollout size, same minibatch,
+                                            # 64 x 288 (V2_CONTRACT §PPO): same rollout size, same minibatch,
                                             # hence the same gradient updates per sample as the CPU arm
     total_steps: int = 300_000_000
     batch_size: int = 4096
