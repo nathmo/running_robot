@@ -219,7 +219,9 @@ class Config:
     stance_ratio_start: float = 0.65
     stance_ratio_final: float = 0.42
     gait_curriculum_steps: int = 120_000_000
-    curriculum_gate_ep_len: float = 600.0   # CPU contract: DR/gait/efficiency ramps gate at 600
+    curriculum_gate_ep_len: float = 600.0   # the DR ramp's competence gate (contract: DR gated at 600)
+    gait_curriculum_gate_ep_len: float = 0.0    # stance-ratio ramp: 0 = clock from step 0 (contract)
+    efficiency_gate_ep_len: float = 0.0         # efficiency ramp: 0 = clock from step 0 (contract)
     curriculum_retreat_frac: float = 0.5
     workspace_kill: bool = True
     workspace_dx_max: float = 0.34
@@ -257,6 +259,8 @@ class Config:
     pitch_assist_kp: float = 100.0
     pitch_assist_kd: float = 10.0
     pitch_assist_ramp_steps: int = 30_000_000
+    pitch_assist_gate_ep_len: float = 0.0   # 0 = clock fade from step 0 (v2); >0 = full help until
+                                            # ep_len > gate for 5 rollouts, then a monotonic fade (v2b)
     w_assist_penalty: float = 0.0
 
     # ----- PPO (§04) ---------------------------------------------------------------------------
@@ -279,6 +283,8 @@ class Config:
     ent_final: float = 0.0
     ent_anneal_steps: int = 40_000_000
     ent_gate_swing_frac: float = 0.13
+    ent_gate_ep_len: float = 0.0            # v2b: the competence gate also needs ep_len > this
+                                            # (a falling robot has both feet airborne)
     ent_anneal_deadline_steps: int = 12_500_000
     ent_schedule_autoscale: bool = True
     max_log_std: float = 0.0
@@ -307,12 +313,27 @@ def _v2(**kw) -> Config:
     return Config(**kw)
 
 
+# Readout-1 deltas (V2_CONTRACT.md 2026-09-10): the artifact-literal v2 runs on BOTH arms fell into a
+# clock-rail exploit (CPU: 5.00 Hz on 100 % of commits, bang-bang spec; GPU: 0.5 Hz on 94 %) and
+# regressed. v2b keeps the plant, obs, action layout and reward set and changes only these; the GPU
+# port must mirror the first two rows, the gates are training-side.
+_V2B = dict(
+    gait_freq_hz=(1.5, 4.0),                 # neutral stays 2.75 Hz; no 5 Hz max-commit rail, no 0.5 Hz freeze
+    residual_scale=0.10, w_residual=0.20,    # half the per-tick authority, twice the bill
+    pitch_assist_gate_ep_len=600.0,          # fade the wheel once the policy runs on it, then 30 M monotonic
+    ent_gate_ep_len=600.0, ent_anneal_deadline_steps=40_000_000,   # precision phase on competence, not falls
+    curriculum_gate_ep_len=1200.0, jitter_curriculum_gate_ep_len=1200.0,   # harden a runner, not a stander
+)
+
 PRESETS = {
     "default": Config,
     # S1 "planar" (= m3): x, z, pitch free; y, roll, yaw absent from the model. Iteration sandbox.
     "v2_s1_planar": lambda: _v2(model_path="model/dash01_v2_planar.xml"),
     # S2 "free": the real run. Warm from S1 (identical obs/action widths).
     "v2_s2_free": lambda: _v2(model_path="model/dash01_v2_free.xml"),
+    # readout-1 fixes on top (see _V2B); the v2_* presets stay the artifact-literal reference
+    "v2b_s1_planar": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2B),
+    "v2b_s2_free": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2B),
     # Δ_max = pi: the bound becomes reachable (§13 open decision, priced not forbidden)
     "v2_s2_free_wide": lambda: _v2(model_path="model/dash01_v2_free.xml", delta_max=3.14159265),
     # honesty-off debug arms: nominal plant, no noise, no disturbances (fast signal on latch/reward)

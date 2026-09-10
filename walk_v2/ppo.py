@@ -290,10 +290,10 @@ class PPO:
             kw["sprint_dist_m"] = self._clock(c.sprint_dist_start_m, c.sprint_dist_m, c.sprint_curriculum_steps)
         if c.gait_curriculum_steps > 0 and c.w_phase_contact > 0:
             kw["stance_ratio"] = self._gated("stance_ratio", ep_len, c.stance_ratio_start, c.stance_ratio_final,
-                                             c.gait_curriculum_steps, gate, rf, d_steps)
+                                             c.gait_curriculum_steps, c.gait_curriculum_gate_ep_len, rf, d_steps)
         if c.efficiency_ramp_steps > 0:
             kw["eff_scale"] = self._gated("eff_scale", ep_len, 0.0, c.efficiency_target,
-                                          c.efficiency_ramp_steps, gate, rf, d_steps)
+                                          c.efficiency_ramp_steps, c.efficiency_gate_ep_len, rf, d_steps)
         if c.jitter_curriculum_steps > 0:
             jg = c.jitter_curriculum_gate_ep_len
             kw["ctrl_jitter_ms"] = self._gated("ctrl_jitter_ms", ep_len, 0.0, c.ctrl_jitter_ms_final,
@@ -301,13 +301,26 @@ class PPO:
             kw["ctrl_drop_prob"] = self._gated("ctrl_drop_prob", ep_len, 0.0, c.ctrl_drop_prob_final,
                                                c.jitter_curriculum_steps, jg, rf, d_steps)
         if c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0:
-            kw["pitch_assist"] = self._clock(1.0, 0.0, c.pitch_assist_ramp_steps)
+            pg = float(getattr(c, "pitch_assist_gate_ep_len", 0.0))
+            if pg <= 0:
+                kw["pitch_assist"] = self._clock(1.0, 0.0, c.pitch_assist_ramp_steps)
+            else:       # v2b: full help until the policy runs on it, then a monotonic fade (no retreat)
+                st = self.cur.setdefault("pitch_assist", {"streak": 0, "open": False, "progress": 0.0})
+                if not st["open"]:
+                    st["streak"] = st["streak"] + 1 if ep_len > pg else 0
+                    if st["streak"] >= 5:
+                        st["open"] = True
+                        print(f"[ppo] pitch-assist fade opened at {self.step:,} steps (ep_len {ep_len:.0f})")
+                else:
+                    st["progress"] = min(1.0, st["progress"] + d_steps / max(c.pitch_assist_ramp_steps, 1))
+                kw["pitch_assist"] = 1.0 - st["progress"]
         self.env_params = EnvParams(**{k: float(v) for k, v in kw.items()})
 
-    def update_entropy(self, swing_min):
+    def update_entropy(self, swing_min, ep_len=None):
         c = self.cfg
         if self.anneal_from is None:
-            competent = swing_min > c.ent_gate_swing_frac
+            eg = float(getattr(c, "ent_gate_ep_len", 0.0))
+            competent = swing_min > c.ent_gate_swing_frac and (eg <= 0 or (ep_len is not None and ep_len > eg))
             self.streak = self.streak + 1 if competent else 0
             gate_open = self.streak >= 5
             deadline_hit = self.deadline > 0 and self.step >= self.deadline
@@ -431,7 +444,7 @@ class PPO:
         for kk, v in self.env_params._asdict().items():
             log[f"curriculum/{kk}"] = float(v)
         # ---- schedules for the NEXT rollout
-        self.update_entropy(swing_min)
+        self.update_entropy(swing_min, ep_len)
         self.update_curricula(ep_len, d_steps)
         return log
 

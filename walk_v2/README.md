@@ -78,6 +78,19 @@ walk_v2/
   remains: the phase channel is `(cos φ, sin φ)` as the artifact's §03 table states; the contract
   lists `(sin φ, cos φ)`.
 
+## v2b: the readout-1 deltas (2026-09-10)
+
+Both arms' artifact-literal `v2` runs fell into a clock-rail exploit inside the latched design: the
+CPU arm's clock sat at 5.00 Hz on 100 % of commits with a bang-bang spec (regressing from ep_len
+~700 at 19 M to ~150 by 33 M), this side's at 0.5 Hz on 94 % of commits with the residual at its
+bound half the time. `walk_mit/V2_CONTRACT.md` defines `v2b`: frequency range (1.5, 4.0) Hz and
+residual 0.10 rad at w_residual 0.20 (the two rows the GPU port must mirror), plus training-side
+gates (pitch-assist fade opened by competence, entropy gate needing ep_len > 600 with the deadline
+at 40 M, DR/jitter gates 1200). Presets `v2b_s1_planar` / `v2b_s2_free`; `v2_*` stay the
+artifact-literal reference. Fixed at the same time: the stance-ratio and efficiency ramps are
+clock-driven from step 0 as on the CPU arm (they were gated at ep_len 600 here, so the CPU arm
+paid the efficiency terms from 1 M steps while this side paid nothing).
+
 ## Run
 
 ```bash
@@ -173,11 +186,11 @@ Throughput comparison: `bench.py --json` here vs the CPU stack's steps/s from it
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
   masked PPO update, estimator, symmetry loss, entropy/std anneal, curricula, eval, checkpoint).
-* Izar (V100): full smoke test passes on the GPU. `v2_s1_planar` seeds 0/1 are training (jobs
-  3144881/82, contract sizing 1024 × 18, cap 16 × 8, 300 M steps, ~7.7k steps/s each at the start).
-  The first attempt (2048 × 64 / minibatch 16 384, 4× fewer updates per sample) reached 13 M steps
-  at 7.8k steps/s but learned slower per step than the CPU arm (ep_len 105 vs 430–540 at 13 M);
-  archived on Izar as `runs/*_2048x64`. Compare curves with `tools/compare_cpu_gpu.py`.
+* Izar (V100): full smoke test passes on the GPU. Four runs: `v2_s1_planar` seeds 0/1 (jobs
+  3144977/78, artifact-literal, resumed at 5 M with the eval fix; clock parked on the 0.5 Hz rail)
+  and `v2b_s1_planar` seeds 0/1 (jobs 3145016/17, the readout-1 preset, the usable-policy
+  candidates). Contract sizing 1024 × 18, cap 16 × 8, ~7.7k steps/s each at the start. The CPU
+  arm runs `v2b_s1_s0/s1` on JED in parallel. Compare curves with `tools/compare_cpu_gpu.py`.
 * Cross-check with the CPU arm: golden fixture `walk_mit/golden/v2_s1_clean_seed0.npz` replays with
   exact commit flags and rewards identical over the first 20 ticks; control-law agreement 5e-6 on the
   traces. Policy-level comparison (same preset, seed, budget; greedy dash eval) pending the runs.
