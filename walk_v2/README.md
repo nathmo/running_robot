@@ -110,6 +110,25 @@ in v2b). Experiments running: `v2b_s1_planar_noassist` (seeds 0/1, no wheel from
 latched design learn balance at all?) and `v2b_s1_planar_stiff` (seed 0, 10× leg spring = the CPU
 arm's effectively rigid rod, isolating the plant compliance in the per-step lag).
 
+## Readout 3 (2026-09-10, late): the wheel is the cause; the plant is not
+
+Episode length / assist level / policy std at matched steps (GPU, `v2b_s1`):
+
+| steps | soft leg, wheel (s0) | stiff leg, wheel (s0) | no wheel (s0) | no wheel (s1) |
+|---|---|---|---|---|
+| 20 M | 187 / 1.00 / 0.97 | 231 / 1.00 / 0.95 | 45 / 0 / 1.00 | 36 / 0 / 1.00 |
+| 30 M | 436 / 1.00 / 0.95 | 602 / 1.00 / 0.94 | 44 / 0 / 0.99 | 38 / 0 / 1.00 |
+| 40 M | 676 / 0.85 / 0.82 | 799 / 0.69 / 0.69 | 96 / 0 / 0.95 | 38 / 0 / 1.00 |
+| 50 M | 630 / 0.51 / 0.59 | 392 / 0.35 / 0.49 | 114 / 0 / 0.68 | 73 / 0 / 0.71 |
+| 55 M | 453 / 0.35 / 0.49 | 188 / 0.19 / 0.41 | 120 / 0 / 0.57 | 87 / 0 / 0.59 |
+
+The stiff-leg run tracks the soft-leg run and collapses the same way as its assist fades (17 at
+57 M with the assist at 0.13), so the leg compliance is not behind the per-step lag or the collapse.
+Without the wheel the latched design learns balance, but slowly: episode length 120 / 87 at 55 M
+with the greedy policy creeping 1.1 m at 0.8 m/s (seed 0), and the 40 M entropy deadline is now
+annealing the std toward 0.25, which will freeze whatever exists by ~80 M. The wheel runs' episode
+lengths were never the policy's own: everything above ~100 ticks was the 100 N·m/rad pitch spring.
+
 ## Run
 
 ```bash
