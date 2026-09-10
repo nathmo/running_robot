@@ -437,6 +437,19 @@ PRESETS = {
                                                    stoplight_gate_ep_len=600.0, stop_decel_s=2.0,
                                                    w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25,
                                                    stop_cmd_continuous=True),
+    # GENTLE stop (2026-09-11 01:00). Measured: even with the continuous command and 5x the stop reward,
+    # the policy survives only 1.2 s of red (up from 0.8) and still falls, 16/16, 0% of red spent slow.
+    # The demand was the problem: stop_decel_s 2.0 asks for 1.45 m/s^2 from 2.9 m/s, and this morphology
+    # has never learned a capture step (the foot lands ~8 cm BEHIND the CoM -- walk_mit m3 finding).
+    # The actual requirement is "stop within ~20 m of the line" = 0.21 m/s^2 over ~14 s, SEVEN times
+    # gentler. So: ramp over 8 s (0.36 m/s^2, ~11.6 m of stopping distance, inside the 20 m budget), red
+    # phases long enough to finish the stop and hold it, and the overrun bill moved out to 20 m.
+    "v2c_s2_free_fast_stopgentle": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                               stoplight_prob_final=0.35, stoplight_curriculum_steps=15_000_000,
+                                               stoplight_gate_ep_len=600.0, stop_decel_s=8.0,
+                                               stoplight_red_s=(10.0, 14.0), stoplight_green_s=(6.0, 12.0),
+                                               w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25,
+                                               stop_cmd_continuous=True, sprint_brake_m=20.0),
     # cold S2, the whole recipe: frequency floor (no slow-gait rail while the gait forms) + the stop
     # curriculum. This is the "no S1 stage" configuration.
     "v2c_s2_free_fast_floorstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
