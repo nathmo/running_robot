@@ -91,7 +91,7 @@ class PPO:
         self.mb_size = self.batch // self.n_minibatches
         assert self.mb_size % self.n_dev == 0 and int(cfg.est_batch) % self.n_dev == 0, "minibatch not divisible by devices"
         self.mb_dev = self.mb_size // self.n_dev
-        self.est_batch_dev = max(1, int(cfg.est_batch) // self.n_dev)
+        self.est_batch_dev = max(1, min(int(cfg.est_batch) // self.n_dev, self.batch_dev))
         self.n_rollouts_total = max(1, math.ceil(self.total_steps / self.batch))
         self.eval_env = eval_env
         self.key = jax.random.PRNGKey(int(seed))
@@ -275,6 +275,54 @@ class PPO:
                 return params, est_opt_state, loss
 
             self._est_update_p = jax.pmap(est_update_p, axis_name="dev", in_axes=(0, 0, 0, 0), devices=devs)
+
+            # one launch per EPOCH: lax.scan over the minibatches inside the pmap (the per-minibatch
+            # pmap dispatch + all-reduce was ~18 ms a call, 0.3-1.2 s per iteration at 4 GPUs)
+            n_mb_epoch, mb_dev = self.n_minibatches, self.mb_dev
+            target_kl = float(cfg.target_kl)
+
+            def update_epoch_p(params, opt_state, stats, data, perm, clip_range, ent_coef, log_std_clamp):
+                def body(carry, i):
+                    params, opt_state, stopped = carry
+                    idx = jax.lax.dynamic_slice(perm, (i * mb_dev,), (mb_dev,))
+                    mb = tuple(x[idx] for x in data)
+                    (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+                        params, stats, *mb, clip_range, ent_coef)
+                    grads = jax.lax.pmean(grads, "dev")
+                    aux = jax.lax.pmean(aux, "dev")
+                    updates, opt_new = self.tx.update(grads, opt_state, params)
+                    p_new = _clamp_log_std(optax.apply_updates(params, updates), log_std_clamp)
+                    # KL early stop (the CPU arm's target_kl rule): once tripped, later minibatches are no-ops
+                    keep = jnp.logical_not(stopped)
+                    params = jax.tree_util.tree_map(lambda a, b: jnp.where(keep, a, b), p_new, params)
+                    opt_state = jax.tree_util.tree_map(lambda a, b: jnp.where(keep, a, b), opt_new, opt_state)
+                    tripped = (aux["kl"] > 1.5 * target_kl) if target_kl > 0 else jnp.zeros((), bool)
+                    stopped = stopped | tripped
+                    aux = {**aux, "applied": keep.astype(jnp.float32)}
+                    return (params, opt_state, stopped), aux
+
+                (params, opt_state, stopped), auxs = jax.lax.scan(
+                    body, (params, opt_state, jnp.zeros((), bool)), jnp.arange(n_mb_epoch))
+                return params, opt_state, stopped, auxs
+
+            self._update_epoch_p = jax.pmap(update_epoch_p, axis_name="dev",
+                                            in_axes=(0, 0, None, 0, 0, None, None, None), devices=devs)
+            n_est_epoch, est_dev = max(1, self.batch_dev // self.est_batch_dev), self.est_batch_dev
+
+            def est_epoch_p(params, est_opt_state, obs, perm):
+                def body(carry, i):
+                    params, est_opt_state = carry
+                    idx = jax.lax.dynamic_slice(perm, (i * est_dev,), (est_dev,))
+                    loss, grads = jax.value_and_grad(est_loss)(params, obs[idx])
+                    grads = jax.lax.pmean(grads, "dev")
+                    updates, est_opt_state = self.est_tx.update(grads, est_opt_state, params)
+                    params = optax.apply_updates(params, updates)
+                    return (params, est_opt_state), jax.lax.pmean(loss, "dev")
+
+                (params, est_opt_state), losses = jax.lax.scan(body, (params, est_opt_state), jnp.arange(n_est_epoch))
+                return params, est_opt_state, losses[-1]
+
+            self._est_epoch_p = jax.pmap(est_epoch_p, axis_name="dev", in_axes=(0, 0, 0, 0), devices=devs)
             self._reset_p = jax.pmap(lambda k, prm: env.reset(k, prm), in_axes=(0, None), devices=devs)
 
     def _replicate(self, tree):
@@ -477,18 +525,17 @@ class PPO:
             for epoch in range(cfg.n_epochs):
                 self.key, k = jax.random.split(self.key)
                 perm = jnp.stack([jax.random.permutation(kd, self.batch_dev) for kd in jax.random.split(k, self.n_dev)])
-                for i in range(self.n_minibatches):
-                    idx = perm[:, i * self.mb_dev:(i + 1) * self.mb_dev]
-                    p_rep, opt_rep, loss, aux = self._update_mb_p(
-                        p_rep, opt_rep, stats_used, data, idx, float(cfg.clip_range),
-                        float(self.ent_coef), float(self.log_std_clamp))
-                    n_mb += 1
-                    for kk, v in aux.items():
-                        aux_acc[kk] = aux_acc.get(kk, 0.0) + float(v[0])
-                    if cfg.target_kl > 0 and float(aux["kl"][0]) > 1.5 * cfg.target_kl:
-                        stop = True
-                        break
-                if stop:
+                p_rep, opt_rep, stopped, auxs = self._update_epoch_p(
+                    p_rep, opt_rep, stats_used, data, perm, float(cfg.clip_range),
+                    float(self.ent_coef), float(self.log_std_clamp))
+                auxs = jax.tree_util.tree_map(lambda x: np.asarray(x[0]), auxs)     # (n_mb,) per key
+                applied = auxs.pop("applied").astype(bool)
+                n_app = int(applied.sum())
+                n_mb += n_app
+                for kk, v in auxs.items():
+                    aux_acc[kk] = aux_acc.get(kk, 0.0) + float(v[applied].sum()) if n_app else aux_acc.get(kk, 0.0)
+                if bool(np.asarray(stopped)[0]):
+                    stop = True
                     break
             jax.block_until_ready(p_rep)
             t_update = time.time() - t1
@@ -498,10 +545,8 @@ class PPO:
             for _ in range(cfg.est_epochs):
                 self.key, k = jax.random.split(self.key)
                 perm = jnp.stack([jax.random.permutation(kd, self.batch_dev) for kd in jax.random.split(k, self.n_dev)])
-                for i in range(max(1, self.batch_dev // self.est_batch_dev)):
-                    idx = perm[:, i * self.est_batch_dev:(i + 1) * self.est_batch_dev]
-                    p_rep, est_rep, est_l = self._est_update_p(p_rep, est_rep, data[0], idx)
-                    est_last = est_l[0]
+                p_rep, est_rep, est_l = self._est_epoch_p(p_rep, est_rep, data[0], perm)
+                est_last = est_l[0]
             unrep = lambda t: jax.tree_util.tree_map(lambda x: x[0], t)
             self.params, self.opt_state, self.est_opt_state = unrep(p_rep), unrep(opt_rep), unrep(est_rep)
             jax.block_until_ready(self.params)
