@@ -1,0 +1,30 @@
+{
+ "device": "cuda:0",
+ "platform": "gpu",
+ "preset": "v2_s2_free",
+ "env": [
+  {
+   "n_envs": 2048,
+   "env_sps": 8388.785155741203,
+   "substeps_per_s": 83887.85155741204,
+   "sim_seconds_per_wall_s": 83.88785155741203,
+   "reset_s": 18.267456769943237,
+   "compile_s": 52.81244230270386,
+   "step_ms": 244.13546919822693
+  }
+ ],
+ "ppo": [
+  {
+   "n_envs": 2048,
+   "n_steps": 18,
+   "batch": 36864,
+   "iter_first_s": 48.025285482406616,
+   "iter_s": 16.86523699760437,
+   "ppo_sps": 2185.797922984205,
+   "rollout_s": 3.4245967864990234,
+   "minibatches": 9
+  }
+ ],
+ "mjx_iterations": 32,
+ "mjx_ls_iterations": 8
+}
