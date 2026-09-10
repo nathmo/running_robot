@@ -422,6 +422,14 @@ PRESETS = {
     "v2c_s2_free_fast_stoplight": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                               stoplight_prob_final=0.5, stoplight_curriculum_steps=20_000_000,
                                               stoplight_gate_ep_len=600.0, stop_decel_s=1.5),
+    # stronger stop incentive: at the contract w_stop_vel 0.4 a red phase pays at most 0.4/step against
+    # ~5/step of running income, so the measured stop income stayed ~0.005 (the policy ignores the light
+    # and simply loses the income). Pay braking on the same order as running, widen the tracking window
+    # and give it longer to bleed off speed; fewer lit episodes so the running signal stays strong.
+    "v2c_s2_free_fast_stoplight_hard": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                                   stoplight_prob_final=0.35, stoplight_curriculum_steps=20_000_000,
+                                                   stoplight_gate_ep_len=600.0, stop_decel_s=2.0,
+                                                   w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25),
     # cold S2, the whole recipe: frequency floor (no slow-gait rail while the gait forms) + the stop
     # curriculum. This is the "no S1 stage" configuration.
     "v2c_s2_free_fast_floorstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
