@@ -221,10 +221,16 @@ def main():
         N_VID = int(min(16, args.pop))
         state, obs = env.reset(jax.random.PRNGKey(args.seed), params)
 
+        # THE RUN-UP MUST SEE THE SAME WORLD AS THE BRAKE. Under --hold-run the brake window has the
+        # line pushed out of range, but the run-up used to keep it at 100 m -- so a late brake point
+        # spent its approach inside the last task_brake_m (8 m), where d_to_go ramps and the policy
+        # starts its pre-stop behaviour, and some episodes crossed the line outright. That is what
+        # made a 95 m brake point collapse to 6/512 upright while 91.8 m held 511/512. It is also
+        # simply wrong for the red-light case, where there is no line anywhere.
         def to_line(carry, _):
             state, obs = carry
             a = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
-            state2, obs2, _, _, _ = env.step(state, a, params)
+            state2, obs2, _, _, _ = env.step(state, a, p_brake)
             return (state2, obs2), state.data.qpos[:N_VID]
 
         # Run to the brake DISTANCE, measured -- never to an estimated time. d_brake/v0 ignores the
