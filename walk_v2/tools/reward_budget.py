@@ -95,13 +95,41 @@ def main():
         share = (-m / cost * 100) if m < 0 else (m / max(income, 1e-9) * 100)
         print(f"{k:>18}  {m:>10.4f}  {share:>6.1f}% {'cost' if m < 0 else 'income'}")
     net = float((rew * alive_mask).sum() / n)
-    print(f"\n{'INCOME':>18}  {income:>10.4f}\n{'COST':>18}  {-cost:>10.4f}\n{'NET':>18}  {net:>10.4f}")
-    if net < 0:
-        print(f"\n[budget] NET IS NEGATIVE: every extra tick alive costs {-net:.3f}. The shortest episode is "
-              f"the best episode, so falling early is optimal play -- this is an objective bug, not a "
-              f"policy failure. Raise w_alive above {cost - income:.2f} or cut the dominant cost above.")
+
+    # The reward the optimiser sees is NOT the sum of the terms: it is scaled by reward_dt_scale,
+    # floored at -step_reward_floor, and then the terminal fall_penalty lands on the one tick that
+    # ends the episode. Reporting the raw sum overstates the living cost (the floor clips it) and
+    # folds a one-time -100 into the per-tick mean, which reads as if every tick were catastrophic.
+    scale = float(env.reward_dt_scale)
+    terms_net = (income - cost) * scale
+    floor = -float(cfg.step_reward_floor) * scale
+    step_net = max(terms_net, floor)
+    print(f"\n{'INCOME':>20}  {income:>10.4f}")
+    print(f"{'COST':>20}  {-cost:>10.4f}")
+    print(f"{'terms net':>20}  {income - cost:>10.4f}  x reward_dt_scale {scale:.3f} = {terms_net:>8.4f}")
+    if terms_net < floor:
+        print(f"{'step floor':>20}  {step_net:>10.4f}  (clamped -- cost below the floor is invisible to "
+              f"the optimiser, and so is income that only climbs back toward it)")
+    print(f"{'LIVING':>20}  {step_net:>10.4f} /tick")
+    print(f"{'per-tick incl falls':>20}  {net:>10.4f}  (this is the training line's `rew`)")
+
+    ep_ticks = float(cfg.episode_s) / float(env.control_dt)
+    if step_net < 0:
+        horizon = float(cfg.fall_penalty) / -step_net
+        ratio = -step_net * ep_ticks / float(cfg.fall_penalty)
+        print(f"\n[budget] LIVING COSTS {-step_net:.3f}/tick. Against a one-time fall_penalty of "
+              f"{cfg.fall_penalty:.0f} the break-even horizon is {horizon:.0f} ticks; an episode is "
+              f"{ep_ticks:.0f} ticks.")
+        if ep_ticks > horizon:
+            print(f"[budget] => dying immediately is worth {ratio:.0f}x living. That is an OBJECTIVE bug, "
+                  f"not a policy failure: the optimiser will hunt for the shortest episode, which on this "
+                  f"plant means railing the gait clock to its floor and falling early.")
+        else:
+            print("[budget] => surviving still wins over this horizon, so the objective is not upside down.")
     else:
-        print(f"\n[budget] net positive: staying alive pays {net:.3f}/tick, so termination is a real loss.")
+        print(f"\n[budget] net positive: living pays {step_net:.3f}/tick over {ep_ticks:.0f} ticks "
+              f"({step_net * ep_ticks:.0f} an episode) against a {cfg.fall_penalty:.0f} fall penalty, so "
+              f"termination is a real loss.")
     return 0
 
 

@@ -932,14 +932,27 @@ class DashEnvV2:
         t = {}
         # ---- objective income
         if c.objective == "joystick":
-            # TRACK THE COMMAND, do not pay for speed. w_fwd_speed pays more the faster you go, which
-            # is the right income for a dash and exactly wrong for a joystick -- it would bribe the
-            # policy to ignore any command below top speed. "As fast as possible" is instead what
-            # v_cmd = v_max asks for. Laplace, not Gaussian: measured 2026-09-11, a Gaussian pays
-            # 0.006 at the ~1.8 m/s error this lineage actually sits at, i.e. it is flat exactly
-            # where the policy lives, and ten reward variants died on that.
+            # TRACK THE COMMAND -- but the income must be worth as much as the dash's was, or staying
+            # alive stops paying. Measured 2026-09-11 (tools/reward_budget.py, same checkpoint, same
+            # plant): the sprint objective earns income 5.11/tick against 2.69 of cost, net +1.32,
+            # and survives 600/600 ticks. A BOUNDED tracking income (w_track * shape, ceiling 3.0)
+            # earned 0.57 against the same 2.50 of cost -- net -0.55/tick after the step floor. With
+            # fall_penalty 100, the break-even horizon is ~180 ticks against 3000-tick episodes, so
+            # dying immediately was worth ~16x living: both v3 seeds duly railed the clock to its
+            # 1.5 Hz floor, dropped residual saturation to 0.06 and fell early. Costs were never the
+            # problem (2.69 vs 2.50); deleting fwd_speed removed 94% of the income.
+            #
+            # So scale the income by what was ASKED, not by what was achieved. `shape` still peaks
+            # only at the commanded speed -- running faster than commanded pays less, which is the
+            # property a bare speed income lacks -- while the magnitude tracks the cost of the
+            # commanded gait, exactly as the dash's income tracked the cost of sprinting. w_track is
+            # the part that survives at v_cmd = 0, so holding station still pays (and drifting does
+            # not), which a purely proportional income would have zeroed out.
+            # Laplace, not Gaussian: measured, a Gaussian pays 0.006 at the ~1.8 m/s error this
+            # lineage sits at, i.e. it is flat exactly where the policy lives.
             err_cmd = jnp.abs(vx - state.v_cmd)
-            income = c.w_track * jnp.exp(-err_cmd / c.track_sigma)
+            income = ((c.w_track + c.w_fwd_speed * jnp.clip(state.v_cmd, 0.0, c.v_ceiling))
+                      * jnp.exp(-err_cmd / c.track_sigma))
             if c.speed_upright_gate:
                 u = jnp.clip((-grav[2] - c.speed_upright_c0) / (1.0 - c.speed_upright_c0), 0.0, 1.0)
                 income = income * u ** c.speed_upright_k
