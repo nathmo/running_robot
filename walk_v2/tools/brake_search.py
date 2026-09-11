@@ -250,6 +250,13 @@ def main():
                   f"median {np.median(ov):+.1f} m, 10-90% {np.percentile(ov, 10):+.1f} .. "
                   f"{np.percentile(ov, 90):+.1f} m, worst {ov.max():+.1f} m; "
                   f"final |v| median {np.median(np.abs(v_f[stopped])):.3f} m/s")
+        rolling = alive & ~stopped
+        if rolling.any():
+            vr = np.abs(v_f[rolling])
+            print(f"[demo] the {int(rolling.sum())} upright-but-still-rolling: final |v| median "
+                  f"{np.median(vr):.2f} m/s, 10-90% {np.percentile(vr, 10):.2f} .. "
+                  f"{np.percentile(vr, 90):.2f} m/s, at a median {np.median(d_f[rolling]) - line:+.1f} m "
+                  f"past the line -- these are NOT falls, they are stops the window ended too soon for")
         print(f"[demo] env 0 (the video): ran {d_line:.1f} m, ended at {d_f[0]:.1f} m "
               f"({overrun[0]:+.1f} m relative to the line), final speed {v_f[0]:+.3f} m/s, "
               f"fell={'no' if i_fall < 0 else f'at {i_fall * dt:.1f} s'}")
