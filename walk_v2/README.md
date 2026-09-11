@@ -435,6 +435,17 @@ back, is the only repeatable option.
   running gait forms. Verified locally: the minimum action gives 3.00 / 2.25 / 1.50 Hz at the three
   curriculum points and the contract preset still gives 1.50. Preset `v2c_s2_free_fast_floorstop` = floor
   (60 M) + the stop curriculum, i.e. the cold-S2 "no S1 stage" recipe; seeds `runs/v2c_s2_floorstop_s8/s9`.
+* **The gait shaping was switched off for the whole deceleration (2026-09-11, 01:45)** -- a structural
+  mismatch, not a tuning problem, and the likeliest reason braking plateaued at `reward_terms/stop` ~0.033
+  (perfect would be ~0.38). `cmd_speed` was binary -- `v_ceiling` while running, **0** the instant the light
+  turned -- and `gait_on = cmd_speed >= gait_cmd_gate` (0.25) gates the entire gait block: air-time credit,
+  swing floor, stance time, clearance, phase contact. So through the whole 8 s ramp, 2.5 -> 1.0 -> 0 m/s,
+  the robot had NO gait shaping at all -- exactly the intermediate-speed regime this morphology has never
+  been shaped in and historically cannot balance through (the command-objective runs all converged to
+  stand/creep; the sprint objective is what produced runners). Under `stop_cmd_continuous` `cmd_speed` now
+  follows the ramp, so the shaping tracks the command down and releases only at a genuine standstill.
+  Verified: at 2.5 / 1.87 / 1.25 / 0.62 m/s of commanded speed the gait terms are live, and they switch off
+  at 0.06 m/s.
 * **The deceleration demand was 7x the requirement (2026-09-11, 01:00)** -- the reason the stop still
   would not train. With the continuous command AND 5x the stop reward, `v2c_s2_stophard_s14` still fell on
   red 16/16, spending 0% of the red phase slow; it only survived longer (1.2 s vs 0.8 s). The arithmetic

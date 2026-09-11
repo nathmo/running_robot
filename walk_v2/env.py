@@ -769,7 +769,16 @@ class DashEnvV2:
         y = self._y(data)
         t["lane"] = pen(-c.w_lane * jnp.maximum(jnp.abs(y) - c.lane_free_m, 0.0) ** 2)
         progress = jnp.where(run_phase, jnp.clip(vx / c.v_ceiling, 0.0, 1.0), 0.0)
-        cmd_speed = jnp.where(run_phase, c.v_ceiling, 0.0)
+        # Under the continuous stop command the commanded speed FOLLOWS THE RAMP instead of dropping to
+        # zero the instant the light turns. With the binary version the whole gait block (air-time
+        # credit, swing floor, stance time, clearance, phase contact -- everything below `gait_on`)
+        # switched off for the entire deceleration, i.e. exactly while the robot has to hold a gait
+        # together through 2.5 -> 2.0 -> 1.0 -> 0 m/s, the regime it has never been shaped in. Now the
+        # shaping tracks the command down and only lets go below gait_cmd_gate (a genuine standstill).
+        if c.stop_cmd_continuous and c.stop_decel_s > 0:
+            cmd_speed = jnp.where(run_phase, c.v_ceiling, jnp.clip(v_target, 0.0, c.v_ceiling))
+        else:
+            cmd_speed = jnp.where(run_phase, c.v_ceiling, 0.0)
         gait_on = cmd_speed >= c.gait_cmd_gate
         # ---- gait shaping
         toe = self._toe_pos(data)
