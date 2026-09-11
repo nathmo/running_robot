@@ -53,7 +53,7 @@ def rollout(env, agent, seed, n_max, record=False, assist=0.0, stoplight=0.0):
 
     def body(carry, _):
         (state, obs, alive, dist, tline, fin, fell, tend, red_n, red_slow, fell_red,
-         v_min_post, t_post, crossed_any) = carry
+         v_min_post, t_post, crossed_any, f_end, v_end, f_red_min, f_red_max) = carry
         a = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
         state2, obs2, r, done, info = env.step(state, a, params)
         ending = alive & done
@@ -72,23 +72,34 @@ def rollout(env, agent, seed, n_max, record=False, assist=0.0, stoplight=0.0):
         crossed_any = crossed_any | post
         v_min_post = jnp.where(post, jnp.minimum(v_min_post, jnp.abs(vx)), v_min_post)
         t_post = t_post + jnp.where(post, dt, 0.0)
+        # what the gait clock is doing while the stop command falls: a latched frequency that jumps
+        # from the running rail to the slow rail mid-stride topples the robot without it ever braking
+        f = info["freq_hz"]
+        f_end = jnp.where(ending, f, f_end)
+        v_end = jnp.where(ending, vx, v_end)
+        f_red_min = jnp.where(red, jnp.minimum(f_red_min, f), f_red_min)
+        f_red_max = jnp.where(red, jnp.maximum(f_red_max, f), f_red_max)
         alive2 = alive & ~done
         q0 = state.data.qpos[0] if record else jnp.zeros(1)
         return (state2, obs2, alive2, dist, tline, fin, fell, tend, red_n, red_slow, fell_red,
-                v_min_post, t_post, crossed_any), q0
+                v_min_post, t_post, crossed_any, f_end, v_end, f_red_min, f_red_max), q0
 
     n = env.n_envs
     init = (state, obs, jnp.ones(n, bool), jnp.zeros(n), jnp.full(n, -1.0), jnp.zeros(n, bool),
             jnp.zeros(n, bool), jnp.full(n, n_max * dt), jnp.zeros(n, jnp.int32), jnp.zeros(n, jnp.int32),
-            jnp.zeros(n, bool), jnp.full(n, jnp.inf), jnp.zeros(n), jnp.zeros(n, bool))
+            jnp.zeros(n, bool), jnp.full(n, jnp.inf), jnp.zeros(n), jnp.zeros(n, bool),
+            jnp.zeros(n), jnp.zeros(n), jnp.full(n, jnp.inf), jnp.zeros(n))
     (_, _, alive, dist, tline, fin, fell, tend, red_n, red_slow, fell_red,
-     v_min_post, t_post, crossed_any), qs = jax.lax.scan(body, init, None, length=n_max)
+     v_min_post, t_post, crossed_any, f_end, v_end, f_red_min, f_red_max), qs = jax.lax.scan(
+        body, init, None, length=n_max)
     return dict(dist=np.asarray(dist), t_line=np.asarray(tline), finished=np.asarray(fin),
                 fell=np.asarray(fell), t_end=np.asarray(tend), alive=np.asarray(alive),
                 red_s=np.asarray(red_n) * dt, red_slow_frac=np.asarray(red_slow) / np.maximum(np.asarray(red_n), 1),
                 fell_red=np.asarray(fell_red), crossed=np.asarray(crossed_any),
                 v_min_post=np.where(np.asarray(crossed_any), np.asarray(v_min_post), np.nan),
-                t_post=np.asarray(t_post)), np.asarray(qs)
+                t_post=np.asarray(t_post), f_end=np.asarray(f_end), v_end=np.asarray(v_end),
+                f_red_min=np.where(np.isfinite(f_red_min), np.asarray(f_red_min), np.nan),
+                f_red_max=np.asarray(f_red_max)), np.asarray(qs)
 
 
 def render_video(cfg, qs, t_end, path, seconds=None, fps=None):
@@ -142,9 +153,11 @@ def main():
         post = (f"  post-line {stats['t_post'][i]:4.1f} s min|v| {stats['v_min_post'][i]:.2f}"
                 if stats["crossed"][i] else "")
         red = (f"  red {stats['red_s'][i]:4.1f} s slow {100 * stats['red_slow_frac'][i]:3.0f}%"
+               + f" clock {stats['f_red_min'][i]:.1f}-{stats['f_red_max'][i]:.1f} Hz"
                + ("  FELL-ON-RED" if stats["fell_red"][i] else "")) if stats["red_s"][i] > 0 else ""
         print(f"  ep{i:02d}: {stats['dist'][i]:6.1f} m in {stats['t_end'][i]:6.2f} s  {line}  {how}  "
-              f"avg {stats['dist'][i] / max(stats['t_end'][i], 1e-6):.2f} m/s{post}{red}")
+              f"avg {stats['dist'][i] / max(stats['t_end'][i], 1e-6):.2f} m/s{post}{red}"
+              f"  at end: {stats['v_end'][i]:+.2f} m/s, clock {stats['f_end'][i]:.2f} Hz")
     if fin.any():
         print(f"  mean t_line {stats['t_line'][fin].mean():.2f} s  mean speed "
               f"{(cfg.sprint_dist_m / stats['t_line'][fin]).mean():.2f} m/s")
