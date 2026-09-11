@@ -356,9 +356,16 @@ class DashEnvV2:
             # half of top speed and 1.0 asks for everything. Nothing here reads sprint_d, so the
             # actor carries no odometry at all -- under v2 task[1] was clip((line - d)/8, 0, 1),
             # computed from ground-truth world x, which the robot can only guess at. task[1] is
-            # reserved (a yaw command later) and held at 0 so the width stays 2 and v2 checkpoints
-            # remain loadable as warm starts.
-            return jnp.stack([jnp.clip(state.v_cmd / self.cfg.v_max, 0.0, 1.0), 0.0])
+            # reserved (a yaw command later) so the width stays 2 and v2 checkpoints remain loadable.
+            #
+            # It is held at ONE, not zero. Zero is not a neutral filler here: under v2 semantics
+            # task[1] is the distance-to-go ramp, 1.0 whenever the line is far away and 0 only to
+            # demand a stop. Pinning it at 0 told a warm-started runner to brake on every tick --
+            # measured 2026-09-11, the 3.27 m/s runner made 0.1 m/s under a 3.2 m/s command, earned
+            # 0.05 of a possible 9.0 of tracking income and fell 100% of the time inside 86 ticks,
+            # while the same checkpoint ran 600/600 upright under the sprint preset. 1.0 is what the
+            # warm start saw for the whole run phase, i.e. "nothing to brake for".
+            return jnp.stack([jnp.clip(state.v_cmd / self.cfg.v_max, 0.0, 1.0), 1.0])
         stop_now = state.crossed | state.light_red
         if self.cfg.stop_cmd_continuous and self.cfg.stop_decel_s > 0:
             # the same ramp the stop reward tracks, recomputed from the state (v0 at the switch, time since)
