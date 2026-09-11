@@ -3,7 +3,9 @@
 # The schedule is POLICY-SPECIFIC: it rides on top of the policy's own per-tick residual, so re-run it for
 # every checkpoint you want to brake.
 #   search: sbatch --export=ALL,RUN=v2c_s2_brakeprior_s41,CKPT=walk_v2/runs/.../best_speed.msgpack walk_v2/slurm/izar_brake.sbatch
-#   demo:   sbatch --export=ALL,RUN=...,CKPT=...,DEMO=walk_v2/results/brake_x.json walk_v2/slurm/izar_brake.sbatch
+#   demo:   sbatch --export=ALL,RUN=...,CKPT=...,DEMO=walk_v2/results/brake_x.json,SEED=1 walk_v2/slurm/izar_brake.sbatch
+# ALWAYS demo on a SEED the fit did not see. env.reset splits the key per env, so the same seed
+# replays the very episodes the CEM selected against and the stop rate comes back flattering.
 #SBATCH --job-name=dash-v2-brake
 #SBATCH --qos=debug
 #SBATCH --nodes=1
@@ -25,7 +27,7 @@ RUN="${RUN:?set RUN}"
 TAG="${TAG:-$(date +%H%M)}"
 python walk_v2/tools/brake_search.py --run "walk_v2/runs/$RUN" ${CKPT:+--checkpoint "$CKPT"} \
     --pop "${POP:-512}" --iters "${ITERS:-8}" --cruise-s "${CRUISE_S:-6}" --brake-s "${BRAKE_S:-8}" \
-    ${DEMO:+--demo "$DEMO"} ${BRAKE_AT:+--brake-at "$BRAKE_AT"} \
+    ${DEMO:+--demo "$DEMO"} ${BRAKE_AT:+--brake-at "$BRAKE_AT"} --seed "${SEED:-0}" \
     --json "walk_v2/results/brake_${RUN}_${TAG}.json" \
     ${DEMO:+--video "walk_v2/results/run_and_stop_${RUN}_${TAG}.mp4"}
 echo "[brake] done"
