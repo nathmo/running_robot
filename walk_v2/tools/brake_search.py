@@ -84,7 +84,10 @@ def main():
     n_cruise, n_brake = int(args.cruise_s / dt), int(args.brake_s / dt)
     key = jax.random.PRNGKey(args.seed)
 
-    # ---- run-up: every env is the same policy, so they only differ once the schedule takes over
+    # ---- run-up: one policy, but the envs are NOT clones -- reset_joint_noise (0.03 rad) gives
+    # every env a different starting pose, and a 27 s run-up amplifies that into genuinely
+    # independent episodes. So a CEM candidate is scored on its own episode (noisier, but it
+    # selects for robustness), and --demo, which puts ONE schedule on every env, is a sample.
     state, obs = env.reset(key, params)
     act = agent._act_greedy
 
@@ -154,8 +157,12 @@ def main():
         print(f"[demo] policy ran {d_line:.1f} m in {n_line * dt:.1f} s; braking from "
               f"{float(np.asarray(state.prev_vel_body)[0, 0]):.2f} m/s")
 
+        # Every env is an INDEPENDENT episode (env.reset splits the key per env) and they all carry
+        # the same schedule here, so this is a pop-sized sample of one brake, not one demo. Freeze
+        # each env's numbers at ITS episode end: past `done` the env has auto-reset and sprint_d
+        # reads ~0, which is what made an earlier demo report "came to rest at -0.0 m".
         def brake_demo(carry, i):
-            state, obs = carry
+            state, obs, alive, d_f, v_f = carry
             ch = schedule(jnp.asarray(th), i / max(n_brake - 1, 1))
             spec = cruise_spec
             spec = spec.at[:, gait.I_FREQ].set(jnp.clip(cruise_spec[:, gait.I_FREQ] * ch[:, 0], -1.0, 1.0))
@@ -165,17 +172,36 @@ def main():
             spec = spec.at[:, gait.I_O.start + 1].set(jnp.clip(ch[:, 3], -1.0, 1.0))
             pol = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
             a = jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1)
-            state2, obs2, _, _, info = env.step(state, a, params)
-            return (state2, obs2), (state.data.qpos[0], info["sprint_d"][0], info["fallen"][0])
+            state2, obs2, _, done, info = env.step(state, a, params)
+            vx = (info["sprint_d"] - state.sprint_d) / dt
+            d_f = jnp.where(alive, info["sprint_d"], d_f)
+            v_f = jnp.where(alive, vx, v_f)
+            alive2 = alive & ~done
+            return (state2, obs2, alive2, d_f, v_f), (state.data.qpos[0], info["fallen"][0])
 
-        (state, obs), (q_br, sd, fell) = jax.lax.scan(brake_demo, (state, obs), jnp.arange(n_brake))
-        sd, fell = np.asarray(sd), np.asarray(fell)
-        v_end = float(np.asarray(state.prev_vel_body)[0, 0])
-        stop_d = float(sd[-1] - d_line)
-        past_line = float(sd[-1]) - float(cfg.sprint_dist_m)
-        i_fall = int(np.argmax(fell)) if fell.any() else -1
-        print(f"[demo] braked over {stop_d:.1f} m, came to rest at {float(sd[-1]):.1f} m "
-              f"({past_line:+.1f} m relative to the line), final speed {v_end:+.3f} m/s, "
+        n_pop = th.shape[0]
+        init = (state, obs, jnp.ones(n_pop, bool), state.sprint_d, jnp.zeros(n_pop))
+        (state, obs, alive, d_f, v_f), (q_br, fell0) = jax.lax.scan(
+            brake_demo, init, jnp.arange(n_brake))
+        alive = np.asarray(alive)
+        d_f, v_f = np.asarray(d_f), np.asarray(v_f)
+        line = float(cfg.sprint_dist_m)
+        overrun = d_f - line
+        stopped = alive & (np.abs(v_f) <= 0.25)            # upright and at a standstill
+        good = stopped & (overrun <= 20.0)                 # ... and inside the 20 m allowance
+        fell0 = np.asarray(fell0)
+        i_fall = int(np.argmax(fell0)) if fell0.any() else -1
+        print(f"[demo] {n_pop} episodes: upright {alive.sum()}/{n_pop}, "
+              f"STOPPED (|v|<=0.25) {stopped.sum()}/{n_pop}, "
+              f"stopped within 20 m of the line {good.sum()}/{n_pop}")
+        if stopped.any():
+            ov = overrun[stopped]
+            print(f"[demo] of those that stopped: overrun past the line "
+                  f"median {np.median(ov):+.1f} m, 10-90% {np.percentile(ov, 10):+.1f} .. "
+                  f"{np.percentile(ov, 90):+.1f} m, worst {ov.max():+.1f} m; "
+                  f"final |v| median {np.median(np.abs(v_f[stopped])):.3f} m/s")
+        print(f"[demo] env 0 (the video): ran {d_line:.1f} m, ended at {d_f[0]:.1f} m "
+              f"({overrun[0]:+.1f} m relative to the line), final speed {v_f[0]:+.3f} m/s, "
               f"fell={'no' if i_fall < 0 else f'at {i_fall * dt:.1f} s'}")
         if args.video:
             from evaluate import render_video
