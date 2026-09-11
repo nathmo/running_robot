@@ -213,6 +213,12 @@ class Config:
     # ramp the stop reward tracks, so the command is continuous and is a speed command a deployment
     # panel can drive directly. Off = the contract's binary flag.
     stop_cmd_continuous: bool = False
+    # The Gaussian tracking reward VANISHES far from the target: asked to slow from 3.3 m/s toward
+    # 1.5, the error is 1.8 m/s and exp(-(1.8/0.8)^2) = 0.006, so the policy sits in a flat region
+    # with no gradient telling it which way to go -- and what it actually does is lower the cadence
+    # (4.0 -> 2.4 Hz) while ACCELERATING to 3.3 m/s, i.e. overstriding into a fall. The Laplace form
+    # exp(-|e|/sigma) gives 0.105 at the same error, 17x the signal, with gradient everywhere.
+    stop_track_laplace: bool = False
     decel_sigma: float = 0.6                # width (m/s) of the tracking reward while the target is > 0
     fall_penalty: float = 100.0
     penalty_term_cap: float = 2.0
@@ -449,7 +455,8 @@ PRESETS = {
                                                stoplight_gate_ep_len=600.0, stop_decel_s=8.0,
                                                stoplight_red_s=(10.0, 14.0), stoplight_green_s=(6.0, 12.0),
                                                w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25,
-                                               stop_cmd_continuous=True, sprint_brake_m=20.0),
+                                               stop_cmd_continuous=True, sprint_brake_m=20.0,
+                                               stop_track_laplace=True),
     # cold S2, the whole recipe: frequency floor (no slow-gait rail while the gait forms) + the stop
     # curriculum. This is the "no S1 stage" configuration.
     "v2c_s2_free_fast_floorstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,

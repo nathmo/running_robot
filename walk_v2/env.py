@@ -760,7 +760,9 @@ class DashEnvV2:
         t["fwd_speed"] = jnp.where(run_phase, income, 0.0)
         # stop term: track the deceleration target while it is > 0 (stop_decel_s), then be still
         sig = jnp.where(v_target > 0.0, c.decel_sigma, c.stop_sigma)
-        t["stop"] = jnp.where(run_phase, 0.0, c.w_stop_vel * jnp.exp(-((vx - v_target) / sig) ** 2))
+        err = jnp.abs(vx - v_target)
+        track = jnp.exp(-err / sig) if c.stop_track_laplace else jnp.exp(-(err / sig) ** 2)
+        t["stop"] = jnp.where(run_phase, 0.0, c.w_stop_vel * track)
         over = jnp.maximum(0.0, sprint_d - (params.sprint_dist_m + c.sprint_brake_m))
         t["overrun"] = jnp.where(run_phase, 0.0, pen(-c.w_overrun * over))
         t["time"] = -c.w_time if c.objective == "sprint" else 0.0
