@@ -257,9 +257,17 @@ def main():
             ctrl[:, 2 * KNOTS:3 * KNOTS] = float(np.asarray(cruise_spec)[0, gait.I_O.start])
             ctrl[:, 3 * KNOTS:4 * KNOTS] = float(np.asarray(cruise_spec)[0, gait.I_O.start + 1])
             a_c, v_c = brake_jit(jnp.asarray(ctrl), state, obs)
-            print(f"[brake] CONTROL (schedule = cruise): upright {int(np.asarray(a_c).sum())}/{args.pop}, "
-                  f"min |v| {float(np.asarray(v_c)[0]):.2f} m/s -- if this is not upright the harness is wrong",
-                  flush=True)
+            n_c = int(np.asarray(a_c).sum())
+            # The control keeps cruising for the whole window. Read it against WHERE the fit is:
+            # mid-run it must be ~all upright or the harness is broken, but at the brake point it
+            # runs past the finish line into the stop phase and SHOULD mostly fall -- that fall is
+            # the problem being solved, not a bug. What matters there is that braking candidates,
+            # which stop before the line, can stay upright where this control cannot.
+            past = d_now + v0 * args.brake_s > cfg.sprint_dist_m
+            note = ("expected to fall: the window runs past the line" if past else
+                    "if this is not upright the harness is wrong")
+            print(f"[brake] CONTROL (schedule = cruise): upright {n_c}/{args.pop}, "
+                  f"min |v| {float(np.asarray(v_c)[0]):.2f} m/s -- {note}", flush=True)
         # env (i * n_reps + j) runs candidate i on episode j; the pad rows keep the jitted shape
         theta_env = np.repeat(theta, n_reps, axis=0)
         if n_pad:
