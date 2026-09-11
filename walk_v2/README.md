@@ -441,6 +441,42 @@ a measurement, not a guess, and each was verified on the live environment before
 signature never changed: **0% of the light phase spent slow, falling 0.8-1.9 s in, accelerating to
 3.0-3.8 m/s against a ~2.3 m/s command.**
 
+## The two privileged channels, and what the robot actually needs (2026-09-11, 19:00)
+
+The gait clock is nudged toward the measured touchdown phase in sim (`resync_kappa` ~0.5 on a rising edge
+inside +-0.15 cycle), and that touchdown comes from the MJX contact array plus toe geom heights -- simulator
+ground truth, never the IMU. DASH-01 has no foot contact sensor, so `robot/deploy/controller_v2.py`
+free-runs the clock. Every dash and stop number this project reported was measured WITH that lock, and
+nobody had checked what happens without it. `evaluate.py --free-clock` and `brake_search.py --free-clock`
+now measure the deployment case (they clear `cfg.resync_enable` before the env is built, which is where
+`plant.py` reads it, so kappa is genuinely zero).
+
+**Neither running nor braking needs it.**
+
+| | with resync | free-running clock |
+|---|---|---|
+| dash, `brakeprior_s41` | 103.1-104.8 m @ 3.23-3.29 m/s | 103.1-104.9 m @ 3.20-3.28 m/s |
+| brake, held-out upright | 476/512 | 511/512 |
+| brake, held-out stopped | 151/512 | 128/512 |
+| overrun median / worst | +10.9 / +13.2 m | +12.0 / +14.1 m |
+
+151 -> 128 is inside the noise of this measurement: the same schedule gave 161 and 167 on two seeds, and a
+1.1 m change in brake point moved a comparable count from 55 to 93. **Brake-point placement dominates the
+clock.** So do not build an IMU touchdown estimator -- and if one is ever wanted anyway,
+`controller_v2.note_contact()` already reproduces the sim correction exactly.
+
+**The second privileged channel disappears too.** `task[1] = clip((line - d)/8, 0, 1)` is computed from
+ground-truth world x, but under `--hold-run` the line is out of range, so the task input is a constant
+`[1, 1]` for the whole run: **the policy needs no odometry and no absolute position at all.** What is left
+outside the policy is an external brake TRIGGER at ~88 m and a 12 s timer for the schedule's twelve numbers.
+The trigger is the real hardware risk, not the clock -- odometry integrated from estimated base velocity
+drifts metres over 88 m, and metres are what move the stop rate.
+
+**Window length is not the lever.** 16 s fitted at 84 m stops the same 128/512 with a better margin
+(+9.4 m median) but only 294/512 stay upright, against 476-511 at 12 s. **Recommended configuration: the
+3.27 m/s runner, 12 s schedule fitted at 88 m with `--hold-run` and `--free-clock`, `--reps 4`.**
+
+
 ## THE ROBOT RUNS 100 m AND STOPS -- the fall at the line was the COMMAND (2026-09-11, 17:00)
 
 One control settles what ten training configurations could not. `--hold-run` pushes the finish line out of
