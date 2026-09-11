@@ -339,10 +339,14 @@ def main():
         mu, sd = theta[el].mean(0), theta[el].std(0) + 1e-3
         n_up = int(alive.sum())
         n_all = int(upright_all.sum())
+        if n_up:
+            b = f"best mean |v| {score[order[0]]:.3f} m/s (elite mean {np.mean(score[el][score[el] < 1e2]) if np.any(score[el] < 1e2) else float('nan'):.3f})"
+        else:
+            # nothing upright: the graded fall score is all there is, so show the search climbing
+            # through it rather than printing nan and looking stuck
+            b = f"all fell; best survived {surv.mean(axis=1).max() * 100:.0f}% of the window (mean {surv.mean() * 100:.0f}%)"
         print(f"[brake] iter {it}: episodes upright {n_up}/{n_cand * n_reps}, candidates upright in "
-              f"ALL {n_reps} {n_all}/{n_cand}, best mean |v| "
-              f"{score[order[0]] if score[order[0]] < 1e2 else float('nan'):.3f} m/s "
-              f"(elite mean {np.mean(score[el][score[el] < 1e2]) if np.any(score[el] < 1e2) else float('nan'):.3f})", flush=True)
+              f"ALL {n_reps} {n_all}/{n_cand}, {b}", flush=True)
 
     print(f"\n[brake] cruise {v0:.2f} m/s -> best reachable |v| {best['v_min']:.3f} m/s while upright "
           f"(upright={best['upright']})")
