@@ -69,6 +69,10 @@ def main():
     ap.add_argument("--cruise-s", type=float, default=6.0, help="policy-driven run-up before braking")
     ap.add_argument("--brake-s", type=float, default=8.0, help="length of the open-loop braking window")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--hold-run", action="store_true",
+                    help="during the brake window, keep the POLICY believing it is still running "
+                         "(move the finish line out of range) so it keeps contributing its "
+                         "stabilising residual instead of its learned stop response")
     ap.add_argument("--json", default=None)
     ap.add_argument("--demo", default=None, help="theta json: run the policy to the line, then brake; writes a video")
     ap.add_argument("--video", default=None)
@@ -84,6 +88,16 @@ def main():
                                            pitch_assist=0.0, stoplight_prob=0.0)
     dt = env.control_dt
     n_cruise, n_brake = int(args.cruise_s / dt), int(args.brake_s / dt)
+    # What the policy is TOLD, during braking only. Both the policy's distance-to-go input and the
+    # env's stop phase come off params.sprint_dist_m, so pushing the line out of range leaves the
+    # policy in the regime it is competent in -- running -- while the schedule does the decelerating.
+    # That is not a cheat for the robot: the run/stop button IS this input, so "brake without telling
+    # the policy" is a controller you can actually build. The measured reason to want it: past the
+    # line the policy's residual becomes the destabilising response this whole investigation chased,
+    # and it fights the schedule exactly when the schedule needs it most.
+    p_brake = params._replace(sprint_dist_m=1e4) if args.hold_run else params
+    if args.hold_run:
+        print("[brake] hold-run: the policy is not told about the line during the brake window")
     key = jax.random.PRNGKey(args.seed)
 
     # ---- run-up: one policy, but the envs are NOT clones -- reset_joint_noise (0.03 rad) gives
@@ -141,7 +155,7 @@ def main():
             # stabiliser and everything falls. Only the LATCHED spec is overridden by the schedule.
             pol = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
             a = jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1)
-            state2, obs2, _, done, info = env.step(state, a, params)
+            state2, obs2, _, done, info = env.step(state, a, p_brake)
             alive2 = alive & ~info["fallen"]
             vx = info["sprint_d"] - state.sprint_d
             vmin = jnp.where(alive2, jnp.minimum(vmin, jnp.abs(vx) / dt), vmin)
@@ -192,7 +206,7 @@ def main():
             spec = spec.at[:, gait.I_O.start + 1].set(jnp.clip(ch[:, 3], -1.0, 1.0))
             pol = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
             a = jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1)
-            state2, obs2, _, done, info = env.step(state, a, params)
+            state2, obs2, _, done, info = env.step(state, a, p_brake)
             vx = (info["sprint_d"] - state.sprint_d) / dt
             d_f = jnp.where(alive, info["sprint_d"], d_f)
             v_f = jnp.where(alive, vx, v_f)
