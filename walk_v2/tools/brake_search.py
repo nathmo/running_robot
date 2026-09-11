@@ -142,7 +142,7 @@ def main():
     # ---- braking window: the POLICY IS OFF, the spec is driven by the schedule
     def brake_rollout(theta, state, obs):
         def step(carry, i):
-            state, obs, alive, vmin = carry
+            state, obs, alive, vmin, surv = carry
             ch = schedule(theta, i / max(n_brake - 1, 1))
             spec = cruise_spec
             spec = spec.at[:, gait.I_FREQ].set(jnp.clip(cruise_spec[:, gait.I_FREQ] * ch[:, 0], -1.0, 1.0))
@@ -159,12 +159,12 @@ def main():
             alive2 = alive & ~info["fallen"]
             vx = info["sprint_d"] - state.sprint_d
             vmin = jnp.where(alive2, jnp.minimum(vmin, jnp.abs(vx) / dt), vmin)
-            return (state2, obs2, alive2, vmin), None
+            return (state2, obs2, alive2, vmin, surv + alive2.astype(jnp.float32)), None
 
         n = theta.shape[0]
-        init = (state, obs, jnp.ones(n, bool), jnp.full(n, jnp.inf))
-        (_, _, alive, vmin), _ = jax.lax.scan(step, init, jnp.arange(n_brake))
-        return alive, vmin
+        init = (state, obs, jnp.ones(n, bool), jnp.full(n, jnp.inf), jnp.zeros(n))
+        (_, _, alive, vmin, surv), _ = jax.lax.scan(step, init, jnp.arange(n_brake))
+        return alive, vmin, surv / float(n_brake)
 
     brake_jit = jax.jit(brake_rollout)
 
@@ -304,7 +304,7 @@ def main():
             ctrl[:, KNOTS:2 * KNOTS] = 1.0
             ctrl[:, 2 * KNOTS:3 * KNOTS] = float(np.asarray(cruise_spec)[0, gait.I_O.start])
             ctrl[:, 3 * KNOTS:4 * KNOTS] = float(np.asarray(cruise_spec)[0, gait.I_O.start + 1])
-            a_c, v_c = brake_jit(jnp.asarray(ctrl), state, obs)
+            a_c, v_c, _ = brake_jit(jnp.asarray(ctrl), state, obs)
             n_c = int(np.asarray(a_c).sum())
             # The control keeps cruising for the whole window. Read it against WHERE the fit is:
             # mid-run it must be ~all upright or the harness is broken, but at the brake point it
@@ -320,12 +320,16 @@ def main():
         theta_env = np.repeat(theta, n_reps, axis=0)
         if n_pad:
             theta_env = np.concatenate([theta_env, np.repeat(theta[-1:], n_pad, axis=0)], axis=0)
-        alive, vmin = brake_jit(jnp.asarray(theta_env, jnp.float32), state, obs)
-        alive = np.asarray(alive)[:n_cand * n_reps].reshape(n_cand, n_reps)
-        vmin = np.asarray(vmin)[:n_cand * n_reps].reshape(n_cand, n_reps)
-        # a fall is disqualifying: score = slowest speed reached while staying upright, averaged
-        # over the candidate's episodes, so one fall (1e3) sinks it however good the others were
-        score = np.where(alive, vmin, 1e3).mean(axis=1)
+        alive, vmin, surv = brake_jit(jnp.asarray(theta_env, jnp.float32), state, obs)
+        k = n_cand * n_reps
+        alive = np.asarray(alive)[:k].reshape(n_cand, n_reps)
+        vmin = np.asarray(vmin)[:k].reshape(n_cand, n_reps)
+        surv = np.asarray(surv)[:k].reshape(n_cand, n_reps)
+        # A fall is disqualifying but NOT flat: falls score 100..200 by how early they came, so the
+        # search still has something to climb when every candidate falls. With a flat penalty the
+        # scores tie, the elite are arbitrary, mu/sd drift and the run never recovers -- which is
+        # exactly how a --reps 8 fit died at 0/512 while --reps 4 solved the same problem.
+        score = np.where(alive, vmin, 100.0 + 100.0 * (1.0 - surv)).mean(axis=1)
         upright_all = alive.all(axis=1)
         order = np.argsort(score)
         el = order[:n_elite]
