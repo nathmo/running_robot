@@ -393,6 +393,35 @@ random clock phase and a red-light start, so that every release condition an ope
 is in distribution. Until then a release jig that drops both feet together, upright to slightly
 back, is the only repeatable option.
 
+## The stop: eight measured interventions, none successful (2026-09-11)
+
+Every runner on both arms crosses the 100 m line at full speed and falls. Each fix below was chosen from
+a measurement, not a guess, and each was verified on the live environment before training; the failure
+signature never changed: **0% of the light phase spent slow, falling 0.8-1.9 s in, accelerating to
+3.0-3.8 m/s against a ~2.3 m/s command.**
+
+| # | Intervention | Measured reason | Result |
+|---|---|---|---|
+| 1 | `w_stop_vel` 0.4 -> 2.0 | braking earned 0.005/step against 4.7 for running | survives 0.8 -> 1.2 s |
+| 2 | binary flag -> continuous target speed (`stop_cmd_continuous`) | a 1-tick flip is a step disturbance on an input the gait depends on | no change in slowing |
+| 3 | `stop_decel_s` 2.0 -> 8.0 (and a 20 s probe) | 1.45 m/s^2 demanded vs 0.21 the 20 m budget needs | survives 2.9 s, then 5.8 s |
+| 4 | `cmd_speed` follows the ramp | `gait_on` switched the ENTIRE gait block off for the whole deceleration | shaping live 2.5 -> 0.06 m/s |
+| 5 | Gaussian -> Laplace tracking (`stop_track_laplace`) | Gaussian pays 0.006 at the 1.8 m/s error the policy lives at: a flat region | 17x the gradient, no behaviour change |
+| 6 | amber phases (`amber_frac`) | the robot only knows ONE speed; lowering the clock makes it FASTER on this plant | first evals with < 16/16 falls |
+| 7 | capture-step reward (`w_brake_foot`) | braking needs the foot AHEAD of the CoM; this lineage plants ~8 cm behind | earned exactly 0.000 |
+| 8 | capture-step reward made SIGNED | clipped at 0 it is flat exactly where the robot lives (the same mistake as #5) | income live, behaviour unchanged |
+
+**The open hypothesis** (`v2c_s2_free_fast_slowstop`, running): stopping may simply be out of reach from
+2.9 m/s for this morphology. The requirement is "run 100 m and stop within ~20 m", which at 1.8 m/s needs
+0.08 m/s^2 -- a quarter of what 2.9 m/s needs. A slower runner that stops beats a fast one that cannot.
+Beyond that, the next ideas are larger than reward tweaks: a speed-command objective across the whole
+range (warm-started from a runner, which is what every failed command-objective run in this project
+lacked), or a braking primitive added to the gait library so it need not be discovered.
+
+**Instrumentation added for this** (`evaluate.py`): `--stoplight P`, per-episode red-phase time and slow
+fraction, falls on red, post-line time and minimum speed, the gait clock through the red phase, the speed
+and cadence at the fall, and the mean speed-tracking error against the command.
+
 ## Status (2026-09-10)
 
 * Local CPU: `smoke_test.py` passes; `train.py --preset v2_smoke` runs end to end (rollout,
