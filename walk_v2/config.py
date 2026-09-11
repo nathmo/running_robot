@@ -477,6 +477,19 @@ PRESETS = {
                                                stop_cmd_continuous=True, sprint_brake_m=20.0,
                                                stop_track_laplace=True,
                                                amber_frac=0.6, w_brake_foot=1.5),
+    # SLOW RUNNER. Eight measured interventions have failed to teach a stop FROM ~2.8 m/s. The
+    # requirement is "run 100 m and stop within ~20 m", not "run at 3 m/s": at 1.8 m/s the 20 m budget
+    # needs only 0.08 m/s^2, a quarter of what it needs at 2.9. Income saturates at v_ceiling, so above it
+    # extra speed earns nothing and still costs energy -- the policy should settle near the cap. A slower
+    # runner that can stop is worth more than a fast one that cannot.
+    "v2c_s2_free_fast_slowstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                             v_ceiling=1.8, stoplight_prob_final=0.35,
+                                             stoplight_curriculum_steps=15_000_000, stoplight_gate_ep_len=600.0,
+                                             stop_decel_s=8.0, stoplight_red_s=(10.0, 14.0),
+                                             stoplight_green_s=(6.0, 12.0), w_stop_vel=2.0, decel_sigma=0.8,
+                                             stop_speed_eps=0.25, stop_cmd_continuous=True,
+                                             sprint_brake_m=20.0, stop_track_laplace=True,
+                                             amber_frac=0.6, amber_speed_band=(0.5, 1.1), w_brake_foot=1.5),
     # cold S2, the whole recipe: frequency floor (no slow-gait rail while the gait forms) + the stop
     # curriculum. This is the "no S1 stage" configuration.
     "v2c_s2_free_fast_floorstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
