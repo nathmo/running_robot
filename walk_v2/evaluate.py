@@ -27,9 +27,18 @@ from ppo import PPO
 from train import make_eval_env, latest_checkpoint
 
 
-def load_run(run, checkpoint=None, n_envs=16, dr=False, keep_assist=False):
+def load_run(run, checkpoint=None, n_envs=16, dr=False, keep_assist=False, free_clock=False):
     run = Path(run)
     cfg = config_from_dict(json.loads((run / "resolved_config.json").read_text())["config"])
+    if free_clock:
+        # THE DEPLOYMENT CLOCK. In sim the gait clock is pulled toward the measured touchdown phase
+        # by kappa, and that touchdown comes from the MJX contact array and toe heights -- simulator
+        # ground truth. DASH-01 has no foot contact sensor, so on the robot nothing can produce the
+        # event and the clock free-runs (robot/deploy/controller_v2.py says so in its docstring).
+        # cfg.resync_enable is read at trace time in plant.py's DR draw, so clearing it here, before
+        # the env is built, genuinely zeroes kappa rather than merely looking like it does.
+        cfg.resync_enable = False
+        print("[eval] FREE-RUNNING CLOCK: resync off (kappa=0), as on the robot")
     ck = Path(checkpoint) if checkpoint else latest_checkpoint(run)
     if ck is None:
         raise FileNotFoundError(f"no checkpoint in {run}")
@@ -147,13 +156,17 @@ def main():
     ap.add_argument("--seconds", type=float, default=None, help="cap per episode (default: cfg.episode_s)")
     ap.add_argument("--video", default=None)
     ap.add_argument("--dr", action="store_true", help="evaluate on the randomized training plant")
+    ap.add_argument("--free-clock", action="store_true",
+                    help="disable the touchdown resync: the gait clock free-runs, as it must on the "
+                         "robot, which has no foot contact sensor")
     ap.add_argument("--stoplight", type=float, default=0.0,
                     help="fraction of eval episodes with red/green light phases (stop curriculum check)")
     ap.add_argument("--assist", type=float, default=0.0,
                     help="pitch-assist level (0 = deployable test; the CPU arm reads out at the training level)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
-    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=args.dr, keep_assist=args.assist > 0)
+    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=args.dr, keep_assist=args.assist > 0,
+                               free_clock=args.free_clock)
     n_max = int(round((args.seconds or cfg.episode_s) / env.control_dt))
     stats, qs = rollout(env, agent, args.seed, n_max, record=args.video is not None, assist=args.assist,
                         stoplight=args.stoplight)
