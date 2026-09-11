@@ -125,6 +125,7 @@ class EnvState:
     light_left: jnp.ndarray      # seconds left in the current light phase (inf = no lights this episode)
     light_v0: jnp.ndarray        # forward speed when the last red / the line started (decel target start)
     light_t: jnp.ndarray         # seconds since that switch
+    light_floor: jnp.ndarray     # speed the ramp descends TO (0 = stop, > 0 = amber, a slow run)
     # library variant
     theta: jnp.ndarray           # (44,) this episode's gait (box-perturbed library entry)
     v_ref: jnp.ndarray
@@ -326,7 +327,8 @@ class DashEnvV2:
         stop_now = state.crossed | state.light_red
         if self.cfg.stop_cmd_continuous and self.cfg.stop_decel_s > 0:
             # the same ramp the stop reward tracks, recomputed from the state (v0 at the switch, time since)
-            v_tgt = state.light_v0 * jnp.maximum(0.0, 1.0 - state.light_t / self.cfg.stop_decel_s)
+            f = jnp.maximum(0.0, 1.0 - state.light_t / self.cfg.stop_decel_s)
+            v_tgt = state.light_floor + (state.light_v0 - state.light_floor) * f
             run = jnp.where(stop_now, jnp.clip(v_tgt / self.cfg.v_ceiling, 0.0, 1.0), 1.0)
         else:
             run = jnp.where(stop_now, 0.0, 1.0)
@@ -427,7 +429,7 @@ class DashEnvV2:
                       jnp.where(jax.random.uniform(k_light) < params.stoplight_prob,
                                 jax.random.uniform(k_next, (), minval=c.stoplight_green_s[0],
                                                    maxval=c.stoplight_green_s[1]), jnp.inf)),
-            light_v0=jnp.zeros(()), light_t=jnp.zeros(()),
+            light_v0=jnp.zeros(()), light_t=jnp.zeros(()), light_floor=jnp.zeros(()),
             theta=jnp.clip(theta, -1.0, 1.0), v_ref=v_ref, raibert_i=jnp.zeros(()),
             ep_return=jnp.zeros(()), ep_len=jnp.zeros((), jnp.int32),
         )
@@ -669,8 +671,22 @@ class DashEnvV2:
         go_red = (toggle & ~state.light_red) | newly_crossed
         light_v0 = jnp.where(go_red, v_body[0], state.light_v0)
         light_t = jnp.where(go_red, 0.0, state.light_t + dt)
+        # amber: the ramp descends to a slow RUN instead of a standstill (the line always demands a stop)
+        if c.amber_frac > 0.0:
+            kl3, kl4 = jax.random.split(kl2)
+            amber = (jax.random.uniform(kl3) < c.amber_frac) & (~newly_crossed)
+            floor_new = jnp.where(amber, jax.random.uniform(kl4, (), minval=c.amber_speed_band[0],
+                                                            maxval=c.amber_speed_band[1]), 0.0)
+            light_floor = jnp.where(go_red, floor_new, state.light_floor)
+            light_floor = jnp.where(newly_crossed, 0.0, light_floor)
+        else:
+            light_floor = jnp.zeros(())
         stop_now = crossed | light_red
-        v_target = (light_v0 * jnp.maximum(0.0, 1.0 - light_t / c.stop_decel_s)) if c.stop_decel_s > 0 else jnp.zeros(())
+        if c.stop_decel_s > 0:
+            frac = jnp.maximum(0.0, 1.0 - light_t / c.stop_decel_s)
+            v_target = light_floor + (light_v0 - light_floor) * frac
+        else:
+            v_target = jnp.zeros(())
         # ---- reward
         lp = float(np.exp(-dt / c.lp_yaw_tau_s))
         lp_yaw_true = lp * state.lp_yaw_true + (1.0 - lp) * gyro[2]
@@ -715,6 +731,7 @@ class DashEnvV2:
             gust_countdown=gust_countdown, gust_dir=gust_dir, sprint_d=sprint_d, crossed=crossed,
             t_line=t_line, stop_hold=stop_hold,
             light_red=light_red, light_left=light_left, light_v0=light_v0, light_t=light_t,
+            light_floor=light_floor,
             raibert_i=jnp.clip(state.raibert_i + (v_body[0] - state.v_ref) * dt,
                                -c.raibert_imax, c.raibert_imax),
             ep_return=state.ep_return + reward, ep_len=state.ep_len + 1, **ns)

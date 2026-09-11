@@ -219,6 +219,17 @@ class Config:
     # (4.0 -> 2.4 Hz) while ACCELERATING to 3.3 m/s, i.e. overstriding into a fall. The Laplace form
     # exp(-|e|/sigma) gives 0.105 at the same error, 17x the signal, with gradient everywhere.
     stop_track_laplace: bool = False
+    # AMBER. Five measured fixes (weight, continuous command, 8 s and even 20 s ramps, live gait
+    # shaping, Laplace tracking) all failed the same way: asked to slow, the robot drops the cadence
+    # a little and ACCELERATES to ~3.1 m/s, overstrides, falls in ~1.3 s, 0% of red spent slow. The
+    # deficit is not braking, it is that THIS ROBOT ONLY KNOWS ONE SPEED -- every policy in the
+    # project has been trained at the sprint and nowhere else, and lowering the gait clock on this
+    # plant makes it FASTER (longer stance, bigger push) rather than slower. So a fraction of the
+    # light phases now ramp down to a SLOW RUN instead of to a standstill: the ramp target becomes a
+    # speed drawn from amber_speed_band, and the policy has to hold a gait there. Stopping is then
+    # the bottom of a range it knows, not a regime it has never visited. 0 = off.
+    amber_frac: float = 0.0
+    amber_speed_band: tuple = (0.8, 1.6)
     decel_sigma: float = 0.6                # width (m/s) of the tracking reward while the target is > 0
     fall_penalty: float = 100.0
     penalty_term_cap: float = 2.0
@@ -456,7 +467,8 @@ PRESETS = {
                                                stoplight_red_s=(10.0, 14.0), stoplight_green_s=(6.0, 12.0),
                                                w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25,
                                                stop_cmd_continuous=True, sprint_brake_m=20.0,
-                                               stop_track_laplace=True),
+                                               stop_track_laplace=True,
+                                               amber_frac=0.6),
     # cold S2, the whole recipe: frequency floor (no slow-gait rail while the gait forms) + the stop
     # curriculum. This is the "no S1 stage" configuration.
     "v2c_s2_free_fast_floorstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
