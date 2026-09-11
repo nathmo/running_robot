@@ -937,8 +937,8 @@ class DashEnvV2:
             # plant): the sprint objective earns income 5.11/tick against 2.69 of cost, net +1.32,
             # and survives 600/600 ticks. A BOUNDED tracking income (w_track * shape, ceiling 3.0)
             # earned 0.57 against the same 2.50 of cost -- net -0.55/tick after the step floor. With
-            # fall_penalty 100, the break-even horizon is ~180 ticks against 3000-tick episodes, so
-            # dying immediately was worth ~16x living: both v3 seeds duly railed the clock to its
+            # fall_penalty 100 and reward_dt_scale 0.5, the break-even horizon is ~200 ticks against
+            # 3000-tick episodes, so dying at once was worth ~15x living: both v3 seeds railed the clock to its
             # 1.5 Hz floor, dropped residual saturation to 0.06 and fell early. Costs were never the
             # problem (2.69 vs 2.50); deleting fwd_speed removed 94% of the income.
             #
