@@ -15,7 +15,7 @@
 #SBATCH --mem=90G
 #SBATCH --gres=gpu:1
 #SBATCH --time=2-23:30:00
-#SBATCH --output=%x-%j.out
+#SBATCH --output=walk_v2/logs/%x-%j.out
 
 set -euo pipefail
 module purge

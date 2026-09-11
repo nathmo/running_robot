@@ -173,17 +173,12 @@ def export(run, out, checkpoint=None, brake=None, brake_window_s=None):
         "policy_hidden": [int(arrays["pi_w0"].shape[0]), int(arrays["pi_w1"].shape[0])],
         "task_brake_m": float(cfg.task_brake_m), "sprint_dist_m": float(cfg.sprint_dist_m),
         "objective": str(cfg.objective),
-        # THE COMMAND CHANNEL'S UNITS. objective='joystick' puts the commanded speed in task[0],
-        # normalised: task[0] = clip(v_cmd / v_max, v_min / v_max, 1). The robot's panel is a
-        # slider in m/s, so it needs v_max to send anything at all -- without it the runtime
-        # refuses rather than guessing a scale, because a wrong one is a policy being asked for a
-        # speed nobody typed. v_min is 0 while the env clips there (forward only); a backward
-        # command lands here as a negative v_min and the same formula covers it. v_cmd_rate is the
-        # rate the TRAINER moves the command at, if it ramps it -- the deployed slider is slewed at
-        # that rate so a dragged slider is not a step input on the one channel measured to matter.
+        # the speed the income saturates at, which is NOT the joystick's scale -- see "v_max" and
+        # "command" below for the command channel's own units. `v_cmd_rate` is the rate the TRAINER
+        # moves the command at if it ever ramps rather than redraws it; the deployed slider is
+        # slewed at that rate when it is nonzero (controller_v2.DEFAULT_CMD_SLEW_S otherwise), so
+        # that a dragged slider is never a step on the one input measured to drop this machine.
         "v_ceiling": float(cfg.v_ceiling),
-        "v_max": float(getattr(cfg, "v_max", 0.0) or cfg.v_ceiling),
-        "v_min": float(getattr(cfg, "v_min", 0.0)),
         "v_cmd_rate": float(getattr(cfg, "v_cmd_rate", 0.0)),
         "gait": gait_block,
         "gait_freq_floor_steps": freq_floor_steps,
@@ -208,10 +203,13 @@ def export(run, out, checkpoint=None, brake=None, brake_window_s=None):
                    "enable": bool(cfg.resync_enable)},
         # THE COMMAND CHANNEL. v2's task was [run flag, distance countdown] and the countdown came
         # from ground-truth world x. v3's is [commanded speed / v_max, reserved], so the runtime needs
-        # v_max to turn a joystick fraction into the number the policy was trained against, and
-        # nothing needs odometry.
+        # v_max to turn the operator's m/s into the number the policy reads -- and nothing needs
+        # odometry. These are TOP-LEVEL keys because that is where controller_v2.py reads them
+        # (`m.get("v_max")`); it raises a pointed error naming this exporter if they are missing.
+        "v_max": float(cfg.v_max) if cfg.objective == "joystick" else 0.0,
+        "v_min": float(cfg.v_min) if cfg.objective == "joystick" else 0.0,
         "command": {"kind": "speed_fraction" if cfg.objective == "joystick" else "run_flag_distance",
-                    "v_max": float(cfg.v_max), "zero_means": "step in place"},
+                    "zero_means": "step in place"},
         # did this checkpoint ever see a red light? The run/stop button on the robot drives task[0],
         # which is exactly the stoplight signal -- a checkpoint trained with stoplight_prob 0 has
         # only ever seen task[0] drop once, at the finish line, where every runner so far falls.

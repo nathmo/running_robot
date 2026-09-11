@@ -178,6 +178,7 @@ class Config:
     # moving command instead of having one retrofitted -- the v2 failure mode, where a command pinned
     # at 1 for a whole run and then flipped acted as a step disturbance, not as an input.
     v_max: float = 3.6                      # what a full stick asks for; measured top speed is ~3.5
+    v_min: float = 0.0                      # forward only for now; negative = walk backwards
     cmd_range: tuple = (0.0, 1.0)           # FINAL fraction-of-v_max band the curriculum widens to
     cmd_range_start: tuple = (0.8, 1.0)     # where it starts: what the warm-start runner already does
     cmd_curriculum_steps: int = 40_000_000

@@ -1,0 +1,1182 @@
+
+<title>DASH-01 Walker v2</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #F2F4F6;
+    --surface: #FFFFFF;
+    --ink: #1B242E;
+    --muted: #56626F;
+    --line: #D8DEE4;
+    --latch: #B26A00;
+    --latch-tint: #F6EBD9;
+    --step: #0A7C7C;
+    --step-tint: #DCEFEF;
+    --priv: #6A4FB6;
+    --priv-tint: #EAE4F7;
+    --new: #2A7D3A;
+    --new-tint: #E1F0E3;
+    --code-bg: #E9EDF1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12171D;
+      --surface: #1A2129;
+      --ink: #E7EBEF;
+      --muted: #93A0AD;
+      --line: #2C3641;
+      --latch: #E8A44C;
+      --latch-tint: #3A2C14;
+      --step: #45C4BC;
+      --step-tint: #12312F;
+      --priv: #A78BE0;
+      --priv-tint: #2A2140;
+      --new: #6FBF73;
+      --new-tint: #1C3222;
+      --code-bg: #232C36;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12171D;
+    --surface: #1A2129;
+    --ink: #E7EBEF;
+    --muted: #93A0AD;
+    --line: #2C3641;
+    --latch: #E8A44C;
+    --latch-tint: #3A2C14;
+    --step: #45C4BC;
+    --step-tint: #12312F;
+    --priv: #A78BE0;
+    --priv-tint: #2A2140;
+    --new: #6FBF73;
+    --new-tint: #1C3222;
+    --code-bg: #232C36;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+    margin: 0;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 40px 24px 80px; }
+  header.hero { border-bottom: 2px solid var(--ink); padding-bottom: 20px; margin-bottom: 8px; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  h1 {
+    font-family: "Chakra Petch", "IBM Plex Sans", sans-serif;
+    font-weight: 600; font-size: clamp(30px, 5vw, 44px);
+    margin: 6px 0 8px; line-height: 1.05; text-wrap: balance;
+  }
+  .subtitle { color: var(--muted); max-width: 68ch; margin: 0; }
+  h2 {
+    font-family: "Chakra Petch", "IBM Plex Sans", sans-serif;
+    font-weight: 600; font-size: 22px; margin: 0 0 4px; text-wrap: balance;
+  }
+  h3 { font-family: "Chakra Petch", sans-serif; font-weight: 500; font-size: 16px; margin: 24px 0 6px; }
+  section { margin-top: 52px; }
+  section > p { max-width: 72ch; }
+  p { margin: 10px 0; }
+  code, .mono {
+    font-family: "IBM Plex Mono", Consolas, monospace;
+    font-size: 0.92em;
+  }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 14px; }
+  .sec-num { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--muted); }
+
+  /* at-a-glance strip */
+  .glance { display: flex; flex-wrap: wrap; gap: 0; border: 1px solid var(--line); background: var(--surface); margin-top: 24px; }
+  .glance > div { flex: 1 1 130px; padding: 12px 16px; border-right: 1px solid var(--line); }
+  .glance > div:last-child { border-right: none; }
+  .glance .k { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .glance .v { font-family: "Chakra Petch", sans-serif; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .glance .v small { font-size: 13px; font-weight: 500; color: var(--muted); }
+
+  /* legend + chips */
+  .legend { display: flex; flex-wrap: wrap; gap: 18px; margin: 18px 0 0; font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 14px; height: 14px; border-radius: 2px; display: inline-block; }
+  .sw-latch { background: var(--latch-tint); border: 2px solid var(--latch); }
+  .sw-step { background: var(--step-tint); border: 2px solid var(--step); }
+  .sw-priv { background: var(--priv-tint); border: 2px dashed var(--priv); }
+  .chip-new {
+    display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 10px;
+    letter-spacing: 0.08em; padding: 1px 6px; border-radius: 3px;
+    background: var(--new-tint); color: var(--new); border: 1px solid var(--new);
+    vertical-align: 1px;
+  }
+
+  /* segmented vector bars */
+  .vecbar { display: flex; width: 100%; height: 58px; margin: 14px 0 4px; }
+  .vecbar .seg {
+    display: flex; flex-direction: column; justify-content: center; align-items: center;
+    border: 1px solid var(--line); border-left-width: 0; overflow: hidden;
+    background: var(--surface); min-width: 0;
+  }
+  .vecbar .seg:first-child { border-left-width: 1px; }
+  .vecbar .seg .nm { font-family: "IBM Plex Mono", monospace; font-size: 11px; white-space: nowrap; }
+  .vecbar .seg .d { font-family: "Chakra Petch", sans-serif; font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .seg.latch { background: var(--latch-tint); border-color: var(--latch); border-top-width: 2px; border-bottom-width: 2px; }
+  .seg.step  { background: var(--step-tint);  border-color: var(--step); border-top-width: 2px; border-bottom-width: 2px; }
+  .seg.priv  { background: var(--priv-tint);  border-color: var(--priv); border-style: dashed; }
+  .barcaption { font-size: 12.5px; color: var(--muted); font-family: "IBM Plex Mono", monospace; margin-bottom: 10px; }
+
+  /* tables */
+  .tblwrap { overflow-x: auto; border: 1px solid var(--line); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; text-align: left; color: var(--muted);
+    border-bottom: 2px solid var(--ink); padding: 8px 12px; white-space: nowrap;
+  }
+  td { border-bottom: 1px solid var(--line); padding: 8px 12px; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.mono, .num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.cmt { color: var(--muted); min-width: 260px; }
+  .rl { border-left: 3px solid var(--latch); }
+  .rs { border-left: 3px solid var(--step); }
+  .rp { border-left: 3px solid var(--priv); }
+
+  figure { margin: 20px 0; }
+  figure svg { max-width: 100%; height: auto; display: block; }
+  .figwrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); padding: 12px; }
+  figcaption { font-size: 12.5px; color: var(--muted); margin-top: 8px; max-width: 80ch; }
+  .svg-box { fill: var(--surface); stroke: currentColor; stroke-width: 1.2; }
+  .svg-latchbox { fill: var(--latch-tint); stroke: var(--latch); stroke-width: 1.6; }
+  .svg-stepbox { fill: var(--step-tint); stroke: var(--step); stroke-width: 1.6; }
+  .svg-privbox { fill: var(--priv-tint); stroke: var(--priv); stroke-width: 1.4; stroke-dasharray: 5 3; }
+  .svg-t { font-family: "IBM Plex Sans", sans-serif; font-size: 12px; fill: currentColor; }
+  .svg-m { font-family: "IBM Plex Mono", monospace; font-size: 11px; fill: currentColor; }
+  .svg-mut { fill: var(--muted); }
+  .svg-lt { fill: var(--latch); }
+  .svg-st { fill: var(--step); }
+  .svg-pt { fill: var(--priv); }
+
+  .note {
+    border-left: 3px solid var(--latch); background: var(--surface);
+    padding: 10px 16px; margin: 16px 0; max-width: 76ch; font-size: 14px;
+  }
+  .note.trap { border-left-color: var(--priv); }
+  .eq {
+    font-family: "IBM Plex Mono", monospace; font-size: 13.5px;
+    background: var(--code-bg); padding: 12px 16px; overflow-x: auto;
+    margin: 12px 0; line-height: 1.7;
+  }
+  ul { max-width: 76ch; }
+  li { margin: 4px 0; }
+  .cols2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+  a { color: var(--step); }
+  :focus-visible { outline: 2px solid var(--latch); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">DASH-01 · walk_mit lineage successor · proposal 2026-09-04 · rev 2026-09-09 — implementation ground truth</div>
+  <h1>DASH-01 Walker v2</h1>
+  <p class="subtitle">Proposed training architecture for the next lineage: 100&nbsp;Hz control, a per-cycle <strong>latched</strong> gait spec (the clock-warp exploit becomes unrepresentable), mirror-symmetry loss, randomized delay, thermal budget, and a two-stage curriculum. Everything below is dimensioned for the sprint objective (<span class="mono">task&nbsp;2</span>), steering on, impedance on, rigid ankle. Rev 2026-09-09 adds the parts a build needs and the earlier text lacked: the clock takes feedback from the ground (§05), the plant model is stated as <em>measured vs simulated</em> with the numbers (§07), the outdoor margin budget is a gate (§08), and the gait-library pipeline that finds the gait outside RL is specified end to end (§09).</p>
+
+  <div class="glance">
+    <div><div class="k">control rate</div><div class="v">100 <small>Hz</small></div></div>
+    <div><div class="k">action</div><div class="v">50 <small>dims</small></div></div>
+    <div><div class="k">actor obs</div><div class="v">377 <small>dims</small></div></div>
+    <div><div class="k">critic obs</div><div class="v">402 <small>dims</small></div></div>
+    <div><div class="k">gait freq</div><div class="v">1.5–4 <small>Hz latched</small></div></div>
+    <div><div class="k">actor+est params</div><div class="v">≈232 <small>k</small></div></div>
+  </div>
+
+  <div class="legend">
+    <span><span class="swatch sw-latch"></span> latched — commits once per gait cycle, at φ-wrap</span>
+    <span><span class="swatch sw-step"></span> per-step — flows every 10 ms tick</span>
+    <span><span class="swatch sw-priv"></span> privileged — train-time only, never on the Pi</span>
+    <span><span class="chip-new">NEW</span> not in the current sprint_m6_lim2 stack</span>
+  </div>
+</header>
+
+<!-- ============================================================ §00 AS BUILT -->
+<section>
+  <div class="sec-head"><span class="sec-num">§00</span><h2>As built — where this document was wrong</h2></div>
+  <p>This artifact was the design. It has now been implemented twice (a CPU arm in <code>walk_mit/</code>,
+  a GPU/MJX arm in <code>walk_v2/</code>), trained to a working runner, and taken to the edge of hardware.
+  The sections below have been corrected in place; this is the summary of what moved, so nobody reads a
+  stale number out of a figure. Every claim here is measured, and the measurement is named.</p>
+
+  <div class="tblwrap">
+  <table>
+    <tr><th>the design said</th><th>as built</th><th>why</th></tr>
+    <tr><td class="mono">actor 376 / critic 401</td><td class="mono">377 / 402</td>
+        <td class="cmt">The commit flag is an explicit once-block entry rather than something the actor
+        infers from the phase. Every index in §03 shifted by one with it.</td></tr>
+    <tr><td class="mono">residual ±0.20 rad</td><td class="mono">±0.10 rad</td>
+        <td class="cmt">Halved in v2b and never put back: at ±0.20 the residual became a second waveform
+        (58–95% saturation per channel) instead of a correction.</td></tr>
+    <tr><td class="mono">gait freq 0.5–5 Hz</td><td class="mono">1.5–4.0 Hz</td>
+        <td class="cmt">0.5 Hz cannot run, and the low rail is an attractor — cold free-plant seeds park
+        on it by 6–26 M steps and never leave.</td></tr>
+    <tr><td class="mono">contact-triggered resync</td><td class="mono">removed</td>
+        <td class="cmt">The robot has no foot contact sensor. It moved the actor's phase and could carry
+        its commit flag, and with κ = 0 the dash and the brake are unchanged. See §05.</td></tr>
+    <tr><td class="mono">task = [run flag, dist to line]</td><td class="mono">[v_cmd / v_max, reserved]</td>
+        <td class="cmt">The distance countdown came from ground-truth world x. The joystick command
+        replaces it, so the actor carries no odometry at all. See §03.</td></tr>
+    <tr><td class="mono">spec from a solved library + Raibert law</td><td class="mono">policy head</td>
+        <td class="cmt">The library variant is refused by the deploy runtime: it builds its spec from true
+        body velocity and exposes a touchdown-phase estimate. Neither exists on the robot.</td></tr>
+    <tr><td class="mono">Stages 0–5 (solver → library → Raibert → stabilizer → search → absorption)</td>
+        <td class="mono">end-to-end PPO, plus CEM over specs</td>
+        <td class="cmt">The staged pipeline was not used. What worked: PPO on the policy spec source for
+        locomotion, and a cross-entropy search over gait specs for the things PPO would not find. See §00b.</td></tr>
+  </table>
+  </div>
+
+  <h3 id="as-built-privilege">The invariant this design now holds to</h3>
+  <p><strong>Nothing the robot cannot measure reaches the actor.</strong> The privileged tail is the
+  critic's input and the velocity estimator's supervised target, with a <code>stop_gradient</code> between
+  the estimator and the actor, and the exporter slices the observation statistics to the actor width so no
+  privileged number can even reach a bundle. That part was always sound. What was <em>not</em> sound, and
+  is what §00 above records, is privileged <em>information</em> arriving through channels that are not
+  privileged tensors: a clock pulled by foot contact, and a task input computed from ground-truth position.
+  Reading the code is how you miss that, so it is now a test —
+  <code>walk_v2/tools/audit_actor_obs.py</code> perturbs contact and absolute position and requires the
+  actor slice to be bit-identical. It fails on every v2 checkpoint. That is the point.</p>
+
+  <h3>What the robot actually senses</h3>
+  <p>Joint encoders (with an origin that is re-randomised every power cycle), motor current, and one
+  ICM-20948 IMU on a Sense HAT under the base. Velocity is <em>differentiated position</em>, not measured;
+  torque is inferred from a datasheet <code>K<sub>t</sub></code> derated by a measured 0.85 gearbox
+  efficiency, which is roughly twice the torque noise the policy trained against; roll and pitch are
+  gravity-referenced and absolute while yaw is pure gyro integration and drifts. There is
+  <strong>no foot contact sensor, no absolute position, and no measured velocity</strong>. See
+  <code>robot/IMU.md</code> for the noise figures and the sim2real model.</p>
+</section>
+
+<!-- ============================================================ §00b WHAT WORKED -->
+<section>
+  <div class="sec-head"><span class="sec-num">§00b</span><h2>What actually produced the gait — and the stop</h2></div>
+  <p>The staged pipeline in §09–§11 (fixed-point solver, library solve, Raibert prior, stabilizer
+  training, closed-loop search, feedforward absorption) was not used. Two things were:</p>
+  <p><strong>PPO end-to-end on the policy spec source</strong> produced the locomotion. The best runner
+  covers the full 100 m in 16/16 greedy episodes at 3.23–3.29 m/s. It is warm-started, and that matters
+  more than it looks: 4/4 cold free-plant seeds park on the slow clock rail by 6–26 M steps and never
+  leave, so the planar stage exists to make 4 Hz discoverable, not to transfer balance.</p>
+  <p><strong>A cross-entropy search over gait specs</strong> produced everything PPO refused to find.
+  It runs the policy for its per-tick residual but overrides the latched spec, so it asks "does the
+  <em>action space</em> contain this?" rather than "can PPO find it?" — a distinction worth several
+  hundred million steps. It found a stop, and it found a gait at every commanded speed from 0.0 to
+  3.5 m/s, all upright, on a policy that only ever produced one speed.</p>
+
+  <h3>The stop, and why ten reward variants failed</h3>
+  <p>This robot would not learn to stop. Ten measured interventions — a bigger tracking weight, a
+  continuous command instead of a binary flag, a gentler deceleration, Laplace instead of Gaussian
+  tracking, a capture-step term, the measured braking direction injected as a prior — all produced the
+  same signature: it never slowed, and it fell <em>accelerating</em>. The cause is not the reward.</p>
+  <div style="border-left:3px solid var(--new); background:var(--new-tint); padding:12px 14px; margin:12px 0; border-radius:4px">
+    <strong>The stop command is itself the disturbance.</strong> Hold the run flag through the finish
+    line and the identical control — no braking at all — goes from <strong>3/512</strong> upright to
+    <strong>512/512</strong>. The robot was never failing at braking; it was failing at being told to
+    stop, because the command arrives on an input the gait is conditioned on, and the policy had spent
+    its whole life with that input pinned. Softening it (a ramp instead of a flip) cannot help, because
+    the problem is the channel, not its sharpness.
+  </div>
+  <p>So the stop is not a learned behaviour. It is twelve numbers — four channels × three knots,
+  piecewise linear over a fixed window — fitted per checkpoint by the same CEM, applied by overriding
+  the latched spec while the policy keeps supplying its residual, and the policy is never told the run
+  has ended. On held-out episodes with the trigger arriving at a random moment: 500/512 upright,
+  213/512 reaching a full standstill, median 19.6 m to stop. Three properties decide whether a schedule
+  reproduces, all measured: it is <em>duration</em>-specific (replaying a 12 s fit over 16 s gives
+  0/512), <em>state</em>-specific, and <em>checkpoint</em>-specific, because it rides on that policy's
+  residual.</p>
+  <p class="cmt"><strong>A method note that cost three experiments.</strong> Asking the search only to
+  avoid falling produces schedules that stay upright and never quite stop. Adding the thing actually
+  wanted — stop, and stop <em>short</em> — improved robustness <em>and</em> distance <em>and</em> the
+  stop rate simultaneously (78%→98% upright, 25%→42% stopped, 24.1 m→19.6 m). Optimising for the
+  absence of failure gave a worse controller than optimising for the presence of success. Pushing the
+  same search harder then lost on held-out episodes three separate times: more episodes per candidate,
+  a heavier distance weight, more iterations. Moderate settings generalise; aggressive ones fit the
+  episodes they were scored on.</p>
+
+  <h3>v3: the joystick</h3>
+  <p>The command channel is now the operator's, not the task's. <code>task[0] = v_cmd / v_max</code> —
+  a fraction of top speed, so half a stick asks for half — drawn per episode and redrawn on a timer
+  <em>throughout</em> training, with a share of draws at exactly zero. A zero command means
+  <strong>step in place</strong>, not stand still: this plant has no passive stance to hold, it topples
+  in 0.7–1.0 s with no gait, and the CEM confirmed a spec that holds 0.02 m/s upright. Episodes also
+  start the way an operator actually hands the robot over — dropped from 5–10 cm above a
+  tilt-dependent touching height, or held misaligned and released at up to ±20° of pitch — because the
+  measured bring-up envelope today is ±5° with both feet flat, and that is a training gap, not a fact
+  about the machine.</p>
+</section>
+
+<!-- ============================================================ §01 SIGNAL PATH -->
+<section>
+  <div class="sec-head"><span class="sec-num">§01</span><h2>Signal path</h2></div>
+  <p>One loop, one tick = 10 ms. The single structural change vs the current stack is the <strong>latch register</strong> between the policy and the gait generator: the policy still emits the full spec every tick (CPG-RL style), but only the value present at the phase wrap ever reaches the generator. Mid-cycle rewrites are not penalized — they are <em>discarded</em>, so there is no gate to park the phase against (the m3 exploit evaded the phase-gated penalty 89% of the time; a latch cannot be evaded).</p>
+
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 1000 460" role="img" aria-label="Signal path for one control tick. The 377-dim actor observation feeds both a velocity estimator and the actor network. The actor emits a 50-dim action which splits into a 44-dim gait spec held in a latch register that commits only at the phase wrap, and a 6-dim per-step residual. Both reach the gait generator, which produces PD targets and impedance gains for the MuJoCo plant. The plant output passes through a sensor model into a 33-dim observation frame that is pushed back into the history. The latched spec is echoed back into the observation. Separately the plant supplies a 25-dim privileged tail which, with the actor observation, forms the 402-dim critic input.">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+        <marker id="arrL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--latch)"/></marker>
+        <marker id="arrS" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--step)"/></marker>
+        <marker id="arrP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--priv)"/></marker>
+      </defs>
+
+      <!-- ECHO, routed above every box -->
+      <path d="M 660 62 L 660 32 L 103 32 L 103 62" fill="none" stroke="var(--latch)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrL)"/>
+      <text x="381" y="27" text-anchor="middle" class="svg-m svg-lt">latched spec 44 &#8594; obs, once</text>
+
+      <!-- ACTOR OBS -->
+      <rect x="20" y="62" width="165" height="83" class="svg-box"/>
+      <text x="103" y="82" text-anchor="middle" class="svg-t" font-weight="600">ACTOR OBS</text>
+      <text x="103" y="101" text-anchor="middle" class="svg-m svg-mut">history 10&#215;33 = 330</text>
+      <text x="103" y="117" text-anchor="middle" class="svg-m svg-lt">+ spec 44 + task 2</text>
+      <text x="103" y="136" text-anchor="middle" class="svg-m" font-weight="500">= 377</text>
+
+      <!-- obs -> actor -->
+      <line x1="185" y1="103" x2="300" y2="103" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+      <text x="235" y="97" class="svg-m svg-mut">377</text>
+
+      <!-- obs -> estimator -> actor -->
+      <path d="M 120 145 L 120 199 L 195 199" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+      <rect x="195" y="175" width="135" height="48" class="svg-box"/>
+      <text x="262" y="195" text-anchor="middle" class="svg-t" font-weight="600">ESTIMATOR</text>
+      <text x="262" y="213" text-anchor="middle" class="svg-m svg-mut">377&#8594;128&#8594;64&#8594;3</text>
+      <path d="M 330 199 L 355 199 L 355 145" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+      <circle cx="355" cy="172" r="8" fill="var(--surface)" stroke="var(--latch)" stroke-width="1.5"/>
+      <line x1="350" y1="177" x2="360" y2="167" stroke="var(--latch)" stroke-width="1.5"/>
+      <text x="369" y="176" class="svg-m svg-lt">v&#770; 3, detached</text>
+
+      <!-- ACTOR -->
+      <rect x="300" y="62" width="165" height="83" class="svg-box"/>
+      <text x="382" y="86" text-anchor="middle" class="svg-t" font-weight="600">ACTOR</text>
+      <text x="382" y="106" text-anchor="middle" class="svg-m svg-mut">377+3 &#8594; 256 &#8594; 256</text>
+      <text x="382" y="124" text-anchor="middle" class="svg-m svg-mut">&#8594; &#956; 50 (+&#963; 50)</text>
+
+      <!-- action split -->
+      <line x1="465" y1="103" x2="510" y2="103" stroke="currentColor" stroke-width="1.2"/>
+      <text x="472" y="96" class="svg-m">a 50</text>
+      <line x1="510" y1="92" x2="510" y2="178" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="510" y1="92" x2="560" y2="92" stroke="var(--latch)" stroke-width="1.4" marker-end="url(#arrL)"/>
+      <line x1="510" y1="178" x2="560" y2="178" stroke="var(--step)" stroke-width="1.4" marker-end="url(#arrS)"/>
+
+      <!-- LATCH -->
+      <rect x="560" y="62" width="200" height="62" class="svg-latchbox"/>
+      <text x="660" y="82" text-anchor="middle" class="svg-t svg-lt" font-weight="600">LATCH REGISTER</text>
+      <text x="660" y="100" text-anchor="middle" class="svg-m svg-lt">spec 44 &#183; commit @ &#966;-wrap</text>
+      <text x="660" y="116" text-anchor="middle" class="svg-m svg-lt">mid-cycle writes discarded</text>
+
+      <!-- PER-STEP -->
+      <rect x="560" y="152" width="200" height="53" class="svg-stepbox"/>
+      <text x="660" y="172" text-anchor="middle" class="svg-t svg-st" font-weight="600">PER-STEP</text>
+      <text x="660" y="192" text-anchor="middle" class="svg-m svg-st">residual 6, position only</text>
+
+      <line x1="760" y1="92" x2="800" y2="92" stroke="var(--latch)" stroke-width="1.4" marker-end="url(#arrL)"/>
+      <line x1="760" y1="178" x2="800" y2="178" stroke="var(--step)" stroke-width="1.4" marker-end="url(#arrS)"/>
+
+      <!-- GENERATOR -->
+      <rect x="800" y="62" width="180" height="143" class="svg-box"/>
+      <text x="890" y="90" text-anchor="middle" class="svg-t" font-weight="600">GAIT GENERATOR</text>
+      <text x="890" y="114" text-anchor="middle" class="svg-m svg-mut">S(&#966;) &#183; &#916;, s, o knobs</text>
+      <text x="890" y="132" text-anchor="middle" class="svg-m svg-mut">kp(&#966;), kd(&#966;)</text>
+      <text x="890" y="156" text-anchor="middle" class="svg-m svg-mut">+ pitch reflex (fixed)</text>
+      <text x="890" y="174" text-anchor="middle" class="svg-m svg-mut">+ roll reflex (learned)</text>
+
+      <!-- generator -> plant -->
+      <line x1="890" y1="205" x2="890" y2="265" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+      <text x="878" y="240" text-anchor="end" class="svg-m svg-mut">6 PD targets + gains</text>
+
+      <!-- PLANT -->
+      <rect x="790" y="265" width="190" height="85" class="svg-box"/>
+      <text x="885" y="288" text-anchor="middle" class="svg-t" font-weight="600">PLANT &#183; MuJoCo 1 kHz</text>
+      <text x="885" y="307" text-anchor="middle" class="svg-m svg-mut">&#215;10 substeps / tick</text>
+      <text x="885" y="323" text-anchor="middle" class="svg-m svg-mut">vel caps &#183; back-EMF</text>
+      <text x="885" y="339" text-anchor="middle" class="svg-m svg-mut">thermal &#916;T &#183; pushes</text>
+
+      <!-- plant -> sensor -> frame -> obs -->
+      <line x1="790" y1="300" x2="700" y2="300" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+      <rect x="500" y="270" width="200" height="60" class="svg-box"/>
+      <text x="600" y="290" text-anchor="middle" class="svg-t" font-weight="600">SENSOR MODEL</text>
+      <text x="600" y="308" text-anchor="middle" class="svg-m svg-mut">noise &#183; bias &#183; staleness</text>
+      <text x="600" y="324" text-anchor="middle" class="svg-m">delay draw 3&#8211;15 ms/ep</text>
+
+      <line x1="500" y1="300" x2="440" y2="300" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+      <rect x="250" y="270" width="190" height="60" class="svg-box"/>
+      <text x="345" y="290" text-anchor="middle" class="svg-t" font-weight="600">FRAME 33</text>
+      <text x="345" y="308" text-anchor="middle" class="svg-m svg-mut">proprio 18, grav 3, gyro 3</text>
+      <text x="345" y="324" text-anchor="middle" class="svg-m svg-mut">LPyaw 1, &#966; 2, prev residual 6</text>
+
+      <path d="M 250 300 L 60 300 L 60 145" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+      <text x="95" y="293" class="svg-m svg-mut">push, stride 2</text>
+
+      <!-- privileged tail -->
+      <path d="M 860 350 L 860 405 L 760 405" fill="none" stroke="var(--priv)" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#arrP)"/>
+      <text x="852" y="372" text-anchor="end" class="svg-m svg-pt">ground truth</text>
+      <rect x="560" y="378" width="200" height="52" class="svg-privbox"/>
+      <text x="660" y="398" text-anchor="middle" class="svg-t svg-pt" font-weight="600">PRIVILEGED TAIL 25</text>
+      <text x="660" y="416" text-anchor="middle" class="svg-m svg-pt">no noise, no delay</text>
+
+      <line x1="560" y1="405" x2="470" y2="405" stroke="var(--priv)" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#arrP)"/>
+      <text x="503" y="398" class="svg-m svg-pt">25</text>
+
+      <!-- CRITIC -->
+      <rect x="250" y="378" width="220" height="62" class="svg-privbox"/>
+      <text x="360" y="398" text-anchor="middle" class="svg-t svg-pt" font-weight="600">CRITIC (train only)</text>
+      <text x="360" y="416" text-anchor="middle" class="svg-m svg-pt">402 &#8594; 256 &#8594; 256 &#8594; V(s)</text>
+      <text x="360" y="432" text-anchor="middle" class="svg-m svg-pt">sees what the actor infers</text>
+
+      <path d="M 25 145 L 25 410 L 250 410" fill="none" stroke="var(--priv)" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#arrP)"/>
+      <text x="95" y="403" class="svg-m svg-pt">actor obs 377</text>
+    </svg>
+    </div>
+    <figcaption>Fig. 1 &mdash; Signal path per 10&nbsp;ms tick. Amber = latched once per gait cycle, teal = per-step, dashed violet = train-time only. The latched-spec echo returns to the observation because a cycle at 0.5&#8211;5&nbsp;Hz lasts 200&nbsp;ms to 2&nbsp;s and so outlives the 190&nbsp;ms history window &mdash; without it the policy cannot see which spec is currently driving the legs.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ §02 ACTION -->
+<section>
+  <div class="sec-head"><span class="sec-num">§02</span><h2>Action vector — 50 dims</h2></div>
+  <p>One Fourier series per joint family describes <em>the</em> gait; five relationship knobs describe how the right leg relates to the left. Everything in the spec is latched once per cycle. The two reflexes are the only state-driven pieces, and the residual is the only per-tick one.</p>
+
+  <div class="vecbar" aria-label="Action vector, 50 dims: series 21, kp 7, kd 7, freq 1, reflex 3, lag 1, stride asymmetry 1, offsets 3 latched; residual 6 per-step">
+    <div class="seg latch" style="flex: 21"><span class="nm">S · cam · thigh · hip_roll</span><span class="d">3 × 7 = 21</span></div>
+    <div class="seg latch" style="flex: 7"><span class="nm">kp(φ)</span><span class="d">7</span></div>
+    <div class="seg latch" style="flex: 7"><span class="nm">kd(φ)</span><span class="d">7</span></div>
+    <div class="seg latch" style="flex: 1.6"><span class="nm">f</span><span class="d">1</span></div>
+    <div class="seg latch" style="flex: 3"><span class="nm">reflex</span><span class="d">3</span></div>
+    <div class="seg latch" style="flex: 5"><span class="nm">Δ · s · o×3</span><span class="d">5</span></div>
+    <div class="seg step" style="flex: 6"><span class="nm">residual</span><span class="d">6</span></div>
+  </div>
+  <div class="barcaption">[0:44] gait spec — LATCHED at φ-wrap&nbsp;&nbsp;·&nbsp;&nbsp;[44:50] residual — applied every tick&nbsp;&nbsp;·&nbsp;&nbsp;all entries ∈ [−1, 1]</div>
+
+  <div class="eq">u_L(φ) = n_L + (1+s)·A·S(φ) &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ o<br>u_R(φ) = n_R − (1−s)·A·S(φ − π − Δ) + o<br><span style="opacity:.7">joint space; the structural minus + half-cycle shift is the mirror; o enters both legs with the same joint sign (+,+), which the kinematic test showed is the antisymmetric pattern for every joint family</span></div>
+
+  <div class="tblwrap">
+  <table>
+    <tr><th>field</th><th>idx</th><th>dims</th><th>what it is</th><th>comment</th></tr>
+    <tr class="rl"><td class="mono">S cam</td><td class="mono">0:7</td><td class="mono">7</td><td>N=3 series, ×<code>cam_amp</code></td><td class="cmt">The crank: 1.32 m/rad of fore-aft authority at stance, 2.7× the thigh, nearly linear across a stride. Both legs read this same series.</td></tr>
+    <tr class="rl"><td class="mono">S thigh</td><td class="mono">7:14</td><td class="mono">7</td><td>N=3 series, ×<code>thigh_amp</code></td><td class="cmt">Support and lift; its fore-aft gain varies 6× across ±0.2 rad, so it is the wrong place for a trim offset.</td></tr>
+    <tr class="rl"><td class="mono">S hip_roll</td><td class="mono">14:21</td><td class="mono">7</td><td>N=3 series, ×<code>roll_amp</code></td><td class="cmt"><span class="chip-new">NEW</span> Periodic lateral motion — clean axis, no fore-aft bleed measured. Bounded by the slow AK60-39.</td></tr>
+    <tr class="rl"><td class="mono">kp(φ), kd(φ)</td><td class="mono">21:35</td><td class="mono">14</td><td>series → exp map</td><td class="cmt">Stiffness/damping scheduled on phase, one profile for both legs (a gain has no handedness). kp ×2.5/÷3, kd soften-only ÷4 — the measured MIT frame ranges.</td></tr>
+    <tr class="rl"><td class="mono">freq_raw</td><td class="mono">35</td><td class="mono">1</td><td>linear → [0.5, 5.0] Hz</td><td class="cmt">Latched, so the clock can neither pause nor warp. 0.5 Hz cannot run (6 m stride), so the floor is only reachable while stopping.</td></tr>
+    <tr class="rl"><td class="mono">reflex kp, kd, bias</td><td class="mono">36:39</td><td class="mono">3</td><td>u = kp·roll + kd·roll̇ + bias</td><td class="cmt"><strong>Not a series — feedback</strong>: a function of phase cannot stabilise an unstable DoF. Gains latch, the multiplication runs at 100 Hz, and the output enters hip_roll as (+,+) (the lean), correcting the current code — see §06.</td></tr>
+    <tr class="rl"><td class="mono">Δ — lag</td><td class="mono">39</td><td class="mono">1</td><td>×Δ_max rad</td><td class="cmt"><strong>Exact in workspace by theorem.</strong> Right footfall lands π+Δ after the left. Δ_max is a real decision: ±0.6 rad (the CPG arm’s value) excludes the bound; ±π allows it. See §06.</td></tr>
+    <tr class="rl"><td class="mono">s — stride asymmetry</td><td class="mono">40</td><td class="mono">1</td><td>g_L = 1+s, g_R = 1−s</td><td class="cmt">The existing <code>steer_stride</code>, kept. Measured 0.4% error in workspace. <strong>s = ±1 zeroes one leg</strong> — the one-legged hop is expressible, and priced.</td></tr>
+    <tr class="rl"><td class="mono">o — cam, thigh, hip</td><td class="mono">41:44</td><td class="mono">3</td><td>joint bias, (+,+)</td><td class="cmt"><code>o_cam</code> = fore-aft split, 1.3% workspace error on a stride (the exact one). <code>o_thigh</code> with <code>o_cam</code> = lift (both lift the toe equally, 0.115 m/rad). <code>o_hip</code> = lean, both feet the same way, 6.6% spread — the old <code>s_width</code> under its true name.</td></tr>
+    <tr class="rs"><td class="mono">residual</td><td class="mono">44:50</td><td class="mono">6</td><td>±0.10 rad, per joint <span class="chip-new" style="background:var(--code-bg);color:var(--muted)">as built</span></td><td class="cmt">The only per-tick channel, and the only one whose history is worth stacking. Load-bearing (every freeze/replay counterfactual falls without it); billed on magnitude and rate.</td></tr>
+  </table>
+  </div>
+
+  <div class="note">
+    <strong>Billing.</strong> No phase-gated penalty anywhere. Spec change is billed once per cycle at commit, <code>w_spec·‖S<sub>k+1</sub>−S<sub>k</sub>‖²</code>; asymmetry is billed as a standing price on the five knobs, <code>w_knob·‖(Δ/Δ_max, s, o/o_max)‖²</code>. Mirror symmetry is not a penalty fighting the parameterisation — knobs at zero <em>is</em> the mirror-symmetric gait, structurally.
+  </div>
+  <div class="note trap">
+    <strong>Watch item — slow-clock billing.</strong> Per-commit billing gives a low frequency a mild discount. Second-order (speed income and the clock cost dominate, and 0.5 Hz cannot run); watch latched f mid-dash and amortise by <code>f/f_ref</code> only if it drifts to the floor.
+  </div>
+  <p><strong>Stopping is an amplitude decision</strong> — S → 0 halts the legs at any f, so the stop phase never needs the clock parked.</p>
+</section>
+
+<!-- ============================================================ §03 OBSERVATION -->
+<section>
+  <div class="sec-head"><span class="sec-num">§03</span><h2>Observation — 377 actor / 402 critic</h2></div>
+  <p>Only what changes every tick goes in the history. The latched spec changes once per cycle and the task once per episode, so they are observed <em>once</em>, outside the stack — not ten times. That single change takes the actor input from 800 to 377.</p>
+
+  <h3>Per-tick frame — 33 dims</h3>
+  <div class="vecbar" aria-label="Observation frame, 33 dims: motor pos 6, vel 6, torque 6, gravity 3, gyro 3, LP yaw 1, phase 2, previous residual 6">
+    <div class="seg" style="flex: 6"><span class="nm">q pos</span><span class="d">6</span></div>
+    <div class="seg" style="flex: 6"><span class="nm">q vel</span><span class="d">6</span></div>
+    <div class="seg" style="flex: 6"><span class="nm">τ</span><span class="d">6</span></div>
+    <div class="seg" style="flex: 3"><span class="nm">grav</span><span class="d">3</span></div>
+    <div class="seg" style="flex: 3"><span class="nm">gyro</span><span class="d">3</span></div>
+    <div class="seg" style="flex: 1.6"><span class="nm">ψ̇LP</span><span class="d">1</span></div>
+    <div class="seg" style="flex: 2.2"><span class="nm">φ</span><span class="d">2</span></div>
+    <div class="seg step" style="flex: 6"><span class="nm">prev residual</span><span class="d">6</span></div>
+  </div>
+  <div class="barcaption">6+6+6+3+3+1+2+6 = 33 — every entry measurable on the Pi, every entry actually changes at 100 Hz</div>
+
+  <div class="tblwrap">
+  <table>
+    <tr><th>block</th><th>dims</th><th>source</th><th>comment</th></tr>
+    <tr><td class="mono">motor pos/vel/torque</td><td class="mono">18</td><td>CAN feedback, 200 Hz broadcast (2 frames/tick)</td><td class="cmt">Torque is real telemetry in MIT mode.</td></tr>
+    <tr><td class="mono">gravity, gyro</td><td class="mono">6</td><td>IMU</td><td class="cmt">Gravity is yaw-invariant — the reason heading was invisible; gyro carries the wobble.</td></tr>
+    <tr><td class="mono">LP yaw rate <span class="chip-new">NEW</span></td><td class="mono">1</td><td>EMA of ω_z, τ ≈ 0.7 s</td><td class="cmt">The same filtered signal the reward bills: drift, not wobble. Deployable.</td></tr>
+    <tr><td class="mono">phase</td><td class="mono">2</td><td>controller state</td><td class="cmt">cos φ, sin φ, advancing at the latched f. Also what tells the policy which tick is the wrap (§04).</td></tr>
+    <tr><td class="mono">prev residual</td><td class="mono">6</td><td>own output</td><td class="cmt">The per-tick channel — the only part of the old <code>prev_action</code> whose history carries information.</td></tr>
+  </table>
+  </div>
+
+  <h3>Assembly</h3>
+  <div class="vecbar" aria-label="Full observation: history 330, once-block 46, privileged tail 25">
+    <div class="seg" style="flex: 33"><span class="nm">history — 10 frames × stride 2 ≈ 190 ms</span><span class="d">10 × 33 = 330</span></div>
+    <div class="seg latch" style="flex: 5"><span class="nm">spec 44 + task 2</span><span class="d">46</span></div>
+    <div class="seg priv" style="flex: 3"><span class="nm">priv</span><span class="d">25</span></div>
+  </div>
+  <div class="barcaption">actor slice = obs[0:377]&nbsp;&nbsp;·&nbsp;&nbsp;critic reads all 402&nbsp;&nbsp;·&nbsp;&nbsp;the tail never exists on hardware</div>
+  <p>The once-block holds the <strong>live latched spec</strong> (what is driving the legs, not what the policy last emitted — under the latch those differ, and only the live one matters) and the task <code>[run_flag, clip(d/8, 0, 1)] in v2; [v_cmd / v_max, reserved] in v3</code>: a binary command plus the braking lookahead, re-encoded so the last 8 m have resolution.</p>
+
+  <div class="tblwrap">
+  <table>
+    <tr><th>privileged entry</th><th>idx</th><th>dims</th><th>comment</th></tr>
+    <tr class="rp"><td class="mono">true base velocity (body)</td><td class="mono">377:380</td><td class="mono">3</td><td class="cmt">Also the estimator’s supervised target — <strong>must stay at [0:3]</strong> of the tail.</td></tr>
+    <tr class="rp"><td class="mono">foot contacts L,R</td><td class="mono">380:382</td><td class="mono">2</td><td class="cmt">Unchanged.</td></tr>
+    <tr class="rp"><td class="mono">height above kill line</td><td class="mono">382</td><td class="mono">1</td><td class="cmt">Survival margin, no target baked in.</td></tr>
+    <tr class="rp"><td class="mono">lateral offset y</td><td class="mono">383</td><td class="mono">1</td><td class="cmt">The heading failure in its own units, invisible to the actor.</td></tr>
+    <tr class="rp"><td class="mono">heading (world yaw)</td><td class="mono">384</td><td class="mono">1</td><td class="cmt">So the reward can bill drift against something the critic sees.</td></tr>
+    <tr class="rp"><td class="mono">true base acceleration</td><td class="mono">385:388</td><td class="mono">3</td><td class="cmt">Landing severity, not recoverable from one state.</td></tr>
+    <tr class="rp"><td class="mono">normal contact force L,R</td><td class="mono">388:390</td><td class="mono">2</td><td class="cmt">How hard, not just whether.</td></tr>
+    <tr class="rp"><td class="mono">DR draw</td><td class="mono">390:395</td><td class="mono">5</td><td class="cmt">mass, CoM, friction, kp, torque scale — the episode’s plant identity.</td></tr>
+    <tr class="rp"><td class="mono">drawn delay (ms)</td><td class="mono">395</td><td class="mono">1</td><td class="cmt">This episode’s actuation delay.</td></tr>
+    <tr class="rp"><td class="mono">winding ΔT / ΔT_max ×6</td><td class="mono">396:402</td><td class="mono">6</td><td class="cmt">The thermal budget the reward charges against (τ_th = 45 s — the 5 s here was the assumed constant; the second anchor fixed it, see §07).</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ §04 NETWORKS -->
+<section>
+  <div class="sec-head"><span class="sec-num">§04</span><h2>Networks</h2></div>
+  <div class="tblwrap">
+  <table>
+    <tr><th>net</th><th>in → arch → out</th><th>≈ params</th><th>trained by</th><th>runs on Pi</th><th>comment</th></tr>
+    <tr>
+      <td class="mono">estimator</td><td class="mono">377 → 128 → 64 → 3</td><td class="mono num">57 k</td>
+      <td>supervised MSE vs priv[0:3]</td><td class="mono">yes</td>
+      <td class="cmt">DreamWaQ-style; output enters the actor <em>detached</em> so PPO can't bend it. Unchanged from asym_policy.py.</td>
+    </tr>
+    <tr>
+      <td class="mono">actor</td><td class="mono">377+3 → 256 → 256 → μ 50</td><td class="mono num">175 k</td>
+      <td>PPO + symmetry loss (§06)</td><td class="mono">yes</td>
+      <td class="cmt">+ state-independent log σ (50), annealed — greedy eval only, as always (determinism gap).</td>
+    </tr>
+    <tr>
+      <td class="mono">critic</td><td class="mono">402 → 256 → 256 → 1</td><td class="mono num">168 k</td>
+      <td>PPO value loss</td><td class="mono">no</td>
+      <td class="cmt">Full obs incl. privileged tail.</td>
+    </tr>
+  </table>
+  </div>
+  
+  <h3>Credit assignment under the latch <span class="chip-new">NEW RISK</span></h3>
+  <p>At 3 Hz and 100 Hz, <strong>44 of the 50 action dims are no-ops on 32 of every 33 ticks</strong>: only the wrap-tick emission of the spec reaches the plant. PPO would still sample those dims with exploration noise and assign them an advantage on every tick — pure gradient noise on ~90% of the action, ~97% of the time. The fix is to <strong>mask the spec dims out of the log-probability on non-wrap ticks</strong> (a per-sample mask from the env into a custom Gaussian distribution, ~40 lines), so those dims neither perturb the ratio nor receive spurious gradients. The alternative — commit the <em>cycle average</em> of the emissions instead of the wrap-tick value — spreads credit over every tick with no masking, at the cost of the policy not being able to act on late-cycle information. Masking is the recommendation; it is the one genuinely new implementation risk the latch introduces.</p>
+
+  <h3>How the estimator is trained</h3>
+  <p><strong>Supervised regression against ground truth &mdash; not PPO, and not its own actor-critic.</strong> The privileged tail already carries the true base velocity for the critic; the same three numbers double as a labelled target. After every PPO rollout a separate callback runs a few Adam epochs of MSE on that rollout&rsquo;s own observations, and those gradients touch the estimator&rsquo;s weights and nothing else.</p>
+
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 980 330" role="img" aria-label="Gradient scoping. One observation vector splits into an actor slice of 377 dims and a privileged tail of 25. The estimator reads only the actor slice and predicts base velocity; it is trained by a supervised mean-squared-error loss against the privileged true velocity, with its own Adam optimiser, and those gradients reach the estimator only. Its output passes through a detach barrier into the actor, which is trained by the PPO policy loss alone. The critic reads the full observation including the privileged tail and is trained by the PPO value loss alone.">
+      <defs>
+        <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="a4p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="var(--priv)"/>
+        </marker>
+      </defs>
+
+      <!-- observation -->
+      <rect x="40" y="44" width="620" height="32" class="svg-box"/>
+      <text x="350" y="65" text-anchor="middle" class="svg-m">actor slice &#183; obs[0:377] &#183; deployable proprioception only</text>
+      <rect x="660" y="44" width="140" height="32" class="svg-privbox"/>
+      <text x="730" y="65" text-anchor="middle" class="svg-m svg-pt">priv tail 25</text>
+
+      <!-- obs -> estimator -->
+      <line x1="170" y1="76" x2="170" y2="120" stroke="currentColor" stroke-width="1.2" marker-end="url(#a4)"/>
+      <text x="178" y="103" class="svg-m svg-mut">377</text>
+      <!-- obs -> actor, routed left of the estimator -->
+      <path d="M 48 76 L 48 252 L 60 252" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#a4)"/>
+      <text x="10" y="200" class="svg-m svg-mut">377</text>
+      <!-- obs -> critic -->
+      <path d="M 780 76 L 780 100 L 740 100 L 740 120" fill="none" stroke="var(--priv)" stroke-width="1.2" marker-end="url(#a4p)"/>
+      <text x="800" y="112" class="svg-m svg-pt">402, priv included</text>
+
+      <!-- estimator -->
+      <rect x="60" y="120" width="240" height="52" class="svg-box"/>
+      <text x="180" y="140" text-anchor="middle" class="svg-t" font-weight="600">ESTIMATOR</text>
+      <text x="180" y="158" text-anchor="middle" class="svg-m svg-mut">377 &#8594; 128 &#8594; 64 &#8594; 3</text>
+
+      <!-- supervised loss -->
+      <line x1="300" y1="146" x2="340" y2="146" stroke="currentColor" stroke-width="1.2" marker-end="url(#a4)"/>
+      <rect x="340" y="112" width="240" height="68" class="svg-privbox"/>
+      <text x="460" y="132" text-anchor="middle" class="svg-t svg-pt" font-weight="600">SUPERVISED MSE</text>
+      <text x="460" y="150" text-anchor="middle" class="svg-m svg-pt">own Adam, lr 1e-3</text>
+      <text x="460" y="166" text-anchor="middle" class="svg-m svg-pt">2 epochs &#215; 4096, after each rollout</text>
+      <path d="M 690 76 L 690 96 L 460 96 L 460 112" fill="none" stroke="var(--priv)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#a4p)"/>
+      <text x="470" y="92" class="svg-m svg-pt">target = priv[377:380], true base velocity</text>
+      <text x="180" y="192" text-anchor="middle" class="svg-m" fill="var(--new)">&#8711; estimator only</text>
+
+      <!-- critic -->
+      <rect x="620" y="120" width="240" height="52" class="svg-box"/>
+      <text x="740" y="140" text-anchor="middle" class="svg-t" font-weight="600">CRITIC</text>
+      <text x="740" y="158" text-anchor="middle" class="svg-m svg-mut">401 &#8594; 256 &#8594; 256 &#8594; V(s)</text>
+      <text x="740" y="192" text-anchor="middle" class="svg-m" fill="var(--new)">&#8711; PPO value loss only</text>
+
+      <!-- estimator -> actor, detached -->
+      <line x1="180" y1="172" x2="180" y2="226" stroke="currentColor" stroke-width="1.4" marker-end="url(#a4)"/>
+      <circle cx="180" cy="205" r="9" fill="var(--surface)" stroke="var(--latch)" stroke-width="1.6"/>
+      <line x1="174" y1="211" x2="186" y2="199" stroke="var(--latch)" stroke-width="1.6"/>
+      <text x="196" y="209" class="svg-m svg-lt">detach &#8212; PPO cannot train the estimator</text>
+
+      <!-- actor -->
+      <rect x="60" y="226" width="240" height="52" class="svg-box"/>
+      <text x="180" y="246" text-anchor="middle" class="svg-t" font-weight="600">ACTOR</text>
+      <text x="180" y="264" text-anchor="middle" class="svg-m svg-mut">377 + 3 &#8594; 256 &#8594; 256 &#8594; &#956; 50</text>
+      <line x1="180" y1="278" x2="180" y2="298" stroke="currentColor" stroke-width="1.2" marker-end="url(#a4)"/>
+      <text x="196" y="298" class="svg-m" fill="var(--new)">&#8711; PPO policy loss only</text>
+      <text x="468" y="250" class="svg-m svg-mut">Three networks, three disjoint gradient scopes, one shared observation.</text>
+      <text x="468" y="268" class="svg-m svg-mut">Only the two boxes on the left run on the Pi.</text>
+    </svg>
+    </div>
+    <figcaption>Fig. 4 &mdash; Gradient scoping. The estimator answers to its supervised target alone; the detach is what keeps it honest.</figcaption>
+  </figure>
+
+  <p><strong>Why detached.</strong> If PPO could backpropagate through the estimate, the actor would be free to bend the estimator toward whatever feature happened to raise return &mdash; and it would stop being a velocity estimate. Detaching leaves it a single-purpose regressor with its own optimum, which is also what makes it deployable: on the robot the same weights map measured history to a velocity the controller can trust.</p>
+  <p><strong>Why it exists at all.</strong> The actor has no velocimeter, and velocity is only about R&#178; 0.807 recoverable from the observation history &mdash; so without this the policy would have to re-derive it inside the policy net from a noisy signal, with no supervision saying whether it got it right. The estimator makes that step explicit, supervised, and loggable (<code>est/vel_rmse</code>).</p>
+  <p>Two practical notes: the estimator&rsquo;s weights live inside the policy and ride every checkpoint, but the callback&rsquo;s Adam moments do not survive a resume, which costs a few warm-up updates and nothing else. And the supervised pass reuses the PPO rollout buffer, so it adds no environment steps &mdash; only a little GPU time per update.</p>
+
+  <p>Pi budget: estimator + actor ≈ 232 k MACs/tick ≈ 0.9 ms at the measured 519 MFLOPS (OpenBLAS gemv). The measured 8–9 ms/tick at 200 Hz was mostly numpy dispatch, already cut from the deploy control law — at 100 Hz the 10 ms budget holds with margin, which is the deployment argument for 100 Hz in the first place.</p>
+</section>
+
+<!-- ============================================================ §05 LATCH TIMELINE -->
+<section>
+  <div class="sec-head"><span class="sec-num">§05</span><h2>The latch, over one gait cycle</h2></div>
+  <p>Example at f = 3 Hz: one cycle = 333 ms = 33 ticks. The policy's spec output is sampled every tick but only the wrap-time value commits. Compare the m3 exploit: with per-step specs and 0.5–50 Hz rails, the policy warped φ to park where the penalty gate was free (93% of the time) and rewrote the spec every 5 ms. Here the exploit is not expensive — it is <em>unrepresentable</em>.</p>
+
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 980 300" role="img" aria-label="Timeline of one gait cycle at 3 Hz: spec emissions every tick are discarded, the latch register holds S_k for the whole cycle and commits S_k+1 at the phase wrap, the per-step residual flows every tick, and the phase ramps linearly at the latched frequency.">
+      <!-- tick axis -->
+      <line x1="40" y1="40" x2="940" y2="40" stroke="currentColor" stroke-width="1"/>
+      <text x="40" y="28" class="svg-m svg-mut">tick 0</text>
+      <text x="852" y="28" class="svg-m svg-mut" text-anchor="middle">tick 33 = φ-wrap</text>
+      <text x="940" y="28" class="svg-m svg-mut" text-anchor="end">…</text>
+
+      <!-- lane 1: emissions -->
+      <text x="40" y="70" class="svg-m svg-mut">policy spec output (44/tick)</text>
+      <g stroke="var(--muted)" stroke-width="1.6" opacity="0.55">
+        <line x1="40"  y1="78" x2="40"  y2="94"/><line x1="65"  y1="78" x2="65"  y2="94"/>
+        <line x1="90"  y1="78" x2="90"  y2="94"/><line x1="115" y1="78" x2="115" y2="94"/>
+        <line x1="140" y1="78" x2="140" y2="94"/><line x1="165" y1="78" x2="165" y2="94"/>
+        <line x1="190" y1="78" x2="190" y2="94"/><line x1="215" y1="78" x2="215" y2="94"/>
+        <line x1="240" y1="78" x2="240" y2="94"/><line x1="265" y1="78" x2="265" y2="94"/>
+        <line x1="290" y1="78" x2="290" y2="94"/><line x1="315" y1="78" x2="315" y2="94"/>
+        <line x1="340" y1="78" x2="340" y2="94"/><line x1="365" y1="78" x2="365" y2="94"/>
+        <line x1="390" y1="78" x2="390" y2="94"/><line x1="415" y1="78" x2="415" y2="94"/>
+        <line x1="440" y1="78" x2="440" y2="94"/><line x1="465" y1="78" x2="465" y2="94"/>
+        <line x1="490" y1="78" x2="490" y2="94"/><line x1="515" y1="78" x2="515" y2="94"/>
+        <line x1="540" y1="78" x2="540" y2="94"/><line x1="565" y1="78" x2="565" y2="94"/>
+        <line x1="590" y1="78" x2="590" y2="94"/><line x1="615" y1="78" x2="615" y2="94"/>
+        <line x1="640" y1="78" x2="640" y2="94"/><line x1="665" y1="78" x2="665" y2="94"/>
+        <line x1="690" y1="78" x2="690" y2="94"/><line x1="715" y1="78" x2="715" y2="94"/>
+        <line x1="740" y1="78" x2="740" y2="94"/><line x1="765" y1="78" x2="765" y2="94"/>
+        <line x1="790" y1="78" x2="790" y2="94"/><line x1="815" y1="78" x2="815" y2="94"/>
+      </g>
+      <line x1="852" y1="74" x2="852" y2="98" stroke="var(--latch)" stroke-width="3"/>
+      <text x="600" y="70" class="svg-m svg-mut">…discarded…</text>
+      <text x="860" y="70" class="svg-m svg-lt">sampled</text>
+
+      <!-- lane 2: latch register -->
+      <text x="40" y="130" class="svg-m svg-lt">latch register</text>
+      <rect x="40" y="138" width="812" height="22" fill="var(--latch-tint)" stroke="var(--latch)" stroke-width="1.5"/>
+      <text x="446" y="153" text-anchor="middle" class="svg-m svg-lt">S_k live for the whole cycle — generator reads only this</text>
+      <rect x="852" y="138" width="88" height="22" fill="var(--latch)" opacity="0.85"/>
+      <text x="896" y="153" text-anchor="middle" class="svg-m" fill="#fff">S_k+1</text>
+      <line x1="852" y1="98" x2="852" y2="138" stroke="var(--latch)" stroke-width="2"/>
+      <text x="580" y="180" class="svg-m svg-lt">commit + bill once: w_spec_cycle · ‖S_k+1 − S_k‖²</text>
+
+      <!-- lane 3: per-step -->
+      <text x="40" y="212" class="svg-m svg-st">residual 6 (position only)</text>
+      <g stroke="var(--step)" stroke-width="1.6">
+        <line x1="40"  y1="220" x2="40"  y2="234"/><line x1="65"  y1="220" x2="65"  y2="234"/>
+        <line x1="90"  y1="220" x2="90"  y2="234"/><line x1="115" y1="220" x2="115" y2="234"/>
+        <line x1="140" y1="220" x2="140" y2="234"/><line x1="165" y1="220" x2="165" y2="234"/>
+        <line x1="190" y1="220" x2="190" y2="234"/><line x1="215" y1="220" x2="215" y2="234"/>
+        <line x1="240" y1="220" x2="240" y2="234"/><line x1="265" y1="220" x2="265" y2="234"/>
+        <line x1="290" y1="220" x2="290" y2="234"/><line x1="315" y1="220" x2="315" y2="234"/>
+        <line x1="340" y1="220" x2="340" y2="234"/><line x1="365" y1="220" x2="365" y2="234"/>
+        <line x1="390" y1="220" x2="390" y2="234"/><line x1="415" y1="220" x2="415" y2="234"/>
+        <line x1="440" y1="220" x2="440" y2="234"/><line x1="465" y1="220" x2="465" y2="234"/>
+        <line x1="490" y1="220" x2="490" y2="234"/><line x1="515" y1="220" x2="515" y2="234"/>
+        <line x1="540" y1="220" x2="540" y2="234"/><line x1="565" y1="220" x2="565" y2="234"/>
+        <line x1="590" y1="220" x2="590" y2="234"/><line x1="615" y1="220" x2="615" y2="234"/>
+        <line x1="640" y1="220" x2="640" y2="234"/><line x1="665" y1="220" x2="665" y2="234"/>
+        <line x1="690" y1="220" x2="690" y2="234"/><line x1="715" y1="220" x2="715" y2="234"/>
+        <line x1="740" y1="220" x2="740" y2="234"/><line x1="765" y1="220" x2="765" y2="234"/>
+        <line x1="790" y1="220" x2="790" y2="234"/><line x1="815" y1="220" x2="815" y2="234"/>
+        <line x1="840" y1="220" x2="840" y2="234"/><line x1="865" y1="220" x2="865" y2="234"/>
+        <line x1="890" y1="220" x2="890" y2="234"/><line x1="915" y1="220" x2="915" y2="234"/>
+      </g>
+      <text x="600" y="248" class="svg-m svg-st">applied every tick — always billed, never gated</text>
+
+      <!-- lane 4: phase ramp -->
+      <text x="40" y="272" class="svg-m svg-mut">φ</text>
+      <polyline points="60,290 852,262 852,290 940,287" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="440" y="290" class="svg-m svg-mut">advances at f_latched — no mid-cycle warp possible</text>
+    </svg>
+    </div>
+    <figcaption>Fig. 2 — One cycle at 3 Hz (33 ticks @ 100 Hz). The spec-change cost is charged once, at commit, with no phase window anywhere — parking the phase buys nothing because frequency itself is latched.</figcaption>
+  </figure>
+
+  <h3>Ground feedback into the clock — contact-triggered resync <span class="chip-new" style="background:var(--code-bg);color:var(--muted)">REMOVED in v3</span></h3>
+  <div style="border-left:3px solid var(--latch); background:var(--latch-tint); padding:12px 14px; margin:12px 0; border-radius:4px">
+    <strong>This was built, measured, and then taken out.</strong> DASH-01 has no foot contact sensor, so nothing on the robot can produce the touchdown event — the runtime free-runs the clock. That made the resync a privileged input in the strict sense: it moved <code>&#966;</code>, which the actor reads as <code>[cos, sin]</code>, and it could carry the commit flag across the wrap, so <em>two</em> actor inputs depended on a signal the hardware cannot supply.
+    <br><br>Measured 2026-09-11 with &#954; forced to 0 on the same checkpoints: the dash is unchanged (103.1–104.9 m at 3.20–3.28 m/s free-running, against 103.1–104.8 m at 3.23–3.29 m/s with the resync) and braking is if anything better (511/512 upright held-out, against 476/512). It was buying nothing. <strong>v3 compiles the whole block out</strong> (<code>resync_enable=False</code>): no contact quantity reaches the clock at all. The parameters below are kept because v2 runs replay with them, and because <code>controller_v2.note_contact()</code> is the hook if a contact sensor ever exists — but do not build an IMU touchdown estimator for this, it is not what limits the controller. Brake-point placement dominates it by a wide margin.
+  </div>
+  <p>Every gait above is timed by a free-running clock. Texture, camber, a gust or a scuffed swing all show up first as an <em>early or late touchdown</em>, and a time-clocked reference then fights each one through the residual for the rest of the cycle. The hybrid-zero-dynamics remedy is a state-based phase (stance-leg angle), which running lacks during flight; the running-appropriate form is the spring-mass one — <strong>the touchdown event resets the clock</strong>. The env keeps its own estimate of where in φ each foot normally lands and pulls the clock toward it when the foot actually lands.</p>
+  <div class="eq">on a rising contact edge of foot j at phase φ, if |wrap(φ − φ̂_td,j)| ≤ W and no resync yet this cycle for j:<br>
+&nbsp;&nbsp;φ ← φ + κ · wrap(φ̂_td,j − φ)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;wrap(·) ∈ (−π, π]<br>
+&nbsp;&nbsp;φ̂_td,j ← φ̂_td,j + (1/N_ema) · wrap(φ_raw,j − φ̂_td,j)&nbsp;&nbsp;&nbsp;(update from the PRE-resync phase, so the estimate is the gait's own habit)</div>
+  <div class="tblwrap">
+  <table>
+    <tr><th>parameter</th><th>value</th><th>comment</th></tr>
+    <tr><td class="mono">κ</td><td class="mono num">0.5</td><td class="cmt">Half the timing error per event. 1.0 would hand the clock to a single scuff; 0 is today's free clock. Per-episode DR ∈ [0.3, 0.7] so the policy does not tune to one gain.</td></tr>
+    <tr><td class="mono">W (window)</td><td class="mono num">0.15 cycle (54°)</td><td class="cmt">Touchdowns outside the window are not the expected one (double contact, stumble) and do not move the clock. One resync per foot per cycle.</td></tr>
+    <tr><td class="mono">N_ema</td><td class="mono num">5 cycles</td><td class="cmt">Slow estimate of the gait's own touchdown phase per foot; κ is held at 0 for the first 3 cycles of an episode while it settles. With the latched spec the habit is stationary within a cycle by construction.</td></tr>
+    <tr><td class="mono">commit shift</td><td class="mono num">+1 tick</td><td class="cmt">If the resync carries φ across 2π, the wrap is <em>the touchdown</em>. Its commit flag goes into the <strong>next</strong> tick's once-block (the action of tick t cannot know a touchdown detected in tick t's physics), the spec latches from that tick's action, and the log-prob mask reads the same flag — rollout and update stay consistent (§04). Cost: 10 ms of commit latency. Fallback when no touchdown arrives inside W: the clock wraps on its own at 2π exactly as before.</td></tr>
+    <tr><td class="mono">observation</td><td class="mono">unchanged</td><td class="cmt">The actor already sees (sin φ, cos φ) per tick, so it sees the jump; nothing new is stacked. The per-foot φ̂_td estimates (2) go into the once-block for the library variant (§09), where they are also what the Raibert law indexes.</td></tr>
+    <tr><td class="mono">billing</td><td class="mono">none</td><td class="cmt">A plant-side mechanism, not a policy choice. The frequency channel stays latched and bounded, so a policy cannot lean on resync to run a clock it does not command: mismatches larger than W are simply not corrected.</td></tr>
+  </table>
+  </div>
+  <figure>
+    <div class="figwrap">
+    <svg viewBox="0 0 980 250" role="img" aria-label="Timeline of one gait cycle with an early left touchdown four ticks before the expected phase: the clock jumps forward by half the error, the phase wrap and the spec commit move to the tick after the touchdown, and the free-running fallback wrap is shown for comparison.">
+      <line x1="40" y1="34" x2="940" y2="34" stroke="currentColor" stroke-width="1"/>
+      <text x="40" y="24" class="svg-m svg-mut">tick 0</text>
+      <text x="765" y="24" class="svg-m svg-mut" text-anchor="middle">tick 29</text>
+      <text x="852" y="24" class="svg-m svg-mut" text-anchor="middle">tick 33</text>
+
+      <text x="40" y="66" class="svg-m svg-mut">left foot contact</text>
+      <rect x="40" y="72" width="330" height="12" fill="var(--step-tint)" stroke="var(--step)" stroke-width="1"/>
+      <rect x="765" y="72" width="175" height="12" fill="var(--step-tint)" stroke="var(--step)" stroke-width="1"/>
+      <text x="205" y="98" class="svg-m svg-st" text-anchor="middle">stance</text>
+      <text x="765" y="98" class="svg-m svg-st" text-anchor="middle">touchdown, 4 ticks early</text>
+      <line x1="852" y1="60" x2="852" y2="70" stroke="var(--muted)" stroke-width="1.2"/><line x1="852" y1="86" x2="852" y2="92" stroke="var(--muted)" stroke-width="1.2"/>
+      <text x="862" y="98" class="svg-m svg-mut">expected φ̂_td</text>
+
+      <text x="40" y="132" class="svg-m svg-mut">φ</text>
+      <polyline points="60,196 765,144" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <polyline points="765,144 765,118" fill="none" stroke="var(--latch)" stroke-width="2.2"/>
+      <polyline points="765,118 790,116 790,196 940,185" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <polyline points="765,144 852,138 852,196" fill="none" stroke="var(--muted)" stroke-width="1" stroke-dasharray="4 3"/>
+      <text x="612" y="140" class="svg-m svg-lt" text-anchor="end">φ ← φ + κ·(φ̂_td − φ), κ = 0.5</text>
+      <text x="940" y="212" class="svg-m svg-mut" text-anchor="end">free clock would wrap @ tick 33</text>
+      <text x="300" y="214" class="svg-m svg-mut">advances at f_latched</text>
+
+      <line x1="790" y1="104" x2="790" y2="200" stroke="var(--latch)" stroke-width="2"/>
+      <rect x="790" y="222" width="150" height="20" fill="var(--latch)" opacity="0.85"/>
+      <text x="865" y="236" text-anchor="middle" class="svg-m" fill="#fff">S_k+1 commits @ tick 30</text>
+      <text x="40" y="236" class="svg-m svg-lt">latch: flag in tick-30 once-block, spec latched from tick-30 action</text>
+    </svg>
+    </div>
+    <figcaption>Fig. 2b — Same 3 Hz cycle as Fig. 2, with the left foot landing at tick 29 instead of 33. The clock closes half the timing error at the contact edge, the wrap and the commit move to tick 30, and the free-running wrap at tick 33 is shown dashed. A touchdown outside ±0.15 cycle of φ̂_td would leave the clock untouched.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ §06 SYMMETRY -->
+<section>
+  <div class="sec-head"><span class="sec-num">§06</span><h2>One series, five relationship knobs</h2></div>
+  <div class="eq">u_L(φ) = n_L + (1+s)·A·S(φ) &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ o<br>u_R(φ) = n_R − (1−s)·A·S(φ − π − Δ) + o</div>
+  <p>The right leg is <em>literally the same series</em>, mirrored by the structural minus sign, read π+Δ later, scaled by (1−s), and biased by o. The mirror defect is then a one-line identity:</p>
+  <div class="eq">u_L(φ) + u_R(φ+π) &nbsp;=&nbsp; A·[(1+s)·S(φ) − (1−s)·S(φ−Δ)] + 2o &nbsp;&nbsp;&nbsp;&nbsp; = 0 for all φ &nbsp;⇔&nbsp; Δ = 0, s = 0, o = 0</div>
+  <p>So <strong>knobs at zero is exactly the mirror-symmetric gait</strong>, and “penalise the difference between the left and right channel” reduces to a standing price on five numbers. Because Δ and s are global (one per leg pair) and S is shared, the two legs always have the same waveform <em>shape</em>: they can differ in timing, amplitude and offset, never in stance plateau — duty-cycle limp is unrepresentable, heading trim is not.</p>
+
+  <figure>
+    <div class="figwrap">
+      <svg viewBox="0 0 980 258" role="img" aria-label="Four waveform panels of the joint-space series commanded to the left and right leg over one cycle, using a two-harmonic gait. With the knobs neutral the two curves are identical and half a cycle apart. The offset knob splits their midlines. The stride knob scales one curve up and the other down with the shape unchanged. The lag knob shifts the right curve as a whole, every harmonic together, so the footfalls are pi plus delta apart.">
+        <defs><marker id="ar3" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+        <line x1="12" y1="24" x2="40" y2="24" stroke="var(--step)" stroke-width="2.4"/><text x="46" y="28" class="svg-m">left leg q_L(φ)</text>
+        <line x1="150" y1="24" x2="178" y2="24" stroke="var(--latch)" stroke-width="2.4" stroke-dasharray="6 3"/><text x="184" y="28" class="svg-m">right leg q_R(φ)</text>
+        <text x="470" y="28" class="svg-m svg-mut">joint command, S(φ) = cos φ + 0.3 cos 2φ · forward-positive</text>
+        <g>
+          <text x="12" y="46" class="svg-t svg-mut" font-weight="600">knobs neutral</text>
+          <rect x="12.0" y="58.0" width="165.0" height="110.0" fill="none" stroke="currentColor" stroke-width="0.6" opacity="0.28"/>
+          <line x1="12.0" y1="113.0" x2="177.0" y2="113.0" stroke="currentColor" stroke-width="0.7" stroke-dasharray="3 3" opacity="0.45"/>
+          <polyline points="12.0,134.0 13.7,134.0 15.4,134.1 17.2,134.1 18.9,134.2 20.6,134.3 22.3,134.4 24.0,134.4 25.8,134.5 27.5,134.5 29.2,134.5 30.9,134.4 32.6,134.2 34.3,134.0 36.1,133.6 37.8,133.1 39.5,132.5 41.2,131.7 42.9,130.8 44.7,129.8 46.4,128.6 48.1,127.2 49.8,125.6 51.5,123.9 53.2,122.0 55.0,120.0 56.7,117.8 58.4,115.5 60.1,113.0 61.8,110.5 63.6,107.9 65.3,105.2 67.0,102.5 68.7,99.8 70.4,97.1 72.2,94.4 73.9,91.8 75.6,89.3 77.3,86.9 79.0,84.6 80.8,82.5 82.5,80.6 84.2,78.9 85.9,77.5 87.6,76.2 89.3,75.3 91.1,74.6 92.8,74.1 94.5,74.0 96.2,74.1 97.9,74.6 99.7,75.3 101.4,76.2 103.1,77.5 104.8,78.9 106.5,80.6 108.2,82.5 110.0,84.6 111.7,86.9 113.4,89.3 115.1,91.8 116.8,94.4 118.6,97.1 120.3,99.8 122.0,102.5 123.7,105.2 125.4,107.9 127.2,110.5 128.9,113.0 130.6,115.5 132.3,117.8 134.0,120.0 135.8,122.0 137.5,123.9 139.2,125.6 140.9,127.2 142.6,128.6 144.3,129.8 146.1,130.8 147.8,131.7 149.5,132.5 151.2,133.1 152.9,133.6 154.7,134.0 156.4,134.2 158.1,134.4 159.8,134.5 161.5,134.5 163.2,134.5 165.0,134.4 166.7,134.4 168.4,134.3 170.1,134.2 171.8,134.1 173.6,134.1 175.3,134.0 177.0,134.0" fill="none" stroke="var(--latch)" stroke-width="2" stroke-dasharray="6 3"/>
+          <polyline points="12.0,74.0 13.7,74.1 15.4,74.6 17.2,75.3 18.9,76.2 20.6,77.5 22.3,78.9 24.0,80.6 25.8,82.5 27.5,84.6 29.2,86.9 30.9,89.3 32.6,91.8 34.3,94.4 36.1,97.1 37.8,99.8 39.5,102.5 41.2,105.2 42.9,107.9 44.7,110.5 46.4,113.0 48.1,115.5 49.8,117.8 51.5,120.0 53.2,122.0 55.0,123.9 56.7,125.6 58.4,127.2 60.1,128.6 61.8,129.8 63.6,130.8 65.3,131.7 67.0,132.5 68.7,133.1 70.4,133.6 72.2,134.0 73.9,134.2 75.6,134.4 77.3,134.5 79.0,134.5 80.8,134.5 82.5,134.4 84.2,134.4 85.9,134.3 87.6,134.2 89.3,134.1 91.1,134.1 92.8,134.0 94.5,134.0 96.2,134.0 97.9,134.1 99.7,134.1 101.4,134.2 103.1,134.3 104.8,134.4 106.5,134.4 108.2,134.5 110.0,134.5 111.7,134.5 113.4,134.4 115.1,134.2 116.8,134.0 118.6,133.6 120.3,133.1 122.0,132.5 123.7,131.7 125.4,130.8 127.2,129.8 128.9,128.6 130.6,127.2 132.3,125.6 134.0,123.9 135.8,122.0 137.5,120.0 139.2,117.8 140.9,115.5 142.6,113.0 144.3,110.5 146.1,107.9 147.8,105.2 149.5,102.5 151.2,99.8 152.9,97.1 154.7,94.4 156.4,91.8 158.1,89.3 159.8,86.9 161.5,84.6 163.2,82.5 165.0,80.6 166.7,78.9 168.4,77.5 170.1,76.2 171.8,75.3 173.6,74.6 175.3,74.1 177.0,74.0" fill="none" stroke="var(--step)" stroke-width="2.2"/>
+          <text x="12" y="214" class="svg-t svg-mut" font-weight="600">reference</text>
+          <text x="12" y="230" class="svg-m svg-mut">one waveform, both legs,</text>
+          <text x="12" y="245" class="svg-m svg-mut">half a cycle apart</text>
+        </g>
+        <g>
+          <text x="254" y="46" class="svg-t svg-lt" font-weight="600">o — offset</text>
+          <rect x="254.0" y="58.0" width="165.0" height="110.0" fill="none" stroke="currentColor" stroke-width="0.6" opacity="0.28"/>
+          <line x1="254.0" y1="113.0" x2="419.0" y2="113.0" stroke="currentColor" stroke-width="0.7" stroke-dasharray="3 3" opacity="0.45"/>
+          <polyline points="254.0,147.5 255.7,147.5 257.4,147.6 259.2,147.6 260.9,147.7 262.6,147.8 264.3,147.9 266.0,147.9 267.8,148.0 269.5,148.0 271.2,148.0 272.9,147.9 274.6,147.7 276.3,147.5 278.1,147.1 279.8,146.6 281.5,146.0 283.2,145.2 284.9,144.3 286.7,143.3 288.4,142.1 290.1,140.7 291.8,139.1 293.5,137.4 295.2,135.5 297.0,133.5 298.7,131.3 300.4,129.0 302.1,126.5 303.8,124.0 305.6,121.4 307.3,118.7 309.0,116.0 310.7,113.3 312.4,110.6 314.2,107.9 315.9,105.3 317.6,102.8 319.3,100.4 321.0,98.1 322.8,96.0 324.5,94.1 326.2,92.4 327.9,91.0 329.6,89.7 331.3,88.8 333.1,88.1 334.8,87.6 336.5,87.5 338.2,87.6 339.9,88.1 341.7,88.8 343.4,89.7 345.1,91.0 346.8,92.4 348.5,94.1 350.2,96.0 352.0,98.1 353.7,100.4 355.4,102.8 357.1,105.3 358.8,107.9 360.6,110.6 362.3,113.3 364.0,116.0 365.7,118.7 367.4,121.4 369.2,124.0 370.9,126.5 372.6,129.0 374.3,131.3 376.0,133.5 377.8,135.5 379.5,137.4 381.2,139.1 382.9,140.7 384.6,142.1 386.3,143.3 388.1,144.3 389.8,145.2 391.5,146.0 393.2,146.6 394.9,147.1 396.7,147.5 398.4,147.7 400.1,147.9 401.8,148.0 403.5,148.0 405.2,148.0 407.0,147.9 408.7,147.9 410.4,147.8 412.1,147.7 413.8,147.6 415.6,147.6 417.3,147.5 419.0,147.5" fill="none" stroke="var(--latch)" stroke-width="2" stroke-dasharray="6 3"/>
+          <polyline points="254.0,60.5 255.7,60.6 257.4,61.1 259.2,61.8 260.9,62.7 262.6,64.0 264.3,65.4 266.0,67.1 267.8,69.0 269.5,71.1 271.2,73.4 272.9,75.8 274.6,78.3 276.3,80.9 278.1,83.6 279.8,86.3 281.5,89.0 283.2,91.7 284.9,94.4 286.7,97.0 288.4,99.5 290.1,102.0 291.8,104.3 293.5,106.5 295.2,108.5 297.0,110.4 298.7,112.1 300.4,113.7 302.1,115.1 303.8,116.3 305.6,117.3 307.3,118.2 309.0,119.0 310.7,119.6 312.4,120.1 314.2,120.5 315.9,120.7 317.6,120.9 319.3,121.0 321.0,121.0 322.8,121.0 324.5,120.9 326.2,120.9 327.9,120.8 329.6,120.7 331.3,120.6 333.1,120.6 334.8,120.5 336.5,120.5 338.2,120.5 339.9,120.6 341.7,120.6 343.4,120.7 345.1,120.8 346.8,120.9 348.5,120.9 350.2,121.0 352.0,121.0 353.7,121.0 355.4,120.9 357.1,120.7 358.8,120.5 360.6,120.1 362.3,119.6 364.0,119.0 365.7,118.2 367.4,117.3 369.2,116.3 370.9,115.1 372.6,113.7 374.3,112.1 376.0,110.4 377.8,108.5 379.5,106.5 381.2,104.3 382.9,102.0 384.6,99.5 386.3,97.0 388.1,94.4 389.8,91.7 391.5,89.0 393.2,86.3 394.9,83.6 396.7,80.9 398.4,78.3 400.1,75.8 401.8,73.4 403.5,71.1 405.2,69.0 407.0,67.1 408.7,65.4 410.4,64.0 412.1,62.7 413.8,61.8 415.6,61.1 417.3,60.6 419.0,60.5" fill="none" stroke="var(--step)" stroke-width="2.2"/>
+          <line x1="254.0" y1="99.5" x2="427.0" y2="99.5" stroke="currentColor" stroke-width="0.7" stroke-dasharray="2 3" opacity="0.55"/>
+          <line x1="254.0" y1="126.5" x2="427.0" y2="126.5" stroke="currentColor" stroke-width="0.7" stroke-dasharray="2 3" opacity="0.55"/>
+          <line x1="445.0" y1="99.5" x2="445.0" y2="126.5" stroke="currentColor" stroke-width="1.3" marker-start="url(#ar3)" marker-end="url(#ar3)"/>
+          <text x="451.0" y="117.0" class="svg-m">2o</text>
+          <text x="254" y="214" class="svg-t svg-lt" font-weight="600">OFFSET</text>
+          <text x="254" y="230" class="svg-m svg-mut">midlines split ±o:</text>
+          <text x="254" y="245" class="svg-m svg-mut">one foot parks forward</text>
+        </g>
+        <g>
+          <text x="496" y="46" class="svg-t svg-lt" font-weight="600">s — stride asym.</text>
+          <rect x="496.0" y="58.0" width="165.0" height="110.0" fill="none" stroke="currentColor" stroke-width="0.6" opacity="0.28"/>
+          <line x1="496.0" y1="113.0" x2="661.0" y2="113.0" stroke="currentColor" stroke-width="0.7" stroke-dasharray="3 3" opacity="0.45"/>
+          <polyline points="496.0,127.7 497.7,127.7 499.4,127.7 501.2,127.8 502.9,127.8 504.6,127.9 506.3,127.9 508.0,128.0 509.8,128.0 511.5,128.0 513.2,128.0 514.9,128.0 516.6,127.8 518.3,127.7 520.1,127.4 521.8,127.1 523.5,126.7 525.2,126.1 526.9,125.5 528.7,124.7 530.4,123.9 532.1,122.9 533.8,121.8 535.5,120.6 537.2,119.3 539.0,117.9 540.7,116.3 542.4,114.7 544.1,113.0 545.8,111.2 547.6,109.4 549.3,107.5 551.0,105.7 552.7,103.7 554.4,101.8 556.2,100.0 557.9,98.2 559.6,96.4 561.3,94.7 563.0,93.1 564.8,91.7 566.5,90.3 568.2,89.1 569.9,88.1 571.6,87.3 573.3,86.6 575.1,86.1 576.8,85.8 578.5,85.7 580.2,85.8 581.9,86.1 583.7,86.6 585.4,87.3 587.1,88.1 588.8,89.1 590.5,90.3 592.2,91.7 594.0,93.1 595.7,94.7 597.4,96.4 599.1,98.2 600.8,100.0 602.6,101.8 604.3,103.7 606.0,105.6 607.7,107.5 609.4,109.4 611.2,111.2 612.9,113.0 614.6,114.7 616.3,116.3 618.0,117.9 619.8,119.3 621.5,120.6 623.2,121.8 624.9,122.9 626.6,123.9 628.3,124.7 630.1,125.5 631.8,126.1 633.5,126.7 635.2,127.1 636.9,127.4 638.7,127.7 640.4,127.8 642.1,128.0 643.8,128.0 645.5,128.0 647.2,128.0 649.0,128.0 650.7,127.9 652.4,127.9 654.1,127.8 655.8,127.8 657.6,127.7 659.3,127.7 661.0,127.7" fill="none" stroke="var(--latch)" stroke-width="2" stroke-dasharray="6 3"/>
+          <polyline points="496.0,62.3 497.7,62.5 499.4,63.0 501.2,63.9 502.9,65.2 504.6,66.8 506.3,68.7 508.0,70.9 509.8,73.4 511.5,76.1 513.2,79.0 514.9,82.2 516.6,85.4 518.3,88.8 520.1,92.3 521.8,95.8 523.5,99.3 525.2,102.9 526.9,106.3 528.7,109.7 530.4,113.0 532.1,116.2 533.8,119.2 535.5,122.0 537.2,124.7 539.0,127.2 540.7,129.4 542.4,131.4 544.1,133.2 545.8,134.8 547.6,136.2 549.3,137.4 551.0,138.3 552.7,139.1 554.4,139.8 556.2,140.2 557.9,140.6 559.6,140.8 561.3,140.9 563.0,140.9 564.8,140.9 566.5,140.9 568.2,140.8 569.9,140.6 571.6,140.5 573.3,140.4 575.1,140.4 576.8,140.3 578.5,140.3 580.2,140.3 581.9,140.4 583.7,140.4 585.4,140.5 587.1,140.6 588.8,140.8 590.5,140.9 592.2,140.9 594.0,140.9 595.7,140.9 597.4,140.8 599.1,140.6 600.8,140.2 602.6,139.8 604.3,139.1 606.0,138.4 607.7,137.4 609.4,136.2 611.2,134.8 612.9,133.2 614.6,131.4 616.3,129.4 618.0,127.2 619.8,124.7 621.5,122.0 623.2,119.2 624.9,116.2 626.6,113.0 628.3,109.7 630.1,106.3 631.8,102.9 633.5,99.3 635.2,95.8 636.9,92.3 638.7,88.8 640.4,85.4 642.1,82.2 643.8,79.0 645.5,76.1 647.2,73.4 649.0,70.9 650.7,68.7 652.4,66.8 654.1,65.2 655.8,63.9 657.6,63.0 659.3,62.5 661.0,62.3" fill="none" stroke="var(--step)" stroke-width="2.2"/>
+          <line x1="687.0" y1="113.0" x2="687.0" y2="62.3" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar3)"/>
+          <text x="687.0" y="56.3" class="svg-m" text-anchor="middle">1+s</text>
+          <line x1="717.0" y1="113.0" x2="717.0" y2="140.3" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar3)"/>
+          <text x="717.0" y="152.3" class="svg-m" text-anchor="middle">1−s</text>
+          <text x="496" y="214" class="svg-t svg-lt" font-weight="600">GAIN</text>
+          <text x="496" y="230" class="svg-m svg-mut">(1+s) vs (1−s), same shape:</text>
+          <text x="496" y="245" class="svg-m svg-mut">differential stride</text>
+        </g>
+        <g>
+          <text x="738" y="46" class="svg-t svg-lt" font-weight="600">Δ — lag</text>
+          <rect x="738.0" y="58.0" width="165.0" height="110.0" fill="none" stroke="currentColor" stroke-width="0.6" opacity="0.28"/>
+          <line x1="738.0" y1="113.0" x2="903.0" y2="113.0" stroke="currentColor" stroke-width="0.7" stroke-dasharray="3 3" opacity="0.45"/>
+          <polyline points="738.0,134.2 739.7,134.4 741.4,134.5 743.2,134.5 744.9,134.5 746.6,134.4 748.3,134.4 750.0,134.3 751.8,134.2 753.5,134.1 755.2,134.1 756.9,134.0 758.6,134.0 760.3,134.0 762.1,134.0 763.8,134.1 765.5,134.2 767.2,134.2 768.9,134.3 770.7,134.4 772.4,134.5 774.1,134.5 775.8,134.5 777.5,134.4 779.2,134.3 781.0,134.0 782.7,133.7 784.4,133.2 786.1,132.6 787.8,131.9 789.6,131.1 791.3,130.0 793.0,128.8 794.7,127.5 796.4,126.0 798.2,124.3 799.9,122.4 801.6,120.4 803.3,118.3 805.0,116.0 806.8,113.6 808.5,111.1 810.2,108.5 811.9,105.8 813.6,103.1 815.3,100.4 817.1,97.7 818.8,95.0 820.5,92.4 822.2,89.8 823.9,87.4 825.7,85.1 827.4,83.0 829.1,81.0 830.8,79.3 832.5,77.8 834.2,76.5 836.0,75.5 837.7,74.7 839.4,74.2 841.1,74.0 842.8,74.1 844.6,74.4 846.3,75.1 848.0,76.0 849.7,77.2 851.4,78.6 853.2,80.2 854.9,82.1 856.6,84.1 858.3,86.4 860.0,88.7 861.8,91.2 863.5,93.8 865.2,96.5 866.9,99.2 868.6,101.9 870.3,104.6 872.1,107.3 873.8,109.9 875.5,112.5 877.2,114.9 878.9,117.3 880.7,119.5 882.4,121.6 884.1,123.5 885.8,125.2 887.5,126.8 889.2,128.3 891.0,129.5 892.7,130.6 894.4,131.6 896.1,132.3 897.8,133.0 899.6,133.5 901.3,133.9 903.0,134.2" fill="none" stroke="var(--latch)" stroke-width="2" stroke-dasharray="6 3"/>
+          <polyline points="738.0,74.0 739.7,74.1 741.4,74.6 743.2,75.3 744.9,76.2 746.6,77.5 748.3,78.9 750.0,80.6 751.8,82.5 753.5,84.6 755.2,86.9 756.9,89.3 758.6,91.8 760.3,94.4 762.1,97.1 763.8,99.8 765.5,102.5 767.2,105.2 768.9,107.9 770.7,110.5 772.4,113.0 774.1,115.5 775.8,117.8 777.5,120.0 779.2,122.0 781.0,123.9 782.7,125.6 784.4,127.2 786.1,128.6 787.8,129.8 789.6,130.8 791.3,131.7 793.0,132.5 794.7,133.1 796.4,133.6 798.2,134.0 799.9,134.2 801.6,134.4 803.3,134.5 805.0,134.5 806.8,134.5 808.5,134.4 810.2,134.4 811.9,134.3 813.6,134.2 815.3,134.1 817.1,134.1 818.8,134.0 820.5,134.0 822.2,134.0 823.9,134.1 825.7,134.1 827.4,134.2 829.1,134.3 830.8,134.4 832.5,134.4 834.2,134.5 836.0,134.5 837.7,134.5 839.4,134.4 841.1,134.2 842.8,134.0 844.6,133.6 846.3,133.1 848.0,132.5 849.7,131.7 851.4,130.8 853.2,129.8 854.9,128.6 856.6,127.2 858.3,125.6 860.0,123.9 861.8,122.0 863.5,120.0 865.2,117.8 866.9,115.5 868.6,113.0 870.3,110.5 872.1,107.9 873.8,105.2 875.5,102.5 877.2,99.8 878.9,97.1 880.7,94.4 882.4,91.8 884.1,89.3 885.8,86.9 887.5,84.6 889.2,82.5 891.0,80.6 892.7,78.9 894.4,77.5 896.1,76.2 897.8,75.3 899.6,74.6 901.3,74.1 903.0,74.0" fill="none" stroke="var(--step)" stroke-width="2.2"/>
+          <circle cx="738.0" cy="74.0" r="3" fill="currentColor"/>
+          <line x1="738.0" y1="74.0" x2="738.0" y2="182" stroke="currentColor" stroke-width="0.7" stroke-dasharray="2 3" opacity="0.55"/>
+          <circle cx="841.5" cy="74.0" r="3" fill="currentColor"/>
+          <line x1="841.5" y1="74.0" x2="841.5" y2="182" stroke="currentColor" stroke-width="0.7" stroke-dasharray="2 3" opacity="0.55"/>
+          <line x1="738.0" y1="182" x2="841.5" y2="182" stroke="currentColor" stroke-width="1.3" marker-start="url(#ar3)" marker-end="url(#ar3)"/>
+          <text x="789.8" y="177" class="svg-m" text-anchor="middle">226°</text>
+          <text x="738" y="196" class="svg-m svg-mut">was 180°</text>
+          <text x="738" y="214" class="svg-t svg-lt" font-weight="600">TIMING</text>
+          <text x="738" y="230" class="svg-m svg-mut">identical shape, every harmonic</text>
+          <text x="738" y="245" class="svg-m svg-mut">shifted: footfalls π+Δ apart</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Fig. 3 — <strong>Joint-space</strong> series (what the policy commands, not the foot path; see the FK measurements below) for a two-harmonic gait S(φ) = cos φ + 0.3 cos 2φ, one knob at a time. o splits the midlines; s scales the two legs (1+s)/(1−s) with the shape untouched; Δ shifts the whole right curve — every harmonic together — so the footfalls sit π+Δ = 226° apart instead of 180°.</figcaption>
+  </figure>
+
+  <div class="tblwrap">
+  <table>
+    <tr><th>knob</th><th>what it does</th><th>workspace exactness (measured, §below)</th></tr>
+    <tr><td class="mono">Δ</td><td>right footfall at π+Δ after the left; a true lag — all harmonics shift by kΔ, shape preserved</td><td><strong>exact by theorem</strong></td></tr>
+    <tr><td class="mono">s</td><td>stride amplitude (1+s) vs (1−s); s = ±1 zeroes a leg</td><td>0.4%</td></tr>
+    <tr><td class="mono">o_cam</td><td>persistent fore-aft split, one foot parked forward</td><td>1.3% spread</td></tr>
+    <tr><td class="mono">o_cam + o_thigh</td><td>lift (both raise the toe 0.115 m/rad) — parks a leg in the air</td><td>—</td></tr>
+    <tr><td class="mono">o_hip</td><td>lean: both feet shifted the same physical way (lateral CoP)</td><td>6.6% spread</td></tr>
+  </table>
+  </div>
+
+  <h3>The hop, the bound, and the “half-quadruped”</h3>
+  <p>All of them are corners of this knob space, not exclusions. <strong>s = ±1</strong> zeroes one leg’s amplitude; with <code>o_cam + o_thigh</code> lifting it and <code>o_hip</code> adducting the working foot toward the midline, that is THE RUNNER’s one-legged hop. <strong>Δ = ±π</strong> puts both legs in phase: the bound, the gait a biped can borrow from a quadruped. Δ_max decides whether the bound is reachable; s already makes the hop reachable. They are priced by <code>w_knob</code>, not forbidden — the policy is free to test the hypothesis that one of them is optimal, on a plant that now carries every cost sprint_m3 dodged.</p>
+  <p>Those costs are why the hop lost when roll was freed (RUN 8): the moment does not go away when the foot is adducted to the midline, it <em>moves</em> — from a body-level topple to a joint-level load on hip_roll, whose axis sits 0.19 m off the midline. A hop that is 80% airborne must deliver ≈5× body weight per stance: <strong>≈140 N·m on the AK60-39, against a 72 N·m peak</strong> (61.2 in the model). On the m3 rail that moment was carried by the constraint for free. The only escape is to roll the torso over the foot instead of adducting the foot under the torso — ≈11° at 4.76 Hz, roughly 50 N·m of roll torque, marginal — and the thermal budget still charges one leg for the whole gait (the hop already sat at 100% of continuous). The bound is roll-feasible and shares load across both legs, but no flight-heavy gait beats a grounded one without elastic storage (flight bound 6.2 m/s), and a rigid ankle stores nothing.</p>
+
+  <h3>Symmetry price and equivariance</h3>
+  <div class="eq">L = L_PPO + w_knob·‖k(s)‖² + w_sym·‖ k(M_o s) + k(s) ‖² &nbsp;&nbsp;&nbsp;&nbsp; k = (Δ/Δ_max, s, o/o_max), &nbsp; w_sym ≈ 0.5</div>
+  <p>The first term is the standing asymmetry price. The second says: mirror the state and the knobs must negate — a robot drifting left trims right, its mirror image trims left, both satisfy it exactly. Asymmetry justified by the state is free; asymmetry adopted for no reason is not. Only the observation mirror M<sub>o</sub> needs deriving; on the action side the mirror is “negate the five knobs, swap the residual with the verified sign rule.”</p>
+
+  <div class="note trap">
+    <strong>Verified sign rule, and a correction to the current code.</strong> A pure-FK test (mj_forward at the keyframe, no dynamics) gives one uniform rule: joint pattern <code>(+,−)</code> is <em>symmetric</em> and <code>(+,+)</code> is <em>antisymmetric</em>, for both joint families — thigh <code>(+,−)</code> moves both feet the same way in x (dx −0.147/−0.147), hip_roll <code>(+,−)</code> moves them oppositely in y (dy +0.147/−0.147). One rule looks “flipped” only because the mirror preserves fore-aft and negates lateral.<br><br>
+    This contradicts <a href="walk_mit/fourier_gait.py#L212-L213">fourier_gait.py:212-213</a>, which has the two hip_roll channels swapped: as wired, <code>s_width</code> is a lateral <em>shift</em> and the abduction reflex is a symmetric <em>widen/narrow</em>. Roll is antisymmetric under mirroring, so an equivariant response must enter as <code>(+,+)</code>. Wired <code>(+,−)</code>, <strong>the reflex structurally cannot make a directional lateral capture step</strong>; no learned gain fixes it. Inert through m1–m3 (roll locked), live for the first time in RUN 8. The pitch reflex checks out.
+  </div>
+
+  <h3>What survives the forward kinematics — measured</h3>
+  <p>Everything above is a <em>joint</em> command; the foot path is FK∘series through a cam-crank 4-bar. Measured on the env’s own in-air rig (<code>set_fixed_base(0.25)</code>: real loop closure, rigid ankle, base welded 25 cm above stance, deterministic to 4×10<sup>−7</sup> m) on a realistic 0.34 m stride (cam ±0.11, thigh ±0.05 rad). Target: a 2 cm per-foot fore-aft split, swept through the cycle — exact means 0% mean error and 0% spread.</p>
+  <div class="tblwrap"><table>
+    <tr><th>knob</th><th>realised as</th><th>workspace error on the stride</th><th>verdict</th></tr>
+    <tr><td class="mono">mirror (knobs zero)</td><td>structural</td><td class="mono">5 mm residual</td><td class="cmt">exact up to the model’s as-built asymmetry</td></tr>
+    <tr><td class="mono">lag Δ</td><td class="mono">S(φ−π−Δ)</td><td class="mono">0</td><td class="cmt"><strong>exact by theorem</strong>: a time shift commutes with any static map, FK(S(φ+Δ)) = (FK∘S)(φ+Δ)</td></tr>
+    <tr><td class="mono">gain s</td><td class="mono">(1±s)·S</td><td class="mono">1.305 realised vs 1.300 (0.4%)</td><td class="cmt">exact in practice — scaling about the same centre is first-order-dominated</td></tr>
+    <tr><td class="mono">offset on <strong>cam</strong></td><td class="mono">joint bias</td><td class="mono">−0.4% mean, 1.3% spread</td><td class="cmt"><strong>exact in practice</strong>: the crank is nearly linear across the stride</td></tr>
+    <tr><td class="mono">offset on thigh</td><td class="mono">joint bias</td><td class="mono">+4.8%, 18% spread</td><td class="cmt">usable trim, not exact — gain varies 6× across ±0.2 rad</td></tr>
+    <tr><td class="mono">Jacobian pullback</td><td class="mono">J<sup>−1</sup> at stance</td><td class="mono">−3.2%, 8.9%</td><td class="cmt">differential IK buys nothing over cam-only: the nonlinearity is second-order</td></tr>
+    <tr><td class="mono">full IK</td><td class="mono">Newton on the plant</td><td class="mono">−4.2%, 15% (tolerance-limited)</td><td class="cmt">the only route that holds on over-workspace strokes (0.8 m: cam-only degrades to 90%) — buys nothing where the gait lives</td></tr>
+    <tr><td class="mono">lean o_hip</td><td class="mono">joint bias (+,+)</td><td class="mono">same direction, 6.6% spread</td><td class="cmt">clean lateral knob, <strong>no fore-aft bleed</strong> (dx −0.2 mm per 0.2 rad)</td></tr>
+  </table></div>
+  <ul>
+    <li><strong>Waveform:</strong> a pure joint sinusoid arrives in toe-x with 5.7% THD on this stride (22% on an over-large ±0.2 rad thigh stroke). N=3 has the harmonics to pre-distort; the policy never reads the label.</li>
+    <li><strong>Load dependence:</strong> the unloaded rig and the loaded ride-height LUT differ by 2–3 cm at the <em>same</em> command (4-bar compliance under kp 200; memory records ~15 cm yield under full load). Workspace exactness on this plant is load-dependent regardless of IK — a joint-space knob transfers to hardware exactly, an IK table must also match the load.</li>
+    <li><strong>Consequence:</strong> fore-aft offset on cam, s and Δ global, o per joint, no inverse kinematics anywhere.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ §07 PLANT / TIMING / THERMAL -->
+<section>
+  <div class="sec-head"><span class="sec-num">§07</span><h2>Plant model — measured vs simulated</h2></div>
+  <p>The reference gait is only as good as the plant it is solved on, and the stabilizer is only as robust as the randomisation around that plant. This section states what has been <strong>measured on the robot</strong>, what the simulator does <strong>today</strong>, the gap, and the change the build must make. Dates are the measurement dates; every number is quoted from the measurement record, not from the datasheet, unless marked.</p>
+
+  <h3>Drive: the position/impedance loop</h3>
+  <div class="tblwrap">
+  <table>
+    <tr><th>item</th><th>measured</th><th>simulated today</th><th>change for v2</th></tr>
+    <tr>
+      <td>closed-loop corner at the deployed gains</td>
+      <td class="cmt"><strong>kp 200 / kd 5: −3 dB at 6.1 Hz (L) / 6.5 Hz (R)</strong>, thighs, legs attached, unloaded, robot homed (2026-09-01, <code>ak_bode_sweep.py</code>, stepped sines 1–30 Hz). <strong>kp 500 / kd 5: ≈19 Hz</strong>, +0.02 dB max peaking, −138° at 30 Hz. Corner scales <em>linearly in kp</em>, not √kp: the loop is damping-dominated, <strong>corner ≈ kp/kd</strong> (predicts 6.4 and 15.9 Hz). Raw npz in repo: <code>webui/data/measurements/bode_{servo,mit}_can{0,1}_106.npz</code>, <code>kp500_bode_mit_can1_106.npz</code>.</td>
+      <td class="cmt">MuJoCo <code>&lt;position kp=200 kv=5&gt;</code> (hip roll 120/4) on the sim inertia → critically damped 2nd order at ≈13 Hz, <em>plus</em> an EMA target filter from <code>drive_bandwidth_hz 12</code> (retention 0.687 at 200 Hz, τ 13 ms). Two lags where the real drive has one, and the corner twice too high.</td>
+      <td class="cmt"><strong>Fit joint <code>armature</code></strong> per motor family so the closed-loop corner is 6.3 Hz at 200/5 and ≈19 Hz at 500/5 (two-point check with the same sweep protocol in sim). <strong>Delete the EMA target filter</strong> (<code>drive_bandwidth_hz 0</code>) so the lag is not double-counted. The impedance channel then has a physical meaning: corner(φ) = kp(φ)/kd(φ) within the wire range 0–500 / 0–5.</td>
+    </tr>
+    <tr>
+      <td>pure delay</td>
+      <td class="cmt"><strong>11–13 ms</strong> phase-slope delay in the impedance loop at 200/5 (same Bode). Command-path transport delay alone: <strong>6–7 ms</strong> (≈1.3 periods at 200 Hz; velocity-loop sweep on a free rotor, kp 0; phase independent of kd). Servo <code>SET_POS</code> mode for reference: 1.9 Hz and ≈18 ms.</td>
+      <td class="cmt"><code>drive_delay_ms 7.0</code> → resolved to <strong>1 control step = 5 ms</strong> at 200 Hz (integer rounding; <code>resolved_config.json</code> shows the pre-construction 4). DR range <code>dr_delay_steps_range (3, 6)</code> exists but <code>dr_enable False</code> in the whole sprint lineage.</td>
+      <td class="cmt"><strong>12 ms nominal, applied at 1 kHz substep granularity, drawn per episode from [6, 18] ms</strong>; the draw sits in the privileged tail. The RUNNER's delay margin was zero in both directions (0% survival at 0 ms and at ≥10 ms), so the orbit depends on this number and the stabilizer must see the whole range.</td>
+    </tr>
+    <tr>
+      <td>control loop</td>
+      <td class="cmt">Drives broadcast at exactly 200.0 Hz. Pi 3B: 8–9 ms per tick after OpenBLAS (numpy dispatch on 6-vectors, not BLAS), 0.14 ms sd jitter at 200 Hz; 50 Hz measured reproducibly worse.</td>
+      <td class="cmt">1 kHz physics ÷ 5 = 200 Hz control.</td>
+      <td class="cmt">÷10 = <strong>100 Hz</strong>. Jitter and drop models kept (<code>ctrl_drop_prob</code>, hold-last).</td>
+    </tr>
+    <tr>
+      <td>torque, speed, back-EMF</td>
+      <td class="cmt">Delivered peaks 144.5 N·m (AKE90-8) / 61.2 N·m (AK60-39) — the XML <code>forcerange</code>. No-load 22.01 / 10.30 rad/s. Kt = <strong>96–99% of datasheet</strong> on cam/thigh (known-mass test 2026-08-05: 2.09–2.15 N·m/A vs 2.176). Pack resistance 0.065 Ω measured.</td>
+      <td class="cmt"><code>motor_vel_limit (10.30, 22.01, 22.01)×2</code>, <code>motor_r_ohm (0.665, 0.229)</code> back-EMF clamp at 48 V: corners 8.4 / 15.1 rad/s, closure to 0.5% of datasheet no-load.</td>
+      <td class="cmt">Keep. Bracket R (the audit's linear-derate flagged 4–7% of samples at worst-case R, 0.06–0.11% at plausible R) and randomise <code>dr_torque</code> 0.12 for bus sag.</td>
+    </tr>
+  </table>
+  </div>
+
+  <h3>Leg: 4-bar loop closure, mass distribution</h3>
+  <div class="tblwrap">
+  <table>
+    <tr><th>item</th><th>measured</th><th>simulated today</th><th>change for v2</th></tr>
+    <tr>
+      <td>loop-closure compliance</td>
+      <td class="cmt"><strong>Hardware: 5 mm loaded-stance deflection</strong> (reported 2026-09-09; taken as the stance leg under the robot's own weight, ≈148 N). Foot-referred stiffness k_link ≈ <strong>30 kN/m</strong>; at the 3.5 BW running peak that is ≈17 mm, and the vertical mode on 15 kg sits near 7 Hz — inside the touchdown band, so it is a spring, not "rigid". In the simulator (scripted-walk study, 2026-08-11) the soft constraint let <strong>the base sink ≈15 cm during stepping with every joint on target</strong>, 30× the real number; capture steps then landed on air.</td>
+      <td class="cmt"><code>&lt;connect&gt;</code> equalities <code>loop_L/R</code> with <code>solref="0.005 1"</code>, <code>solimp="0.95 0.99 0.001"</code> — a soft constraint (5 ms time constant, 95–99% impedance). The ankle locks by contrast use <code>solref 0.002 / solimp 0.999 0.9999</code>.</td>
+      <td class="cmt">(1) <strong>Stiffen the loop closure to the ankle-lock values</strong> (<code>solref 0.002</code>, <code>solimp 0.999 0.9999</code>) so the constraint itself no longer yields. (2) <strong>Add an explicit series spring at the pushrod tip of 30 kN/m foot-referred</strong> (≈5 mm at 1 BW), verify 5 ± 1 mm in sim with the robot standing on one leg, then <strong>randomise it ±50%</strong> (15–45 kN/m, i.e. 3–10 mm at 1 BW) with the draw in the privileged tail. (3) Re-run the scripted-walk sink measurement: the base must drop ≤ 2 cm at 3.5 BW.</td>
+    </tr>
+    <tr>
+      <td>gravity torque / CoM</td>
+      <td class="cmt">Known-mass test (1.552 kg at the calf end, 2026-08-05, R² 0.90–0.98): with Kt pinned, <strong>the model under-predicts gravity torque 1.28–1.30× (left) and 1.51–1.73× (right)</strong>. Total mass is right (weighed: <strong>15.14 kg</strong>, CAD placeholder was 12.83), so this is CoM <em>position</em> — the CAD link inertials are still placeholders. Abduction is a separate anomaly (g 1.03 L / 0.52 R, mapping suspect, unresolved).</td>
+      <td class="cmt">Measured segment masses baked into <code>dash01.xml</code>; per-link CoM from CAD. DR: <code>dr_mass_global 0.12</code>, <code>dr_mass_body 0.15</code>, <code>dr_com_offset 0.02 m</code>, <code>dr_inertia 0.25</code> — all off in the sprint lineage.</td>
+      <td class="cmt">Fit per-link CoM offsets from the static data (the residual is 1.3–1.7× on torque, i.e. several cm of CoM), or re-measure the inertials. Until then <strong><code>dr_com_offset 0.03 m</code>, mass and inertia DR on</strong>, and the abduction zero verified by the identify-wiggle before any lateral claim.</td>
+    </tr>
+    <tr>
+      <td>force anisotropy at stance</td>
+      <td class="cmt">Statics on the model: the stand pose is at 96% of reach; vertical 2440 N (16.4 BW) vs horizontal 126 N (0.85 BW), <strong>19:1</strong>; 15° forward tilt drops the vertical to 2.95 BW, below the 3.5 BW running peak. Not a hardware measurement, but the reason the gait must be solved on the free plant with periodicity (§09), never on the rail.</td>
+      <td class="cmt">Inherent in the model.</td>
+      <td class="cmt">No model change; a constraint the library solve must respect (peak GRF ≤ 3.5 BW inside the envelope).</td>
+    </tr>
+    <tr>
+      <td>ankle, foot, ground</td>
+      <td class="cmt">Rigid carbon-tube ankle (40 g) in the sprint presets. Floor friction 1.0 nominal; track texture and wet rubber are the outdoor range (§08).</td>
+      <td class="cmt">Sphere foot, <code>condim 6</code>, <code>solref 0.01</code>; <code>dr_friction_range (0.5, 1.3)</code> off.</td>
+      <td class="cmt">DR on, range 0.4–1.3; trips (<code>trip_prob</code>) on as the texture proxy.</td>
+    </tr>
+  </table>
+  </div>
+
+  <h3>Timing and discount</h3>
+  <div class="tblwrap">
+  <table>
+    <tr><th>subsystem</th><th>setting</th><th>status</th><th>comment</th></tr>
+    <tr>
+      <td>control rate</td><td class="mono">1 kHz physics ÷ 10 = 100 Hz</td><td class="mono"><span class="chip-new">NEW</span></td>
+      <td class="cmt">Driven by deployment: Pi 3B measured 8–9 ms/tick — 200 Hz never fit. Same sim-days at half the steps (300 M @ 100 Hz ≡ 600 M @ 200 Hz).</td>
+    </tr>
+    <tr>
+      <td>discount / horizons</td><td class="mono">γ 0.9975 → 0.995 · ep cap 6000 (60 s)</td><td class="mono">rescale</td>
+      <td class="cmt">Same 2 s reward horizon in seconds (≈6 topple time constants of 0.32 s); every step-denominated curriculum halves. Reward already rate-invariant (<code>_reward_dt_scale</code>).</td>
+    </tr>
+    <tr>
+      <td>DR + sensor noise</td><td class="mono">dr_enable=True this time</td><td class="mono"><span class="chip-new">enable</span></td>
+      <td class="cmt">Mass/CoM/friction/gains/zero-offset draws + IMU noise from the measured figures (accel 190 µg/√Hz, gyro 0.0097 dps/√Hz, bias floor 0.0024 dps). The sprint lineage's biggest honesty gap: it trained with all of this off.</td>
+    </tr>
+  </table>
+  </div>
+
+  <h3>Lumped thermal model <span class="chip-new">NEW</span> — anchored: full current for 5 s reaches the limit</h3>
+  <p>Motive: the m3 limits audit (1 kHz per-substep logging, both seeds) measured the stance-heavy thigh at <strong>53.5–54.8 N·m RMS = 0.97–1.00× the 55 N·m continuous rating for the whole 33 s dash</strong>, its cam at 47.7–51.4 (0.87–0.94×), and on seed 1 hip_roll_L at 25.3 N·m RMS = 1.09× the <em>estimated</em> AK60 continuous rating; 5–9% of the dash sits at ≥98% of peak torque. Nothing in training knew heat accumulates.</p>
+  <div class="eq">τ_th · dΔT/dt = (τ/τ_cont)² · ΔT_max − ΔT&nbsp;&nbsp;&nbsp;&nbsp;per motor, torque-space form of I²R heating with single-node cooling</div>
+  <div class="tblwrap">
+  <table>
+    <tr><th>parameter</th><th>AKE90-8 (cam, thigh ×4)</th><th>AK60-39 (hip roll ×2)</th><th>provenance</th></tr>
+    <tr><td class="mono">τ_cont (I_cont)</td><td class="mono num">55 N·m (21 A)</td><td class="mono num">≈23 N·m est. (cont. not published)</td><td class="cmt">Datasheet. Steady state at τ_cont ≡ rated winding rise — anchors R·R_th without knowing either separately.</td></tr>
+    <tr><td class="mono">τ_peak (I_peak)</td><td class="mono num">170 N·m (72 A) · delivered 144.5</td><td class="mono num">72 N·m (17 A) · delivered 61.2</td><td class="cmt">Datasheet / measured delivered peak. (τ_peak/τ_cont)² ≈ 9.6× heating → rated rise from cold in ≈0.11·τ_th.</td></tr>
+    <tr><td class="mono">anchor</td><td class="mono num" colspan="2"><strong>τ_peak held from cold reaches ΔT_max at t = 5 s</strong> (decision 2026-09-09)</td><td class="cmt">Second anchor of the single-node model alongside "steady state at τ_cont = ΔT_max". Together they fix both constants: (τ_peak/τ_cont)²·(1 − e^(−5/τ_th)) = 1 ⇒ <strong>τ_th = 45 s</strong> in torque space (170/55); the current-space ratio (72/21) gives 56 s — the difference is the Kt roll-off at peak and is inside the DR band.</td></tr>
+    <tr><td class="mono">τ_th (winding node)</td><td class="mono num" colspan="2"><strong>45 s</strong> (fixed, no draw)</td><td class="cmt">Supersedes the earlier 5 s. The two-node campaign (<code>robot/deploy/thermal_fit.py</code>, deployed, no burst run) stays the way to replace this anchor with a fit; its self-test numbers are unchanged: 12 A × 10 s moves the case 0.21 °C, a readable +3 °C needs ≥3400 J, a 3-minute hold under-reads the continuous rating by 31%. Drives idle at 45–47 °C, +6–9 °C per 155 s sweep.</td></tr>
+  </table>
+  </div>
+  <ul>
+    <li><strong>Why 45 s and not 0.7 × 5 s.</strong> "Limit at about one time constant" holds only when the heating drive settles just above the limit. At peak it settles 10–12× above it — (72/21)² = 11.8 in current, (170/55)² = 9.6 in torque — so ΔT_max is crossed on the linear part of the ramp, at ≈10% of the way up, and reaching it at 5 s needs a ramp ten times longer.
+      <div class="tblwrap" style="margin-top:8px"><table>
+        <tr><th>τ_th</th><th>time to limit at peak, from cold</th><th>steady state at I_cont</th><th>33 s dash at 1.0× cont</th></tr>
+        <tr><td class="mono num">5 s (old design value)</td><td class="mono num">0.55 s</td><td class="mono num">1.0 ΔT_max</td><td class="cmt">saturated at the limit</td></tr>
+        <tr><td class="mono num">3.5 s (0.7 rule)</td><td class="mono num">0.38 s</td><td class="mono num">1.0 ΔT_max</td><td class="cmt">saturated</td></tr>
+        <tr><td class="mono num">3.5 s with "5 s at peak" forced</td><td class="mono num">5 s</td><td class="mono num">0.14 ΔT_max</td><td class="cmt">14% — contradicts the 21 A rating by 2.7×</td></tr>
+        <tr><td class="mono num"><strong>45–56 s (both anchors)</strong></td><td class="mono num">5 s</td><td class="mono num">1.0 ΔT_max</td><td class="cmt">52%</td></tr>
+      </table></div>
+      <strong>Copper cross-check</strong> (datasheet R_ll 0.164 Ω → k_cu = 1.5·R_phase = 0.123 W/A²): 638 W at 72 A, 54 W at 21 A. For 0.2–0.3 kg of copper (C_w 77–115 J/K) the winding heats at 5.5–8 °C/s at peak, so "limit at 5 s" is a winding limit ≈30–40 °C above the case; the same gradient at steady state on 54 W gives R_wc ≈ 0.55–0.75 K/W and <strong>τ_w = R_wc·C_w ≈ 50–60 s</strong>. A 3.5 s constant would need a 0.04 K/W path that cannot carry 640 W to a 35 °C gradient. The single-node τ_th is physically the copper-to-case constant, and the anchors and the copper mass agree on it.</li>
+    <li><strong>What 45 s means for a dash.</strong> The node no longer saturates inside an episode (3τ = 135 s). Sustained 55 N·m — the measured dash — reaches <strong>52% of ΔT_max at 33 s</strong>; at 2× continuous (110 N·m) the limit arrives in 12.9 s; at peak, in 5 s by construction. Back-to-back dashes with no rest: 0.52 → 0.77 → <strong>0.89 on the third</strong>, above the 0.85 penalty line; with 60 s of rest between dashes the second peaks at 0.59. So one dash is thermally legal at the RUNNER's operating point and the model prices <em>repeated</em> dashes and any derate.</li>
+    <li><strong>Consequences for training.</strong> The hot-start draw carries the weight: initial ΔT ∼ U[0, 0.7·ΔT_max] per episode so the penalty is active in a useful fraction of episodes; ΔT_max scale ∼ U[0.8, 1.2] as DR for the unknown Kt roll-off. The same τ_th = 45 s and ΔT_max ship to the Pi's winding observer.</li>
+    <li><strong>Penalty</strong> on ΔT/ΔT_max above 0.85, quadratic; the deployed governor keeps the hard cutoff.</li>
+    <li><strong>Hard fault</strong>: none in training (a kill teaches episode-ending exploits); the deployed safety governor keeps the real cutoff with its 0.8 engineering derate.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ §08 MARGIN -->
+<section>
+  <div class="sec-head"><span class="sec-num">§08</span><h2>Margin budget — stadium track</h2></div>
+  <p>Deployment target: a 100 m straight on an outdoor athletics track. Flat, textured rubber, possible wind, a lane 1.22 m wide. "Reliable" means the framework returns a <strong>speed-versus-margin front and a pass/fail gate</strong>, not a single fastest gait. Body weight for the percentages: 15.14 kg = 148.5 N. Wind force assumes ρ 1.2 kg/m³, C_d 1.0, frontal area 0.2 m².</p>
+  <div class="tblwrap">
+  <table>
+    <tr><th>disturbance</th><th>expected on the track</th><th>measured so far</th><th>training coverage (v2)</th><th>acceptance gate</th></tr>
+    <tr><td>steady wind, fore-aft</td><td class="cmt">10–15 m/s → <strong>12–27 N</strong> (8–18% BW); gusts on top.</td><td class="cmt">RUNNER: fore-aft impulses 0.2–1.0 m/s every 4 s → 100% survival, v_peak rises exactly +dv.</td><td class="cmt"><span class="chip-new">NEW</span> constant base force F_x ∼ U[−30, 30] N per episode + 30 N steps of 1 s every 5–10 s; the constant is a bias the Raibert law's integral term (§09) absorbs.</td><td class="cmt">100% survival at ±30 N steady; dash time within 10% of calm.</td></tr>
+    <tr><td>wind and gusts, lateral</td><td class="cmt">Same 12–27 N, lateral. Per step (≈0.2 s) a 27 N gust is 5.4 N·s = <strong>0.36 m/s</strong> of lateral velocity on 15 kg, which is what the 0.5 m/s gate covers. Plant ceiling for one capture step: ω₀ = √(g/h) ≈ 3.1 s⁻¹ at h ≈ 1 m and ≈0.3 m of lateral foot reach absorb ≈<strong>0.9 m/s</strong> before the hip-roll torque cap and swing time trim it; the gate is about half the ceiling.</td><td class="cmt"><strong>Never tested.</strong> m3 was y/roll/yaw rail-locked; RUN 8 v2 freed them but no lateral push axis has been run.</td><td class="cmt"><span class="chip-new">NEW</span> lateral impulses 0.3–0.6 m/s + constant F_y. Requires the hip_roll reflex sign fix (both legs +, +) so a <em>directional</em> lateral step exists, and the lateral Raibert term.</td><td class="cmt">Recover a 0.5 m/s lateral impulse at any phase, 16/16 greedy. Protocol below.</td></tr>
+    <tr><td>slope, camber</td><td class="cmt">World Athletics limits: lateral ≤ 1:100 (0.57°), running direction ≤ 1:1000.</td><td class="cmt">—</td><td class="cmt"><code>dr_gravity_tilt</code> 3° exists (off); set 5°, roll and pitch.</td><td class="cmt">100% at ±3° both axes.</td></tr>
+    <tr><td>friction</td><td class="cmt">Dry rubber 0.8–1.0+, wet 0.5–0.6.</td><td class="cmt">—</td><td class="cmt"><code>dr_friction_range</code> (0.5, 1.3) → (0.4, 1.3), on.</td><td class="cmt">No fall at μ 0.5 over 16 dashes.</td></tr>
+    <tr><td>lane keeping</td><td class="cmt">Lane 1.22 m; start centred → budget <strong>|y| ≤ 0.5 m at 100 m</strong>, i.e. mean heading error ≤ 0.29°. IMU yaw drift is irrelevant over 33 s (bias floor 0.0024 dps → 0.08°).</td><td class="cmt">RUN 8 v2: heading is a random walk — 171 m of path for 15–38 m net, 0–1/8 finishes.</td><td class="cmt">LP yaw in obs and reward (§03, §10); lateral offset y in the privileged tail; lane term in the search objective.</td><td class="cmt"><strong>|y| &lt; 0.5 m at the line, 16/16 greedy.</strong></td></tr>
+    <tr><td>texture, scuffs</td><td class="cmt">5–20 mm.</td><td class="cmt">—</td><td class="cmt"><code>trip_prob</code> 0.0008 (one per ≈6 s) on; contact resync (§05) absorbs the timing part.</td><td class="cmt">Survive 20 mm trips at one per 6 s, 100%.</td></tr>
+    <tr><td>mass, payload</td><td class="cmt">Battery/electronics placement ±2 kg.</td><td class="cmt">RUNNER basin two-sided: 62% @0.8×, 88% @0.9, 100% @1.0, 88% @1.1, 75% @1.2, <strong>0% from 1.35×</strong>.</td><td class="cmt"><code>dr_mass_global</code> 0.12, <code>dr_mass_body</code> 0.15, <code>dr_com_offset</code> 0.03 m, on.</td><td class="cmt">≥ 90% across 0.85–1.15×.</td></tr>
+    <tr><td>actuation delay</td><td class="cmt">12 ms measured (§07), plus whatever the Pi adds on a hot day.</td><td class="cmt">RUNNER: <strong>zero margin</strong> — 0% at 0 ms, 0% at ≥ 10 ms, only the trained 5 ms works.</td><td class="cmt">U[6, 18] ms per episode, substep-granular.</td><td class="cmt">≥ 95% at each of 6, 9, 12, 15, 18 ms.</td></tr>
+    <tr><td>thermal</td><td class="cmt">Dash at 0.97–1.00× continuous on the thigh (§07) reaches 52% of the limit; the third back-to-back dash reaches 89%.</td><td class="cmt">Anchor only (5 s at full current); no burst on hardware.</td><td class="cmt">ΔT ODE, τ_th 45 s, hot-start draw, penalty above 0.85.</td><td class="cmt">ΔT_peak &lt; 0.85·ΔT_max over two dashes with ≤ 60 s rest; the third dash is refused by the governor, not the gait.</td></tr>
+    <tr><td>model error: leg, CoM</td><td class="cmt">5 mm real vs 15 cm simulated stance yield; gravity torque 1.3–1.7× under-predicted (§07).</td><td class="cmt">5 mm at 1 BW (2026-09-09).</td><td class="cmt">Pushrod spring 30 kN/m ±50%, CoM offset 0.03 m, in the privileged tail.</td><td class="cmt">Same survival across the draws as at nominal.</td></tr>
+    <tr><td>no velocimeter outdoors</td><td class="cmt">Speed truth is the lane timing; the controller only has proprioception.</td><td class="cmt">Estimator head exists (asym_policy), R² not yet reported on DR plants.</td><td class="cmt">Supervised on the privileged velocity (§04).</td><td class="cmt">v̂ RMSE &lt; 0.15 m/s on held-out DR plants.</td></tr>
+  </table>
+  </div>
+  <h3>Protocol</h3>
+  <ul>
+    <li><code>tools/eval_envelope.py</code> gains axes for constant force (x, y), lateral impulse, tilt, friction, delay in ms, thermal scale; paired seeds 1000+, greedy, 8 episodes × 20 s per point, 16 × full dash for lane keeping and thermal. Pass = every gate row met and 100% at nominal.</li>
+    <li><strong>Push envelope, defined.</strong> It is a property of the <em>closed loop</em> — controller, gait and plant together — not of the robot: the plant only sets the ceiling above. It is measured on a policy, which is why RUN 8 v2 is the baseline and the deployed controller is what gets pushed on hardware. A push is an instantaneous change of the base velocity, Δv, in a body-frame direction (the env already applies fore-aft shoves as a qvel step on the free translational axes before the physics runs, seeded and paired, every 4 s). The <em>envelope</em> along an axis is survival fraction versus Δv, and the number quoted is the largest Δv recovered at every gait phase. Lateral = the body-y axis, which only exists on plants with y free (RUN 8 v2 and everything after). Sweep Δv ∈ {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0} m/s × phase ∈ 8 bins × both signs, 8 seeds each; report per-bin survival and the recovery time to |v_y| &lt; 0.05 m/s. Steady wind is a separate axis: a constant body-frame force, not an impulse.</li>
+    <li><strong>On the robot.</strong> Impulse: a pendulum mass of known m on a rope striking the torso at hip height, Δv = m·v_impact/M with v_impact from the release height; or a hand push through a force gauge with the impulse integrated from its trace. Read the delivered Δv from the IMU (integrated lateral acceleration over the 0.1 s contact; 190 µg/√Hz resolves 0.01 m/s) and log survival and recovery time — the standard biped push-recovery protocol. Steady force: a rope over a pulley to a hanging mass (12–27 N = 1.2–2.8 kg) or a leaf blower with an anemometer, applied lateral and fore-aft, during a treadmill or a slow track run. Start at 0.1 m/s with the spotter harness slack and step up.</li>
+    <li>The library search (§09) evaluates each candidate gait under the same randomisation, so the front it returns is already the speed–margin trade; the gate then picks the operating point, and a gait that fails a row is not "fast".</li>
+    <li>Hardware readout of margin: residual RMS and saturation per gait versus their simulated values (the model-error meter), touchdown-phase error from the resync estimator, lane offset at the line, drive-reported case temperature.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ §09 PIPELINE -->
+<section>
+  <div class="sec-head"><span class="sec-num">§09</span><h2>Pipeline — gait library, stabilizer, search <span class="chip-new">NEW</span></h2></div>
+  <p>The single-network design of §01–§06 asks one policy to find the gait and stabilize it. The 2026-09-01 freeze study showed the split the physics wants: the stabilizing correction is small (0.018–0.035 rad RMS per joint, p99 &lt; 0.14 rad, within-cycle), the orbit is unstable with an e-fold time of about one cycle, and gait <em>expressibility</em> was never the constraint. The gait-library pipeline below therefore finds the gait <strong>outside RL</strong> as a solved periodic orbit, and trains the network only for the job the freeze study proved it must do. Every component of §01–§08 is reused; what changes is who emits the spec.</p>
+  <div class="note"><strong>Two variants, one interface.</strong> <em>Library variant</em> (recommended build order): the spec is a per-episode command drawn from the library box, the action is the residual, the search picks the gait. <em>Single-network variant</em> (§02–§04 as written): the policy's latched head emits the spec. The env, the once-block, the reward and the margin gate are identical; the fallback is one config flag if the fixed-point solver finds no usable orbits.</div>
+
+  <h3>Stage 0 — fixed-point solver (tool, no network)</h3>
+  <div class="eq">section Σ: φ = 0⁺ (just after the wrap) · state x = (qpos, qvel) minus the cyclic coordinates x, y, yaw, incl. the passive 4-bar joints<br>
+return map P(x; θ): set the simulator to x, play ONE open-loop cycle T = 1/f of assemble(θ, φ) targets through the PD plant (armature-fit drive, 12 ms delay, no residual, no reflexes), read x' at the next wrap<br>
+defect d(x) = P(x; θ) − x&nbsp;&nbsp;·&nbsp;&nbsp;solve d = 0 by damped Newton (FD Jacobian h_q 1e-4 rad, h_v 1e-3 rad/s; step clip 0.05; ≤ 20 iters), fallback CMA-ES on ‖d‖²<br>
+outputs: x*, ‖d‖, v* (forward speed is a component of x*), Floquet multipliers λ_i = eig(∂P/∂x at x*), per-cycle envelope flags (torque, speed, thermal, GRF ≤ 3.5 BW, workspace)</div>
+  <p>Contact makes P non-smooth, hence the damping and the derivative-free fallback. Numerical error is not a limit: with the measured e-fold time of one cycle, a fixed point converged to 1e-6 gives ≈12 cycles before a 0.1 rad deviation, and v* is known the moment it converges. The multipliers are the number the whole design turns on: they say how hard the stabilizer's job is <em>before</em> any training, and the solver also repairs the freeze study's confound (those replays started from the policy's closed-loop state, not x*).</p>
+
+  <h3>Stage 1 — library solve</h3>
+  <div class="tblwrap">
+  <table>
+    <tr><th>item</th><th>specification</th><th>comment</th></tr>
+    <tr><td>search variables θ_r (17)</td><td class="mono">f · cam a0 a1 b1 a2 b2 · thigh a0 a1 b1 a2 b2 · Δ s o_cam · kp_lvl kd_lvl · hip a1</td><td class="cmt">Reduced from the 44-dim spec: the third harmonic and the hip profile beyond a1 are fixed at 0 for the solve (the fit ladder found k&gt;3 worth 4–7% of waveform variance). Full θ is θ_r embedded.</td></tr>
+    <tr><td>objective</td><td class="mono">max v* s.t. ‖d‖ &lt; 1e-3, envelope flags clear, max|λ_i| ≤ λ̄</td><td class="cmt">λ̄ is an open decision (§13): ≤ 1 is self-stable; the RUNNER's orbit was ≈2.7 per cycle. Report λ_max for every entry regardless.</td></tr>
+    <tr><td>optimizer</td><td class="mono">CMA-ES, pop 16, ≤ 2000 evals; continuation slow → fast in 0.5 m/s steps</td><td class="cmt">Each evaluation ≈ 100 cycle rollouts ≈ 20 sim-seconds; a library is an hour on the cluster, deterministic, no training. Continuation is how HZD libraries avoid local minima and gives λ_max along the whole speed axis.</td></tr>
+    <tr><td>entries</td><td class="mono">v ∈ {0 (stand), 1, 2, 3, v_max} m/s, mirror-symmetric (Δ = s = o = 0) by default</td><td class="cmt">Asymmetric knobs allowed in a second pass only if the symmetric front is slower — and then billed by the symmetry term. The stand entry is the stop command; run→stop is a walk down the speed axis, switched at commits.</td></tr>
+    <tr><td>outputs per entry</td><td class="mono">θ, x*, v*, λ_max, envelope margins, thermal-per-cycle</td><td class="cmt">x* is the episode reset state for Stage 3 (start on the orbit, not in a settle phase).</td></tr>
+  </table>
+  </div>
+
+  <h3>Stage 2 — Raibert prior on the relationship knobs (deterministic, per commit)</h3>
+  <div class="eq">o_cam ← o_θ − k_p·(v̂ − v_ref) − k_i·I_v,&nbsp;&nbsp;&nbsp;I_v ← clip(I_v + (v̂ − v_ref)·T, ±I_max)<br>
+o_hip ← o_θ,hip − k_y·v̂_y − k_r·roll_lp&nbsp;&nbsp;&nbsp;&nbsp;(both legs same sign: the (+,+) pattern is the antisymmetric one on the hip axes — a directional lateral step)<br>
+gains from the linearized return map: choose k_p so the eigenvalue of ∂P/∂x along v moves inside 0.5; k_i for a 30 N bias in ≤ 3 cycles; signs verified on the FK rig, never assumed</div>
+  <p>This is the step-to-step stabilizer — foot placement as a function of measured velocity error — and it is what makes <em>any</em> θ in the box converge to a periodic orbit of the body. It removes the discrete part of the problem from the network, absorbs constant forces (wind) that a proportional law would lean into forever, and it is readable. The knobs it modulates are the ones proven exact in workspace (§06). Its output is what the once-block carries as the live spec.</p>
+
+  <h3>Stage 3 — stabilizer training (the RL part)</h3>
+  <div class="tblwrap">
+  <table>
+    <tr><th>item</th><th>library variant</th><th>comment</th></tr>
+    <tr><td>action</td><td class="mono">6 residual (±0.20 rad) [+ 3 latched: Δf/f, amplitude scale, both ±20%]</td><td class="cmt">The optional three are the catch-event channel (0.2–0.5 rad events exceed the residual); bounded too tightly to game, and the only place the mask of §04 is still needed. Impedance profile stays in θ.</td></tr>
+    <tr><td>once-block</td><td class="mono">q_ref(φ) 6 · q̇_ref(φ) 6 · q_ref(φ + ¼ cycle) 6 · φ̂_td 2 · task 2 · commit 1 = 23</td><td class="cmt">Reference targets at the current phase and a quarter-cycle lookahead instead of the 44 coefficients (Li et al.): the network never evaluates the series. Actor obs 330 + 23 = 353.</td></tr>
+    <tr><td>episode</td><td class="mono">θ ∼ box around a library entry (amplitudes ±20%, f ±0.3 Hz, knobs ±0.1) · reset at x* + noise · θ switches along the speed path at commits</td><td class="cmt">Box width is the risk (§13): start narrow, widen by curriculum. The switch teaches run→stop as a gait change to survive.</td></tr>
+    <tr><td>reward</td><td class="mono">survive · speed income at v_ref · −w_track‖q − q_ref‖² (small) · −w_res‖r‖² (0.10) · −w_res_rate (0.02) · thermal · LP yaw · lane</td><td class="cmt">Residual effort must be charged here or the search (Stage 4) cannot see it. The baseline policies paid 0.02 and lived at the bound.</td></tr>
+    <tr><td>networks, DR, estimator</td><td class="mono">as §04 and §07</td><td class="cmt">Privileged critic, estimator head, delay/thermal/link draws in the tail. Nothing to game: the policy cannot touch the clock, the spec or the frequency.</td></tr>
+  </table>
+  </div>
+
+  <h3>Stage 4 — closed-loop search (the gait, finally)</h3>
+  <div class="eq">J(θ) = t_100m + λ_res·RMS(residual) + λ_th·max(0, ΔT/ΔT_max − 0.85) + λ_lane·|y_100| + λ_sym·asym + λ_fall·falls&nbsp;&nbsp;&nbsp;averaged over 8 paired seeds with the §08 randomisation on<br>
+CMA-ES on θ_r with the stabilizer frozen, ≤ 1000 evaluations, warm-started from the library entry</div>
+  <p>The residual term is what writes the plant physics into θ: the search lowers the stabilizer's bill by moving the gait toward where the leg carries its weight cheaply, which is the anisotropy, the moment balance and the loaded 4-bar geometry landing in the Fourier parameters rather than being repaired every cycle. Output: the speed–margin front; the §08 gate picks the point.</p>
+
+  <h3>Stage 5 — feedforward absorption and the hardware loop</h3>
+  <ul>
+    <li><strong>Absorb what is left.</strong> Phase-average the residual over ≥ 50 cycles, project r̄(φ) onto the weighted Fourier basis (least squares), add to θ, repeat ≤ 5 times or until RMS(r̄) &lt; 0.01 rad. Stays inside the stabilizer's box, so nothing retrains.</li>
+    <li><strong>On the robot</strong>, deploy θ* and log residual RMS/saturation and the touchdown-phase error. Residual effort far above its simulated value means the nominal is wrong for the real leg: run one absorption pass on hardware data and redeploy. The gait is tuned by θ within the box; retraining is not on the path.</li>
+    <li><strong>Diagnostics that gate each stage</strong>: <code>gait_diag.py</code> frequency rails and residual saturation (greedy residual saturation must stay rare; sustained saturation on a legal gait means the residual has become the waveform), λ_max from Stage 0, the §08 envelope.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ §10 REWARD -->
+<section>
+  <div class="sec-head"><span class="sec-num">§10</span><h2>Reward deltas</h2></div>
+  <p>The sprint objective survives unchanged in shape — dense speed income, per-step clock cost, stop phase, finish bonus (gated on actually coming to rest, the m3 stop-unlearning fix). What changes:</p>
+  <div class="tblwrap">
+  <table>
+    <tr><th>term</th><th>was</th><th>becomes</th><th>comment</th></tr>
+    <tr><td class="mono">coef_rate (spec change)</td><td>per-step, phase-gated</td><td class="mono">w_spec_cycle·‖ΔS‖² @ wrap</td><td class="cmt">Gate deleted; latch makes the honest version structural. 89% evasion → 0 by construction.</td></tr>
+    <tr><td class="mono">w_yaw_rate 3.0</td><td>raw ω_z</td><td class="mono">LP ω_z (τ≈0.7 s)</td><td class="cmt">Bills drift, not wobble; the billed signal is in the actor obs (§03).</td></tr>
+    <tr><td class="mono">w_height 2.5</td><td class="mono">−2.5·(h − 0.9612)²<br>two-sided quadratic</td><td class="mono">0 above 0.81 m<br>quadratic below only</td><td class="cmt"><strong>The hand-picked height prior comes out, and the ceiling goes with it.</strong> Measured: settled stance <strong>1.0112 m</strong>, sprint presets pinned to 0.9612 m, <code>term_height</code> 0.45 m — so the kill line sits 56 cm below stance and is a torso-on-the-floor crash detector, not a crouch limiter. The floor therefore comes from kinematics, not kill-line margin: the ride-height LUT’s measured feasible band is <strong>0.81–1.04 m</strong>, so 0.81 m is the real edge of validated geometry. <strong>No upper bound</strong> — one would directly tax the flight phase, which is the thing running requires. Keep the <em>knowledge</em> behind the old 5 cm crouch (backward toe reach 2.7 → 20.2 cm) without imposing it: with the torque-speed clamp, workspace-kill and the thermal budget all live, height is a trade the physics now prices by itself, and this term is only a fence around the validated band.</td></tr>
+    <tr><td class="mono">thermal budget</td><td>—</td><td class="mono">penalty on ΔT/ΔT_max &gt; 0.85</td><td class="cmt">§07. τ_th 45 s from the 5 s-at-peak anchor: one dash reaches 52% of the limit, the third back-to-back dash 89%; the hot-start draw makes the term active in training.</td></tr>
+    <tr><td class="mono">w_residual · w_residual_rate</td><td class="mono">0.02 · 0.0</td><td class="mono">0.10 · 0.02</td><td class="cmt"><span class="chip-new">NEW</span> Baseline diagnostics (gait_diag, 2026-09-08): every existing policy saturates the ±0.20 rad residual on 58–95% of steps per channel and carries 51–64% of all joint motion in it, in sustained 70–180 ms same-sign runs — the residual is a second waveform channel, not a correction. The bound stays (the freeze study's correction size fits inside it); living at the bound gets expensive.</td></tr>
+    <tr><td class="mono">lane term</td><td>—</td><td class="mono">−w_lane·y² beyond 0.25 m</td><td class="cmt"><span class="chip-new">NEW</span> §08: the 1.22 m lane is the deliverable's real constraint; y is in the privileged tail, LP yaw in the actor obs.</td></tr>
+    <tr><td class="mono">duty_sym 8.0 · contact_switch 0.20 · residual/imp rate · workspace kill</td><td colspan="2">keep</td><td class="cmt">The anti-hop and anti-chatter set that RUN 8 validated.</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ §11 CURRICULUM -->
+<section>
+  <div class="sec-head"><span class="sec-num">§11</span><h2>Curriculum — two stages, frozen interface</h2></div>
+  <div class="tblwrap">
+  <table>
+    <tr><th>stage</th><th>base DOF</th><th>role</th><th>comment</th></tr>
+    <tr><td class="mono">S1 “planar” (= m3)</td><td class="mono">x, z, pitch free · y, roll, yaw locked</td><td>iteration sandbox</td><td class="cmt">Cheap, fast signal on reward/latch changes. Steer + abduction dims present but inert, so the checkpoint carries.</td></tr>
+    <tr><td class="mono">S2 “free” (= m4+m5+m6 pooled)</td><td class="mono">all six free</td><td>the real run</td><td class="cmt">RUN 8 already proved this rung trains directly — free roll+yaw is what killed the hop. m1/m2 demoted to debug presets; the 6-rung ladder retires.</td></tr>
+  </table>
+  </div>
+  <p>Evidence for pooling: both of the project's real successes were single-rung runs (sprint_m3_mit 600 M cold; sprint_m6_lim2 at full freedom), while most historical failures were curriculum artifacts — gate deadlocks, clock-driven ramps, compressed schedules. The interface freeze (identical obs/action widths at both stages) is what makes S1→S2 warm-starts legal for the first time. <strong>Warm is the default</strong>: S1 pays for itself as the cheap sandbox where the latch, the symmetry loss and the new <code>split</code> dim get shaken out, and carrying that checkpoint into S2 is free once the widths match. S2-cold stays available as the paired-seed control.</p>
+</section>
+
+<!-- ============================================================ §12 DIFF -->
+<section>
+  <div class="sec-head"><span class="sec-num">§12</span><h2>Diff vs current stack (sprint_m6_lim2)</h2></div>
+  <div class="tblwrap">
+  <table>
+    <tr><th>item</th><th>current</th><th>proposed</th><th>why</th></tr>
+    <tr><td>control rate</td><td class="mono">200 Hz</td><td class="mono">100 Hz</td><td class="cmt">Pi can't hold 200 Hz (8–9 ms/tick measured); halves step budget per sim-day.</td></tr>
+    <tr><td>gait spec timing</td><td class="mono">per-step (5 ms)</td><td class="mono">latched @ φ-wrap</td><td class="cmt">Clock-warp exploit unrepresentable; spec becomes an honest, distillable gait description.</td></tr>
+    <tr><td>freq range</td><td class="mono">0.5–50 Hz per-step</td><td class="mono">0.5–5 Hz, latched</td><td class="cmt">50 Hz at 200 Hz control was a 4-step “cycle” — a pause button, not a cadence. The 0.5 floor stays: it cannot run (6 m stride), so the speed income fences it off during the dash.</td></tr>
+    <tr><td>height</td><td class="mono">quadratic pin to 0.961 m</td><td class="mono">free above 0.81 m, one-sided</td><td class="cmt">Removes a hand-picked prior; no upper bound at all, because one would tax the flight phase.</td></tr>
+    <tr><td>task encoding</td><td class="mono">dist_to_go/100</td><td class="mono">clip(d/8, 0, 1)</td><td class="cmt">Braking resolution where braking happens; command stays binary.</td></tr>
+    <tr><td>spec billing</td><td class="mono">phase-gated coef_rate</td><td class="mono">per-cycle ‖ΔS‖² @ commit</td><td class="cmt">Never phase-gate a penalty (m3 audit rule).</td></tr>
+    <tr><td>symmetry</td><td class="mono">reward-side only (duty_sym)</td><td class="mono">one series + Δ/s/o knobs</td><td class="cmt">Knobs at zero is exactly the mirror-symmetric gait; asymmetry is five priced numbers. Lag exact by theorem, offset-on-cam and gain exact to ~1% in workspace (measured). Shape asymmetry unrepresentable.</td></tr><tr><td>action</td><td class="mono">30 (per-step spec)</td><td class="mono">50 (44 latched + 6)</td><td class="cmt">One series per joint family + five relationship knobs; impedance latched too.</td></tr>
+    <tr><td>delay</td><td class="mono">7 ms → 1 step = 5 ms, DR off</td><td class="mono">12 ms nominal, 6–18 ms drawn, substep-granular</td><td class="cmt">Measured 11–13 ms in the impedance loop (§07); delay margin was ZERO in both directions — any timing change meant retrain.</td></tr>
+    <tr><td>drive model</td><td class="mono">2nd-order ≈13 Hz + EMA τ 13 ms</td><td class="mono">armature-fit kp/kd lag (6.3 Hz @ 200/5) + 12 ms</td><td class="cmt">Bode 2026-09-01: real corner is half the sim's and linear in kp; two lags become one.</td></tr>
+    <tr><td>4-bar closure</td><td class="mono">soft connect (solref 0.005)</td><td class="mono">rigid constraint + 30 kN/m series spring ±50%</td><td class="cmt">15 cm sink under load in sim vs 5 mm measured on the robot (§07).</td></tr>
+    <tr><td>thermal constant</td><td class="mono">τ_th 5 s (assumed)</td><td class="mono">τ_th 45 s (5 s to limit at peak)</td><td class="cmt">Second anchor fixes both constants; one dash is legal, repeated dashes are priced (§07).</td></tr>
+    <tr><td>clock</td><td class="mono">free-running</td><td class="mono">free-running (v3)</td><td class="cmt">The resync was built and removed: it needs a foot contact sensor the robot does not have, and measured with &#954;&nbsp;=&nbsp;0 it changed neither the dash nor braking (§05).</td></tr>
+    <tr><td>who emits the spec</td><td class="mono">policy, per step</td><td class="mono">library entry + Raibert law (§09); policy head as fallback</td><td class="cmt">Gait found as a solved periodic orbit; the network stabilizes it. Action 6 (+3), once-block 23, actor obs 353 in the library variant.</td></tr>
+    <tr><td>margin</td><td class="mono">measured after the fact</td><td class="mono">§08 gate, part of the search objective</td><td class="cmt">Lateral, slope, wind, lane, thermal never in any run's envelope before.</td></tr>
+    <tr><td>yaw signal</td><td class="mono">raw gyro in reward</td><td class="mono">LP yaw in reward + obs</td><td class="cmt">RUN 8: 95% of the yaw bill was wobble the policy couldn't act on.</td></tr>
+    <tr><td>thermal</td><td class="mono">none (audit-only)</td><td class="mono">ΔT ODE, penalty &gt; 0.85, hot-start draw</td><td class="cmt">Measured: thigh RMS = 100% of continuous rating at 3 m/s.</td></tr>
+    <tr><td>priv tail</td><td class="mono">6</td><td class="mono">25</td><td class="cmt">+ lateral offset, heading, accel, contact forces, DR draw, delay draw, winding ΔT ×6; height error → height above kill line.</td></tr>
+    <tr><td>obs</td><td class="mono">590 (+6) = 596</td><td class="mono">330 + once 47 (+25) = 402</td><td class="cmt">Only per-tick signals are stacked; the latched spec and task are observed once. Actor slice 377.</td></tr>
+    <tr><td>curriculum</td><td class="mono">6-rung DOF ladder</td><td class="mono">2 stages, frozen interface</td><td class="cmt">Ladder rungs caused more failures than they prevented.</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ §13 OPEN -->
+<section>
+  <div class="sec-head"><span class="sec-num">§13</span><h2>Open decisions</h2></div>
+  <ul>
+    <li><strong>Δ_max — is the bound testable?</strong> ±0.6 rad (the CPG arm’s value) forbids both-legs-in-phase; ±π allows it and lets the thermal budget, the hip_roll torque cap and the flight bound price it. s = ±1 already makes the one-legged hop reachable. The spirit of the design is to price, not forbid — but widening Δ_max is a deliberate choice, made once.</li>
+    <li><strong>Log-prob mask on non-wrap ticks</strong> — the latch’s one new implementation risk (§04). Verify the wrap flag lines up with the env’s commit bit-for-bit before training.</li>
+    <li><strong>Harmonic count for impedance</strong> — N=3 for uniformity; the profile probably needs N=2, which cuts the action to 46. Trim after the first run.</li>
+    <li><strong>w_knob, w_sym and stats symmetrisation</strong> — start w_sym ≈ 0.5; if VecNormalize stats drift asymmetric early, mirror the stats rather than raise the weight.</li>
+    <li><strong>Slow-clock billing</strong> — watch latched f mid-dash; amortise by f/f_ref only if it drifts to the 0.5 Hz floor.</li>
+    <li><strong>100 Hz on the real drives</strong> — bench-test before the run commits; 50 Hz measured reproducibly worse on these drives, so 100 Hz is an open empirical question.</li>
+    <li><strong>λ̄, the multiplier bound in the library solve (§09)</strong> — ≤ 1 asks for self-stable orbits, which may not exist at running speed on a rigid-ankle leg; a bound around 1.5–2 per cycle is holdable by a residual with the measured correction sizes. Report λ_max on every entry first, then choose.</li>
+    <li><strong>Library box width (§09 Stage 3)</strong> — too wide and most episodes are infeasible gaits with no signal; too narrow and the search returns the nominal. Start at ±10% amplitudes and widen by curriculum on survival.</li>
+    <li><strong>Resync gain and window (§05)</strong> — κ 0.5 / ±0.15 cycle are priors; measure the touchdown-phase error distribution on the first stabilizer run and set W at its 99th percentile.</li>
+    <li><strong>Lateral push envelope (§08)</strong> — the last axis with no data on any plant; run it on RUN 8 v2 before the stabilizer trains, so the first lateral number is a baseline and not a design guess.</li>
+  </ul>
+</section>
+
+<footer style="margin-top: 64px; border-top: 1px solid var(--line); padding-top: 14px;">
+  <span class="eyebrow">Sources: walk_mit/{env,config,fourier_gait,asym_policy,domain_rand,gait_diag,masked_policy}.py · model/dash01.xml · m3 CPG audit + freeze study (2026-09-01) · RUN 8 (sprint_m6_lim2) eval · limits audit · actuator Bode (2026-09-01) · known-mass test (2026-08-05) · scripted-walk plant study (2026-08-11) · thermal campaign self-test (2026-08-28) · gait_diag baselines (2026-09-08) · Pi timing. Originally the design ground truth for the next lineage. It has since been built on both arms and trained: the fastest runner is 3.27 m/s over 16/16 full-distance greedy episodes, and the stop is an open-loop gait-spec schedule fitted per checkpoint rather than a learned behaviour — ten reward variants could not teach one, because the stop COMMAND is itself the disturbance. §00 lists where this document was corrected against the build; the measurements behind each correction are in walk_v2/README.md.</span>
+</footer>
+
+</div>
+

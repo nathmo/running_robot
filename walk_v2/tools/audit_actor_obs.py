@@ -69,10 +69,37 @@ def compare(name, a, b, actor_dim, tol=0.0):
         print(f"[audit]   WARNING: the perturbation did not reach the privileged tail either -- it may "
               f"not have bitten at all, so this is not evidence of anything")
     if not ok:
-        t, i = np.unravel_index(np.argmax(d), d.shape)
-        print(f"[audit]   FAIL: actor input moved first at tick {t}, channel {i} "
-              f"({act_a[t, i]:.6f} vs {act_b[t, i]:.6f})")
+        # Report the EARLIEST divergence, not the biggest. The largest delta is almost always the
+        # previous-residual block, which moved only because the policy's own action moved -- a
+        # consequence, not the entry point. The first tick that moves at all is the leak.
+        ticks = np.where(d.max(axis=1) > tol)[0]
+        t0 = int(ticks[0])
+        chans = np.where(d[t0] > tol)[0]
+        print(f"[audit]   FAIL: first divergence at tick {t0}, channel(s) {list(chans[:6])}"
+              f"{' ...' if chans.size > 6 else ''} -- {_where(chans[0], actor_dim)}")
+        tm, im = np.unravel_index(np.argmax(d), d.shape)
+        print(f"[audit]   largest divergence {moved:.3e} at tick {tm}, channel {im} "
+              f"({_where(im, actor_dim)})")
     return ok
+
+
+def _where(i, actor_dim, frame_dim=33):
+    """Name an actor channel, so a failure points at the leak instead of an index."""
+    i = int(i)
+    if i >= actor_dim:
+        return "privileged tail"
+    hist = frame_dim * 10
+    if i < hist:
+        k, off = divmod(i, frame_dim)
+        block = ("motor_pos" if off < 6 else "motor_vel" if off < 12 else "motor_torque" if off < 18
+                 else "gravity" if off < 21 else "gyro" if off < 24 else "lp_yaw" if off < 25
+                 else "PHASE [cos,sin]" if off < 27 else "prev_residual")
+        return f"history frame {k}, {block}"
+    o = i - hist
+    if o < 44:
+        return f"once-block: latched spec[{o}]"
+    return ("once-block: TASK[0] (the command)" if o == 44 else
+            "once-block: TASK[1]" if o == 45 else "once-block: commit flag")
 
 
 def main():
