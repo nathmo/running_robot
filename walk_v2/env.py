@@ -776,6 +776,14 @@ class DashEnvV2:
             income = jnp.where(income > 0.0, income * u ** c.speed_upright_k, income)
         t["fwd_speed"] = jnp.where(run_phase, income, 0.0)
         # stop term: track the deceleration target while it is > 0 (stop_decel_s), then be still
+        # capture step: feet ahead of the CoM while the robot is above its commanded speed
+        if c.w_brake_foot > 0.0:
+            ahead = self._toe_pos(data)[:, 0] - data.qpos[p.base_q["x"]]
+            ahead = jnp.sum(jnp.where(grounded, jnp.clip(ahead, 0.0, c.brake_foot_max_m), 0.0))                 / jnp.maximum(jnp.sum(grounded), 1.0)
+            need = jnp.tanh(jnp.maximum(vx - v_target, 0.0))
+            t["brake_foot"] = jnp.where(run_phase, 0.0, c.w_brake_foot * need * ahead / c.brake_foot_max_m)
+        else:
+            t["brake_foot"] = 0.0
         sig = jnp.where(v_target > 0.0, c.decel_sigma, c.stop_sigma)
         err = jnp.abs(vx - v_target)
         track = jnp.exp(-err / sig) if c.stop_track_laplace else jnp.exp(-(err / sig) ** 2)

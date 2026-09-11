@@ -228,6 +228,14 @@ class Config:
     # light phases now ramp down to a SLOW RUN instead of to a standstill: the ramp target becomes a
     # speed drawn from amber_speed_band, and the policy has to hold a gait there. Stopping is then
     # the bottom of a range it knows, not a regime it has never visited. 0 = off.
+    # Braking needs a CAPTURE STEP: the stance foot planted AHEAD of the CoM so the ground reaction
+    # pushes backwards. Instrumented, this robot does the opposite -- it drops the gait clock, which
+    # on this plant lengthens the stance and the push, so it pitches forward and ACCELERATES into the
+    # fall (3.0-3.4 m/s at the fall against a 2.3 m/s command). Cadence is the only lever it uses and
+    # it is the wrong one. This rewards feet ahead of the CoM, but only while the robot is running
+    # FASTER than commanded, so it never fights the running gait. 0 = off.
+    w_brake_foot: float = 0.0
+    brake_foot_max_m: float = 0.25          # saturation of the foot-ahead offset
     amber_frac: float = 0.0
     amber_speed_band: tuple = (0.8, 1.6)
     decel_sigma: float = 0.6                # width (m/s) of the tracking reward while the target is > 0
@@ -468,7 +476,7 @@ PRESETS = {
                                                w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25,
                                                stop_cmd_continuous=True, sprint_brake_m=20.0,
                                                stop_track_laplace=True,
-                                               amber_frac=0.6),
+                                               amber_frac=0.6, w_brake_foot=1.5),
     # cold S2, the whole recipe: frequency floor (no slow-gait rail while the gait forms) + the stop
     # curriculum. This is the "no S1 stage" configuration.
     "v2c_s2_free_fast_floorstop": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
