@@ -26,7 +26,7 @@ cd "${REPO:-$HOME/running_robot}"
 RUN="${RUN:?set RUN}"
 TAG="${TAG:-$(date +%H%M)}"
 python walk_v2/tools/brake_search.py --run "walk_v2/runs/$RUN" ${CKPT:+--checkpoint "$CKPT"} \
-    --pop "${POP:-512}" --iters "${ITERS:-8}" --cruise-s "${CRUISE_S:-6}" --brake-s "${BRAKE_S:-8}" \
+    --pop "${POP:-512}" --iters "${ITERS:-8}" --reps "${REPS:-4}" --cruise-s "${CRUISE_S:-6}" --brake-s "${BRAKE_S:-8}" \
     ${DEMO:+--demo "$DEMO"} ${BRAKE_AT:+--brake-at "$BRAKE_AT"} --seed "${SEED:-0}" \
     --json "walk_v2/results/brake_${RUN}_${TAG}.json" \
     ${DEMO:+--video "walk_v2/results/run_and_stop_${RUN}_${TAG}.mp4"}
