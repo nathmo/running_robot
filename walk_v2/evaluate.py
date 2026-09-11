@@ -27,7 +27,8 @@ from ppo import PPO
 from train import make_eval_env, latest_checkpoint
 
 
-def load_run(run, checkpoint=None, n_envs=16, dr=False, keep_assist=False, free_clock=False):
+def load_run(run, checkpoint=None, n_envs=16, dr=False, keep_assist=False, free_clock=False,
+              warm_start=False):
     run = Path(run)
     cfg = config_from_dict(json.loads((run / "resolved_config.json").read_text())["config"])
     if free_clock:
@@ -44,7 +45,11 @@ def load_run(run, checkpoint=None, n_envs=16, dr=False, keep_assist=False, free_
         raise FileNotFoundError(f"no checkpoint in {run}")
     env = DashEnvV2(cfg, n_envs=n_envs) if dr else make_eval_env(cfg, n_envs, keep_assist=keep_assist)
     agent = PPO(cfg, env, run, cfg.total_steps, seed=0, eval_env=None)
-    agent.load(ck)
+    # warm_start=True applies the SAME obs-stat surgery training applies when this checkpoint is
+    # used as a warm start (warmstart_var_floor, warmstart_obs_count_cap). Without it a diagnostic
+    # measures normalisation the run never sees -- and on a near-constant channel the difference is
+    # the whole answer: task[0] has var 6.5e-5 here, so 0.89 reads as -13.6 sigma raw and -1.1 floored.
+    agent.load(ck, warm_start=warm_start)
     print(f"[eval] {ck.name} @ {agent.step:,} steps  plant {'DR' if dr else 'nominal'}")
     return cfg, env, agent
 

@@ -42,11 +42,14 @@ def main():
     ap.add_argument("--n-envs", type=int, default=64)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--v-cmd", type=float, default=None, help="hold the joystick here (m/s) instead of drawing")
+    ap.add_argument("--raw-stats", action="store_true",
+                    help="load obs stats verbatim; default applies the warm-start floor training applies")
     ap.add_argument("--curriculum", choices=("start", "final"), default="start",
                     help="'start' = what step 0 of training sees (default); 'final' = the end of every ramp")
     args = ap.parse_args()
 
-    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.n_envs, dr=False)
+    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.n_envs, dr=False,
+                               warm_start=not args.raw_stats)
     if args.preset:
         cfg = PRESETS[args.preset]()
         env = make_eval_env(cfg, args.n_envs)
@@ -54,6 +57,11 @@ def main():
     params = base._replace(dr_scale=0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0)
     print(f"[budget] preset={args.preset or 'run'} objective={cfg.objective} curriculum={args.curriculum} "
           f"w_alive={cfg.w_alive} w_track={getattr(cfg, 'w_track', 0)} ticks={args.ticks}")
+    import numpy as _np
+    _m, _v = _np.asarray(agent.stats.mean), _np.asarray(agent.stats.var)
+    print(f"[budget] task-channel normalisation: task[0] mean {_m[374]:.4f} std {_np.sqrt(_v[374]):.4f} "
+          f"| task[1] mean {_m[375]:.4f} std {_np.sqrt(_v[375]):.4f}"
+          f"{'  (RAW)' if args.raw_stats else '  (warm-start floored)'}")
     print(f"[budget] env params: bringup_scale={params.bringup_scale:.2f} pitch_assist={params.pitch_assist:.2f} "
           f"cmd=[{params.cmd_lo:.2f},{params.cmd_hi:.2f}] zero_p={params.cmd_zero_p:.2f}")
 
