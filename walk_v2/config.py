@@ -234,6 +234,15 @@ class Config:
     # fall (3.0-3.4 m/s at the fall against a 2.3 m/s command). Cadence is the only lever it uses and
     # it is the wrong one. This rewards feet ahead of the CoM, but only while the robot is running
     # FASTER than commanded, so it never fights the running gait. 0 = off.
+    # BRAKE PRIOR (2026-09-11, measured by tools/brake_search.py). A CEM search over gait specs found
+    # that a stop IS expressible: from 3.3 m/s hundreds of schedules reach a standstill upright. The
+    # braking direction it found is the OPPOSITE of what the policy learned: raise the cadence, hold
+    # the stride, shift the feet FORWARD (the capture step) and lean back. The policy instead drops
+    # the clock, overstrides and accelerates into a fall. So bias the latched spec that way while the
+    # robot is above its commanded speed, exactly like the pitch reflex already in the control law:
+    # the policy keeps full authority to modulate it, but braking is now reachable from where it
+    # starts instead of being a needle PPO has to find in the dark. 0 = off.
+    brake_prior: float = 0.0
     w_brake_foot: float = 0.0
     brake_foot_max_m: float = 0.25          # saturation of the foot-ahead offset
     amber_frac: float = 0.0
@@ -476,7 +485,7 @@ PRESETS = {
                                                w_stop_vel=2.0, decel_sigma=0.8, stop_speed_eps=0.25,
                                                stop_cmd_continuous=True, sprint_brake_m=20.0,
                                                stop_track_laplace=True,
-                                               amber_frac=0.6, w_brake_foot=1.5),
+                                               amber_frac=0.6, w_brake_foot=1.5, brake_prior=1.0),
     # SLOW RUNNER. Eight measured interventions have failed to teach a stop FROM ~2.8 m/s. The
     # requirement is "run 100 m and stop within ~20 m", not "run at 3 m/s": at 1.8 m/s the 20 m budget
     # needs only 0.08 m/s^2, a quarter of what it needs at 2.9. Income saturates at v_ceiling, so above it

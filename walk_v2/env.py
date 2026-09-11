@@ -502,6 +502,16 @@ class DashEnvV2:
             spec_cmd = action[:gait.SPEC_DIM]
         spec = jnp.where(commit, spec_cmd, state.spec)
         spec_change = jnp.where(commit & (state.cycle_n > 0), jnp.sum((spec - state.spec) ** 2), 0.0)
+        if c.brake_prior > 0.0:
+            # the measured braking direction (tools/brake_search.py): MORE cadence, feet forward, lean back
+            st_now = state.crossed | state.light_red
+            rmp = jnp.maximum(0.0, 1.0 - state.light_t / c.stop_decel_s) if c.stop_decel_s > 0 else 0.0
+            v_tg = state.light_floor + (state.light_v0 - state.light_floor) * rmp
+            g = c.brake_prior * jnp.tanh(jnp.maximum(v_body_pre[0] - v_tg, 0.0)) * st_now
+            spec = spec.at[gait.I_FREQ].add(0.20 * g)
+            spec = spec.at[gait.I_O.start].add(0.35 * g)
+            spec = spec.at[gait.I_O.start + 1].add(-0.50 * g)
+            spec = jnp.clip(spec, -1.0, 1.0)
         f = gait.frequency(spec[gait.I_FREQ], gp)
         phi = state.phase
         target, kp, kd, q_ref = gait.assemble(spec, residual, phi, roll, roll_rate, pitch, prate,
