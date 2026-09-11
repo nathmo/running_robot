@@ -387,6 +387,36 @@ release conditions and reports which termination fired. All numbers below: the b
   the bring-up (the 147 M robust runner, the one trained with the full DR / jitter / drop
   curricula, was lost in the quota outage between the 140 M and 145 M checkpoints).
 
+### How precise does the release have to be?
+
+Single-axis tolerances, 3 s hold, nominal plant, 16 envs (`--sweep pitchfine / rollfine / dzfine /
+combo`). The boundary is sharp everywhere -- one step past it every env dies, usually in 0.16-0.18 s:
+
+| axis | 16/16 range | first failure | what it means |
+|---|---|---|---|
+| pitch | **-6 deg (back) .. +2 deg (forward)** | -8 deg 13/16, -10 deg 11/16; **+3 deg 0/16** | asymmetric: it wants to be level or leaning back |
+| roll | **-2 deg .. 0 deg** | **+0.5 deg 0/16** (-3 deg 0/16) | 1 deg of roll = **7 mm** of height difference between the feet |
+| height | **-5 mm .. +30 mm** | -7 mm 5/16, -10 mm 11/16; +35 mm 0/16 | about first foot contact; do not press it down |
+| release speed | **+-0.2 m/s any axis, -0.4 m/s down: all 16/16** | none found | *how* you let go barely matters |
+| hold time | **>= 1 s** (or <= 0.02 s) | 0.05 s 2/16, 0.15 s 8/16, 0.20 s 0/16, 0.40 s 4/16, 0.60-0.80 s 0/16 | between 0.05 and 0.8 s it is a lottery |
+
+Two things make this harder than the table suggests and one makes it easier:
+
+* **Roll is one-sided.** Positive roll lifts the LEFT foot and is fatal at 0.5 deg (3.5 mm);
+  negative roll lifts the RIGHT foot and is fine to 2 deg (12 mm). The learned gait is not
+  left-right symmetric, so the two feet are not interchangeable at t = 0.
+* **The axes are coupled, and not as a box.** roll +2 deg alone is 0/16, and so is pitch -2 with
+  roll +1 -- but pitch **-4** with roll +2 is 16/16, as is -7/+7 (12/16). A backward lean buys roll
+  tolerance; a forward lean destroys it (pitch +2 with roll +1 dies in 0.10 s).
+* **Velocity errors are free, geometry errors are not.** Every release velocity tested was 16/16.
+  So a clean hand-off is not about letting go gently, it is about *where* the robot is when you do.
+
+The practical consequence: **lower it onto a flat floor until both feet carry weight and let the
+floor set the roll** (that is the only way to hold 0.5 deg), keep the trunk level to ~4 deg back,
+do not press down more than ~5 mm past first contact, and let go at least a second after the policy
+starts. With sensor noise the same nominal release drops from 15/16 to 9/16, so read every number
+above as optimistic.
+
 Verdict: **no hand bring-up with the current policy.** The cheapest fix is a reset distribution
 rather than a new curriculum -- initial base height, +-10 deg of tilt, a small base velocity, a
 random clock phase and a red-light start, so that every release condition an operator can produce
@@ -464,6 +494,12 @@ Asking for a SHORT stop made it more robust, not less. That is the reps-8 lesson
 that only says "do not fall" drifts to gentle schedules that stay upright and never quite stop, while one
 that must stop short commits to decisive braking -- which settles more reliably as well. Video:
 `results/v2c_redlight_stop.mp4`.
+
+**Do not push the search harder.** `--w-dist 0.15` with 12 iterations fits 16.3 m and then gives
+446/512 upright, 47/512 stopped, median 24.8 m held out -- worse on every axis than `0.05`, and the
+fit's own number does not survive. That is the third harder-optimisation loss of the day (after
+`--reps 8`), always the same mechanism: a longer or harder CEM narrows onto the episodes it was
+scored against. 8 iterations, 4 episodes, `w_dist 0.05` is the setting that generalises.
 
 **Recommended for the corridor test:** `v2c_s2_brakeprior_s41` `best_speed` (3.27 m/s, 16/16) with a brake
 fitted `--hold-run --free-clock --stagger-s 4 --w-dist 0.05 --reps 4`, 8 s window. Budget ~10 m of run-up
