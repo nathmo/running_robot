@@ -74,6 +74,33 @@ class Transition(NamedTuple):
 
 
 # ------------------------------------------------------------------ the trainer
+def initial_params(c):
+    """EnvParams at the START of every curriculum -- what step 0 of training actually sees.
+
+    Module-level so diagnostics can reproduce the training condition exactly: `EnvParams.final(cfg)` is
+    the END of the curricula (full bring-up, full command range, assist off), which is a different and
+    much harder env than the one a run begins in. Measuring the wrong one reads as a policy failure.
+    """
+    return EnvParams(dr_scale=0.0 if (c.dr_enable and c.dr_curriculum_steps > 0) else 1.0,
+    sprint_dist_m=float(c.sprint_dist_start_m if c.sprint_curriculum_steps > 0
+                        else c.sprint_dist_m),
+    stance_ratio=float(c.stance_ratio_start if c.gait_curriculum_steps > 0
+                       else c.stance_ratio_final),
+    eff_scale=0.0 if c.efficiency_ramp_steps > 0 else float(c.efficiency_target),
+    ctrl_jitter_ms=0.0 if c.jitter_curriculum_steps > 0 else float(c.ctrl_jitter_ms_final),
+    ctrl_drop_prob=0.0 if c.jitter_curriculum_steps > 0 else float(c.ctrl_drop_prob_final),
+    pitch_assist=1.0 if (c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0) else 0.0,
+    bringup_scale=0.0 if (getattr(c, 'bringup_enable', False)
+                         and c.bringup_curriculum_steps > 0) else 1.0,
+    cmd_zero_p=0.0 if c.cmd_curriculum_steps > 0 else float(c.cmd_zero_frac),
+    cmd_lo=float(c.cmd_range_start[0] if c.cmd_curriculum_steps > 0
+                 else c.cmd_range[0]),
+    cmd_hi=float(c.cmd_range_start[1] if c.cmd_curriculum_steps > 0
+                 else c.cmd_range[1]),
+    gait_freq_lo=float(c.gait_freq_lo_start if c.gait_freq_floor_steps > 0
+                       else c.gait_freq_hz[0]))
+
+
 class PPO:
     def __init__(self, cfg, env: DashEnvV2, run_dir, total_steps, seed=0, eval_env=None, n_devices=1):
         self.cfg, self.env, self.run = cfg, env, Path(run_dir)
@@ -371,33 +398,6 @@ class PPO:
 
     def _initial_params(self):
         return initial_params(self.cfg)
-
-
-def initial_params(c):
-    """EnvParams at the START of every curriculum -- what step 0 of training actually sees.
-
-    Module-level so diagnostics can reproduce the training condition exactly: `EnvParams.final(cfg)` is
-    the END of the curricula (full bring-up, full command range, assist off), which is a different and
-    much harder env than the one a run begins in. Measuring the wrong one reads as a policy failure.
-    """
-    return EnvParams(dr_scale=0.0 if (c.dr_enable and c.dr_curriculum_steps > 0) else 1.0,
-    sprint_dist_m=float(c.sprint_dist_start_m if c.sprint_curriculum_steps > 0
-                        else c.sprint_dist_m),
-    stance_ratio=float(c.stance_ratio_start if c.gait_curriculum_steps > 0
-                       else c.stance_ratio_final),
-    eff_scale=0.0 if c.efficiency_ramp_steps > 0 else float(c.efficiency_target),
-    ctrl_jitter_ms=0.0 if c.jitter_curriculum_steps > 0 else float(c.ctrl_jitter_ms_final),
-    ctrl_drop_prob=0.0 if c.jitter_curriculum_steps > 0 else float(c.ctrl_drop_prob_final),
-    pitch_assist=1.0 if (c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0) else 0.0,
-    bringup_scale=0.0 if (getattr(c, 'bringup_enable', False)
-                         and c.bringup_curriculum_steps > 0) else 1.0,
-    cmd_zero_p=0.0 if c.cmd_curriculum_steps > 0 else float(c.cmd_zero_frac),
-    cmd_lo=float(c.cmd_range_start[0] if c.cmd_curriculum_steps > 0
-                 else c.cmd_range[0]),
-    cmd_hi=float(c.cmd_range_start[1] if c.cmd_curriculum_steps > 0
-                 else c.cmd_range[1]),
-    gait_freq_lo=float(c.gait_freq_lo_start if c.gait_freq_floor_steps > 0
-                       else c.gait_freq_hz[0]))
 
     def _gated(self, key, ep_len, start, target, warmup, gate, retreat, d_steps):
         """Competence-gated, retreating ramp (walk_mit GatedRampCallback): progress in [0,1]."""
