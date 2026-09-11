@@ -81,6 +81,11 @@ def main():
     ap.add_argument("--cruise-s", type=float, default=6.0, help="policy-driven run-up before braking")
     ap.add_argument("--brake-s", type=float, default=8.0, help="length of the open-loop braking window")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--w-dist", type=float, default=0.0,
+                    help="weight on STOPPING DISTANCE in the score (per metre). The search only ever "
+                         "asked for a standstill, so among schedules that stop it had no reason to "
+                         "prefer the one that stops SHORT -- which is the only thing a corridor cares "
+                         "about. 0.05 makes 20 m cost as much as 1 m/s of leftover speed.")
     ap.add_argument("--stagger-s", type=float, default=0.0,
                     help="spread the moment braking starts over this many seconds, independently "
                          "per episode. 0 fits ONE brake point, which is right for a finish line and "
@@ -370,6 +375,7 @@ def main():
         if n_pad:
             theta_env = np.concatenate([theta_env, np.repeat(theta[-1:], n_pad, axis=0)], axis=0)
         alive, vmin, surv, dstop = brake_jit(jnp.asarray(theta_env, jnp.float32), state, obs, t0_env)
+        ds_all = np.asarray(dstop)[:n_cand * n_reps].reshape(n_cand, n_reps)
         k = n_cand * n_reps
         alive = np.asarray(alive)[:k].reshape(n_cand, n_reps)
         vmin = np.asarray(vmin)[:k].reshape(n_cand, n_reps)
@@ -378,15 +384,16 @@ def main():
         # search still has something to climb when every candidate falls. With a flat penalty the
         # scores tie, the elite are arbitrary, mu/sd drift and the run never recovers -- which is
         # exactly how a --reps 8 fit died at 0/512 while --reps 4 solved the same problem.
-        score = np.where(alive, vmin, 100.0 + 100.0 * (1.0 - surv)).mean(axis=1)
+        # among candidates that stop, prefer the one that stops in the least distance (w_dist > 0)
+        good = vmin + args.w_dist * np.maximum(ds_all, 0.0)
+        score = np.where(alive, good, 100.0 + 100.0 * (1.0 - surv)).mean(axis=1)
         upright_all = alive.all(axis=1)
         order = np.argsort(score)
         el = order[:n_elite]
         if score[order[0]] < best["score"]:
-            ds = np.asarray(dstop)[:n_cand * n_reps].reshape(n_cand, n_reps)
             best = dict(score=float(score[order[0]]), v_min=float(vmin[order[0]].max()),
                         upright=bool(upright_all[order[0]]), theta=theta[order[0]].tolist(),
-                        stop_m=float(ds[order[0]].mean()))
+                        stop_m=float(ds_all[order[0]].mean()))
         mu, sd = theta[el].mean(0), theta[el].std(0) + 1e-3
         n_up = int(alive.sum())
         n_all = int(upright_all.sum())

@@ -14,7 +14,7 @@
 #SBATCH --mem=90G
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:40:00
-#SBATCH --output=%x-%j.out
+#SBATCH --output=walk_v2/logs/%x-%j.out
 
 set -euo pipefail
 module purge
@@ -26,7 +26,7 @@ cd "${REPO:-$HOME/running_robot}"
 RUN="${RUN:?set RUN}"
 TAG="${TAG:-$(date +%H%M)}"
 python walk_v2/tools/brake_search.py --run "walk_v2/runs/$RUN" ${CKPT:+--checkpoint "$CKPT"} \
-    --pop "${POP:-512}" --iters "${ITERS:-8}" --reps "${REPS:-4}" ${HOLD_RUN:+--hold-run} ${FREE_CLOCK:+--free-clock} --stagger-s "${STAGGER_S:-0}" --cruise-s "${CRUISE_S:-6}" --brake-s "${BRAKE_S:-8}" \
+    --pop "${POP:-512}" --iters "${ITERS:-8}" --reps "${REPS:-4}" ${HOLD_RUN:+--hold-run} ${FREE_CLOCK:+--free-clock} --stagger-s "${STAGGER_S:-0}" --w-dist "${W_DIST:-0}" --cruise-s "${CRUISE_S:-6}" --brake-s "${BRAKE_S:-8}" \
     ${DEMO:+--demo "$DEMO"} ${BRAKE_AT:+--brake-at "$BRAKE_AT"} --seed "${SEED:-0}" \
     --json "walk_v2/results/brake_${RUN}_${TAG}.json" \
     ${DEMO:+--video "walk_v2/results/run_and_stop_${RUN}_${TAG}.mp4"}
