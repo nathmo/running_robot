@@ -70,6 +70,11 @@ def main():
     ap.add_argument("--json", default=None)
     ap.add_argument("--demo", default=None, help="theta json: run the policy to the line, then brake; writes a video")
     ap.add_argument("--video", default=None)
+    ap.add_argument("--brake-at", type=float, default=None,
+                    help="distance (m) at which to start braking; default = the line minus the stopping "
+                         "distance, so the robot comes to rest ON the line. Braking must START BEFORE the "
+                         "line: past it the env is in the stop phase and the policy's own residual -- the "
+                         "destabilising response this whole investigation measured -- fights the schedule.")
     args = ap.parse_args()
 
     cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.pop, dr=False)
@@ -138,8 +143,12 @@ def main():
             state2, obs2, _, _, _ = env.step(state, a, params)
             return (state2, obs2), state.data.qpos[0]
 
-        n_line = int(min(env.max_steps - n_brake - 10, (cfg.sprint_dist_m / max(v0, 0.5) + 2.0) / dt))
+        # stop ON the line: start braking a stopping-distance short of it (v0 * brake_s / 2 for a
+        # roughly linear ramp), and stay in the RUN phase throughout
+        d_brake = args.brake_at if args.brake_at is not None else max(5.0, cfg.sprint_dist_m - v0 * args.brake_s / 2)
+        n_line = int(min(env.max_steps - n_brake - 10, (d_brake / max(v0, 0.5) + 2.0) / dt))
         (state, obs), q_run = jax.lax.scan(to_line, (state, obs), None, length=n_line)
+        print(f"[demo] braking begins at {d_brake:.1f} m (line at {cfg.sprint_dist_m:.0f} m)")
         d_line = float(np.asarray(state.sprint_d)[0])
         cruise_spec = state.spec
         print(f"[demo] policy ran {d_line:.1f} m in {n_line * dt:.1f} s; braking from "
@@ -163,9 +172,11 @@ def main():
         sd, fell = np.asarray(sd), np.asarray(fell)
         v_end = float(np.asarray(state.prev_vel_body)[0, 0])
         stop_d = float(sd[-1] - d_line)
+        past_line = float(sd[-1]) - float(cfg.sprint_dist_m)
         i_fall = int(np.argmax(fell)) if fell.any() else -1
-        print(f"[demo] stopping distance {stop_d:.1f} m past the line, final speed {v_end:+.3f} m/s, "
-              f"total {float(sd[-1]):.1f} m, fell={'no' if i_fall < 0 else f'at {i_fall * dt:.1f} s'}")
+        print(f"[demo] braked over {stop_d:.1f} m, came to rest at {float(sd[-1]):.1f} m "
+              f"({past_line:+.1f} m relative to the line), final speed {v_end:+.3f} m/s, "
+              f"fell={'no' if i_fall < 0 else f'at {i_fall * dt:.1f} s'}")
         if args.video:
             from evaluate import render_video
             qs = np.concatenate([np.asarray(q_run), np.asarray(q_br)], axis=0)
