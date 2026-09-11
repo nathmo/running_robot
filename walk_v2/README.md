@@ -411,12 +411,23 @@ signature never changed: **0% of the light phase spent slow, falling 0.8-1.9 s i
 | 7 | capture-step reward (`w_brake_foot`) | braking needs the foot AHEAD of the CoM; this lineage plants ~8 cm behind | earned exactly 0.000 |
 | 8 | capture-step reward made SIGNED | clipped at 0 it is flat exactly where the robot lives (the same mistake as #5) | income live, behaviour unchanged |
 
-**The open hypothesis** (`v2c_s2_free_fast_slowstop`, running): stopping may simply be out of reach from
-2.9 m/s for this morphology. The requirement is "run 100 m and stop within ~20 m", which at 1.8 m/s needs
-0.08 m/s^2 -- a quarter of what 2.9 m/s needs. A slower runner that stops beats a fast one that cannot.
-Beyond that, the next ideas are larger than reward tweaks: a speed-command objective across the whole
-range (warm-started from a runner, which is what every failed command-objective run in this project
-lacked), or a braking primitive added to the gait library so it need not be discovered.
+| 9 | cap the top speed at 1.8 m/s (`v2c_s2_free_fast_slowstop`) | stopping from 1.8 m/s needs 0.08 m/s^2, a quarter of 2.9 m/s | **answered: no** |
+
+**The slow-runner hypothesis is dead.** `v2c_s2_slowstop_s36` does exactly what the cap intended -- 104.9 m
+at **1.79 m/s**, 16/16 (`best_speed_74M.msgpack`, banked) -- and it still cannot stop. Wheel-free with no
+lights it crosses the line and holds 1.80-1.88 m/s for 2.2-2.9 s before falling: it never slows at all.
+Under red lights it falls 8/8, 0% slow, ACCELERATING from 1.79 to 2.2-3.6 m/s. The one thing the lower
+speed bought is time: 2.2-2.9 s past the line against 0.4-0.7 s for the 3 m/s runners. **The deficit is
+not speed-dependent.** Nine configurations, no stop.
+
+**The remaining hypothesis is architectural, and there is a decisive test for it.** The v2 action is a
+Fourier gait spec LATCHED once per cycle plus a +-0.10 rad residual: a periodic parameterisation, while a
+stop is an aperiodic transient. Before spending more GPU time on reward shaping, settle whether a stop is
+expressible by this controller AT ALL: take a running policy at the line and search offline (CMA-ES over a
+short sequence of per-cycle specs -- the machinery exists in `walk_mit/library/`) for ANY spec sequence
+that decelerates it without falling. If none exists the architecture is the wall, and the fix is a bigger
+residual or an explicit brake primitive in the library, not another reward term. If one exists, it is an
+RL exploration problem and the spec sequence found is a demonstration to warm-start from.
 
 **Instrumentation added for this** (`evaluate.py`): `--stoplight P`, per-episode red-phase time and slow
 fraction, falls on red, post-line time and minimum speed, the gait clock through the red phase, the speed
