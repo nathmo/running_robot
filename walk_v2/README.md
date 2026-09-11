@@ -395,6 +395,10 @@ back, is the only repeatable option.
 
 ## THE STOP IS EXPRESSIBLE -- it was exploration, not architecture (2026-09-11, 09:00)
 
+> **Read the section below with its correction (15:00, further down): the schedule it finds is
+> fitted to its own episodes and does not survive a held-out seed.** A stop is expressible; a
+> single open-loop schedule is not a stop CONTROLLER.
+
 After nine reward variants failed identically, `tools/brake_search.py` asked the question that settles it
 **without training**: run a trained policy to steady state, switch the POLICY OFF for the gait spec (keep
 its per-tick residual -- zeroing that removes the stabiliser and everything falls, which is how the first
@@ -436,6 +440,43 @@ Every runner on both arms crosses the 100 m line at full speed and falls. Each f
 a measurement, not a guess, and each was verified on the live environment before training; the failure
 signature never changed: **0% of the light phase spent slow, falling 0.8-1.9 s in, accelerating to
 3.0-3.8 m/s against a ~2.3 m/s command.**
+
+## ...but the schedule fits the EPISODES, not the task (2026-09-11, 15:00)
+
+The result above is measured on the episodes the search itself selected against. Held out, it collapses.
+`env.reset` splits its key per env, so the 512 envs are independent episodes -- which means one candidate
+per env scored each schedule on exactly ONE episode, and the CEM was free to elect schedules whose episode
+happened to be kind. Re-running the winning schedule on a seed the fit had never seen:
+
+```
+[demo] 512 episodes: upright 13/512, STOPPED (|v|<=0.25) 8/512, stopped within 20 m of the line 8/512
+[demo] of those that stopped: overrun past the line median -6.5 m ... worst -5.4 m
+```
+
+297/512 on its own episodes, **8/512 on new ones** -- and the eight that do work come to rest a median
+6.5 m BEFORE the line, so they never finish the dash. Two fixes, both in the tool: `--reps` (default 4)
+gives every candidate its own block of episodes and scores it on the mean, where one fall costs 1e3, so a
+schedule must survive all of them before its speed is compared; and the demo takes `--seed`, because a
+demo on the fit's own seed is self-congratulatory by construction.
+
+**The mechanism, now measured three ways.** `params.sprint_dist_m` feeds BOTH the policy's distance-to-go
+input and the env's stop phase. So any brake window that reaches the line flips the policy into the stop
+response this whole investigation measured -- drop cadence, accelerate -- and its residual then fights the
+schedule exactly where the schedule needs it. Every fit whose window reached the line returned **0/512**
+(the 3.27 m/s runner at an 8 s window and again at 12 s: best reachable 3.3 m/s, upright=False). The only
+schedules that survive at all are the ones that stop SHORT of the line and never enter the stop phase.
+
+Hence `--hold-run`: push the line out of range for the brake window only, so the policy stays in the regime
+it is competent in -- running -- while the schedule decelerates the body. That is not a simulation cheat.
+On the robot that input IS the run/stop button, so "brake without telling the policy it has finished" is a
+controller that can be built.
+
+**And these schedules are policy- AND state-specific.** The 6 s-fitted schedule replayed at 88 m topples at
+4.0-4.4 s. The at-brake-point fit is qualitatively different and more sensible: cadence 1.01 -> 1.33 -> 0.72
+with `o_cam` +0.25 -> -0.30, i.e. quick-step to get the feet ahead and then wind cadence and stride DOWN to
+settle -- where the mid-run fit rose monotonically (+0.20 -> +0.42) because it only ever had to touch zero
+speed inside its window, never to come to rest.
+
 
 | # | Intervention | Measured reason | Result |
 |---|---|---|---|
