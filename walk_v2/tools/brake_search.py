@@ -64,6 +64,8 @@ def main():
     ap.add_argument("--pop", type=int, default=512)
     ap.add_argument("--iters", type=int, default=8)
     ap.add_argument("--elite", type=float, default=0.1)
+    ap.add_argument("--reps", type=int, default=4,
+                    help="episodes per candidate; the envs are independent episodes, so --reps 1 scores a candidate on ONE and the CEM then selects lucky episodes rather than robust schedules")
     ap.add_argument("--cruise-s", type=float, default=6.0, help="policy-driven run-up before braking")
     ap.add_argument("--brake-s", type=float, default=8.0, help="length of the open-loop braking window")
     ap.add_argument("--seed", type=int, default=0)
@@ -231,11 +233,20 @@ def main():
     lo, hi = BOUNDS[:, 0], BOUNDS[:, 1]
     mu = np.repeat(((lo + hi) / 2)[:, None], KNOTS, axis=1).reshape(-1)
     sd = np.repeat(((hi - lo) / 4)[:, None], KNOTS, axis=1).reshape(-1)
-    n_elite = max(4, int(args.pop * args.elite))
+    # One candidate per env scores a schedule on a SINGLE episode, and since the envs are independent
+    # episodes that rewards luck: the elite are schedules whose one episode happened to be kind, and
+    # they fall over on a held-out seed. Give each candidate `reps` episodes instead and score it on
+    # the mean -- a single fall costs 1e3, so a candidate must survive every one of its episodes
+    # before its speed is even compared.
+    n_reps = max(1, args.reps)
+    n_cand = max(4, args.pop // n_reps)
+    n_pad = args.pop - n_cand * n_reps
+    n_elite = max(4, int(n_cand * args.elite))
     best = dict(score=np.inf, v_min=np.inf, upright=False, theta=None)
+    print(f"[brake] {n_cand} candidates x {n_reps} episodes = {n_cand * n_reps} of {args.pop} envs")
     for it in range(args.iters):
         key, k = jax.random.split(key)
-        theta = np.asarray(jax.random.normal(k, (args.pop, DIM))) * sd + mu
+        theta = np.asarray(jax.random.normal(k, (n_cand, DIM))) * sd + mu
         lo_t = np.repeat(lo[:, None], KNOTS, axis=1).reshape(-1)
         hi_t = np.repeat(hi[:, None], KNOTS, axis=1).reshape(-1)
         theta = np.clip(theta, lo_t, hi_t)
@@ -249,18 +260,27 @@ def main():
             print(f"[brake] CONTROL (schedule = cruise): upright {int(np.asarray(a_c).sum())}/{args.pop}, "
                   f"min |v| {float(np.asarray(v_c)[0]):.2f} m/s -- if this is not upright the harness is wrong",
                   flush=True)
-        alive, vmin = brake_jit(jnp.asarray(theta, jnp.float32), state, obs)
-        alive, vmin = np.asarray(alive), np.asarray(vmin)
-        # a fall is disqualifying: score = slowest speed reached while staying upright
-        score = np.where(alive, vmin, 1e3)
+        # env (i * n_reps + j) runs candidate i on episode j; the pad rows keep the jitted shape
+        theta_env = np.repeat(theta, n_reps, axis=0)
+        if n_pad:
+            theta_env = np.concatenate([theta_env, np.repeat(theta[-1:], n_pad, axis=0)], axis=0)
+        alive, vmin = brake_jit(jnp.asarray(theta_env, jnp.float32), state, obs)
+        alive = np.asarray(alive)[:n_cand * n_reps].reshape(n_cand, n_reps)
+        vmin = np.asarray(vmin)[:n_cand * n_reps].reshape(n_cand, n_reps)
+        # a fall is disqualifying: score = slowest speed reached while staying upright, averaged
+        # over the candidate's episodes, so one fall (1e3) sinks it however good the others were
+        score = np.where(alive, vmin, 1e3).mean(axis=1)
+        upright_all = alive.all(axis=1)
         order = np.argsort(score)
         el = order[:n_elite]
         if score[order[0]] < best["score"]:
-            best = dict(score=float(score[order[0]]), v_min=float(vmin[order[0]]),
-                        upright=bool(alive[order[0]]), theta=theta[order[0]].tolist())
+            best = dict(score=float(score[order[0]]), v_min=float(vmin[order[0]].max()),
+                        upright=bool(upright_all[order[0]]), theta=theta[order[0]].tolist())
         mu, sd = theta[el].mean(0), theta[el].std(0) + 1e-3
         n_up = int(alive.sum())
-        print(f"[brake] iter {it}: upright {n_up}/{args.pop}, best |v| while upright "
+        n_all = int(upright_all.sum())
+        print(f"[brake] iter {it}: episodes upright {n_up}/{n_cand * n_reps}, candidates upright in "
+              f"ALL {n_reps} {n_all}/{n_cand}, best mean |v| "
               f"{score[order[0]] if score[order[0]] < 1e2 else float('nan'):.3f} m/s "
               f"(elite mean {np.mean(score[el][score[el] < 1e2]) if np.any(score[el] < 1e2) else float('nan'):.3f})", flush=True)
 
