@@ -779,7 +779,10 @@ class DashEnvV2:
         # capture step: feet ahead of the CoM while the robot is above its commanded speed
         if c.w_brake_foot > 0.0:
             ahead = self._toe_pos(data)[:, 0] - data.qpos[p.base_q["x"]]
-            ahead = jnp.sum(jnp.where(grounded, jnp.clip(ahead, 0.0, c.brake_foot_max_m), 0.0))                 / jnp.maximum(jnp.sum(grounded), 1.0)
+            # NOT clipped at zero: this lineage plants its feet ~8 cm BEHIND the CoM (walk_mit m3), so a
+            # one-sided reward is identically zero there and teaches nothing -- the same flat-region
+            # mistake as the Gaussian tracking term. Signed, so moving the foot forward always pays.
+            ahead = jnp.sum(jnp.where(grounded, jnp.clip(ahead, -c.brake_foot_max_m, c.brake_foot_max_m), 0.0))                 / jnp.maximum(jnp.sum(grounded), 1.0)
             need = jnp.tanh(jnp.maximum(vx - v_target, 0.0))
             t["brake_foot"] = jnp.where(run_phase, 0.0, c.w_brake_foot * need * ahead / c.brake_foot_max_m)
         else:
