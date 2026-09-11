@@ -718,7 +718,7 @@ class PPO:
                 # n_max-step scan cost the full 60 s episode cap (~200 s on a V100) even when all
                 # 16 greedy envs fell within a second, 63% of the wall clock early in training
                 def body(carry):
-                    state, obs, alive, first_end, dist, tline, fin, fell, t = carry
+                    state, obs, alive, first_end, dist, tline, fin, fell, trk, t = carry
                     a = jnp.clip(net.apply(p, stats.normalize(obs), method=net.actor_mean), -1.0, 1.0)
                     state2, obs2, r, done, info = env.step(state, a, params)
                     ending = alive & done
@@ -727,22 +727,28 @@ class PPO:
                     tline = jnp.where(ending & info["finished"], info["t_line"], tline)
                     fin = fin | (ending & info["finished"])
                     fell = fell | (ending & info["fallen"])
-                    return (state2, obs2, alive & ~done, first_end, dist, tline, fin, fell, t + 1)
+                    # how far off the commanded speed this policy runs. Under the joystick objective
+                    # distance is not the goal -- a policy that ignores the stick and sprints covers
+                    # the most ground, so keeping "best by distance" would keep the worst policy.
+                    vx = (info["sprint_d"] - state.sprint_d) / env.control_dt
+                    trk = trk + jnp.where(alive, jnp.abs(vx - state.v_cmd), 0.0)
+                    return (state2, obs2, alive & ~done, first_end, dist, tline, fin, fell, trk, t + 1)
 
                 def cond(carry):
-                    return carry[2].any() & (carry[8] < n_max)
+                    return carry[2].any() & (carry[9] < n_max)
 
                 n = env.n_envs
                 init = (state, obs, jnp.ones(n, bool), jnp.zeros(n, jnp.int32), jnp.zeros(n),
-                        jnp.full(n, -1.0), jnp.zeros(n, bool), jnp.zeros(n, bool), jnp.zeros((), jnp.int32))
+                        jnp.full(n, -1.0), jnp.zeros(n, bool), jnp.zeros(n, bool), jnp.zeros(n),
+                        jnp.zeros((), jnp.int32))
                 carry = jax.lax.while_loop(cond, body, init)
-                _, _, alive, first_end, dist, tline, fin, fell, _ = carry
-                return alive, first_end, dist, tline, fin, fell
+                _, _, alive, first_end, dist, tline, fin, fell, trk, _ = carry
+                return alive, first_end, dist, tline, fin, fell, trk
 
             self._eval_fns[key_] = jax.jit(run)
         ov = override if override is not None else Override()
         ov = jax.tree_util.tree_map(lambda x: jnp.broadcast_to(jnp.asarray(x, jnp.float32), (env.n_envs,)), ov)
-        alive, first_end, dist, tline, fin, fell = self._eval_fns[key_](
+        alive, first_end, dist, tline, fin, fell, trk = self._eval_fns[key_](
             self.params, self.stats.mean, self.stats.var, self.stats.count, jax.random.PRNGKey(seed), ov)
         alive, first_end = np.asarray(alive), np.asarray(first_end)
         first_end = np.where(alive, n_max, first_end)
@@ -752,6 +758,7 @@ class PPO:
         out["t_line_mean"] = float(out["t_line"][fin].mean()) if fin.any() else float("nan")
         out["dist_mean"] = float(out["dist"].mean())
         out["speed_mean"] = float((out["dist"] / np.maximum(out["ep_len_s"], 1e-6)).mean())
+        out["track_err_mean"] = float((np.asarray(trk) / np.maximum(first_end, 1)).mean())
         return out
 
     # ---------------------------------------------------------------- persistence

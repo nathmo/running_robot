@@ -225,17 +225,27 @@ def main():
                         tb.add_scalar(f"eval/{k_}", v, agent.step)
             print(f"[eval @ {agent.step:,}] greedy: {ev['finishes']}/{ev['n']} finish, {ev['falls']} falls, "
                   f"t_line {ev['t_line_mean']:.2f} s, dist {ev['dist_mean']:.1f} m, "
-                  f"speed {ev['speed_mean']:.2f} m/s ({time.time() - t:.0f}s)", flush=True)
+                  f"speed {ev['speed_mean']:.2f} m/s, cmd err {ev.get('track_err_mean', float('nan')):.2f} m/s "
+                  f"({time.time() - t:.0f}s)", flush=True)
             # keep the best greedy checkpoint (finishes first, then distance): a later collapse (the
             # end-of-fade cliff, v2c_s1_planar_s1 at 47 M) must not lose a usable policy
-            _score = (int(ev.get("finishes", 0)), float(ev.get("dist_mean", float("nan"))))
+            if cfg.objective == "joystick":
+                # distance is the WRONG keeper here: the policy that ignores the stick and sprints
+                # covers the most ground. Keep survivors first, then the closest command tracking.
+                _score = (int(ev["n"] - ev.get("falls", 0)), -float(ev.get("track_err_mean", float("inf"))))
+            else:
+                _score = (int(ev.get("finishes", 0)), float(ev.get("dist_mean", float("nan"))))
             if _score[1] == _score[1] and (best_score is None or _score > best_score):
                 best_score = _score
                 agent.save(run / "best.msgpack")
                 (run / "best_eval.json").write_text(json.dumps({"step": agent.step, "finishes": _score[0],
                                                            "dist_mean": _score[1], **{k: float(v) for k, v in ev.items()
                                                                                        if isinstance(v, (int, float))}}, indent=1))
-                print(f"[train] best checkpoint -> best.msgpack (step {agent.step:,}, finishes {_score[0]}, dist {_score[1]:.1f} m)")
+                if cfg.objective == "joystick":
+                    print(f"[train] best checkpoint -> best.msgpack (step {agent.step:,}, "
+                          f"{_score[0]}/{ev['n']} alive, command error {-_score[1]:.2f} m/s)")
+                else:
+                    print(f"[train] best checkpoint -> best.msgpack (step {agent.step:,}, finishes {_score[0]}, dist {_score[1]:.1f} m)")
             _spd = float(ev.get("speed_mean", float("nan")))
             if _score[1] >= float(cfg.sprint_dist_m) and _spd == _spd and (best_speed is None or _spd > best_speed):
                 best_speed = _spd
