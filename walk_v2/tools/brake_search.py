@@ -68,6 +68,8 @@ def main():
     ap.add_argument("--brake-s", type=float, default=8.0, help="length of the open-loop braking window")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--demo", default=None, help="theta json: run the policy to the line, then brake; writes a video")
+    ap.add_argument("--video", default=None)
     args = ap.parse_args()
 
     cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.pop, dr=False)
@@ -123,6 +125,52 @@ def main():
         return alive, vmin
 
     brake_jit = jax.jit(brake_rollout)
+
+    # ---- demo: policy to the line, then the found schedule brakes it to a standstill
+    if args.demo:
+        th = np.asarray(json.loads(Path(args.demo).read_text())["best"]["theta"], np.float32)[None]
+        th = np.repeat(th, args.pop, axis=0)
+        state, obs = env.reset(jax.random.PRNGKey(args.seed), params)
+
+        def to_line(carry, _):
+            state, obs = carry
+            a = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
+            state2, obs2, _, _, _ = env.step(state, a, params)
+            return (state2, obs2), state.data.qpos[0]
+
+        n_line = int(min(env.max_steps - n_brake - 10, (cfg.sprint_dist_m / max(v0, 0.5) + 2.0) / dt))
+        (state, obs), q_run = jax.lax.scan(to_line, (state, obs), None, length=n_line)
+        d_line = float(np.asarray(state.sprint_d)[0])
+        cruise_spec = state.spec
+        print(f"[demo] policy ran {d_line:.1f} m in {n_line * dt:.1f} s; braking from "
+              f"{float(np.asarray(state.prev_vel_body)[0, 0]):.2f} m/s")
+
+        def brake_demo(carry, i):
+            state, obs = carry
+            ch = schedule(jnp.asarray(th), i / max(n_brake - 1, 1))
+            spec = cruise_spec
+            spec = spec.at[:, gait.I_FREQ].set(jnp.clip(cruise_spec[:, gait.I_FREQ] * ch[:, 0], -1.0, 1.0))
+            spec = spec.at[:, gait.I_S_CAM].multiply(ch[:, 1:2])
+            spec = spec.at[:, gait.I_S_THIGH].multiply(ch[:, 1:2])
+            spec = spec.at[:, gait.I_O.start].set(jnp.clip(ch[:, 2], -1.0, 1.0))
+            spec = spec.at[:, gait.I_O.start + 1].set(jnp.clip(ch[:, 3], -1.0, 1.0))
+            pol = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
+            a = jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1)
+            state2, obs2, _, _, info = env.step(state, a, params)
+            return (state2, obs2), (state.data.qpos[0], info["sprint_d"][0], info["fallen"][0])
+
+        (state, obs), (q_br, sd, fell) = jax.lax.scan(brake_demo, (state, obs), jnp.arange(n_brake))
+        sd, fell = np.asarray(sd), np.asarray(fell)
+        v_end = float(np.asarray(state.prev_vel_body)[0, 0])
+        stop_d = float(sd[-1] - d_line)
+        i_fall = int(np.argmax(fell)) if fell.any() else -1
+        print(f"[demo] stopping distance {stop_d:.1f} m past the line, final speed {v_end:+.3f} m/s, "
+              f"total {float(sd[-1]):.1f} m, fell={'no' if i_fall < 0 else f'at {i_fall * dt:.1f} s'}")
+        if args.video:
+            from evaluate import render_video
+            qs = np.concatenate([np.asarray(q_run), np.asarray(q_br)], axis=0)
+            render_video(cfg, qs, (n_line + n_brake) * dt, args.video)
+        return
 
     # ---- cross-entropy method over the schedule
     lo, hi = BOUNDS[:, 0], BOUNDS[:, 1]
