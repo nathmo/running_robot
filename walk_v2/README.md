@@ -393,6 +393,43 @@ random clock phase and a red-light start, so that every release condition an ope
 is in distribution. Until then a release jig that drops both feet together, upright to slightly
 back, is the only repeatable option.
 
+## THE STOP IS EXPRESSIBLE -- it was exploration, not architecture (2026-09-11, 09:00)
+
+After nine reward variants failed identically, `tools/brake_search.py` asked the question that settles it
+**without training**: run a trained policy to steady state, switch the POLICY OFF for the gait spec (keep
+its per-tick residual -- zeroing that removes the stabiliser and everything falls, which is how the first
+attempt produced a false negative), and search schedules over frequency, stride amplitude, fore-aft offset
+and lean by cross-entropy method, one candidate per env.
+
+```
+[brake] run-up 6 s: cruise speed 3.31 m/s, clock 4.00 Hz
+[brake] CONTROL (schedule = cruise): upright 512/512   <- the harness is sound
+[brake] iter 2: upright 308/512, best |v| while upright 0.001 m/s (elite mean 0.943)
+[brake] iter 5: upright 406/512, best |v| while upright 0.000 m/s (elite mean 0.003)
+[brake] cruise 3.31 m/s -> best reachable |v| 0.000 m/s while upright
+```
+
+**A stop exists in the action space**, and not marginally: hundreds of schedules reach a standstill
+upright. So the nine failures were an RL exploration failure. **The winning schedule explains all of
+them** -- braking here means:
+
+| channel | braking direction | what the policy learned to do |
+|---|---|---|
+| cadence | **x1.15 -> x1.29 (FASTER)** | drop the clock 4.0 -> 2.4 Hz |
+| stride amplitude | x1.0 -> x1.19 (held) | unchanged |
+| `o_cam` fore-aft | **+0.20 -> +0.42 (feet FORWARD)** | feet trail the CoM |
+| lean (`o_thigh`) | **-0.63 -> -0.54 (back)** | forward pitch |
+
+The policy had it backwards on every axis, which is exactly why it overstrided and ACCELERATED into the
+fall. `brake_prior` now biases the latched spec in the measured direction whenever the robot is above its
+commanded speed -- the same idiom as the pitch reflex already in the control law, with the policy keeping
+full authority to modulate it. Seeds `runs/v2c_s2_brakeprior_s40/41/42`.
+
+Caveat: the open-loop schedule ALONE is fragile -- it is tuned to the state it was searched from, and
+replaying it after a full 100 m run falls after 4.4 s (`--demo`). The durable results are the population
+statistic and the direction, which is what `brake_prior` encodes. Note also that braking must START
+BEFORE the line: past it the env enters the stop phase and the policy's own residual fights the schedule.
+
 ## The stop: eight measured interventions, none successful (2026-09-11)
 
 Every runner on both arms crosses the 100 m line at full speed and falls. Each fix below was chosen from
