@@ -87,12 +87,26 @@ def main():
     ap.add_argument("--bringup", choices=("nominal", "full"), default="nominal",
                     help="nominal = settled keyframe start (measures TRACKING); full = drops and "
                          "tilted releases (measures bring-up, and contaminates the speed average)")
-    ap.add_argument("--dr", action="store_true", help="randomised plant instead of nominal")
+    ap.add_argument("--dr", action="store_true",
+                    help="randomised PLANT only (disturbances stay off -- see the note in main)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
-    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.n_envs, dr=args.dr,
+    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.n_envs, dr=False,
                                warm_start=False)
+    if args.dr:
+        # NOT load_run(dr=True): that path keeps the training config wholesale, so it adds pushes,
+        # wind, trips, a hot thermal start and observation noise on top of the plant draw. Measured
+        # 2026-09-12, it kills the fully DR-trained v2 runner in 0.21 s (against 6.00/6.00 s upright
+        # on the nominal path) -- i.e. it measures the harness, not the policy. This rebuilds the
+        # eval env with the plant draw ON and every disturbance still off, which is what "does
+        # tracking survive a different plant?" actually asks.
+        from dataclasses import replace
+        from env import DashEnvV2
+        c = replace(cfg, dr_enable=True, obs_noise_enable=False, push_interval_s=0.0,
+                    wind_force_max=0.0, wind_gust_n=0.0, trip_prob=0.0, thermal_hot_start_max=0.0,
+                    pitch_assist_kp=0.0, roll_assist_kp=0.0, yaw_assist_kp=0.0)
+        env = DashEnvV2(c, n_envs=args.n_envs)
     if cfg.objective != "joystick":
         print(f"[sweep] WARNING: objective is '{cfg.objective}', not 'joystick' -- task[0] is not a "
               f"speed command in this checkpoint, so the sweep is meaningless.")
