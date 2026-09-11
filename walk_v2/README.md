@@ -435,6 +435,20 @@ back, is the only repeatable option.
   running gait forms. Verified locally: the minimum action gives 3.00 / 2.25 / 1.50 Hz at the three
   curriculum points and the contract preset still gives 1.50. Preset `v2c_s2_free_fast_floorstop` = floor
   (60 M) + the stop curriculum, i.e. the cold-S2 "no S1 stage" recipe; seeds `runs/v2c_s2_floorstop_s8/s9`.
+* **AMBER: teach the slow run, not the stop (2026-09-11, 03:00)**. Five measured interventions --
+  `w_stop_vel` 0.4 -> 2.0, binary flag -> continuous target speed, 2 s -> 8 s (and a 20 s probe, 0.15 m/s^2),
+  gait shaping live through the ramp, Gaussian -> Laplace tracking -- every one of them left the SAME
+  behaviour: 0% of the phase slow, accelerating to ~3.1 m/s, falling in ~1.3 s. The deficit is not braking.
+  **This robot only knows one speed.** Every policy in this project trained at the sprint and nowhere else,
+  and on this plant lowering the gait clock makes it FASTER (longer stance, bigger push per stride), which
+  is why "slow down" comes out as an overstride. So `amber_frac` (0.6) of the light phases now ramp down to
+  a slow RUN drawn from `amber_speed_band` (0.8-1.6 m/s) instead of to a standstill, and the policy has to
+  hold a gait there; the 100 m line still demands a true stop. Stopping becomes the bottom of a range it
+  knows rather than a regime it has never visited. Verified: floors drawn in-band, the command ramps
+  2.8 -> 1.2/1.5 m/s over 8 s. Seeds `runs/v2c_s2_amber_s25/26/27`, warm from the 3.00 m/s runner.
+* **Fastest policy to date: `runs/v2c_s2_stoplap_s23/best_speed_59M.msgpack`** -- 102.1 m at **3.00 m/s**
+  wheel-free greedy on the free base at 59 M steps (~55 min on two V100s). Banked locally. Like every
+  other runner it does not stop at the line.
 * **Why the robot will not stop, measured (2026-09-11, 02:30)** -- `evaluate.py` now logs the gait clock
   through the red phase and the state at the fall (`f_red_min/max`, `v_end`, `f_end`). Probing the banked
   2.95 m/s runner at 8 s AND 20 s ramps (0.36 and 0.15 m/s^2): it falls every episode, spends **0%** of the
