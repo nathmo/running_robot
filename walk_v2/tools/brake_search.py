@@ -106,7 +106,11 @@ def main():
             spec = spec.at[:, gait.I_S_THIGH].multiply(ch[:, 1:2])
             spec = spec.at[:, gait.I_O.start].set(jnp.clip(ch[:, 2], -1.0, 1.0))
             spec = spec.at[:, gait.I_O.start + 1].set(jnp.clip(ch[:, 3], -1.0, 1.0))
-            a = jnp.concatenate([spec, jnp.zeros((theta.shape[0], gait.ACTION_DIM - gait.SPEC_DIM))], axis=1)
+            # KEEP THE POLICY'S PER-TICK RESIDUAL. It is 45-95% of joint motion on this lineage
+            # (walk_mit gait_diag), so zeroing it does not test the gait spec, it just removes the
+            # stabiliser and everything falls. Only the LATCHED spec is overridden by the schedule.
+            pol = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
+            a = jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1)
             state2, obs2, _, done, info = env.step(state, a, params)
             alive2 = alive & ~info["fallen"]
             vx = info["sprint_d"] - state.sprint_d
@@ -132,6 +136,16 @@ def main():
         lo_t = np.repeat(lo[:, None], KNOTS, axis=1).reshape(-1)
         hi_t = np.repeat(hi[:, None], KNOTS, axis=1).reshape(-1)
         theta = np.clip(theta, lo_t, hi_t)
+        if it == 0:      # control: schedule = cruise (freq x1, amp x1, offsets at their cruise values)
+            ctrl = np.zeros((args.pop, DIM), np.float32)
+            ctrl[:, 0:KNOTS] = 1.0
+            ctrl[:, KNOTS:2 * KNOTS] = 1.0
+            ctrl[:, 2 * KNOTS:3 * KNOTS] = float(np.asarray(cruise_spec)[0, gait.I_O.start])
+            ctrl[:, 3 * KNOTS:4 * KNOTS] = float(np.asarray(cruise_spec)[0, gait.I_O.start + 1])
+            a_c, v_c = brake_jit(jnp.asarray(ctrl), state, obs)
+            print(f"[brake] CONTROL (schedule = cruise): upright {int(np.asarray(a_c).sum())}/{args.pop}, "
+                  f"min |v| {float(np.asarray(v_c)[0]):.2f} m/s -- if this is not upright the harness is wrong",
+                  flush=True)
         alive, vmin = brake_jit(jnp.asarray(theta, jnp.float32), state, obs)
         alive, vmin = np.asarray(alive), np.asarray(vmin)
         # a fall is disqualifying: score = slowest speed reached while staying upright
