@@ -441,6 +441,53 @@ a measurement, not a guess, and each was verified on the live environment before
 signature never changed: **0% of the light phase spent slow, falling 0.8-1.9 s in, accelerating to
 3.0-3.8 m/s against a ~2.3 m/s command.**
 
+## THE ROBOT RUNS 100 m AND STOPS -- the fall at the line was the COMMAND (2026-09-11, 17:00)
+
+One control settles what ten training configurations could not. `--hold-run` pushes the finish line out of
+range for the brake window only, so the policy is never told it has finished. The cruise control -- keep
+running, no braking at all -- then crosses the line and stays up:
+
+```
+[brake] CONTROL (schedule = cruise): upright 512/512   <- with --hold-run
+[brake] CONTROL (schedule = cruise): upright   3/512   <- same control, policy told it finished
+[brake] CONTROL (schedule = cruise): upright  79/512   <- same, other checkpoint
+```
+
+**The robot never had a braking problem at the line. It had a being-told-to-stop problem.** That is why
+every reward variant failed and why softening the command (intervention 2, binary flag -> continuous ramp)
+bought nothing: the command channel IS the disturbance, so no shaping of the response can remove it. On the
+robot this input is the run/stop button, so "brake the body without telling the policy" is a controller you
+can build -- and it is the one that works.
+
+**The deliverable, on 512 HELD-OUT episodes** (fitted on seed 0, measured on seed 7) -- `v2c_s2_capture_s35`
+`best_speed_118M` plus a 12 s schedule fitted at 90 m with `--hold-run`:
+
+```
+[demo] 512 episodes: upright 512/512, STOPPED (|v|<=0.25) 161/512, stopped within 20 m of the line 161/512
+[demo] of those that stopped: overrun median +16.2 m, 10-90% +14.0 .. +18.1 m, worst +18.9 m; final |v| 0.114 m/s
+```
+
+The robot runs the 100 m at 3.2 m/s, crosses the line, brakes and comes to rest ~16 m past it, inside the
+20 m allowance, on episodes the schedule was never fitted to (`results/v2c_run_and_stop_16m.mp4`).
+
+**Three things that decide whether this reproduces.**
+
+*The schedule is DURATION-specific.* Replaying the 12 s schedule over a 16 s window is not a gentler brake,
+it is a worse one -- **0/512** stopped, the robot decelerates to ~1.3 m/s and crawls. Fit and replay must
+use the same `--brake-s`.
+
+*The brake point matters more than it looks.* Same seed, 94.9 m against 96.0 m, moved the stop count from
+55 to 93. Fit and demo must begin at the same measured distance, which is why the run-up now runs to a
+distance and never to `d_brake / v0` (that estimate ignores the acceleration from rest and lands late).
+
+*Rate trades against margin.* The 8 s fit stops 11-18% of episodes but at +10-13 m, with real room under the
+cap; the 12 s fit stops 31% but at +14-19 m, with almost none. Pick by which you need.
+
+**What is still open.** 31%, not 90%: the other 69% stay upright and slow but have not settled when the
+window ends (median 1.3 m/s). That is a generalisation gap, not a physics one -- the best schedule reaches
+0.000 m/s on the 4 episodes it was scored on -- so the lever is `--reps`, not the window.
+
+
 ## ...but the schedule fits the EPISODES, not the task (2026-09-11, 15:00)
 
 The result above is measured on the episodes the search itself selected against. Held out, it collapses.
