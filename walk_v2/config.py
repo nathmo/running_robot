@@ -83,7 +83,10 @@ class Config:
     residual_scale: float = 0.20            # rad per residual unit (§02: ±0.20, position only)
     action_scale: float = 0.5               # normalization of motor_cmd for the action_rate term
     # ----- the clock (§05) ---------------------------------------------------------------------
-    resync_enable: bool = True
+    # FOOT CONTACT IS NOT AVAILABLE ON DASH-01. Off by default from v3: when False the whole
+    # resync block in env._step_one is compiled out, so no contact quantity reaches the clock --
+    # and therefore neither the actor's phase nor its commit flag. True reproduces v2 runs.
+    resync_enable: bool = False
     resync_kappa: float = 0.5               # nominal κ
     resync_kappa_range: tuple = (0.3, 0.7)  # per-episode DR on κ
     resync_window_cycle: float = 0.15       # W: ±0.15 cycle around the expected touchdown phase
@@ -166,8 +169,23 @@ class Config:
     adversity_curriculum: bool = True       # pushes/trips/wind ride the dr_scale ramp
 
     # ----- objective: the 100 m dash ----------------------------------------------------------
-    objective: str = "sprint"               # "sprint" | "speed" (endless, debug)
+    objective: str = "sprint"               # "sprint" | "speed" (endless, debug) | "joystick"
     v_ceiling: float = 3.0
+    # ----- the joystick (objective="joystick") -------------------------------------------------
+    # task[0] = v_cmd / v_max, so the operator's stick is a FRACTION of top speed: 0.5 asks for half.
+    # Nothing in this objective reads sprint_d, which is what removes the odometry the v2 task[1]
+    # carried. The command is redrawn mid-episode (cmd_interval_s) so the policy is trained WITH a
+    # moving command instead of having one retrofitted -- the v2 failure mode, where a command pinned
+    # at 1 for a whole run and then flipped acted as a step disturbance, not as an input.
+    v_max: float = 3.6                      # what a full stick asks for; measured top speed is ~3.5
+    cmd_range: tuple = (0.0, 1.0)           # FINAL fraction-of-v_max band the curriculum widens to
+    cmd_range_start: tuple = (0.8, 1.0)     # where it starts: what the warm-start runner already does
+    cmd_curriculum_steps: int = 40_000_000
+    cmd_gate_ep_len: float = 600.0
+    cmd_interval_s: float = 4.0             # mean seconds between redraws (x U(0.6, 1.4))
+    cmd_zero_frac: float = 0.25             # share of draws that are exactly 0 = step in place
+    w_track: float = 3.0                    # income for tracking the command
+    track_sigma: float = 0.6                # Laplace width, m/s (Gaussian is flat where we live)
     w_fwd_speed: float = 2.0
     sprint_world_speed: bool = False        # RUN 8 recipe: body-frame income + LP yaw + lane
     w_yaw_rate: float = 3.0                 # on the LOW-PASSED yaw rate (§10)
@@ -340,6 +358,27 @@ class Config:
     # stiff hand -- and suppresses fall termination while held; at t = hold_s the base is released
     # with zero velocity. A kinematic clamp, not a spring: the 1000 N m/rad wheel probe went NaN.
     hold_enable: bool = False
+    # ----- bring-up randomisation (training, needs hold_enable) ---------------------------------
+    # The operator does not hand this robot a settled keyframe. Two real cases, sampled per episode:
+    #   drop  -- let go with the feet off the ground, from bringup_drop_m above TOUCHING height
+    #            (touching is tilt-dependent: model/touch_height.npz, built by tools/make_touch_table.py)
+    #   held  -- feet down but the body not square, held a moment, then released at a pitch
+    # The measured envelope today is upright to 5 deg BACK with both feet flat; +5 deg forward gave
+    # 16/16 floor violations and +-10 deg is outside it entirely. So the bands RAMP on competence --
+    # opening them at step 0 would start most episodes already lost.
+    bringup_enable: bool = False
+    bringup_drop_frac: float = 0.25         # share of episodes dropped
+    bringup_held_frac: float = 0.35         # share held-misaligned then released (rest = nominal)
+    bringup_drop_m: tuple = (0.05, 0.10)    # FINAL drop band above touching height
+    bringup_drop_m_start: tuple = (0.01, 0.02)
+    bringup_pitch_deg: float = 20.0         # FINAL +- pitch at release
+    bringup_pitch_deg_start: float = 5.0
+    bringup_roll_deg: float = 8.0           # FINAL +- roll at release
+    bringup_roll_deg_start: float = 2.0
+    bringup_hold_s: tuple = (0.3, 2.5)      # how long the hand stays on
+    bringup_grace_s: float = 0.35           # no fall termination while dropping / just released
+    bringup_curriculum_steps: int = 40_000_000
+    bringup_gate_ep_len: float = 600.0
 
     # ----- PPO (§04) ---------------------------------------------------------------------------
     n_envs: int = 1024
@@ -455,6 +494,15 @@ PRESETS = {
     "v2c_s2_free": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C),
     "v2c_s1_planar_fast": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V2C, **_FAST),
     "v2c_s2_free_fast": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST),
+    # ---- v3: the joystick, with no privileged input anywhere in the actor path -------------
+    # task[0] = commanded speed / v_max (no odometry), the clock free-runs (no foot contact),
+    # brake_prior off (it read true v_body), and the command moves throughout training. Zero
+    # command means step in place: gait_cmd_gate is bypassed under this objective.
+    "v3_joystick_s2": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
+                                  objective="joystick", resync_enable=False, brake_prior=0.0,
+                                  hold_enable=True, bringup_enable=True,
+                                  w_alive=0.5, episode_s=30.0, sprint_curriculum_steps=0,
+                                  total_steps=140_000_000),
     # S2 warm-start experiment: keep the S1 policy's std (contract re-inflates log sigma; the seeds start at ep_len 77)
     "v2c_s2_free_fast_keepstd": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                             warmstart_reset_log_std=False),

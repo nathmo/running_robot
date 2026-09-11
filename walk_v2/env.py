@@ -17,10 +17,12 @@ values the trainer moves between rollouts (dr_scale, sprint line, stance ratio, 
 Observation layouts (actor slice first, privileged tail last):
     policy variant : 330 history + 44 latched spec + 2 task + 1 commit = 377 | + 25 = 402
     library variant: 330 history + 23 once-block                       = 353 | + 25 = 378
-The commit flag is in the once-block (artifact §05, rev 2026-09-09): the wrap can be moved by
-a touchdown resync, so the actor cannot infer it from the phase alone; the log-prob mask reads
-the same flag (info["commit"]) so rollout and update agree bit for bit.
+The commit flag is an explicit once-block entry (artifact §05, rev 2026-09-09). Under v2 it had to
+be, because a touchdown resync could move the wrap; with the resync off (v3) the flag is inferable
+from the phase, but it stays explicit so the width is stable across both and because the log-prob
+mask reads the same flag (info["commit"]) so rollout and update agree bit for bit.
 """
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
@@ -49,6 +51,9 @@ class EnvParams(NamedTuple):
     eff_scale: float = 1.0
     ctrl_jitter_ms: float = 0.0
     ctrl_drop_prob: float = 0.0
+    bringup_scale: float = 1.0   # 0 = mild starts, 1 = the full drop / tilt bands
+    cmd_lo: float = 0.0          # joystick: fraction-of-v_max band the command is drawn from
+    cmd_hi: float = 1.0          # (curriculum widens it down from cmd_range_start to cmd_range)
     pitch_assist: float = 0.0
     stoplight_prob: float = 0.0
     gait_freq_lo: float = 0.0        # curriculum lower rail of the gait clock (0 = the config value)
@@ -58,10 +63,14 @@ class EnvParams(NamedTuple):
     hold_roll: float = 0.0       # base roll while held (rad)
     start_red_s: float = 0.0     # >0: episode starts on a RED light (task[0]=0, the deployed
                                  # runtime's STOPPED bring-up) and turns green after this long
+    release_vx: float = 0.0      # base velocity added on the release tick (m/s): the operator's
+    release_vy: float = 0.0      # hand is not a clean let-go -- fore-aft, lateral and vertical
+    release_vz: float = 0.0      # (negative = still moving the robot down as it is released)
 
     @classmethod
     def final(cls, cfg):
         return cls(dr_scale=1.0, sprint_dist_m=float(cfg.sprint_dist_m),
+                   cmd_lo=float(cfg.cmd_range[0]), cmd_hi=float(cfg.cmd_range[1]),
                    stance_ratio=float(cfg.stance_ratio_final), eff_scale=float(cfg.efficiency_target),
                    ctrl_jitter_ms=float(cfg.ctrl_jitter_ms_final),
                    ctrl_drop_prob=float(cfg.ctrl_drop_prob_final), pitch_assist=0.0, stoplight_prob=0.0,
@@ -126,6 +135,13 @@ class EnvState:
     light_v0: jnp.ndarray        # forward speed when the last red / the line started (decel target start)
     light_t: jnp.ndarray         # seconds since that switch
     light_floor: jnp.ndarray     # speed the ramp descends TO (0 = stop, > 0 = amber, a slow run)
+    # joystick (objective='joystick'): the operator's commanded speed, redrawn on a timer so the
+    # policy sees the command MOVE from step 0 of training -- the v2 failure was a command pinned
+    # at 1 for a whole run and then flipped, which arrives as a disturbance, not as an input
+    hold_s: jnp.ndarray          # per-episode seconds the operator's hand stays on (0 = none)
+    grace_left: jnp.ndarray      # seconds of fall-termination grace left (a drop needs to land)
+    v_cmd: jnp.ndarray           # m/s, absolute; task[0] carries v_cmd / v_max
+    cmd_left: jnp.ndarray        # seconds until the command is redrawn
     # library variant
     theta: jnp.ndarray           # (44,) this episode's gait (box-perturbed library entry)
     v_ref: jnp.ndarray
@@ -155,6 +171,15 @@ class DashEnvV2:
         self.hist_raw_len = (cfg.history_len - 1) * self.hist_stride + 1
         self.hist_idx = np.array((self.hist_raw_len - 1)
                                  - (np.arange(cfg.history_len) * self.hist_stride)[::-1])
+        self._touch = None
+        if cfg.bringup_enable:
+            # base z with the lowest toe on the floor, per (pitch, roll). Solved offline by
+            # tools/make_touch_table.py because it is a MuJoCo root-find and the reset is jitted.
+            tt = Path(__file__).resolve().parent / "model" / "touch_height.npz"
+            if not tt.exists():
+                raise FileNotFoundError(f"bringup_enable needs {tt}; run tools/make_touch_table.py")
+            z = np.load(tt)
+            self._touch = (jnp.asarray(z["pitch_rad"]), jnp.asarray(z["roll_rad"]), jnp.asarray(z["z"]))
         self.library_mode = (cfg.spec_source == "library")
         self.action_dim = gait.LIB_ACTION_DIM if self.library_mode else gait.ACTION_DIM
         self.once_dim = 23 if self.library_mode else (gait.SPEC_DIM + TASK_DIM + 1)
@@ -324,6 +349,14 @@ class DashEnvV2:
                            lp_yaw_obs=lp_yaw_obs), accel, v_body
 
     def _task(self, state, params):
+        if self.cfg.objective == "joystick":
+            # THE JOYSTICK. task[0] is the commanded speed as a FRACTION of v_max, so 0.5 asks for
+            # half of top speed and 1.0 asks for everything. Nothing here reads sprint_d, so the
+            # actor carries no odometry at all -- under v2 task[1] was clip((line - d)/8, 0, 1),
+            # computed from ground-truth world x, which the robot can only guess at. task[1] is
+            # reserved (a yaw command later) and held at 0 so the width stays 2 and v2 checkpoints
+            # remain loadable as warm starts.
+            return jnp.stack([jnp.clip(state.v_cmd / self.cfg.v_max, 0.0, 1.0), 0.0])
         stop_now = state.crossed | state.light_red
         if self.cfg.stop_cmd_continuous and self.cfg.stop_decel_s > 0:
             # the same ramp the stop reward tracks, recomputed from the state (v0 at the switch, time since)
@@ -399,6 +432,21 @@ class DashEnvV2:
         data = mjx.forward(mx_i, data)
         nominal = jnp.asarray(p.nominal_ctrl)
         cmd0 = jnp.concatenate([nominal, jnp.asarray(gp.drive_kp), jnp.asarray(gp.drive_kd)])
+        k_cmd0, k_bring = jax.random.split(k_noise)
+        v_cmd0, cmd_left0 = self._draw_cmd(k_cmd0, params)
+        hold_s0 = jnp.asarray(params.hold_s, jnp.float32)      # probe override wins when set
+        grace0 = jnp.zeros(())
+        if c.bringup_enable:
+            bz, bpitch, broll, bhold, bgrace = self._draw_bringup(k_bring, params)
+            qpos = qpos.at[p.base_q["z"]].set(bz)
+            if p.base_q["pitch"] >= 0:
+                qpos = qpos.at[p.base_q["pitch"]].set(bpitch)
+            if p.base_q["roll"] >= 0:
+                qpos = qpos.at[p.base_q["roll"]].set(broll)
+            hold_s0 = jnp.where(params.hold_s > 0.0, params.hold_s, bhold)
+            grace0 = bgrace
+            data = data.replace(qpos=qpos)
+            data = mjx.forward(mx_i, data)
         state = EnvState(
             data=data, draw=draw, key=k_next, step_n=jnp.zeros((), jnp.int32), t=jnp.zeros(()),
             phase=jnp.zeros(()), spec=spec0, commit=jnp.ones((), bool),
@@ -430,6 +478,7 @@ class DashEnvV2:
                                 jax.random.uniform(k_next, (), minval=c.stoplight_green_s[0],
                                                    maxval=c.stoplight_green_s[1]), jnp.inf)),
             light_v0=jnp.zeros(()), light_t=jnp.zeros(()), light_floor=jnp.zeros(()),
+            v_cmd=v_cmd0, cmd_left=cmd_left0, hold_s=hold_s0, grace_left=grace0,
             theta=jnp.clip(theta, -1.0, 1.0), v_ref=v_ref, raibert_i=jnp.zeros(()),
             ep_return=jnp.zeros(()), ep_len=jnp.zeros((), jnp.int32),
         )
@@ -441,6 +490,59 @@ class DashEnvV2:
                               prev_vel_body=v_body, **ns)
         obs = self._obs(state, params, data, grounded, fn, accel, v_body, 0.0, 1.0)
         return state, obs
+
+    def _touch_z(self, pitch, roll):
+        """Bilinear lookup of the touching height; clamped at the table edge."""
+        pg, rg, z = self._touch
+        i = jnp.clip(jnp.searchsorted(pg, pitch) - 1, 0, pg.size - 2)
+        j = jnp.clip(jnp.searchsorted(rg, roll) - 1, 0, rg.size - 2)
+        wp = jnp.clip((pitch - pg[i]) / (pg[i + 1] - pg[i]), 0.0, 1.0)
+        wr = jnp.clip((roll - rg[j]) / (rg[j + 1] - rg[j]), 0.0, 1.0)
+        z0 = z[i, j] * (1 - wr) + z[i, j + 1] * wr
+        z1 = z[i + 1, j] * (1 - wr) + z[i + 1, j + 1] * wr
+        return z0 * (1 - wp) + z1 * wp
+
+    def _draw_bringup(self, key, params):
+        """(base_z, pitch, roll, hold_s, grace_s) for one episode's start.
+
+        Three modes: NOMINAL (the settled keyframe, as every run before v3), DROP (feet off the
+        ground, released from a height above touching) and HELD (feet down, body not square, the
+        hand on for a moment). The bands scale with params.bringup_scale so the curriculum can open
+        them as the policy earns it."""
+        c = self.cfg
+        k_m, k_p, k_r, k_d, k_h = jax.random.split(key, 5)
+        s = jnp.clip(params.bringup_scale, 0.0, 1.0)
+        u = jax.random.uniform(k_m)
+        drop = u < c.bringup_drop_frac
+        held = (~drop) & (u < c.bringup_drop_frac + c.bringup_held_frac)
+        lerp = lambda a, b: a + (b - a) * s
+        pit_hi = jnp.deg2rad(lerp(c.bringup_pitch_deg_start, c.bringup_pitch_deg))
+        rol_hi = jnp.deg2rad(lerp(c.bringup_roll_deg_start, c.bringup_roll_deg))
+        pitch = jax.random.uniform(k_p, (), minval=-pit_hi, maxval=pit_hi)
+        roll = jax.random.uniform(k_r, (), minval=-rol_hi, maxval=rol_hi)
+        d_lo = lerp(c.bringup_drop_m_start[0], c.bringup_drop_m[0])
+        d_hi = lerp(c.bringup_drop_m_start[1], c.bringup_drop_m[1])
+        drop_h = jax.random.uniform(k_d, (), minval=d_lo, maxval=d_hi)
+        hold = jax.random.uniform(k_h, (), minval=c.bringup_hold_s[0], maxval=c.bringup_hold_s[1])
+        active = drop | held
+        pitch = jnp.where(active, pitch, 0.0)
+        roll = jnp.where(active, roll, 0.0)
+        z_touch = self._touch_z(pitch, roll)
+        base_z = jnp.where(drop, z_touch + drop_h, z_touch)
+        # a drop has no hand on it; a held start does, and only a drop needs landing grace
+        return base_z, pitch, roll, jnp.where(held, hold, 0.0), jnp.where(drop, c.bringup_grace_s, 0.0)
+
+    def _draw_cmd(self, key, params):
+        """(v_cmd, seconds until the next redraw). A share of draws are exactly zero -- that is the
+        joystick at rest, which the policy must answer by stepping in place rather than by stopping
+        dead: this plant has no passive stance to stand on."""
+        c = self.cfg
+        k_v, k_z, k_t = jax.random.split(key, 3)
+        lo, hi = params.cmd_lo, params.cmd_hi
+        v = jax.random.uniform(k_v, (), minval=lo, maxval=hi) * c.v_max
+        v = jnp.where(jax.random.uniform(k_z) < c.cmd_zero_frac, 0.0, v)
+        left = c.cmd_interval_s * jax.random.uniform(k_t, (), minval=0.6, maxval=1.4)
+        return v, left
 
     def _next_interval(self, key, mean_s):
         if mean_s <= 0.0:
@@ -534,6 +636,13 @@ class DashEnvV2:
         qvel = qvel.at[p.base_d["x"]].add(dvx)
         if not p.planar:
             qvel = qvel.at[p.base_d["y"]].add(dvy)
+        if c.hold_enable:
+            # the release tick: the hand's own motion goes into the base as it opens
+            rel = (state.hold_s > 0.0) & (state.t >= state.hold_s) & (state.t - dt < state.hold_s)
+            qvel = qvel.at[p.base_d["x"]].add(jnp.where(rel, params.release_vx, 0.0))
+            qvel = qvel.at[p.base_d["z"]].add(jnp.where(rel, params.release_vz, 0.0))
+            if not p.planar:
+                qvel = qvel.at[p.base_d["y"]].add(jnp.where(rel, params.release_vy, 0.0))
         push_countdown = jnp.where(push_now, self._next_interval(kp3, c.push_interval_s),
                                    state.push_countdown - 1)
         # trip: a brief force opposing travel on an airborne foot
@@ -606,9 +715,12 @@ class DashEnvV2:
             held_at = dict(x=p.key_qpos[p.base_q["x"]], y=0.0, yaw=0.0,
                            z=jnp.where(params.hold_z > 0.0, params.hold_z,
                                        p.key_qpos[p.base_q["z"]]),
-                           roll=params.hold_roll, pitch=params.hold_pitch)
+                           roll=jnp.where(c.bringup_enable, state.data.qpos[p.base_q["roll"]]
+                                          if p.base_q["roll"] >= 0 else 0.0, params.hold_roll),
+                           pitch=jnp.where(c.bringup_enable, state.data.qpos[p.base_q["pitch"]]
+                                           if p.base_q["pitch"] >= 0 else 0.0, params.hold_pitch))
             hold_qval = jnp.stack([jnp.asarray(held_at[n], jnp.float32) for n in names])
-            hold = state.t < params.hold_s
+            hold = state.t < state.hold_s
 
         def substep(carry, k):
             d, tau_sq, con_acc, _ = carry
@@ -632,31 +744,44 @@ class DashEnvV2:
         thermal_x = drive.thermal_update(state.thermal_x, tau_sq / p.decimation, dt, c.thermal_tau_s,
                                          jnp.asarray(c.thermal_tau_cont), dr.thermal_scale) \
             if c.thermal_enable else state.thermal_x
-        # ---- the clock: advance, wrap, contact resync
+        # ---- the clock: advance and wrap. FREE-RUNNING unless resync_enable (v2 only).
         phi_adv = phi + TWO_PI * f * dt
         wrapped = phi_adv >= TWO_PI
         phi_new = jnp.mod(phi_adv, TWO_PI)
         cycle_n = state.cycle_n + wrapped.astype(jnp.int32)
-        resynced = jnp.where(wrapped, jnp.zeros(2, bool), state.resynced)
-        grounded_c, fn, floor_viol = self._contacts(data)
+        grounded_c, fn, floor_viol = self._contacts(data)      # reward + privileged tail only
         heights = self._toe_heights(data)
         grounded = contact_acc | grounded_c | (heights < c.grounded_h)
-        rising = grounded & ~state.grounded_prev
-        W = c.resync_window_cycle * TWO_PI
-        err = gait.wrap_pi(state.phi_td_hat - phi_new)          # (2,)
-        can = rising & (jnp.abs(err) <= W) & ~resynced
-        phi_td_hat = state.phi_td_hat + jnp.where(can, gait.wrap_pi(phi_new - state.phi_td_hat)
-                                                  / c.resync_ema_cycles, 0.0)
-        kappa = jnp.where(cycle_n >= c.resync_warmup_cycles, dr.kappa, 0.0)
-        shift = jnp.sum(jnp.where(can, kappa * err, 0.0))
-        phi2 = phi_new + shift
-        crossed_fwd = phi2 >= TWO_PI
-        phi2 = jnp.maximum(phi2, 0.0)                          # a backward pull never uncrosses
-        phi2 = jnp.mod(phi2, TWO_PI)
-        wrapped = wrapped | crossed_fwd
-        cycle_n = cycle_n + crossed_fwd.astype(jnp.int32)
-        resynced = resynced | can
+        if c.resync_enable:
+            # THE ONE CONTACT PATH INTO THE ACTOR, and the reason v3 turns this off. The pull moves
+            # phi -- which the actor reads as [cos, sin] -- and `crossed_fwd` can carry the commit
+            # flag over the wrap, so BOTH of those actor inputs become contact-derived. DASH-01 has
+            # no foot contact sensor and cannot reproduce either. Measured 2026-09-11: removing it
+            # changes neither the dash (103.1-104.9 m at 3.20-3.28 m/s vs 103.1-104.8 at 3.23-3.29)
+            # nor braking (511/512 upright vs 476/512). Kept switchable so v2 runs still replay; when
+            # off, this whole block is compiled out and no contact quantity reaches the clock at all.
+            resynced = jnp.where(wrapped, jnp.zeros(2, bool), state.resynced)
+            rising = grounded & ~state.grounded_prev
+            W = c.resync_window_cycle * TWO_PI
+            err = gait.wrap_pi(state.phi_td_hat - phi_new)          # (2,)
+            can = rising & (jnp.abs(err) <= W) & ~resynced
+            phi_td_hat = state.phi_td_hat + jnp.where(can, gait.wrap_pi(phi_new - state.phi_td_hat)
+                                                      / c.resync_ema_cycles, 0.0)
+            kappa = jnp.where(cycle_n >= c.resync_warmup_cycles, dr.kappa, 0.0)
+            shift = jnp.sum(jnp.where(can, kappa * err, 0.0))
+            phi2 = phi_new + shift
+            crossed_fwd = phi2 >= TWO_PI
+            phi2 = jnp.maximum(phi2, 0.0)                          # a backward pull never uncrosses
+            phi2 = jnp.mod(phi2, TWO_PI)
+            wrapped = wrapped | crossed_fwd
+            cycle_n = cycle_n + crossed_fwd.astype(jnp.int32)
+            resynced = resynced | can
+        else:
+            phi2 = phi_new
+            phi_td_hat, resynced = state.phi_td_hat, state.resynced
+            can = jnp.zeros(2, bool)        # diag/resync stays a channel, permanently 0
         commit_next = wrapped
+        grace_left = jnp.maximum(state.grace_left - dt, 0.0)
         # ---- sprint bookkeeping
         t = state.t + dt
         x = data.qpos[p.base_q["x"]]
@@ -670,6 +795,15 @@ class DashEnvV2:
         stopped = jnp.abs(vx_stop) <= c.stop_speed_eps
         stop_hold = jnp.where(crossed & stopped, state.stop_hold + dt, 0.0)
         finished = crossed & (stop_hold >= c.stop_hold_s) if c.objective == "sprint" else jnp.zeros((), bool)
+        # ---- the joystick: redraw the commanded speed on its own timer
+        if c.objective == "joystick":
+            k_cmd, k_light = jax.random.split(k_light)
+            due = (state.cmd_left - dt) <= 0.0
+            v_new, left_new = self._draw_cmd(k_cmd, params)
+            v_cmd = jnp.where(due, v_new, state.v_cmd)
+            cmd_left = jnp.where(due, left_new, state.cmd_left - dt)
+        else:
+            v_cmd, cmd_left = state.v_cmd, state.cmd_left
         # ---- stop curriculum: red light / green light phases (only before the line)
         kl1, kl2 = jax.random.split(k_light)
         light_left = state.light_left - dt
@@ -716,7 +850,14 @@ class DashEnvV2:
         term_tip = grav[2] > c.term_gravity_z
         fallen = (~finite) | term_low | term_tip | floor_viol | ws_kill
         if c.hold_enable:
-            fallen = fallen & ~hold          # held: the stand is what carries it, not a fall
+            # held: the stand is what carries it, not a fall. NOTE this masks ~finite too, so a NaN
+            # plant state during the hold is invisible -- watch diag for it rather than assuming none.
+            fallen = fallen & ~hold
+        if c.bringup_enable:
+            # a dropped robot is legitimately below term_height and touching nothing while it falls;
+            # without this every drop episode dies on the first tick. The grace is short and only a
+            # drop gets one, so it cannot hide a genuine fall for long.
+            fallen = fallen & (state.grace_left <= 0.0)
         reward = reward - c.fall_penalty * fallen + c.finish_bonus * (finished & ~fallen)
         # a non-finite plant state (an unconverged capped solver step can blow up) ends the episode
         # above; the reward computed from that state is NaN and would poison GAE, the value loss and
@@ -741,7 +882,8 @@ class DashEnvV2:
             gust_countdown=gust_countdown, gust_dir=gust_dir, sprint_d=sprint_d, crossed=crossed,
             t_line=t_line, stop_hold=stop_hold,
             light_red=light_red, light_left=light_left, light_v0=light_v0, light_t=light_t,
-            light_floor=light_floor,
+            light_floor=light_floor, v_cmd=v_cmd, cmd_left=cmd_left,
+            hold_s=state.hold_s, grace_left=grace_left,
             raibert_i=jnp.clip(state.raibert_i + (v_body[0] - state.v_ref) * dt,
                                -c.raibert_imax, c.raibert_imax),
             ep_return=state.ep_return + reward, ep_len=state.ep_len + 1, **ns)
@@ -777,14 +919,29 @@ class DashEnvV2:
         vx = v_body[0]
         if c.sprint_world_speed:
             vx = self._vel_world(data)[0]
-        run_phase = (c.objective == "speed") | (~stop_now)
+        run_phase = (c.objective in ("speed", "joystick")) | (~stop_now)
         t = {}
         # ---- objective income
-        income = c.w_fwd_speed * jnp.clip(vx, -c.v_ceiling, c.v_ceiling)
-        if c.speed_upright_gate:
-            u = jnp.clip((-grav[2] - c.speed_upright_c0) / (1.0 - c.speed_upright_c0), 0.0, 1.0)
-            income = jnp.where(income > 0.0, income * u ** c.speed_upright_k, income)
-        t["fwd_speed"] = jnp.where(run_phase, income, 0.0)
+        if c.objective == "joystick":
+            # TRACK THE COMMAND, do not pay for speed. w_fwd_speed pays more the faster you go, which
+            # is the right income for a dash and exactly wrong for a joystick -- it would bribe the
+            # policy to ignore any command below top speed. "As fast as possible" is instead what
+            # v_cmd = v_max asks for. Laplace, not Gaussian: measured 2026-09-11, a Gaussian pays
+            # 0.006 at the ~1.8 m/s error this lineage actually sits at, i.e. it is flat exactly
+            # where the policy lives, and ten reward variants died on that.
+            err_cmd = jnp.abs(vx - state.v_cmd)
+            income = c.w_track * jnp.exp(-err_cmd / c.track_sigma)
+            if c.speed_upright_gate:
+                u = jnp.clip((-grav[2] - c.speed_upright_c0) / (1.0 - c.speed_upright_c0), 0.0, 1.0)
+                income = income * u ** c.speed_upright_k
+            t["track"] = income
+            t["fwd_speed"] = jnp.zeros(())
+        else:
+            income = c.w_fwd_speed * jnp.clip(vx, -c.v_ceiling, c.v_ceiling)
+            if c.speed_upright_gate:
+                u = jnp.clip((-grav[2] - c.speed_upright_c0) / (1.0 - c.speed_upright_c0), 0.0, 1.0)
+                income = jnp.where(income > 0.0, income * u ** c.speed_upright_k, income)
+            t["fwd_speed"] = jnp.where(run_phase, income, 0.0)
         # stop term: track the deceleration target while it is > 0 (stop_decel_s), then be still
         # capture step: feet ahead of the CoM while the robot is above its commanded speed
         if c.w_brake_foot > 0.0:
@@ -803,7 +960,7 @@ class DashEnvV2:
         t["stop"] = jnp.where(run_phase, 0.0, c.w_stop_vel * track)
         over = jnp.maximum(0.0, sprint_d - (params.sprint_dist_m + c.sprint_brake_m))
         t["overrun"] = jnp.where(run_phase, 0.0, pen(-c.w_overrun * over))
-        t["time"] = -c.w_time if c.objective == "sprint" else 0.0
+        t["time"] = -c.w_time if c.objective == "sprint" else 0.0   # joystick: obeying "stop" is not a sin
         t["alive"] = c.w_alive
         t["yaw_rate"] = pen(-c.w_yaw_rate * lp_yaw_true ** 2)
         y = self._y(data)
@@ -815,11 +972,18 @@ class DashEnvV2:
         # switched off for the entire deceleration, i.e. exactly while the robot has to hold a gait
         # together through 2.5 -> 2.0 -> 1.0 -> 0 m/s, the regime it has never been shaped in. Now the
         # shaping tracks the command down and only lets go below gait_cmd_gate (a genuine standstill).
-        if c.stop_cmd_continuous and c.stop_decel_s > 0:
+        if c.objective == "joystick":
+            # the commanded speed IS the joystick, and the gait block stays on all the way down to
+            # zero: a zero command means step in place, not stand still, because this plant has no
+            # passive stance to hold (bring-up probe: it topples in 0.7-1.0 s with no gait)
+            cmd_speed = state.v_cmd
+            gait_on = jnp.ones((), bool)
+        elif c.stop_cmd_continuous and c.stop_decel_s > 0:
             cmd_speed = jnp.where(run_phase, c.v_ceiling, jnp.clip(v_target, 0.0, c.v_ceiling))
+            gait_on = cmd_speed >= c.gait_cmd_gate
         else:
             cmd_speed = jnp.where(run_phase, c.v_ceiling, 0.0)
-        gait_on = cmd_speed >= c.gait_cmd_gate
+            gait_on = cmd_speed >= c.gait_cmd_gate
         # ---- gait shaping
         toe = self._toe_pos(data)
         gprev = state.grounded_prev

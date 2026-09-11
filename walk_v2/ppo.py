@@ -380,6 +380,12 @@ class PPO:
                          ctrl_jitter_ms=0.0 if c.jitter_curriculum_steps > 0 else float(c.ctrl_jitter_ms_final),
                          ctrl_drop_prob=0.0 if c.jitter_curriculum_steps > 0 else float(c.ctrl_drop_prob_final),
                          pitch_assist=1.0 if (c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0) else 0.0,
+                         bringup_scale=0.0 if (getattr(c, 'bringup_enable', False)
+                                              and c.bringup_curriculum_steps > 0) else 1.0,
+                         cmd_lo=float(c.cmd_range_start[0] if c.cmd_curriculum_steps > 0
+                                      else c.cmd_range[0]),
+                         cmd_hi=float(c.cmd_range_start[1] if c.cmd_curriculum_steps > 0
+                                      else c.cmd_range[1]),
                          gait_freq_lo=float(c.gait_freq_lo_start if c.gait_freq_floor_steps > 0
                                             else c.gait_freq_hz[0]))
 
@@ -431,6 +437,19 @@ class PPO:
         if getattr(c, "gait_freq_floor_steps", 0) > 0:
             kw["gait_freq_lo"] = self._clock(c.gait_freq_lo_start, float(c.gait_freq_hz[0]),
                                              c.gait_freq_floor_steps)
+        if getattr(c, "bringup_enable", False) and c.bringup_curriculum_steps > 0:
+            # open the drop height and the release tilt as competence is earned: the measured envelope
+            # today is +-5 deg, and the target is +-20, so starting wide would begin most episodes lost
+            kw["bringup_scale"] = self._gated("bringup_scale", ep_len, 0.0, 1.0,
+                                              c.bringup_curriculum_steps, c.bringup_gate_ep_len, rf, d_steps)
+        if c.objective == "joystick" and c.cmd_curriculum_steps > 0:
+            # widen the command band DOWNWARD from what the warm start already does. Opening it to
+            # [0, 1] at step 0 would spend most episodes asking a runner for speeds it has never
+            # produced, which is how the v2 stop runs burned their budget.
+            kw["cmd_lo"] = self._gated("cmd_lo", ep_len, float(c.cmd_range_start[0]), float(c.cmd_range[0]),
+                                       c.cmd_curriculum_steps, c.cmd_gate_ep_len, rf, d_steps)
+            kw["cmd_hi"] = self._gated("cmd_hi", ep_len, float(c.cmd_range_start[1]), float(c.cmd_range[1]),
+                                       c.cmd_curriculum_steps, c.cmd_gate_ep_len, rf, d_steps)
         if getattr(c, "stoplight_prob_final", 0.0) > 0 and c.stoplight_curriculum_steps > 0:
             kw["stoplight_prob"] = self._gated("stoplight_prob", ep_len, 0.0, c.stoplight_prob_final,
                                                c.stoplight_curriculum_steps, c.stoplight_gate_ep_len, rf, d_steps)
