@@ -46,6 +46,18 @@ BOUNDS = np.array([[0.4, 1.6],      # frequency multiplier on the cruise frequen
                    [-1.0, 1.0]])    # thigh offset (lean)
 
 
+def schedule_at(theta, frac):
+    """As `schedule`, but `frac` is PER ENV (pop,) -- each episode can be at its own point in its
+    own braking window, which is what staggered brake starts need."""
+    th = theta.reshape(theta.shape[0], len(CHANNELS), KNOTS)
+    x = jnp.asarray(frac).reshape(-1, 1) * (KNOTS - 1)
+    i0 = jnp.clip(jnp.floor(x).astype(jnp.int32), 0, KNOTS - 2)
+    w = x - i0
+    a = jnp.take_along_axis(th, i0[:, :, None] * jnp.ones((1, len(CHANNELS), 1), jnp.int32), axis=2)[:, :, 0]
+    b = jnp.take_along_axis(th, (i0 + 1)[:, :, None] * jnp.ones((1, len(CHANNELS), 1), jnp.int32), axis=2)[:, :, 0]
+    return a + w * (b - a)
+
+
 def schedule(theta, frac):
     """theta (pop, DIM), frac scalar in [0,1] -> (pop, 4) channel values, piecewise linear over knots."""
     th = theta.reshape(theta.shape[0], len(CHANNELS), KNOTS)
@@ -69,6 +81,11 @@ def main():
     ap.add_argument("--cruise-s", type=float, default=6.0, help="policy-driven run-up before braking")
     ap.add_argument("--brake-s", type=float, default=8.0, help="length of the open-loop braking window")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--stagger-s", type=float, default=0.0,
+                    help="spread the moment braking starts over this many seconds, independently "
+                         "per episode. 0 fits ONE brake point, which is right for a finish line and "
+                         "wrong for a button: a red-light stop arrives whenever the operator presses, "
+                         "so the schedule has to work across the spread, not at one state.")
     ap.add_argument("--free-clock", action="store_true",
                     help="fit/replay with the touchdown resync OFF, as on the robot, which has no "
                          "foot contact sensor. The dash tolerates this; braking is where phase "
@@ -93,6 +110,8 @@ def main():
                                            pitch_assist=0.0, stoplight_prob=0.0)
     dt = env.control_dt
     n_cruise, n_brake = int(args.cruise_s / dt), int(args.brake_s / dt)
+    n_stag = int(args.stagger_s / dt)          # spread of the brake start, 0 = one fixed point
+    n_total = n_stag + n_brake                 # the scan has to cover the latest start
     # What the policy is TOLD, during braking only. Both the policy's distance-to-go input and the
     # env's stop phase come off params.sprint_dist_m, so pushing the line out of range leaves the
     # policy in the regime it is competent in -- running -- while the schedule does the decelerating.
@@ -142,15 +161,30 @@ def main():
         v0 = float(np.asarray(state.prev_vel_body)[:, 0].mean())
     print(f"[brake] fitting at {d_now:.1f} m ({(n_cruise + n_more) * dt:.1f} s in), brake point "
           f"{d_brake:.1f} m, line {cfg.sprint_dist_m:.0f} m, speed {v0:.2f} m/s")
-    cruise_spec = state.spec                                  # (pop, 44), identical across envs
+    cruise_spec = state.spec      # (pop, 44); NOT identical across envs -- reset_joint_noise makes
+                                  # every episode diverge, so each carries its own latched spec
 
-    # ---- braking window: the POLICY IS OFF, the spec is driven by the schedule
-    def brake_rollout(theta, state, obs):
+    key, k_t0 = jax.random.split(key)
+    t0_env = (jax.random.randint(k_t0, (args.pop,), 0, n_stag + 1) if n_stag > 0
+              else jnp.zeros(args.pop, jnp.int32))
+    if n_stag > 0:
+        print(f"[brake] staggered start: braking begins anywhere in the next "
+              f"{args.stagger_s:.1f} s, drawn per episode")
+    # ---- braking window: the POLICY IS OFF for the spec, the schedule drives it
+    # `t0` is the tick each env starts braking on. With --stagger-s it differs per episode, so one
+    # schedule has to bring the robot down from whatever state the button happens to catch it in --
+    # that is the red-light case. Before its own t0 an env just runs the policy, and the spec the
+    # schedule modulates is the one latched AT t0, not a single shared cruise spec.
+    def brake_rollout(theta, state, obs, t0):
         def step(carry, i):
-            state, obs, alive, vmin, surv = carry
-            ch = schedule(theta, i / max(n_brake - 1, 1))
-            spec = cruise_spec
-            spec = spec.at[:, gait.I_FREQ].set(jnp.clip(cruise_spec[:, gait.I_FREQ] * ch[:, 0], -1.0, 1.0))
+            state, obs, alive, vmin, surv, cspec, d0 = carry
+            braking = i >= t0
+            cspec = jnp.where((i == t0)[:, None], state.spec, cspec)
+            d0 = jnp.where(i == t0, state.sprint_d, d0)
+            frac = jnp.clip((i - t0) / max(n_brake - 1, 1), 0.0, 1.0)
+            ch = schedule_at(theta, frac)
+            spec = cspec
+            spec = spec.at[:, gait.I_FREQ].set(jnp.clip(cspec[:, gait.I_FREQ] * ch[:, 0], -1.0, 1.0))
             spec = spec.at[:, gait.I_S_CAM].multiply(ch[:, 1:2])
             spec = spec.at[:, gait.I_S_THIGH].multiply(ch[:, 1:2])
             spec = spec.at[:, gait.I_O.start].set(jnp.clip(ch[:, 2], -1.0, 1.0))
@@ -159,17 +193,21 @@ def main():
             # (walk_mit gait_diag), so zeroing it does not test the gait spec, it just removes the
             # stabiliser and everything falls. Only the LATCHED spec is overridden by the schedule.
             pol = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
-            a = jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1)
+            a = jnp.where(braking[:, None],
+                          jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1), pol)
             state2, obs2, _, done, info = env.step(state, a, p_brake)
             alive2 = alive & ~info["fallen"]
             vx = info["sprint_d"] - state.sprint_d
-            vmin = jnp.where(alive2, jnp.minimum(vmin, jnp.abs(vx) / dt), vmin)
-            return (state2, obs2, alive2, vmin, surv + alive2.astype(jnp.float32)), None
+            # only score speed once this env is actually braking, else the cruise ticks of a late
+            # starter would be compared against the standstill of an early one
+            vmin = jnp.where(alive2 & braking, jnp.minimum(vmin, jnp.abs(vx) / dt), vmin)
+            return (state2, obs2, alive2, vmin, surv + alive2.astype(jnp.float32), cspec, d0), None
 
         n = theta.shape[0]
-        init = (state, obs, jnp.ones(n, bool), jnp.full(n, jnp.inf), jnp.zeros(n))
-        (_, _, alive, vmin, surv), _ = jax.lax.scan(step, init, jnp.arange(n_brake))
-        return alive, vmin, surv / float(n_brake)
+        init = (state, obs, jnp.ones(n, bool), jnp.full(n, jnp.inf), jnp.zeros(n),
+                jnp.zeros((n, gait.SPEC_DIM)), jnp.zeros(n))
+        (fs, _, alive, vmin, surv, _, d0), _ = jax.lax.scan(step, init, jnp.arange(n_total))
+        return alive, vmin, surv / float(n_total), fs.sprint_d - d0
 
     brake_jit = jax.jit(brake_rollout)
 
@@ -309,7 +347,7 @@ def main():
             ctrl[:, KNOTS:2 * KNOTS] = 1.0
             ctrl[:, 2 * KNOTS:3 * KNOTS] = float(np.asarray(cruise_spec)[0, gait.I_O.start])
             ctrl[:, 3 * KNOTS:4 * KNOTS] = float(np.asarray(cruise_spec)[0, gait.I_O.start + 1])
-            a_c, v_c, _ = brake_jit(jnp.asarray(ctrl), state, obs)
+            a_c, v_c, _, _ = brake_jit(jnp.asarray(ctrl), state, obs, t0_env)
             n_c = int(np.asarray(a_c).sum())
             # The control keeps cruising for the whole window. Read it against WHERE the fit is:
             # mid-run it must be ~all upright or the harness is broken, but at the brake point it
@@ -325,7 +363,7 @@ def main():
         theta_env = np.repeat(theta, n_reps, axis=0)
         if n_pad:
             theta_env = np.concatenate([theta_env, np.repeat(theta[-1:], n_pad, axis=0)], axis=0)
-        alive, vmin, surv = brake_jit(jnp.asarray(theta_env, jnp.float32), state, obs)
+        alive, vmin, surv, dstop = brake_jit(jnp.asarray(theta_env, jnp.float32), state, obs, t0_env)
         k = n_cand * n_reps
         alive = np.asarray(alive)[:k].reshape(n_cand, n_reps)
         vmin = np.asarray(vmin)[:k].reshape(n_cand, n_reps)
@@ -339,8 +377,10 @@ def main():
         order = np.argsort(score)
         el = order[:n_elite]
         if score[order[0]] < best["score"]:
+            ds = np.asarray(dstop)[:n_cand * n_reps].reshape(n_cand, n_reps)
             best = dict(score=float(score[order[0]]), v_min=float(vmin[order[0]].max()),
-                        upright=bool(upright_all[order[0]]), theta=theta[order[0]].tolist())
+                        upright=bool(upright_all[order[0]]), theta=theta[order[0]].tolist(),
+                        stop_m=float(ds[order[0]].mean()))
         mu, sd = theta[el].mean(0), theta[el].std(0) + 1e-3
         n_up = int(alive.sum())
         n_all = int(upright_all.sum())
@@ -355,6 +395,9 @@ def main():
 
     print(f"\n[brake] cruise {v0:.2f} m/s -> best reachable |v| {best['v_min']:.3f} m/s while upright "
           f"(upright={best['upright']})")
+    if best.get("stop_m") is not None:
+        print(f"[brake] STOPPING DISTANCE of the best schedule: {best['stop_m']:.1f} m from the "
+              f"brake point (mean over its episodes) -- this is the number a corridor has to fit")
     verdict = ("A STOP IS EXPRESSIBLE: the action space contains it, so the failure is RL exploration -- "
                "warm-start from this schedule." if best["v_min"] < 0.3 and best["upright"] else
                "NO STOP FOUND: the latched Fourier action space very likely does not contain one. More "
