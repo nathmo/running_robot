@@ -222,9 +222,10 @@
     <tr><td class="mono">contact-triggered resync</td><td class="mono">removed</td>
         <td class="cmt">The robot has no foot contact sensor. It moved the actor's phase and could carry
         its commit flag, and with κ = 0 the dash and the brake are unchanged. See §05.</td></tr>
-    <tr><td class="mono">task = [run flag, dist to line]</td><td class="mono">[v_cmd / v_max, reserved]</td>
+    <tr><td class="mono">task = [run flag, dist to line]</td><td class="mono">[v_cmd / v_max, reserved = 1]</td>
         <td class="cmt">The distance countdown came from ground-truth world x. The joystick command
-        replaces it, so the actor carries no odometry at all. See §03.</td></tr>
+        replaces it, so the actor carries no odometry at all. The reserved channel is held at 1, not
+        0: 0 is v2's "brake now". See §03.</td></tr>
     <tr><td class="mono">spec from a solved library + Raibert law</td><td class="mono">policy head</td>
         <td class="cmt">The library variant is refused by the deploy runtime: it builds its spec from true
         body velocity and exposes a touchdown-phase estimate. Neither exists on the robot.</td></tr>
@@ -311,6 +312,43 @@
   tilt-dependent touching height, or held misaligned and released at up to ±20° of pitch — because the
   measured bring-up envelope today is ±5° with both feet flat, and that is a training gap, not a fact
   about the machine.</p>
+
+  <p><strong><code>task[1]</code> is reserved, and it is held at 1 — not 0.</strong> Zero is not a
+  neutral filler on a channel that already means something. Under v2 <code>task[1]</code> is the
+  distance-to-go ramp: 1 whenever the finish line is far away, 0 only to demand a stop. Pinning the
+  reserved channel at 0 told a warm-started runner to brake on <em>every</em> tick — measured
+  2026-09-11, the 3.27 m/s runner made ~0.1 m/s under a 3.2 m/s command and fell 100% of the time
+  inside 86 ticks, where the same checkpoint runs 600/600 upright under the sprint preset. The
+  deployed control law must send the same 1, or the robot runs a different controller than the one
+  that was trained.</p>
+
+  <p>The same warm start exposes a second trap, in the <em>normalisation</em> rather than the value.
+  <code>task[0]</code> has variance 6.5&nbsp;×&nbsp;10<sup>−5</sup> in the v2 runner — it was
+  effectively the constant 1.0 for all of training, because the run flag only drops at the line. Obs
+  normalisation clips at ±10σ, so with those statistics taken verbatim a 3.2 m/s command reads as
+  −13.6σ and <em>every</em> command below ~0.92 clips to exactly −10: the policy cannot distinguish
+  "stop" from "3.2 m/s", and episode length is identical (130–132 ticks) at every command.
+  <code>warmstart_var_floor</code> (10<sup>−2</sup>) is what makes the channel legible again, lifting
+  the std to 0.1 so 0.89 reads as −1.1σ. Any diagnostic that loads the checkpoint without that floor
+  is measuring a condition no run ever sees.</p>
+
+  <h3>What the joystick pays</h3>
+  <p>Replacing the dash's speed income with a <em>bounded</em> tracking term is what made the first two
+  v3 seeds rail the gait clock to its 1.5 Hz floor and fall early. Measured on the same checkpoint and
+  plant: the sprint objective earns income 5.11/tick against 2.69 of cost and survives 600/600 ticks,
+  while a ceiling-3.0 tracking income earned 0.57 against an almost identical 2.50. <strong>Costs were
+  never the problem.</strong> With <code>fall_penalty</code> 100 and <code>reward_dt_scale</code> 0.5,
+  break-even against a 3000-tick episode is ~200 ticks, so dying at once was worth ~15× living — and
+  the optimiser found exactly that.</p>
+  <div class="eq">income = (w_track + w_fwd_speed · clip(v_cmd, 0, v_ceiling)) · exp(−|v<sub>x</sub> − v_cmd| / σ)&nbsp;&nbsp;&nbsp;&nbsp;w_track 3.0 · w_fwd_speed 2.0 · v_ceiling 3.0 · σ 0.6 m/s<br>
+plus a constant w_alive = 1.5, which is the floor under survival, not a standing attractor: at a 3.2 m/s command standing pays 0.5/tick against running's 3.8</div>
+  <p>The income scales with what was <em>asked</em>, not with what was achieved. The Laplace shape still
+  peaks only at the commanded speed — overspeeding pays less, which a bare speed income does not give —
+  while the magnitude tracks the cost of the commanded gait, exactly as the dash's income tracked the
+  cost of sprinting. The <code>w_track</code> base survives at <code>v_cmd = 0</code>, so holding
+  station pays and drifting does not; a purely proportional income would have zeroed that out. Laplace
+  and not Gaussian because a Gaussian pays 0.006 at the ~1.8 m/s error this lineage actually sits at,
+  i.e. it is flat exactly where the policy lives.</p>
 </section>
 
 <!-- ============================================================ §01 SIGNAL PATH -->
@@ -518,7 +556,7 @@
     <div class="seg priv" style="flex: 3"><span class="nm">priv</span><span class="d">25</span></div>
   </div>
   <div class="barcaption">actor slice = obs[0:377]&nbsp;&nbsp;·&nbsp;&nbsp;critic reads all 402&nbsp;&nbsp;·&nbsp;&nbsp;the tail never exists on hardware</div>
-  <p>The once-block holds the <strong>live latched spec</strong> (what is driving the legs, not what the policy last emitted — under the latch those differ, and only the live one matters) and the task <code>[run_flag, clip(d/8, 0, 1)] in v2; [v_cmd / v_max, reserved] in v3</code>: a binary command plus the braking lookahead, re-encoded so the last 8 m have resolution.</p>
+  <p>The once-block holds the <strong>live latched spec</strong> (what is driving the legs, not what the policy last emitted — under the latch those differ, and only the live one matters) and the task <code>[run_flag, clip(d/8, 0, 1)] in v2; [v_cmd / v_max, reserved = 1] in v3</code>: in v2 a binary command plus the braking lookahead, re-encoded so the last 8 m have resolution; in v3 the operator's stick plus a reserved channel pinned at 1, because 0 on that channel is v2's "brake now" (§03).</p>
 
   <div class="tblwrap">
   <table>
