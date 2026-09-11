@@ -27,5 +27,5 @@ python walk_v2/tools/brake_search.py --run "walk_v2/runs/$RUN" ${CKPT:+--checkpo
     --pop "${POP:-512}" --iters "${ITERS:-8}" --cruise-s "${CRUISE_S:-6}" --brake-s "${BRAKE_S:-8}" \
     ${DEMO:+--demo "$DEMO"} ${BRAKE_AT:+--brake-at "$BRAKE_AT"} \
     --json "walk_v2/results/brake_${RUN}_${TAG}.json" \
-    ${DEMO:+--video "walk_v2/results/run_and_stop_${RUN}.mp4"}
+    ${DEMO:+--video "walk_v2/results/run_and_stop_${RUN}_${TAG}.mp4"}
 echo "[brake] done"
