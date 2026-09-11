@@ -29,6 +29,7 @@ import jax.numpy as jnp
 from config import PRESETS
 from env import EnvParams
 from evaluate import load_run
+from ppo import initial_params
 from train import make_eval_env
 
 
@@ -41,15 +42,20 @@ def main():
     ap.add_argument("--n-envs", type=int, default=64)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--v-cmd", type=float, default=None, help="hold the joystick here (m/s) instead of drawing")
+    ap.add_argument("--curriculum", choices=("start", "final"), default="start",
+                    help="'start' = what step 0 of training sees (default); 'final' = the end of every ramp")
     args = ap.parse_args()
 
     cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.n_envs, dr=False)
     if args.preset:
         cfg = PRESETS[args.preset]()
         env = make_eval_env(cfg, args.n_envs)
-    params = EnvParams.final(cfg)._replace(dr_scale=0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0)
-    print(f"[budget] preset={args.preset or 'run'} objective={cfg.objective} "
+    base = initial_params(cfg) if args.curriculum == "start" else EnvParams.final(cfg)
+    params = base._replace(dr_scale=0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0)
+    print(f"[budget] preset={args.preset or 'run'} objective={cfg.objective} curriculum={args.curriculum} "
           f"w_alive={cfg.w_alive} w_track={getattr(cfg, 'w_track', 0)} ticks={args.ticks}")
+    print(f"[budget] env params: bringup_scale={params.bringup_scale:.2f} pitch_assist={params.pitch_assist:.2f} "
+          f"cmd=[{params.cmd_lo:.2f},{params.cmd_hi:.2f}] zero_p={params.cmd_zero_p:.2f}")
 
     state, obs = env.reset(jax.random.PRNGKey(args.seed), params)
     if args.v_cmd is not None:
