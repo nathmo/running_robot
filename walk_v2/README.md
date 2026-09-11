@@ -435,6 +435,18 @@ back, is the only repeatable option.
   running gait forms. Verified locally: the minimum action gives 3.00 / 2.25 / 1.50 Hz at the three
   curriculum points and the contract preset still gives 1.50. Preset `v2c_s2_free_fast_floorstop` = floor
   (60 M) + the stop curriculum, i.e. the cold-S2 "no S1 stage" recipe; seeds `runs/v2c_s2_floorstop_s8/s9`.
+* **Why the robot will not stop, measured (2026-09-11, 02:30)** -- `evaluate.py` now logs the gait clock
+  through the red phase and the state at the fall (`f_red_min/max`, `v_end`, `f_end`). Probing the banked
+  2.95 m/s runner at 8 s AND 20 s ramps (0.36 and 0.15 m/s^2): it falls every episode, spends **0%** of the
+  red phase slow, and **at the moment of the fall it is doing 2.1-3.35 m/s -- faster than its own 2.65 m/s
+  average -- with the clock dropped from 4.0 to 2.4-3.8 Hz**. Asked to slow it lowers the cadence and
+  ACCELERATES: longer strides, more push per stride, overstride, topple. Lowering the gait clock does not
+  slow this plant down, and the policy has no braking behaviour in its repertoire. Survival time scales with
+  the ramp (1.2 s at 2 s, 2.9 s at 8 s, 5.8 s at 20 s), so it is the command it cannot tolerate, not the
+  braking effort. The reason it never learned one is the REWARD SHAPE: the Gaussian tracking term pays
+  0.006 at the 1.8 m/s error the policy actually operates at -- a flat region carrying no direction
+  information. `stop_track_laplace` uses exp(-|e|/sigma), which pays 0.105 there (17x) and has gradient
+  everywhere, so slowing a little now beats not slowing. Seeds `runs/v2c_s2_stoplap_s22/23/24`.
 * **The gait shaping was switched off for the whole deceleration (2026-09-11, 01:45)** -- a structural
   mismatch, not a tuning problem, and the likeliest reason braking plateaued at `reward_terms/stop` ~0.033
   (perfect would be ~0.38). `cmd_speed` was binary -- `v_ceiling` while running, **0** the instant the light
