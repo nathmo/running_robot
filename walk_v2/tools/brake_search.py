@@ -172,13 +172,17 @@ def main():
     if args.demo:
         th = np.asarray(json.loads(Path(args.demo).read_text())["best"]["theta"], np.float32)[None]
         th = np.repeat(th, args.pop, axis=0)
+        # Record a handful of envs, not just env 0: at an 18% stop rate env 0 is usually NOT a stop,
+        # so a video of it shows a failure while the statistics above report a success. 16 envs make
+        # it ~95% likely at least one stopped, and the video then shows a typical one.
+        N_VID = int(min(16, args.pop))
         state, obs = env.reset(jax.random.PRNGKey(args.seed), params)
 
         def to_line(carry, _):
             state, obs = carry
             a = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
             state2, obs2, _, _, _ = env.step(state, a, params)
-            return (state2, obs2), state.data.qpos[0]
+            return (state2, obs2), state.data.qpos[:N_VID]
 
         # Run to the brake DISTANCE, measured -- never to an estimated time. d_brake/v0 ignores the
         # acceleration from rest, so the old estimate landed metres past the intended point, and a
@@ -194,7 +198,8 @@ def main():
             (state, obs), q = jax.lax.scan(to_line, (state, obs), None, length=chunk)
             q_parts.append(np.asarray(q))
             n_line += chunk
-        q_run = np.concatenate(q_parts, axis=0) if q_parts else np.zeros((0,) + tuple(state.data.qpos[0].shape))
+        q_run = (np.concatenate(q_parts, axis=0) if q_parts
+                 else np.zeros((0, N_VID) + tuple(state.data.qpos[0].shape)))
         print(f"[demo] braking begins at {float(np.asarray(state.sprint_d).mean()):.1f} m "
               f"(target {d_brake:.1f} m, line at {cfg.sprint_dist_m:.0f} m)")
         d_line = float(np.asarray(state.sprint_d)[0])
@@ -222,7 +227,7 @@ def main():
             d_f = jnp.where(alive, info["sprint_d"], d_f)
             v_f = jnp.where(alive, vx, v_f)
             alive2 = alive & ~done
-            return (state2, obs2, alive2, d_f, v_f), (state.data.qpos[0], info["fallen"][0])
+            return (state2, obs2, alive2, d_f, v_f), (state.data.qpos[:N_VID], info["fallen"][:N_VID])
 
         n_pop = th.shape[0]
         init = (state, obs, jnp.ones(n_pop, bool), state.sprint_d, jnp.zeros(n_pop))
@@ -234,7 +239,7 @@ def main():
         overrun = d_f - line
         stopped = alive & (np.abs(v_f) <= 0.25)            # upright and at a standstill
         good = stopped & (overrun <= 20.0)                 # ... and inside the 20 m allowance
-        fell0 = np.asarray(fell0)
+        fell0 = np.asarray(fell0)[:, 0]        # env 0's fall, for the env-0 line below
         i_fall = int(np.argmax(fell0)) if fell0.any() else -1
         print(f"[demo] {n_pop} episodes: upright {alive.sum()}/{n_pop}, "
               f"STOPPED (|v|<=0.25) {stopped.sum()}/{n_pop}, "
@@ -250,7 +255,18 @@ def main():
               f"fell={'no' if i_fall < 0 else f'at {i_fall * dt:.1f} s'}")
         if args.video:
             from evaluate import render_video
-            qs = np.concatenate([np.asarray(q_run), np.asarray(q_br)], axis=0)
+            # pick the most typical SUCCESS among the recorded envs: stopped, and closest to the
+            # median overrun of everything that stopped. Fall back to the one that got furthest.
+            cand = np.where(stopped[:N_VID])[0]
+            if cand.size:
+                target = np.median(overrun[stopped]) if stopped.any() else overrun[cand].mean()
+                idx = int(cand[np.argmin(np.abs(overrun[cand] - target))])
+                why = f"stopped {overrun[idx]:+.1f} m past the line at {abs(v_f[idx]):.3f} m/s"
+            else:
+                idx = int(np.argmax(np.where(alive[:N_VID], d_f[:N_VID], -1e9)))
+                why = "no stop among the recorded envs; showing the one that got furthest"
+            print(f"[demo] video shows env {idx}: {why}")
+            qs = np.concatenate([np.asarray(q_run)[:, idx], np.asarray(q_br)[:, idx]], axis=0)
             render_video(cfg, qs, (n_line + n_brake) * dt, args.video)
         return
 
