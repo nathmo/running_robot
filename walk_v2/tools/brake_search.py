@@ -277,7 +277,7 @@ def main():
             # runs past the finish line into the stop phase and SHOULD mostly fall -- that fall is
             # the problem being solved, not a bug. What matters there is that braking candidates,
             # which stop before the line, can stay upright where this control cannot.
-            past = d_now + v0 * args.brake_s > cfg.sprint_dist_m
+            past = (d_now + v0 * args.brake_s > cfg.sprint_dist_m) and not args.hold_run
             note = ("expected to fall: the window runs past the line" if past else
                     "if this is not upright the harness is wrong")
             print(f"[brake] CONTROL (schedule = cruise): upright {n_c}/{args.pop}, "
