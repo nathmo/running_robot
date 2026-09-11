@@ -503,7 +503,16 @@ PRESETS = {
     "v3_joystick_s2": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                   objective="joystick", resync_enable=False, brake_prior=0.0,
                                   hold_enable=True, bringup_enable=True,
-                                  w_alive=0.5, episode_s=30.0, sprint_curriculum_steps=0,
+                                  # w_alive 1.5, not 0.5: measured 2026-09-11 (tools/reward_budget.py,
+                                  # warm-start stats, curriculum start) the warm start runs 600/600 at a
+                                  # 3.2 m/s command but still earns income 1.42 against 1.66 of cost, so
+                                  # living was NEGATIVE at every command and the optimiser prefers to
+                                  # fall. `alive` is a constant per-tick term, so +1.0 lifts every command
+                                  # to positive living (+0.20 to +0.42/tick) while staying small against
+                                  # the 9.0 peak of the tracking income -- it buys survival a floor, not a
+                                  # standing attractor: at a 3.2 command, standing pays 0.5/tick against
+                                  # running's 3.8.
+                                  w_alive=1.5, episode_s=30.0, sprint_curriculum_steps=0,
                                   total_steps=140_000_000),
     # S2 warm-start experiment: keep the S1 policy's std (contract re-inflates log sigma; the seeds start at ep_len 77)
     "v2c_s2_free_fast_keepstd": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
