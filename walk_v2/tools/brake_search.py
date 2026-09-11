@@ -103,6 +103,24 @@ def main():
     if v0 < 0.8:
         print("[brake] the policy is not running; nothing to brake from")
         return
+
+    # FIT THE SCHEDULE WHERE IT WILL BE USED. The brake point is a DISTANCE -- the line minus the
+    # stopping distance -- not a time, so --cruise-s only bootstraps the speed estimate and the
+    # run-up is then extended to reach that distance. Getting this wrong is quiet and expensive: a
+    # run-up two seconds too long starts the robot past the brake point, the whole 8 s window then
+    # straddles the finish line, the env is in its stop phase for most of it (where the policy's own
+    # residual fights the schedule) and EVERY candidate falls. That reads as 0/512 upright -- a stop
+    # that looks impossible when it was only mistimed.
+    d_brake = args.brake_at if args.brake_at is not None else max(5.0, cfg.sprint_dist_m - v0 * args.brake_s / 2)
+    d_now = float(np.asarray(state.sprint_d).mean())
+    n_more = int(max(0.0, (d_brake - d_now) / max(v0, 0.5)) / dt)
+    n_more = min(n_more, max(0, env.max_steps - n_cruise - n_brake - 10))
+    if n_more > 0:
+        (state, obs), _ = jax.lax.scan(cruise_step, (state, obs), None, length=n_more)
+        d_now = float(np.asarray(state.sprint_d).mean())
+        v0 = float(np.asarray(state.prev_vel_body)[:, 0].mean())
+    print(f"[brake] fitting at {d_now:.1f} m ({(n_cruise + n_more) * dt:.1f} s in), brake point "
+          f"{d_brake:.1f} m, line {cfg.sprint_dist_m:.0f} m, speed {v0:.2f} m/s")
     cruise_spec = state.spec                                  # (pop, 44), identical across envs
 
     # ---- braking window: the POLICY IS OFF, the spec is driven by the schedule
