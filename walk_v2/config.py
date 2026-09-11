@@ -373,7 +373,8 @@ class Config:
     bringup_drop_m: tuple = (0.05, 0.10)    # FINAL drop band above touching height
     bringup_drop_m_start: tuple = (0.01, 0.02)
     bringup_pitch_deg: float = 20.0         # FINAL +- pitch at release
-    bringup_pitch_deg_start: float = 5.0
+    bringup_pitch_deg_start: float = 2.0    # 5 deg is the MEASURED failure edge, not a mild start:
+                                            # +5 deg forward gave 16/16 floor violations
     bringup_roll_deg: float = 8.0           # FINAL +- roll at release
     bringup_roll_deg_start: float = 2.0
     bringup_hold_s: tuple = (0.3, 2.5)      # how long the hand stays on

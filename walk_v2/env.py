@@ -52,6 +52,7 @@ class EnvParams(NamedTuple):
     ctrl_jitter_ms: float = 0.0
     ctrl_drop_prob: float = 0.0
     bringup_scale: float = 1.0   # 0 = mild starts, 1 = the full drop / tilt bands
+    cmd_zero_p: float = 0.25     # share of command draws that are exactly zero (ramped)
     cmd_lo: float = 0.0          # joystick: fraction-of-v_max band the command is drawn from
     cmd_hi: float = 1.0          # (curriculum widens it down from cmd_range_start to cmd_range)
     pitch_assist: float = 0.0
@@ -70,6 +71,7 @@ class EnvParams(NamedTuple):
     @classmethod
     def final(cls, cfg):
         return cls(dr_scale=1.0, sprint_dist_m=float(cfg.sprint_dist_m),
+                   cmd_zero_p=float(cfg.cmd_zero_frac),
                    cmd_lo=float(cfg.cmd_range[0]), cmd_hi=float(cfg.cmd_range[1]),
                    stance_ratio=float(cfg.stance_ratio_final), eff_scale=float(cfg.efficiency_target),
                    ctrl_jitter_ms=float(cfg.ctrl_jitter_ms_final),
@@ -512,9 +514,13 @@ class DashEnvV2:
         c = self.cfg
         k_m, k_p, k_r, k_d, k_h = jax.random.split(key, 5)
         s = jnp.clip(params.bringup_scale, 0.0, 1.0)
+        # scale the SHARE of off-nominal starts, not just how hard they are: at s = 0 nearly every
+        # episode is the settled keyframe, which is what the warm start knows how to do.
         u = jax.random.uniform(k_m)
-        drop = u < c.bringup_drop_frac
-        held = (~drop) & (u < c.bringup_drop_frac + c.bringup_held_frac)
+        p_drop = c.bringup_drop_frac * s
+        p_held = c.bringup_held_frac * s
+        drop = u < p_drop
+        held = (~drop) & (u < p_drop + p_held)
         lerp = lambda a, b: a + (b - a) * s
         pit_hi = jnp.deg2rad(lerp(c.bringup_pitch_deg_start, c.bringup_pitch_deg))
         rol_hi = jnp.deg2rad(lerp(c.bringup_roll_deg_start, c.bringup_roll_deg))
@@ -540,7 +546,10 @@ class DashEnvV2:
         k_v, k_z, k_t = jax.random.split(key, 3)
         lo, hi = params.cmd_lo, params.cmd_hi
         v = jax.random.uniform(k_v, (), minval=lo, maxval=hi) * c.v_max
-        v = jnp.where(jax.random.uniform(k_z) < c.cmd_zero_frac, 0.0, v)
+        # params.cmd_zero_p, not cfg.cmd_zero_frac: a fixed zero share would ignore the command
+        # curriculum completely and ask a warm-started runner to stop a quarter of the time from
+        # step 0, which drags the gait clock onto the slow rail it never comes back from.
+        v = jnp.where(jax.random.uniform(k_z) < params.cmd_zero_p, 0.0, v)
         left = c.cmd_interval_s * jax.random.uniform(k_t, (), minval=0.6, maxval=1.4)
         return v, left
 

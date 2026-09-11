@@ -382,6 +382,7 @@ class PPO:
                          pitch_assist=1.0 if (c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0) else 0.0,
                          bringup_scale=0.0 if (getattr(c, 'bringup_enable', False)
                                               and c.bringup_curriculum_steps > 0) else 1.0,
+                         cmd_zero_p=0.0 if c.cmd_curriculum_steps > 0 else float(c.cmd_zero_frac),
                          cmd_lo=float(c.cmd_range_start[0] if c.cmd_curriculum_steps > 0
                                       else c.cmd_range[0]),
                          cmd_hi=float(c.cmd_range_start[1] if c.cmd_curriculum_steps > 0
@@ -450,6 +451,10 @@ class PPO:
                                        c.cmd_curriculum_steps, c.cmd_gate_ep_len, rf, d_steps)
             kw["cmd_hi"] = self._gated("cmd_hi", ep_len, float(c.cmd_range_start[1]), float(c.cmd_range[1]),
                                        c.cmd_curriculum_steps, c.cmd_gate_ep_len, rf, d_steps)
+            # and the zero share with it -- "stop" is the hardest command this lineage has, so it
+            # arrives last, not alongside the first rollout
+            kw["cmd_zero_p"] = self._gated("cmd_zero_p", ep_len, 0.0, float(c.cmd_zero_frac),
+                                           c.cmd_curriculum_steps, c.cmd_gate_ep_len, rf, d_steps)
         if getattr(c, "stoplight_prob_final", 0.0) > 0 and c.stoplight_curriculum_steps > 0:
             kw["stoplight_prob"] = self._gated("stoplight_prob", ep_len, 0.0, c.stoplight_prob_final,
                                                c.stoplight_curriculum_steps, c.stoplight_gate_ep_len, rf, d_steps)
