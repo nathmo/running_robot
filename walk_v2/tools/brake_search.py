@@ -180,12 +180,23 @@ def main():
             state2, obs2, _, _, _ = env.step(state, a, params)
             return (state2, obs2), state.data.qpos[0]
 
-        # stop ON the line: start braking a stopping-distance short of it (v0 * brake_s / 2 for a
-        # roughly linear ramp), and stay in the RUN phase throughout
+        # Run to the brake DISTANCE, measured -- never to an estimated time. d_brake/v0 ignores the
+        # acceleration from rest, so the old estimate landed metres past the intended point, and a
+        # brake schedule is sensitive enough to where it starts that this alone can decide the demo.
+        # The fit and the demo have to begin at the same place or the demo is testing something else.
         d_brake = args.brake_at if args.brake_at is not None else max(5.0, cfg.sprint_dist_m - v0 * args.brake_s / 2)
-        n_line = int(min(env.max_steps - n_brake - 10, (d_brake / max(v0, 0.5) + 2.0) / dt))
-        (state, obs), q_run = jax.lax.scan(to_line, (state, obs), None, length=n_line)
-        print(f"[demo] braking begins at {d_brake:.1f} m (line at {cfg.sprint_dist_m:.0f} m)")
+        chunk = max(1, int(0.5 / dt))
+        n_cap = max(chunk, env.max_steps - n_brake - 10)
+        n_line, q_parts = 0, []
+        while n_line + chunk <= n_cap:
+            if float(np.asarray(state.sprint_d).mean()) >= d_brake:
+                break
+            (state, obs), q = jax.lax.scan(to_line, (state, obs), None, length=chunk)
+            q_parts.append(np.asarray(q))
+            n_line += chunk
+        q_run = np.concatenate(q_parts, axis=0) if q_parts else np.zeros((0,) + tuple(state.data.qpos[0].shape))
+        print(f"[demo] braking begins at {float(np.asarray(state.sprint_d).mean()):.1f} m "
+              f"(target {d_brake:.1f} m, line at {cfg.sprint_dist_m:.0f} m)")
         d_line = float(np.asarray(state.sprint_d)[0])
         cruise_spec = state.spec
         print(f"[demo] policy ran {d_line:.1f} m in {n_line * dt:.1f} s; braking from "
