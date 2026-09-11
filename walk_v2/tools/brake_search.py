@@ -69,6 +69,10 @@ def main():
     ap.add_argument("--cruise-s", type=float, default=6.0, help="policy-driven run-up before braking")
     ap.add_argument("--brake-s", type=float, default=8.0, help="length of the open-loop braking window")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--free-clock", action="store_true",
+                    help="fit/replay with the touchdown resync OFF, as on the robot, which has no "
+                         "foot contact sensor. The dash tolerates this; braking is where phase "
+                         "alignment should matter most, so a schedule meant for hardware wants it.")
     ap.add_argument("--hold-run", action="store_true",
                     help="during the brake window, keep the POLICY believing it is still running "
                          "(move the finish line out of range) so it keeps contributing its "
@@ -83,7 +87,8 @@ def main():
                          "destabilising response this whole investigation measured -- fights the schedule.")
     args = ap.parse_args()
 
-    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.pop, dr=False)
+    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.pop, dr=False,
+                               free_clock=args.free_clock)
     params = EnvParams.final(cfg)._replace(dr_scale=0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0,
                                            pitch_assist=0.0, stoplight_prob=0.0)
     dt = env.control_dt
