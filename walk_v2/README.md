@@ -449,6 +449,7 @@ signature never changed: **0% of the light phase spent slow, falling 0.8-1.9 s i
 | 8 | capture-step reward made SIGNED | clipped at 0 it is flat exactly where the robot lives (the same mistake as #5) | income live, behaviour unchanged |
 
 | 9 | cap the top speed at 1.8 m/s (`v2c_s2_free_fast_slowstop`) | stopping from 1.8 m/s needs 0.08 m/s^2, a quarter of 2.9 m/s | **answered: no** |
+| 10 | inject the MEASURED brake direction as a spec prior (`brake_prior`, seeds s40/41/42) | the CEM says braking is cadence UP + feet forward + lean back; the policy does the opposite on every axis | **660 M steps, zero finishes** |
 
 **The slow-runner hypothesis is dead.** `v2c_s2_slowstop_s36` does exactly what the cap intended -- 104.9 m
 at **1.79 m/s**, 16/16 (`best_speed_74M.msgpack`, banked) -- and it still cannot stop. Wheel-free with no
@@ -456,6 +457,8 @@ lights it crosses the line and holds 1.80-1.88 m/s for 2.2-2.9 s before falling:
 Under red lights it falls 8/8, 0% slow, ACCELERATING from 1.79 to 2.2-3.6 m/s. The one thing the lower
 speed bought is time: 2.2-2.9 s past the line against 0.4-0.7 s for the 3 m/s runners. **The deficit is
 not speed-dependent.** Nine configurations, no stop.
+
+**And knowing the answer is not enough either.** Intervention 10 fed the CEM's measured braking direction straight into the control law as a prior on frequency and fore-aft foot placement, the same idiom as the pitch reflex. Three seeds x 220 M steps: zero finishes, every seed railed to 1.5 Hz by the end. Ten configurations, no stop -- while the same 220 M produced the fastest runner the project has (3.27 m/s, 16/16). PPO reliably buys the dash and reliably will not buy the brake, so the brake should stop being an RL problem: fit the schedule per checkpoint with `slurm/izar_brake.sbatch` and hand it to the runtime as 12 numbers.
 
 **The remaining hypothesis is architectural, and there is a decisive test for it.** The v2 action is a
 Fourier gait spec LATCHED once per cycle plus a +-0.10 rad residual: a periodic parameterisation, while a
