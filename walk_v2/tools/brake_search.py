@@ -265,32 +265,40 @@ def main():
         # the same schedule here, so this is a pop-sized sample of one brake, not one demo. Freeze
         # each env's numbers at ITS episode end: past `done` the env has auto-reset and sprint_d
         # reads ~0, which is what made an earlier demo report "came to rest at -0.0 m".
+        # Same staggering as the fit: each episode's brake starts at its own tick, so this measures
+        # "the button arrives whenever" rather than one rehearsed distance.
         def brake_demo(carry, i):
-            state, obs, alive, d_f, v_f = carry
-            ch = schedule(jnp.asarray(th), i / max(n_brake - 1, 1))
-            spec = cruise_spec
-            spec = spec.at[:, gait.I_FREQ].set(jnp.clip(cruise_spec[:, gait.I_FREQ] * ch[:, 0], -1.0, 1.0))
+            state, obs, alive, d_f, v_f, cspec, d0 = carry
+            braking = i >= t0_env
+            cspec = jnp.where((i == t0_env)[:, None], state.spec, cspec)
+            d0 = jnp.where(i == t0_env, state.sprint_d, d0)
+            ch = schedule_at(jnp.asarray(th), jnp.clip((i - t0_env) / max(n_brake - 1, 1), 0.0, 1.0))
+            spec = cspec
+            spec = spec.at[:, gait.I_FREQ].set(jnp.clip(cspec[:, gait.I_FREQ] * ch[:, 0], -1.0, 1.0))
             spec = spec.at[:, gait.I_S_CAM].multiply(ch[:, 1:2])
             spec = spec.at[:, gait.I_S_THIGH].multiply(ch[:, 1:2])
             spec = spec.at[:, gait.I_O.start].set(jnp.clip(ch[:, 2], -1.0, 1.0))
             spec = spec.at[:, gait.I_O.start + 1].set(jnp.clip(ch[:, 3], -1.0, 1.0))
             pol = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
-            a = jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1)
+            a = jnp.where(braking[:, None],
+                          jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1), pol)
             state2, obs2, _, done, info = env.step(state, a, p_brake)
             vx = (info["sprint_d"] - state.sprint_d) / dt
             d_f = jnp.where(alive, info["sprint_d"], d_f)
             v_f = jnp.where(alive, vx, v_f)
             alive2 = alive & ~done
-            return (state2, obs2, alive2, d_f, v_f), (state.data.qpos[:N_VID], info["fallen"][:N_VID])
+            return (state2, obs2, alive2, d_f, v_f, cspec, d0), (state.data.qpos[:N_VID], info["fallen"][:N_VID])
 
         n_pop = th.shape[0]
-        init = (state, obs, jnp.ones(n_pop, bool), state.sprint_d, jnp.zeros(n_pop))
-        (state, obs, alive, d_f, v_f), (q_br, fell0) = jax.lax.scan(
-            brake_demo, init, jnp.arange(n_brake))
+        init = (state, obs, jnp.ones(n_pop, bool), state.sprint_d, jnp.zeros(n_pop),
+                jnp.zeros((n_pop, gait.SPEC_DIM)), state.sprint_d)
+        (state, obs, alive, d_f, v_f, _, d0), (q_br, fell0) = jax.lax.scan(
+            brake_demo, init, jnp.arange(n_total))
         alive = np.asarray(alive)
-        d_f, v_f = np.asarray(d_f), np.asarray(v_f)
+        d_f, v_f, d0 = np.asarray(d_f), np.asarray(v_f), np.asarray(d0)
         line = float(cfg.sprint_dist_m)
         overrun = d_f - line
+        d_brake_used = d_f - d0            # distance covered from THIS episode's brake start
         stopped = alive & (np.abs(v_f) <= 0.25)            # upright and at a standstill
         good = stopped & (overrun <= 20.0)                 # ... and inside the 20 m allowance
         fell0 = np.asarray(fell0)[:, 0]        # env 0's fall, for the env-0 line below
@@ -304,6 +312,11 @@ def main():
                   f"median {np.median(ov):+.1f} m, 10-90% {np.percentile(ov, 10):+.1f} .. "
                   f"{np.percentile(ov, 90):+.1f} m, worst {ov.max():+.1f} m; "
                   f"final |v| median {np.median(np.abs(v_f[stopped])):.3f} m/s")
+        if stopped.any():
+            sd = d_brake_used[stopped]
+            print(f"[demo] STOPPING DISTANCE from the moment braking starts: median {np.median(sd):.1f} m, "
+                  f"10-90% {np.percentile(sd, 10):.1f} .. {np.percentile(sd, 90):.1f} m, "
+                  f"worst {sd.max():.1f} m -- this is what the corridor has to fit")
         rolling = alive & ~stopped
         if rolling.any():
             vr = np.abs(v_f[rolling])
