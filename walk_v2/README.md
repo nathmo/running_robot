@@ -441,6 +441,46 @@ a measurement, not a guess, and each was verified on the live environment before
 signature never changed: **0% of the light phase spent slow, falling 0.8-1.9 s in, accelerating to
 3.0-3.8 m/s against a ~2.3 m/s command.**
 
+## Red light / green light: a stop on command, wherever it lands (2026-09-11, 20:00)
+
+The real test is not a 100 m finish line. It is a corridor (>40 m) with an operator pressing stop by hand,
+which changes three things: there is no line, there is no odometry problem (the human IS the trigger), and
+the number that matters is STOPPING DISTANCE rather than overrun past a line.
+
+Two knobs in `brake_search.py` make that measurable. `--stagger-s` gives every episode its own brake tick,
+so one schedule has to work whenever the button arrives instead of at a rehearsed point; `--w-dist` puts
+stopping distance into the score.
+
+**A random trigger is much harder than a rehearsed one** -- and the fix is counter-intuitive:
+
+| held-out, random trigger | distance-agnostic | `--w-dist 0.05` |
+|---|---|---|
+| upright | 399/512 (78%) | **500/512 (98%)** |
+| full stop | 127/512 (25%) | **213/512 (42%)** |
+| stopping distance, median | 24.1 m | **19.6 m** |
+| worst | 30.4 m | **26.0 m** |
+
+Asking for a SHORT stop made it more robust, not less. That is the reps-8 lesson mirrored: an objective
+that only says "do not fall" drifts to gentle schedules that stay upright and never quite stop, while one
+that must stop short commits to decisive braking -- which settles more reliably as well. Video:
+`results/v2c_redlight_stop.mp4`.
+
+**Recommended for the corridor test:** `v2c_s2_brakeprior_s41` `best_speed` (3.27 m/s, 16/16) with a brake
+fitted `--hold-run --free-clock --stagger-s 4 --w-dist 0.05 --reps 4`, 8 s window. Budget ~10 m of run-up
+plus ~20 m to stop, ~26 m worst case. There is no slow regime to exploit: the robot is at 3.4 m/s by 10 m.
+
+**Harness trap, worth knowing before trusting any brake number.** Under `--hold-run` the brake window
+pushes the line out of range, but the demo's RUN-UP used to keep it at 100 m -- so a late brake point
+approached through the last `task_brake_m` (8 m), where `d_to_go` ramps and the policy begins its pre-stop
+behaviour, and some episodes crossed the line before braking started. That alone collapsed a 95 m brake
+point to **6/512** upright while 91.8 m held 511/512. Fixed: the whole episode is line-free under
+`--hold-run`.
+
+**Operational:** Izar `~/running_robot` is a home shared with another agent, and a sweep of `*.out` from the
+repo root destroyed the printed statistics of three completed jobs. Job logs now go to `walk_v2/logs/`;
+`results/` and `runs/` were untouched, so the fitted schedules and videos survived.
+
+
 ## The two privileged channels, and what the robot actually needs (2026-09-11, 19:00)
 
 The gait clock is nudged toward the measured touchdown phase in sim (`resync_kappa` ~0.5 on a rising edge
