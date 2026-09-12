@@ -9,7 +9,7 @@ python walk_v3/train.py --preset v3_stage1 --name v3_stage1_s0 --seed 0 \
        --devices 2 --n-envs 4096 --n-steps 9
 # stage 2 -- the free plant, with heading, bring-up and DR (~3 h)
 python walk_v3/train.py --preset v3 --name v3_s0 --seed 0 \
-       --warm-start walk_v3/runs/v3_stage1_s0/final.msgpack \
+       --warm-start walk_v3/runs/v3_stage1_s0/best.msgpack \
        --devices 2 --n-envs 4096 --n-steps 9
 ```
 
@@ -63,8 +63,12 @@ inside the reset is not jit-able, so it is a table. Without it `bringup_enable` 
 sbatch --export=ALL,PRESET=v3_stage1,NAME=v3_stage1_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9 \
        walk_v3/slurm/izar_train.sbatch
 sbatch --export=ALL,PRESET=v3,NAME=v3_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9,\
-WARM=$HOME/running_robot/walk_v3/runs/v3_stage1_s0 walk_v3/slurm/izar_train.sbatch
+WARM=$HOME/running_robot/walk_v3/runs/v3_stage1_s0/best.msgpack walk_v3/slurm/izar_train.sbatch
 ```
+
+Warm-start stage 2 from **`best.msgpack`**, not `final.msgpack`. The keeper exists because runs
+degrade: stage 1's own last checkpoint sits past its last evaluation, and this lineage has lost usable
+policies to a late collapse more than once.
 
 `STEPS` is deliberately unset by default: the preset owns the budget. Setting it in the sbatch
 environment overrides the preset silently, which once turned a set of 40 M probes into 300 M runs.
