@@ -477,20 +477,24 @@ class PPO:
             kw["ctrl_drop_prob"] = self._gated("ctrl_drop_prob", ep_len, 0.0, c.ctrl_drop_prob_final,
                                                c.jitter_curriculum_steps, jg, rf, d_steps)
         if getattr(c, "shape_curriculum_steps", 0) > 0:
-            # GATED, with retreat -- not a clock. A clock ramp got every cold run started and then
-            # killed it on arrival: measured 2026-09-13, a planar run climbed to return 345 at
-            # shape_scale 0.33 and was back at -101 by the time the clock reached 0.94, and the two
-            # free-plant runs did the same. The penalties the policy learned under are not the ones
-            # it ends up paying.
+            # CLOCK by default, gate optional. The gated variant was tried first, on the theory
+            # that a clock ramp kills runs on arrival -- training return did fall from 1197 to -18
+            # as the clock reached 1.0. That reading was WRONG, and wrong in a way this project has
+            # a rule about: return is not comparable across shape_scale values, because raising the
+            # penalties lowers it by construction. Measured on the greedy ladder over the same
+            # window, the run whose return "collapsed" went from 0% to 60% upright and from 1.93 to
+            # 0.59 m/s of command error. It was improving the whole time.
             #
-            # The earlier objection to gating this was that the gate measures exactly what these
-            # penalties suppress, so it is circular. That is true of a one-way gate and it is the
-            # POINT of a retreating one: raise the bill while survival holds, back off when it does
-            # not, and settle at the highest weight this policy can actually pay. A servo, not a
-            # schedule. It may never reach 1.0, and that is a real outcome rather than a failure --
-            # these are shaping terms, not safety terms.
-            kw["shape_scale"] = self._gated("shape_scale", ep_len, c.shape_scale_start, 1.0,
-                                            c.shape_curriculum_steps, gate, rf, d_steps)
+            # Judged on the greedy ladder instead: at 42-65 M the clock runs reached 32-60% upright
+            # and 0.59-0.78 m/s error, the gated runs 0-2% and 1.68-1.92, with the gate holding
+            # shape_scale at 0.50 and not advancing. So the clock ships. The gate stays available
+            # because it is the right instrument if a plant ever cannot pay the full bill -- it
+            # settles at the highest weight the policy can afford rather than insisting on 1.0.
+            kw["shape_scale"] = (
+                self._gated("shape_scale", ep_len, c.shape_scale_start, 1.0,
+                            c.shape_curriculum_steps, gate, rf, d_steps)
+                if c.shape_curriculum_gated else
+                self._clock(c.shape_scale_start, 1.0, c.shape_curriculum_steps))
         if c.objective == "joystick" and getattr(c, "track_sigma_steps", 0) > 0:
             kw["track_sigma"] = self._clock(c.track_sigma_start, c.track_sigma, c.track_sigma_steps)
         if getattr(c, "gait_freq_floor_steps", 0) > 0:

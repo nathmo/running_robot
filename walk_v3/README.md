@@ -1,10 +1,16 @@
 # walk_v3 — a forward joystick for DASH-01, trained from scratch
 
-One command trains the policy. No warm start, no checkpoint borrowed from another run, no stage that
-depends on something a previous project produced:
+Two commands train the policy, from random weights. No warm start from another project, no
+checkpoint you have to be given -- stage 2 warm-starts from stage 1's own output and nothing else:
 
 ```bash
-python walk_v3/train.py --preset v3 --name v3_s0 --seed 0 --devices 2 --n-envs 4096 --n-steps 9
+# stage 1 -- learn the gait on the planar plant (~1 h on 2 V100s)
+python walk_v3/train.py --preset v3_stage1 --name v3_stage1_s0 --seed 0 \
+       --devices 2 --n-envs 4096 --n-steps 9
+# stage 2 -- the free plant, with heading, bring-up and DR (~3 h)
+python walk_v3/train.py --preset v3 --name v3_s0 --seed 0 \
+       --warm-start walk_v3/runs/v3_stage1_s0/final.msgpack \
+       --devices 2 --n-envs 4096 --n-steps 9
 ```
 
 and one command tells you whether the result is usable:
@@ -12,6 +18,13 @@ and one command tells you whether the result is usable:
 ```bash
 python walk_v3/verify.py --run walk_v3/runs/v3_s0
 ```
+
+**Why two stages.** Measured with a seven-arm probe fleet (40 M steps each, one variable per arm):
+cold on the **free** plant -- where roll and yaw exist -- every arm went backwards, while the same
+recipe on the **planar** plant reached ep_len 473 and a positive return. The blocker is the plant,
+not the command: learning a gait and learning to stay upright sideways at the same time is too much.
+Both stages use the same objective, so the task channel never changes meaning under the warm start --
+which is its own class of bug here (see `task[1]` below).
 
 `verify.py` prints a PASS/FAIL table and exits non-zero if anything failed. **Do not ship a policy on
 the strength of a training curve** — this lineage has produced a run that reported healthy episode
@@ -46,12 +59,15 @@ inside the reset is not jit-able, so it is a table. Without it `bringup_enable` 
 ## Running it
 
 ```bash
-# the recipe, 2 GPUs, ~3 h
-python walk_v3/train.py --preset v3 --name v3_s0 --seed 0 --devices 2 --n-envs 4096 --n-steps 9
 # cluster, requeue-safe (the same line is correct for the first start and every restart)
-sbatch --export=ALL,PRESET=v3,NAME=v3_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9 \
+sbatch --export=ALL,PRESET=v3_stage1,NAME=v3_stage1_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9 \
        walk_v3/slurm/izar_train.sbatch
+sbatch --export=ALL,PRESET=v3,NAME=v3_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9,\
+WARM=$HOME/running_robot/walk_v3/runs/v3_stage1_s0 walk_v3/slurm/izar_train.sbatch
 ```
+
+`STEPS` is deliberately unset by default: the preset owns the budget. Setting it in the sbatch
+environment overrides the preset silently, which once turned a set of 40 M probes into 300 M runs.
 
 `--n-envs` is the **total across devices**, not per device. `--n-envs 4096 --devices 2` runs 2048 per
 GPU. Getting this wrong halves the batch silently.
@@ -130,7 +146,44 @@ Two curricula fix it, and the probe presets measure whether each is load-bearing
 * **the tracking tolerance** starts at σ = 1.5 m/s and tightens to 0.6 (`track_sigma_start`,
   `track_sigma_steps`), so the first metre per second of speed is worth something.
 
-### 4. The keeper scores the thing we actually want
+### 4. The objective no longer pays a policy to die
+
+This is why no cold run in this lineage ever learned. Measured with `tools/reward_budget.py
+--curriculum start` on two cold runs, one per plant:
+
+```
+INCOME 1.87   (alive 1.50 = 80%,  track 0.32 = 17%,  clearance 0.05)
+COST  -2.34
+LIVING        -0.236 / tick
+```
+
+Living is **negative**, so against a one-time `fall_penalty` of 100 over a 3000-tick episode, dying
+immediately is worth seven times staying alive. The optimiser was correctly hunting for the shortest
+episode -- which on this plant means railing the gait clock and falling early, which is what every
+cold arm did.
+
+The cost is not efficiency: `torque`, `motor_vel` and `energy` already ramp through `eff_scale` and
+were **0.0%** of it. It is *gait quality*, billed at full weight to a policy that has no gait --
+`residual` 27.6%, `phase_contact` 15.5%, `foot_slip` 12.9%, 56% between them. "Don't fight your own
+clock" and "don't scuff your feet" are corrections to a walk; charged before there is a walk they are
+a tax on trying.
+
+Those terms now scale with `shape_scale`, ramped from 0.15 through the same retreating gate as the
+other curricula. **Not** ramped: `upright`, `height`, `alive`, `track`, `clearance`, `air_time`,
+`heading`, `lane` -- the income and the safety terms, which mean the same thing on day one as at the
+end. Also not ramped: `duty_sym`, `swing_floor` and `stance_time`, which cost 0.0% and are the guards
+against the one-legged hop and the dragged stance.
+
+Same preset, same seed, same 5.5 M steps, with and without the ramp: return **-11 -> +89** on the free
+plant and **-8 -> +137** on planar, and the clock left its floor.
+
+> **Read returns carefully.** Return is not comparable across `shape_scale` values -- raising the
+> penalties lowers it by construction -- any more than it is comparable across different rewards.
+> Judge on the greedy ladder eval, not the training curve. This project's own rule is "always eval
+> greedy", and it applies to this curriculum too: a run whose training return fell from 1197 to -18
+> as its ramp completed was at the same time improving from 0% to 60% upright on the greedy ladder.
+
+### 5. The keeper scores the thing we actually want
 
 v2 kept "most survivors, then best tracking", scored on whatever commands the env happened to draw
 that episode — re-drawn mid-episode — and on **world-x** speed. Two checkpoints were therefore never

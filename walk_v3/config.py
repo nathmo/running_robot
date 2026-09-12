@@ -204,6 +204,7 @@ class Config:
     # net-negative for a policy with no gait yet, so dying beats trying. 0 steps = off (v2).
     shape_curriculum_steps: int = 0
     shape_scale_start: float = 0.15
+    shape_curriculum_gated: bool = False    # True = retreating gate instead of a clock; see ppo.py
     w_fwd_speed: float = 2.0
     sprint_world_speed: bool = False        # RUN 8 recipe: body-frame income + LP yaw + lane
     w_yaw_rate: float = 3.0                 # on the LOW-PASSED yaw rate (§10)
