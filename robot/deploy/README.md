@@ -30,13 +30,15 @@ checkpoint from the same run should be better. Re-export when one lands; nothing
 
 | file | side | what |
 |---|---|---|
-| `export_policy.py` | desktop | trained run → one self-contained `.npz` bundle |
-| `verify_export.py` | desktop | proves the numpy control law **is** the trained policy |
+| `export_policy.py` | desktop | trained **v1** run → one self-contained `.npz` bundle |
+| `verify_export.py` | desktop | proves the numpy control law **is** the trained v1 policy |
 | `thermal_fit.py` | desktop | fits the thermal model; grades the experiment |
-| `bundle.py` | both | the bundle format |
-| `policy_net.py` | robot | the actor, in numpy — no torch |
-| `fourier_gait.py` | robot | gait reconstruction, **byte-for-byte** from `walk_mit/fourier_gait.py` |
-| `controller.py` | robot | the 200 Hz control law: obs → action → targets + impedance |
+| `bundle.py` | both | the bundle format, **both generations** |
+| `policy_net.py` | robot | the actor, in numpy — no torch (shared by v1 and v2) |
+| `fourier_gait.py` | robot | v1 gait reconstruction, **byte-for-byte** from `walk_mit/fourier_gait.py` |
+| `gait_v2.py` | robot | v2 gait generator, from `walk_v2/gait.py` with jax removed |
+| `controller.py` | robot | the v1 200 Hz control law: obs → action → targets + impedance |
+| `controller_v2.py` | robot | the v2 100 Hz control law: the latch, the clock, the task channel (run/stop flag or speed) |
 | `safety.py` | robot | clamp ladder and kill conditions |
 | `thermal.py` | robot | two-node winding-temperature observer + torque budget |
 | `mit.py` | robot | CubeMars force-control frames |
@@ -44,8 +46,175 @@ checkpoint from the same run should be better. Re-export when one lands; nothing
 | `thermal_calibrate.py` | robot | blocked-rotor thermal experiment |
 | `run_policy.py` | robot | the runner |
 
-Nothing in the *robot* column imports torch, mujoco or `walk_mit`. The Pi has none of them, and a
-deployed control law should be reviewable without a training stack.
+Nothing in the *robot* column imports torch, mujoco, jax, `walk_mit` or `walk_v2`. The Pi has none
+of them, and a deployed control law should be reviewable without a training stack.
+
+---
+
+## Two generations of bundle
+
+`bundle.version` says which, and it is not a detail: v1 and v2 are different control laws, and the
+runtime is chosen from it rather than guessed.
+
+| | v1 (`walk_mit`) | v2 (`walk_v2`, DASH-01 Walker v2) |
+|---|---|---|
+| exporter | `robot/deploy/export_policy.py` | `walk_v2/export.py` |
+| runtime | `controller.py` + `fourier_gait.py` | `controller_v2.py` + `gait_v2.py` |
+| control rate | 200 Hz | **100 Hz** |
+| action | 30 dims, all live every tick | 50 dims: **44 latched** at each clock wrap + 6 residual |
+| observation | 590 = 59 × 10 frames | 377 = 33 × 10 frames + a 47-wide once-block |
+| command | forward speed + yaw rate, fixed at arm time | **a RUN / STOP flag**, driven live — or, on a joystick checkpoint, **a speed slider in m/s** ([below](#the-joystick-a-speed-instead-of-a-flag)) |
+| action filter | EMA on the target | none (the pitch reflex was retuned for its absence) |
+| software actuation delay | yes — walk_mit delayed the *action* | **no** — v2 delays the *command* inside the plant, which is a model of the real 12 ms CAN transport the robot already has. Re-applying it here would double it. |
+
+### Why 100 Hz is the thing that makes v2 deployable
+
+The Pi 3B needs ~6.5 ms for a v1 control tick against a 5 ms budget, and closing that gap means
+rewriting the bit-exactness-verified deploy path. v2 doubles the budget to 10 ms while making the
+nets *smaller* (232k MACs against 305k — the once-block replaced 213 dims of stacked history). The
+webui daemon's CAN loop still runs at 200 Hz for every other mode; a v2 run simply gets every
+second tick, and the force-control frame it produced is re-streamed on the one in between, so the
+bus sees the same six frames every 5 ms it always has. Only integer ratios are accepted: 200/150 is
+not a control law, it is a rounding error with gains.
+
+Everything that must run at the full loop rate stays there — in particular the measured-ERPM
+runaway kill, which is checked above the decimation gate. A bundle running at half the loop rate is
+no reason to look for the 2026-09-01 four-drive over-voltage half as often.
+
+### Where the tick actually goes (measured on the robot, 2026-09-11)
+
+Profiled on the Pi 3B with `v2c_s2_capture_s35_118M.npz`, in a process of its own:
+
+| | before | after | share, before |
+|---|---|---|---|
+| the gait generator (`gait.assemble`) | 5.15 ms | ~1.1 ms | **63 %** |
+| both neural nets (normalize, estimator, policy, action) | 1.79 ms | 1.79 ms | 22 % |
+| observation build (`_proprio` + `_obs`) | 0.16 ms | 0.16 ms | 2 % |
+| slew limit + gait frequency | 0.11 ms | 0.11 ms | 1 % |
+| **whole tick** | **8.22 ms** | **~5.4 ms** | budget 10.0 ms |
+
+**The policy was never the problem.** 232k MACs is 1.8 ms, which is what the Pi's memory bandwidth
+predicts. The generator was, and almost none of it was arithmetic: `assemble` makes ten separate
+`series()` calls (cam, thigh, hip, kp, kd, each at the left and the right phase), twenty-one
+`np.clip`s and four `np.stack`s per tick, every one a numpy dispatch over three to seven elements
+at 10–40 µs of interpreter overhead each on a 1.2 GHz A53. A few hundred flops behind ~50 round
+trips. `gait_v2.GaitEval` batches the ten series into one `(10, 7)` block with one weighted sum,
+does the scalar clips in Python, and writes the six-vectors into preallocated buffers — 4.8× faster
+on the robot, bit-identical, and pinned to the reference by the tests.
+
+**The other half of the story is contention, not cost.** The same tick measured *inside* the webui
+daemon is 12–14 ms, because that process already misses 14.5 % of its 200 Hz loop deadlines sitting
+idle in LIMP: six threads, four cores, a 200 Hz CAN loop and a 200 Hz IMU thread both holding the
+GIL through numpy work, Flask, and whatever the browser is polling. Not thermal — 1200 MHz,
+`throttled=0x0`. So the headless path (`systemctl stop runningrobot-webui`, then `run_policy.py`)
+has margin the panel does not, and `allow_slow_loop` is not an alternative to either: at 13.6 ms the
+gait plays at 0.75× and every observed joint velocity inflates 1.3×, which is a different control
+law rather than a degraded one.
+
+### The command is a run/stop flag
+
+v2's task channel is `[run, distance_to_go]`. `run` is a green light: 1 while the policy is being
+asked to travel, 0 for the red-light phases of the stop curriculum and for everything past the
+finish line. Dropping it stops the speed income and pays the policy for tracking a deceleration
+ramp down to standing still.
+
+So on the robot the operator's button **is** that flag, and two things follow:
+
+* **a run always comes up STOPPED.** The approach crawls the legs to the stance, the policy takes
+  over holding it, and nothing moves off until somebody presses RUN. It is enforced in the daemon
+  and in `controller_v2.start()`, not in the browser — a page that fails to send anything must
+  leave the robot holding its stance, not travelling.
+* **pressing STOP is not the same as stopping the run.** STOP asks the *policy* to halt, at full
+  gains, with the governor untouched. Whether the robot actually stops is a property of the
+  checkpoint — which is the point of having the button, because it is how the stop curriculum gets
+  tested on hardware. Ending the run is the separate soft-stop / kill pair, which take the machine
+  away from the policy instead.
+
+From the web UI that is the RUN / STOP pair in the policy panel. Headless:
+
+```bash
+python robot/deploy/run_policy.py --bundle .../v2_run.npz \
+    --jointmap robot/deploy/deploy_map.json --command-file /tmp/dash_command --max-seconds 30
+echo run  > /tmp/dash_command      # green light
+echo stop > /tmp/dash_command      # red light: ask the policy to halt
+```
+
+A checkpoint trained with `stoplight_prob 0` has seen the flag drop exactly once per episode, at
+the finish line, where every runner in this lineage so far falls. The panel and the runner banner
+both say so before you arm it; expect such a policy to keep going, or to fall, rather than to halt.
+
+An `objective='speed'` checkpoint has the constant task `[1, 1]` and no reachable flag at all. The
+daemon refuses the command rather than accepting one that changes nothing on the wire.
+
+### The joystick: a speed instead of a flag
+
+A checkpoint trained with `objective='joystick'` has no green light. `task[0]` is the commanded
+speed, normalised, and `task[1]` is reserved and held at 0:
+
+    task[0] = clip(v_cmd / v_max, v_min / v_max, 1)
+
+`bundle.command_kind` reports `"speed"` for it, and the panel then offers **a slider in m/s
+instead of the RUN / STOP pair**. Three things change, and each of them is why the retrain
+happened:
+
+* **0 m/s is walking in place, and it is the stop.** The policy has been trained at every value in
+  the range, so asking for 0 is an operating point it knows rather than a step into a state it only
+  ever met at the finish line. There is no fitted brake schedule on this lineage and none is
+  needed; `start_brake()` refuses and says so.
+* **nothing the policy reads is a position.** v2's `task[1]` was `clip((line − d) / 8, 0, 1)`,
+  computed in the sim from ground-truth world x — a privileged channel the robot can only guess at.
+  Under the joystick there is no odometry in the observation at all.
+* **the slider is slewed.** A browser can drag it across its whole travel in one event, and a step
+  change on the command channel is the one thing measured to drop this robot (512/512 upright
+  against 3/512, walk_v2/README.md 2026-09-11). `set_speed()` sets a target and the applied command
+  walks toward it at the bundle's `v_cmd_rate`, or the whole range in `DEFAULT_CMD_SLEW_S` (2 s)
+  when the bundle does not record one. What the panel shows is both numbers: what you asked for,
+  and what the policy is being given this tick.
+
+A run still comes up at rest — the slider starts at 0, enforced in the daemon and in
+`controller_v2.start()` — and the log's `task0` column records the command **as the policy saw
+it**, the slewed value over `v_max`, not the slider's position. Headless:
+
+```bash
+python robot/deploy/run_policy.py --bundle .../v3_joy.npz \
+    --jointmap robot/deploy/deploy_map.json --command-file /tmp/dash_command --max-seconds 30
+echo 1.5 > /tmp/dash_command       # ask for 1.5 m/s
+echo 0   > /tmp/dash_command       # walk in place again: this IS the stop
+```
+
+`v_min` is 0 while the trainer clips there (forward only). Walking backwards arrives as a negative
+`v_min` in the bundle and the same normalisation carries it; the slider simply grows a left half.
+
+### What v2 does NOT reproduce on the robot: the clock resync
+
+In simulation the gait clock is nudged toward the measured touchdown phase each time a foot lands
+inside a ±0.15-cycle window (κ ~ U[0.3, 0.7]). DASH-01 has no foot contact sensor, so on the robot
+the clock free-runs. The machinery is in `controller_v2.note_contact()` if a sensor ever exists;
+until then this is a real sim2real difference, and a small one by construction — κ is held at 0 for
+the first 3 cycles of every episode, it is randomised per episode, and the correction is bounded by
+the window. The panel warns when a bundle trained with the resync on is selected.
+
+### How the v2 runtime is verified without torch, MuJoCo or jax
+
+`verify_export.py` ties the v1 numpy law to the trained torch policy inside MuJoCo, and it needs
+both. For v2 the same job is done by the recorded rollout `walk_v2/tools/trace.py` writes: the
+training environment wrote down, per tick, the state, the command it produced and the 33-dim
+observation frame it published, for a deterministic fixed-spec run.
+`robot/deploy/tests/test_v2_deploy.py` drives `PolicyControllerV2` through those recorded states
+and diffs its targets, gains, clock and observation frames against what the trainer actually
+produced — agreement is at the float32 rounding floor (~1e-5, which is float32-MJX against
+float64-numpy on the same states). That runs on every commit rather than as a desktop ritual.
+
+What it does *not* cover: the trained weights (the fixture drives a fixed spec, not a policy) and
+the plant. Those still need the training package.
+
+```bash
+python walk_v2/export.py --run walk_v2/runs/v2c_s2_free_dp2x_stop_s0 \
+    --out robot/deploy/bundles/v2c_stop_s0.npz
+python -m pytest robot/deploy/tests -q
+python robot/deploy/run_policy.py --bundle robot/deploy/bundles/v2c_stop_s0.npz --mock \
+    --max-seconds 5                     # dress rehearsal: mock bus, mock IMU, energises nothing
+```
 
 ---
 

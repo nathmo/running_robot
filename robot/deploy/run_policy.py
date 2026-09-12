@@ -10,6 +10,21 @@
         --jointmap robot/deploy/deploy_map.json --thermal robot/deploy/thermal_params.json \\
         --v-cmd 0.0 --max-seconds 20 --deadman-file /tmp/dash_deadman
 
+    # a v2 (walk_v2) bundle: 100 Hz, and the command channel is a run/stop flag, not a velocity.
+    # It comes up STOPPED and stays there until something writes "run" into --command-file.
+    python robot/deploy/run_policy.py --bundle .../v2c_s2_free_dp2x_stop_s0.npz \\
+        --jointmap robot/deploy/deploy_map.json --command-file /tmp/dash_command --max-seconds 30
+    echo run  > /tmp/dash_command      # green light
+    echo stop > /tmp/dash_command      # red light: the policy is asked to decelerate and stand
+
+    # a JOYSTICK bundle (objective='joystick'): the same file, but the word is a NUMBER in
+    # m/s. It comes up at 0 -- walking in place, which is a speed it was trained at -- and the
+    # command is slewed toward whatever was last written, so a jump is a ramp on the wire.
+    python robot/deploy/run_policy.py --bundle .../v3_joy_s0.npz \\
+        --jointmap robot/deploy/deploy_map.json --command-file /tmp/dash_command --max-seconds 30
+    echo 1.5 > /tmp/dash_command       # ask for 1.5 m/s
+    echo 0   > /tmp/dash_command       # ask it to walk in place again
+
 PHASES
 ------
   LIMP      streams a zero-gain force-control frame; nothing is commanded. Every run starts and
@@ -18,8 +33,19 @@ PHASES
             tracking error. This is what makes the first policy tick legal: the controller's
             filter starts AT the stance, so if the legs are somewhere else the first command is a
             step, and a step at 200 N*m/rad is not a gait, it is an impact.
-  RUN       the policy, at 200 Hz, every tick through the governor.
+  RUN       the policy, at the bundle's own control rate, every tick through the governor.
   STOP      soft (gains bled out over ~0.3 s, target frozen) or hard (zero gains immediately).
+
+TWO KINDS OF "STOP", AND THEY ARE NOT THE SAME THING
+----------------------------------------------------
+  the RUN/STOP flag  (v2 only, --command-file) is a COMMAND to the policy. Stop means "red light":
+                     the policy keeps running, under full gains, and is asked to bring itself to a
+                     halt. It is the task channel, and whether the robot actually stops is a
+                     property of the checkpoint. On a joystick bundle the same file carries a
+                     SPEED instead, and 0 m/s is the stop -- an operating point it was trained at
+                     rather than a flag it meets once per episode.
+  a governor stop    ends the run. Soft bleeds the gains out; hard goes limp now. Neither asks the
+                     policy for anything -- they take the machine away from it.
 
 WHAT THIS DOES NOT DO
 ---------------------
@@ -73,9 +99,13 @@ import thermal as TH                                                  # noqa: E4
 import jointmap as JM                                                 # noqa: E402
 from bundle import Bundle                                             # noqa: E402
 from controller import PolicyController                               # noqa: E402
+from controller_v2 import PolicyControllerV2                          # noqa: E402
 from safety import Limits, SafetyGovernor, STOP_NONE, STOP_HARD       # noqa: E402
 
-TICK_HZ = 200.0
+# The rate is the BUNDLE's, not the runner's: v1 (walk_mit) is 200 Hz and v2 (walk_v2) is 100 Hz,
+# and control_dt is a constant inside both control laws. This is only the sanity band -- a bundle
+# asking for a rate outside it is a bundle this runner has no business believing.
+TICK_HZ_MIN, TICK_HZ_MAX = 50.0, 400.0
 APPROACH_DPS = 25.0          # deg/s of joint travel during the approach -- deliberately crawling
 APPROACH_KP = 40.0           # N*m/rad; enough to carry the leg, far too little to hurt anything
 APPROACH_KD = 2.0
@@ -89,11 +119,18 @@ class Runner:
         self.args = args
         self.b = Bundle.load(args.bundle)
         self.dt = float(self.b.control_dt)
-        if abs(1.0 / self.dt - TICK_HZ) > 1.0:
-            raise SystemExit("this bundle wants {:.0f} Hz control; the runner is built for {:.0f}"
-                             .format(1.0 / self.dt, TICK_HZ))
+        hz = 1.0 / self.dt
+        if not (TICK_HZ_MIN <= hz <= TICK_HZ_MAX):
+            raise SystemExit("this bundle wants {:.0f} Hz control, outside the {:.0f}-{:.0f} Hz "
+                             "band this runner will attempt".format(hz, TICK_HZ_MIN, TICK_HZ_MAX))
+        self.hz = hz
         self.jm = JM.JointMap.load(args.jointmap) if args.jointmap else JM.JointMap()
-        self.ctrl = PolicyController(self.b)
+        self.v2 = self.b.version == 2
+        self.ctrl = PolicyControllerV2(self.b) if self.v2 else PolicyController(self.b)
+        # which of the three command channels this checkpoint has (see controller_v2's docstring)
+        self.joystick = self.v2 and self.ctrl.command_kind == "speed"
+        self.run_flag = False           # v2: the green light. Always starts stopped.
+        self.speed_cmd = 0.0            # joystick: the asked-for speed, m/s. Always starts at 0.
         self.log = []
         self._last_rx = {}
         self.stop_requested = False
@@ -136,10 +173,25 @@ class Runner:
         lock = m["base_lock"]
         railed = [n for n, l in zip("X Y Z roll pitch yaw".split(), lock) if l]
         print("=" * 78)
-        print("POLICY  {} / {}   ({} action dims, {} Hz)".format(
-            m["run"], m["checkpoint"], m["action_dim"], 1 / self.dt))
-        print("COMMAND BOX (trained): fwd {:.2f} m/s, back {:.2f}, yaw {:.2f} rad/s".format(
-            m["cmd_v_fwd_trained"], m["cmd_v_back_trained"], m["cmd_yaw_trained"]))
+        print("POLICY  {} / {}   (v{} bundle, {} action dims, {:.0f} Hz)".format(
+            m["run"], m["checkpoint"], b.version, m["action_dim"], self.hz))
+        if self.joystick:
+            print("COMMAND: SPEED (task[0] = v_cmd / {:.2f}). Range {:+.2f} to {:+.2f} m/s, slewed "
+                  "at {:.2f} m/s^2.".format(self.ctrl.v_max, self.ctrl.v_min, self.ctrl.v_max,
+                                            self.ctrl.cmd_slew_mps2))
+            print("         Starts at 0.00 m/s -- walking in place. Write a number into {}"
+                  .format(self.args.command_file or "--command-file (not set: stays at 0)"))
+        elif self.v2:
+            stop = m.get("stop") or {}
+            print("COMMAND: run/stop flag (task[0]). Starts STOPPED; write run/stop into "
+                  "{}".format(self.args.command_file or "--command-file (not set: stays stopped)"))
+            if not stop.get("stoplight_prob_final"):
+                print("!! this checkpoint was trained with NO red lights (stoplight_prob 0). It "
+                      "has seen task[0] drop exactly once per episode, at the finish line, where "
+                      "every runner in this lineage so far falls. Pressing stop is off-manifold.")
+        else:
+            print("COMMAND BOX (trained): fwd {:.2f} m/s, back {:.2f}, yaw {:.2f} rad/s".format(
+                m["cmd_v_fwd_trained"], m["cmd_v_back_trained"], m["cmd_yaw_trained"]))
         if railed:
             print("!! RAILED IN TRAINING: {}".format(", ".join(railed)))
         if any(lock[3:]):
@@ -178,6 +230,19 @@ class Runner:
             return None
         import sensehat
         sh = sensehat.SenseHat(mock=self.args.mock)
+        if self.args.mock and not sh.mount.calibrated:
+            # The mock IMU reports in CHIP axes, and an uncalibrated mount is the identity -- so
+            # `up_body` comes back as the chip's [0, 0, -1] and gravity as [0, 0, +1], which the
+            # fall detector reads as "on its back" on the first policy tick. The rehearsal then
+            # ends before it has run a single tick of the control law, which is the one thing it
+            # exists to exercise. sensehat.MOCK_R is the answer the mount calibration is supposed
+            # to FIND, so seeding it here is stating the simulator's own truth, not faking a
+            # calibration: body X (fwd) = chip +Y, body Z (up) = chip -Z.
+            sh.mount.set_level(list(sensehat.MOCK_R.T @ np.array([0.0, 0.0, 1.0])),
+                               {"source": "run_policy --mock", "spread": 0.0})
+            sh.mount.set_declared("+y")
+            print("(mock: seeded the IMU mount with the simulator's known rotation, so gravity is "
+                  "in body axes and the rehearsal can reach the RUN phase)")
         sh.start()
         t0 = time.monotonic()
         while time.monotonic() - t0 < 5.0 and sh.fast() is None:
@@ -376,13 +441,25 @@ class Runner:
         pos, amps, temp, err, _ = self.measure(motors, cal)
         grav, gyro, _ = self.read_imu(sh, time.monotonic())
         tau = self.jm.torque_to_model(amps)
-        v_cmd = float(np.clip(a.v_cmd, -self.b.cmd_v_back_trained, self.b.cmd_v_fwd_trained))
-        if v_cmd != a.v_cmd:
-            print("!! command {:+.2f} m/s is outside the box this checkpoint was trained to; "
-                  "clamped to {:+.2f}".format(a.v_cmd, v_cmd))
-        self.ctrl.start(pos, np.zeros(6), tau, grav, gyro, v_cmd=v_cmd, yaw_cmd=0.0)
-        print("RUN: v_cmd {:+.2f} m/s, max {:.0f} s. Ctrl+C for a soft stop.".format(
-            v_cmd, a.max_seconds))
+        if self.v2:
+            self.ctrl.start(pos, np.zeros(6), tau, grav, gyro)
+            if self.joystick:
+                _, self.speed_cmd = self.ctrl.set_speed(a.speed)
+                print("RUN: the policy is live, asking for {:.2f} m/s. max {:.0f} s. Ctrl+C for a "
+                      "soft stop.".format(self.speed_cmd, a.max_seconds))
+            else:
+                self.run_flag = bool(a.start_running)
+                self.ctrl.set_run(self.run_flag)
+                print("RUN: the policy is live and the command is {}. max {:.0f} s. Ctrl+C for a "
+                      "soft stop.".format("RUN" if self.run_flag else "STOP", a.max_seconds))
+        else:
+            v_cmd = float(np.clip(a.v_cmd, -self.b.cmd_v_back_trained, self.b.cmd_v_fwd_trained))
+            if v_cmd != a.v_cmd:
+                print("!! command {:+.2f} m/s is outside the box this checkpoint was trained to; "
+                      "clamped to {:+.2f}".format(a.v_cmd, v_cmd))
+            self.ctrl.start(pos, np.zeros(6), tau, grav, gyro, v_cmd=v_cmd, yaw_cmd=0.0)
+            print("RUN: v_cmd {:+.2f} m/s, max {:.0f} s. Ctrl+C for a soft stop.".format(
+                v_cmd, a.max_seconds))
 
         prev_pos = pos.copy()
         t0 = time.monotonic()
@@ -406,6 +483,8 @@ class Runner:
             vel = (pos - prev_pos) / self.dt
             prev_pos = pos.copy()
             tau = self.jm.torque_to_model(amps)
+            if self.v2:
+                self.poll_command()
             cmd = self.ctrl.step(pos, vel, tau, grav, gyro)
             # the governor steps the winding observer itself, off `current` -- one owner
             v = self.gov.step(cmd.target, cmd.kp, cmd.kd, pos, vel, grav, gyro,
@@ -422,7 +501,8 @@ class Runner:
             if a.log:
                 self.log.append(np.concatenate([
                     [t], pos, vel, tau, amps, temp, grav, gyro, v.target, v.kp, v.kd,
-                    self.thermal.t_winding, [cmd.phase, cmd.freq, v.stop]]))
+                    self.thermal.t_winding,
+                    [cmd.phase, cmd.freq, v.stop, float(getattr(cmd, "run_flag", 0.0) or 0.0)]]))
             if v.stop != STOP_NONE and v.limp:
                 self.exit_reason = "; ".join(v.reasons)
                 print("\nSTOPPED: {}".format(self.exit_reason))
@@ -446,6 +526,50 @@ class Runner:
         except OSError:
             return 1e9
 
+    def poll_command(self):
+        """v2: read the command out of --command-file, if there is one.
+
+        A file rather than a socket because that is the idiom already here (the dead-man is an
+        mtime) and because `echo stop > /tmp/dash_command` is a thing a human can do from a second
+        ssh session while watching the robot. An unreadable or unrecognised file leaves the command
+        where it is -- a truncated read must not be a command. It is read at the CONTROL rate, so a
+        change takes effect on the next tick.
+
+        A run/stop bundle wants a word; a joystick bundle wants a NUMBER in m/s, and 0 is its stop.
+        `stop` is accepted there too, meaning 0 m/s: an operator reaching for this file in a hurry
+        should not have to remember which lineage is loaded."""
+        f = self.args.command_file
+        if not f:
+            return
+        try:
+            with open(f, "r") as fh:
+                word = fh.read(16).strip().lower()
+        except OSError:
+            return
+        if self.joystick:
+            if word in ("stop", "hold", "red"):
+                want = 0.0
+            else:
+                try:
+                    want = float(word)
+                except ValueError:
+                    return
+            ok, want = self.ctrl.set_speed(want)
+            if ok and want != self.speed_cmd:
+                self.speed_cmd = want
+                print("\ncommand: {:+.2f} m/s".format(want))
+            return
+        if word in ("run", "go", "1", "green"):
+            want = True
+        elif word in ("stop", "hold", "0", "red"):
+            want = False
+        else:
+            return
+        if want != self.run_flag:
+            self.run_flag = want
+            self.ctrl.set_run(want)
+            print("\ncommand: {}".format("RUN" if want else "STOP"))
+
     def save_log(self):
         if not self.log:
             return
@@ -454,10 +578,11 @@ class Runner:
         base.parent.mkdir(parents=True, exist_ok=True)
         meta = {"bundle": str(self.args.bundle), "run": self.b.run,
                 "checkpoint": self.b.checkpoint, "v_cmd": self.args.v_cmd,
+                "bundle_version": self.b.version, "control_hz": self.hz,
                 "exit_reason": self.exit_reason, "governor": self.gov.status(),
                 "thermal_peak_winding_c": self.thermal.peak_w.tolist(),
                 "columns": ("t | pos6 | vel6 | tau6 | amps6 | temp6 | grav3 | gyro3 | "
-                            "target6 | kp6 | kd6 | t_winding6 | phase | freq | stop")}
+                            "target6 | kp6 | kd6 | t_winding6 | phase | freq | stop | task0")}
         np.savez(str(base) + ".npz", data=a, meta_json=np.array(json.dumps(meta)))
         print("wrote {}.npz ({} ticks)".format(base, len(a)))
         print("peak estimated winding temperature: {} C".format(
@@ -470,7 +595,22 @@ def main():
     ap.add_argument("--bundle", required=True)
     ap.add_argument("--jointmap", default=None, help="deploy_map.json (REQUIRED for a real run)")
     ap.add_argument("--thermal", default=None, help="thermal_params.json from thermal_fit.py")
-    ap.add_argument("--v-cmd", type=float, default=0.0, help="forward speed command, m/s")
+    ap.add_argument("--v-cmd", type=float, default=0.0,
+                    help="v1 bundles only: forward speed command, m/s. v2 has no velocity "
+                         "channel -- its command is the run/stop flag below.")
+    ap.add_argument("--command-file", default=None,
+                    help="v2 bundles: a file holding 'run' or 'stop' -- or, for a joystick "
+                         "bundle, a speed in m/s -- polled every control tick. Without one the "
+                         "policy keeps the command it started with for the whole run.")
+    ap.add_argument("--speed", type=float, default=0.0,
+                    help="joystick bundles: the speed to come up asking for, m/s. 0 by default "
+                         "and deliberately -- 0 is walking in place, which is a speed this "
+                         "lineage is trained at, and a robot that starts travelling does so "
+                         "before anyone has touched anything.")
+    ap.add_argument("--start-running", action="store_true",
+                    help="v2 bundles: come up with the green light already on. Off by default, "
+                         "deliberately -- a policy that starts running takes its first step "
+                         "before anyone has pressed anything.")
     ap.add_argument("--max-seconds", type=float, default=20.0)
     ap.add_argument("--ambient", type=float, default=25.0)
     ap.add_argument("--deadman-file", default=None,

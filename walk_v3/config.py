@@ -563,7 +563,7 @@ _V3_PROBE = dict(_V3, total_steps=40_000_000, track_sigma_steps=20_000_000,
 
 PRESETS = {
     "default": Config,
-    # ---- v3: THE RECIPE. Three stages, the first from random weights --------------------------
+    # ---- v3: THE RECIPE. Two stages, the first from random weights ----------------------------
     # Measured 2026-09-12 (a 7-arm probe fleet, cold, 40 M each) the cold JOYSTICK does not work on
     # this plant, and the reason is in the income, not the optimiser. The tracking income is
     # (w_track + w_fwd*v_cmd) * exp(-|v - v_cmd| / sigma): it is FLAT far from the command, so a
@@ -588,23 +588,16 @@ PRESETS = {
     # All three share one observation and action layout, so each warm start is exact, and stage 1
     # starts from random weights -- nothing outside this folder is required.
     #
-    # Stage 1 -- RUN, on the easy plant. Planar (x, z, pitch free; y, roll and yaw absent from the
-    # model), no bring-up, no DR, no jitter. One job: produce a gait.
+    # Stage 1 -- the same objective, on the easy plant. Planar: x, z and pitch are free, y, roll
+    # and yaw are absent from the model, so the policy learns a commanded-speed gait without also
+    # having to stay upright sideways. Measured 2026-09-13 at 11-17 M steps, cold, everything else
+    # equal: joystick-on-planar reached ep_len 473 / return 400, the SPEED objective on the same
+    # plant reached 411 / 134, and the joystick on the FREE plant went backwards (143 / -46). So
+    # the plant is what a cold start cannot take, not the command -- and keeping one objective
+    # across both stages means the task channel never changes meaning under a warm start, which is
+    # its own class of bug in this lineage.
     "v3_stage1": lambda: _v2(model_path="model/dash01_v2_planar.xml",
-                             **dict(_V3, objective="speed", bringup_enable=False, hold_enable=False,
-                                    dr_enable=False, jitter_curriculum_steps=0,
-                                    cmd_curriculum_steps=0, track_sigma_steps=0,
-                                    episode_s=20.0, total_steps=60_000_000),
-                             **_FAST),
-    # Stage 2 -- the same gait on the FREE plant, where roll and yaw exist. Still "run", so the
-    # income stays linear while the policy learns to stay upright in two more degrees of freedom.
-    # Heading is billed here for the first time (the planar model has no yaw to bill).
-    "v3_stage2": lambda: _v2(model_path="model/dash01_v2_free.xml",
-                             **dict(_V3, objective="speed", bringup_enable=False, hold_enable=False,
-                                    dr_enable=False, jitter_curriculum_steps=0,
-                                    cmd_curriculum_steps=0, track_sigma_steps=0,
-                                    episode_s=20.0, total_steps=80_000_000),
-                             **_FAST),
+                             **dict(_V3, total_steps=80_000_000), **_FAST),
     # Stage 3 -- THE DELIVERABLE. Joystick, free plant, heading, bring-up and DR, warm from stage 2.
     "v3": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V3, **_FAST),
     # the same recipe on the planar model (x, z, pitch free): an iteration sandbox, and the control

@@ -121,7 +121,7 @@ class Bundle:
         # caller that asks is told "none" rather than getting a KeyError.
         cmd = m.get("command") or {}
         m.setdefault("command", {"kind": "run_flag_distance", "v_max": 0.0})
-        m.setdefault("cmd_v_fwd_trained", float(cmd.get("v_max", 0.0)))
+        m.setdefault("cmd_v_fwd_trained", float(cmd.get("v_max", m.get("v_max", 0.0)) or 0.0))
         for k in ("cmd_v_back_trained", "cmd_yaw_trained"):
             m.setdefault(k, 0.0)
 
@@ -222,6 +222,11 @@ class Bundle:
         is worse than no control: it silently does nothing while the operator believes it did."""
         if self.version != 2:
             return "velocity"
+        # the exporter states it outright ("speed_fraction" / "run_flag_distance"); the objective
+        # string is the fallback for a bundle written before it did
+        kind = str((self.meta.get("command") or {}).get("kind") or "")
+        if kind:
+            return "speed" if kind == "speed_fraction" else "run_stop"
         return "speed" if str(self.meta.get("objective")) == "joystick" else "run_stop"
 
     @property
@@ -235,6 +240,24 @@ class Bundle:
         """The bottom of the commandable range (m/s). 0 while the trainer clips there; negative
         once walking backwards is trained, and then the slider grows a left half."""
         return float(self.meta.get("v_min") or 0.0)
+
+    @property
+    def v_trained(self):
+        """(lo, hi) in m/s that this CHECKPOINT was actually commanded, which is not the same as
+        what the channel spans.
+
+        The joystick's command is drawn from a fraction band that a curriculum widens downward
+        (`cmd_range_start` 0.8-1.0 -> `cmd_range` 0.0-1.0), because the warm-start parent only
+        knows one speed. A checkpoint taken mid-ramp has therefore never been asked to go slowly:
+        its slider still runs to 0, but 0 is off-distribution and the panel has to say so. Read
+        from the checkpoint's own curriculum sidecar, never from the config -- that is the same
+        mistake as `freq_lo`, which cost 0.4 rad of thigh target."""
+        lo, hi = self.v_min, self.v_max
+        ep = self.meta.get("env_params_at_checkpoint") or {}
+        f_lo, f_hi = ep.get("cmd_lo"), ep.get("cmd_hi")
+        if hi > 0.0 and f_lo is not None and f_hi is not None:
+            return float(f_lo) * hi, float(f_hi) * hi
+        return lo, hi
 
     def cfg_view(self):
         """A duck-typed stand-in for walk_mit.config.Config, holding only the fields the gait
