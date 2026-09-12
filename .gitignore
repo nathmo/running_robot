@@ -89,3 +89,10 @@ training/runs/
 walk_v2/runs/
 walk_v2/model/meshes/
 walk_v2/**/__pycache__/
+
+# walk_v3 (JAX/MJX from-scratch joystick): run outputs, exported bundles, mesh copy, logs
+walk_v3/runs/
+walk_v3/logs/
+walk_v3/results/
+walk_v3/model/meshes/
+walk_v3/**/__pycache__/

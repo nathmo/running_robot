@@ -240,6 +240,14 @@ class PolicyControllerV2:
         self.s_trq, self.s_grav = float(s["motor_torque"]), float(s["gravity"])
         self.s_angv = float(s["ang_vel"])
         self.lp_yaw_a = float(np.exp(-self.control_dt / float(m["lp_yaw_tau_s"])))
+        # v3 adds a HEADING channel to the frame: the robot's own dead-reckoned heading, from
+        # integrating the same gyro z the low-pass above reads. Older (v2) bundles do not export
+        # `heading_scale`, so they build the 33-wide frame exactly as before and this costs them
+        # nothing -- one control law, both bundles, and the frame width check below catches any
+        # mismatch rather than letting a wrong-width observation reach the net.
+        self.s_heading = float(s.get("heading", 0.0)) if isinstance(s, dict) else 0.0
+        self.has_heading = "heading" in s and int(m["frame_dim"]) > 33
+        self.heading_cap = float(m.get("heading_cap_rad", 0.5 * np.pi))
         self.pitch_lp = float(m["pitch_reflex_rate_lp"])
 
         # the task channel. Three command kinds, one per objective -- see the module docstring.
@@ -299,6 +307,9 @@ class PolicyControllerV2:
         self._prev_target = self.nominal.copy()
         self._prev_target_vel = np.zeros(self.nu)
         self._lp_yaw = 0.0
+        # heading is measured from where the operator was pointing when the policy started: zero
+        # here, and zero again on any `zero_heading()` the operator asks for
+        self._yaw_est = 0.0
         self._reflex_prate = 0.0
         self._phi_td_hat = np.array([0.0, np.pi])
         self._resynced = np.zeros(2, bool)
@@ -420,6 +431,19 @@ class PolicyControllerV2:
             return 0.0
         return min(1.0, self._brake_i / float(self.brake_ticks))
 
+    def zero_heading(self):
+        """Declare THIS direction to be straight ahead.
+
+        The heading channel is an integral, so it only means anything relative to an origin. The
+        origin is set when the policy starts; call this to move it -- after turning the robot by
+        hand, say, or if a long run has accumulated visible drift. Nothing else resets it: a
+        heading that silently re-zeroed itself would make the robot veer."""
+        self._yaw_est = 0.0
+
+    def heading_deg(self):
+        """The robot's own estimate of how far it has turned since the origin, in degrees."""
+        return float(np.degrees((self._yaw_est + np.pi) % (2.0 * np.pi) - np.pi))
+
     def set_distance_to_go(self, frac):
         """task[1], already normalised: clip(metres_to_the_line / task_brake_m, 0, 1). 1.0 means
         'the line is more than task_brake_m away', which is what a bench run should say."""
@@ -447,6 +471,13 @@ class PolicyControllerV2:
         reads a clean copy for the reflexes and a corrupted one for the observation. That is an
         inherent sim2real difference and it sits inside the band this run trained against."""
         self._lp_yaw = self.lp_yaw_a * self._lp_yaw + (1.0 - self.lp_yaw_a) * float(gyro[2])
+        self._yaw_est += float(gyro[2]) * self.control_dt
+        tail = []
+        if self.has_heading:
+            # wrap to (-pi, pi] then clip, matching walk_v3/env.py exactly: the policy was trained
+            # on a saturating heading error, not a wrapping one
+            y = (self._yaw_est + np.pi) % (2.0 * np.pi) - np.pi
+            tail = [[float(np.clip(y, -self.heading_cap, self.heading_cap)) * self.s_heading]]
         f = np.concatenate([
             (np.asarray(motor_pos, float) - self.default_motor_pos) * self.s_pos,
             np.asarray(motor_vel, float) * self.s_vel,
@@ -456,6 +487,7 @@ class PolicyControllerV2:
             [self._lp_yaw * self.s_angv],
             [np.cos(self._phase), np.sin(self._phase)],
             self._prev_residual,
+            *tail,
         ]).astype(np.float32)
         if f.size != self.frame_dim:
             raise ValueError("built a {}-wide observation frame, bundle says {} -- the sensor "
