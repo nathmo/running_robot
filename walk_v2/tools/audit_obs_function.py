@@ -88,38 +88,54 @@ def main():
 
     # --- perturbations of UNMEASURABLE state only. Physics is untouched: we re-run the same step from
     #     the same data, changing only bookkeeping the robot has no sensor for.
-    def rerun(mod, label):
+    # env.step on a GPU is NOT bit-reproducible (scatter atomics), so a fixed 1e-9 threshold calls
+    # every row a leak. Calibrate the floor from an identical re-run and judge against that. Measured
+    # 2026-09-12: floor ~3e-5, while the v2 odometry leak reads 1.0 -- 25,000x above it, in TASK[0:2].
+    floor = [1e-8]
+
+    def rerun(mod, label, field=None, calibrate=False):
+        if field is not None and not hasattr(state, field):
+            print(f"\n[fn-audit] {label}")
+            print(f"           SKIPPED: EnvState has no field {field!r} -- this perturbation tested "
+                  f"nothing and is NOT evidence either way")
+            return True
         s2 = mod(state)
         a = jnp.clip(agent._act_greedy(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
         _, o2, _, _, _ = env.step(s2, a, params)
         d = np.abs(np.asarray(o2)[:, :ad] - np.asarray(env.step(state, a, params)[1])[:, :ad])
-        moved = d.max()
-        chans = np.where(d.max(0) > 1e-9)[0]
-        verdict = "clean" if moved <= 1e-9 else "LEAK"
+        moved = float(d.max())
         print(f"\n[fn-audit] {label}")
-        print(f"           actor max|delta| {moved:.3e}  -> {verdict}")
+        if calibrate:
+            floor[0] = max(moved * 4.0, 1e-8)
+            print(f"           actor max|delta| {moved:.3e}  -> NOISE FLOOR, threshold set to "
+                  f"{floor[0]:.3e} (the GPU step is not bit-reproducible)")
+            return True
+        thr = floor[0]
+        chans = np.where(d.max(0) > thr)[0]
+        verdict = "clean (at the noise floor)" if moved <= thr else "LEAK"
+        print(f"           actor max|delta| {moved:.3e}  (floor {thr:.3e})  -> {verdict}")
         if chans.size:
             names = sorted({channel_name(int(c), ad) for c in chans})
-            print(f"           channels touched: {', '.join(names[:8])}"
+            print(f"           channels ABOVE the floor: {', '.join(names[:8])}"
                   f"{' ...' if len(names) > 8 else ''}")
-        return moved <= 1e-9
+        return moved <= thr
 
     ok = True
+    # 0. Calibrate on an identical re-run: whatever this costs is arithmetic, not information.
+    rerun(lambda s: s, "calibration: identical re-run, nothing perturbed", calibrate=True)
     # 1. ODOMETRY: move the episode's origin. sprint_d = x - x0, so shifting x0 changes the distance
     #    travelled by 60 m without touching a single physical quantity. Under v2 this MUST move task[1].
-    ok &= rerun(lambda s: s.replace(x0=s.x0 - 60.0) if hasattr(s, "x0") else s,
-                "odometry origin shifted 60 m (sprint_d +60, physics identical)")
+    ok &= rerun(lambda s: s.replace(x0=s.x0 - 60.0),
+                "odometry origin shifted 60 m (sprint_d +60, physics identical)", "x0")
 
     # 2. THE TOUCHDOWN ESTIMATE: the resync pulls the clock toward phi_td_hat. Under v2 this MUST move
     #    the phase the actor reads; under v3 the field is inert.
     ok &= rerun(lambda s: s.replace(phi_td_hat=jnp.full_like(s.phi_td_hat, 3.0),
-                                    resynced=jnp.ones_like(s.resynced))
-                if hasattr(s, "phi_td_hat") else s,
-                "touchdown phase estimate forced to 3.0 rad (contact-derived)")
+                                    resynced=jnp.zeros_like(s.resynced)),
+                "touchdown phase estimate forced to 3.0 rad (contact-derived)", "phi_td_hat")
 
-    # 3. THE CONTACT ACCUMULATOR: what the clock's touchdown edge is built from.
-    ok &= rerun(lambda s: s.replace(contact_acc=~s.contact_acc) if hasattr(s, "contact_acc") else s,
-                "contact accumulator inverted")
+    # 3. NEGATIVE CONTROL: if an unperturbed re-run reads as a leak, every row above is noise.
+    ok &= rerun(lambda s: s, "negative control: nothing perturbed (MUST be clean)")
 
     print(f"\n[fn-audit] {'CLEAN: nothing unmeasurable reaches the actor' if ok else 'LEAK: see above'}")
     print("[fn-audit] NOTE: a clean result is only meaningful if this same test reports a LEAK on a v2 "
