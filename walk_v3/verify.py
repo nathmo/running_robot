@@ -88,9 +88,14 @@ def check_curriculum(rep, run, ckpt):
     d = json.loads(side.read_text())
     ep = d.get("env_params", {})
     cfg_d = json.loads((run / "resolved_config.json").read_text())
-    rep.add("1. trained as advertised", f"domain randomisation reached full width",
-            float(ep.get("dr_scale", 0)) >= 0.9, f"{ep.get('dr_scale', 0):.3f}", ">= 0.900",
-            "dr_scale from the sidecar, not the config flag")
+    # Read the flag AND the value. With dr_enable=False, initial_params sets dr_scale to 1.0 (there
+    # is no curriculum to ramp), so the sidecar of a run that did no randomisation at all reports a
+    # perfect 1.000 -- the check would pass on precisely the runs it exists to catch.
+    dr_on = bool(cfg_d.get("dr_enable", False))
+    rep.add("1. trained as advertised", "domain randomisation reached full width",
+            dr_on and float(ep.get("dr_scale", 0)) >= 0.9,
+            f"{ep.get('dr_scale', 0):.3f}" if dr_on else "dr_enable=False", ">= 0.900",
+            "dr_scale from the sidecar AND the flag, not either alone")
     if cfg_d.get("bringup_enable"):
         rep.add("1. trained as advertised", "bring-up envelope fully opened",
                 float(ep.get("bringup_scale", 0)) >= 0.9, f"{ep.get('bringup_scale', 0):.3f}", ">= 0.900")

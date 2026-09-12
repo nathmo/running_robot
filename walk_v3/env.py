@@ -1146,9 +1146,14 @@ class DashEnvV2:
         # income and the safety terms, which mean the same thing on day one as at the end.
         if c.shape_curriculum_steps > 0:
             sh = params.shape_scale
+            # duty_sym, swing_floor and stance_time are deliberately NOT in this list. They are the
+            # guards against the two pathologies this plant falls into -- the one-legged hop
+            # (walk_mit measured 4.76 Hz, left duty 0.01) and the dragged stance -- and they were
+            # 0.0% of the measured cost, so ramping them down buys nothing and risks letting a hop
+            # establish itself early, which this lineage has found hard to unlearn.
             for _k in ("residual", "residual_rate", "action_rate", "knob", "spec_cycle",
-                       "phase_contact", "foot_slip", "step_rate", "stance_time", "swing_floor",
-                       "duty_sym", "angmom", "ang_xy", "vz", "hip_roll", "lat_vel"):
+                       "phase_contact", "foot_slip", "step_rate",
+                       "angmom", "ang_xy", "vz", "hip_roll", "lat_vel"):
                 if _k in t:
                     t[_k] = jnp.asarray(t[_k], jnp.float32) * sh
         total = sum(jnp.asarray(v, dtype=jnp.float32) for v in t.values())
