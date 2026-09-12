@@ -23,8 +23,10 @@ Exit code is 0 only if every check the run supports passed.
 """
 import argparse
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -329,10 +331,16 @@ def check_deploy(rep, run, ckpt, env, agent, args):
 
     _, seq = jax.lax.scan(roll, (state, obs), None, length=40)
     seq = np.asarray(seq).reshape(-1, env.actor_dim)[:200]
-    jax_a = np.asarray(agent._act_greedy(agent.params, agent.stats.normalize(
-        jnp.pad(jnp.asarray(seq), ((0, 0), (0, env.obs_dim - env.actor_dim))))))
+    # CLIP the JAX side. PolicyNet.__call__ clips to [-1, 1] because the env clips before doing
+    # anything with the action, so the deployed action space is the trained one. The raw actor mean
+    # does not: w_bound exists in this config precisely because 68-79% of the spec means were
+    # measured OUTSIDE [-1, 1]. Comparing a clipped number against an unclipped one reports a
+    # 0.54 disagreement between two implementations that agree perfectly.
+    jax_a = np.asarray(jnp.clip(agent._act_greedy(agent.params, agent.stats.normalize(
+        jnp.pad(jnp.asarray(seq), ((0, 0), (0, env.obs_dim - env.actor_dim))))), -1.0, 1.0))
     net = PolicyNet(b)
-    np_a = np.stack([net(o) for o in seq.astype(np.float32)])
+    # PolicyNet.__call__ returns (action, velocity_estimate) -- the estimator's output rides along
+    np_a = np.stack([net(o)[0] for o in seq.astype(np.float32)])
     d = float(np.abs(np_a - jax_a[:, :np_a.shape[1]]).max())
     rep.add("7. deploy parity", "numpy actor == JAX actor (max |delta|)", d < 2e-3, f"{d:.2e}", "< 2e-03",
             f"over {len(seq)} observations from a live rollout")
@@ -356,19 +364,34 @@ def main():
     ck = Path(args.checkpoint) if args.checkpoint else (run / "best.msgpack")
     if not ck.exists():
         ck = run / "final.msgpack"
-    cfg, env, agent = load_run(str(run), str(ck) if ck.exists() else None,
+    # SNAPSHOT the checkpoint before doing anything with it. `best.msgpack` is rewritten by the
+    # keeper whenever the run improves, so verifying a run that is still training reads one policy
+    # into memory and exports a different one a minute later -- which showed up here as the deploy
+    # parity check reporting a 2.0 disagreement (the maximum possible for two clipped actions)
+    # between two implementations that in fact agree to 1.8e-07. Copying it once makes every check
+    # below refer to the same weights, and makes it safe to verify a live run.
+    if ck.exists():
+        snap = Path(tempfile.mkdtemp(prefix="verify_")) / ck.name
+        shutil.copy2(ck, snap)
+        side = ck.with_suffix(".json")
+        if side.exists():
+            shutil.copy2(side, snap.with_suffix(".json"))
+        ck_load = snap
+    else:
+        ck_load = None
+    cfg, env, agent = load_run(str(run), str(ck_load) if ck_load else None,
                                n_envs=args.n_envs, dr=False, warm_start=False)
     print(f"[verify] {run.name}  checkpoint {ck.name}  objective={cfg.objective}  "
           f"actor_dim={env.actor_dim}  frame={FRAME_DIM}  v_max={cfg.v_max:.2f} m/s")
 
     rep = Report()
-    check_curriculum(rep, run, ck, cfg)
+    check_curriculum(rep, run, ck, cfg)      # the sidecar lives next to the original, not the snapshot
     rows, _ = check_tracking(rep, cfg, agent, args, args.tol)
     check_bringup(rep, cfg, agent, args)
     check_dr(rep, cfg, agent, args, rows)
     check_privilege(rep, cfg, env, agent, args)
     if not args.skip_deploy:
-        check_deploy(rep, run, ck if ck.exists() else None, env, agent, args)
+        check_deploy(rep, run, ck_load, env, agent, args)
     return 0 if rep.print() else 1
 
 
