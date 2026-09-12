@@ -514,6 +514,26 @@ PRESETS = {
                                   # running's 3.8.
                                   w_alive=1.5, episode_s=30.0, sprint_curriculum_steps=0,
                                   total_steps=140_000_000),
+    # v3 + the DR the whole lineage has never actually had. Measured 2026-09-12 from the checkpoint
+    # sidecars: dr_scale ended at 0.000 in v3_joy_s7 AND s8 AND v2c_s2_brakeprior_s41 (peak 0.041 of
+    # 215 M), because _V2B raised the competence gate to ep_len > 1200 while these policies live at
+    # 300-900 ticks -- so `_gated` subtracts progress more often than it adds and the ramp sits on the
+    # floor. ctrl_jitter/ctrl_drop are zero for the same reason. Every policy so far is nominal-plant
+    # only, which is the largest sim-to-real risk in the stack.
+    #
+    # Back to the contract's 600 (and retreat 0.5, not _V2C's 0.7) so the ramp can actually move, warm
+    # started from the 55 M joystick that already tracks. Budget 70 M, not 140: both v3 seeds peaked
+    # near 55 M and collapsed after ~60 M, so the extra steps bought a worse policy.
+    "v3_joystick_dr": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                                  **dict(_V2C, curriculum_gate_ep_len=600.0,
+                                         jitter_curriculum_gate_ep_len=600.0,
+                                         curriculum_retreat_frac=0.5),
+                                  **_FAST,
+                                  objective="joystick", resync_enable=False, brake_prior=0.0,
+                                  hold_enable=True, bringup_enable=True,
+                                  w_alive=1.5, episode_s=30.0, sprint_curriculum_steps=0,
+                                  dr_curriculum_steps=40_000_000,
+                                  total_steps=70_000_000),
     # S2 warm-start experiment: keep the S1 policy's std (contract re-inflates log sigma; the seeds start at ep_len 77)
     "v2c_s2_free_fast_keepstd": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V2C, **_FAST,
                                             warmstart_reset_log_std=False),
