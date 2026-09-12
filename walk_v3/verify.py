@@ -74,7 +74,7 @@ class Report:
 
 
 # ---------------------------------------------------------------------------- 1. the curriculum
-def check_curriculum(rep, run, ckpt):
+def check_curriculum(rep, run, ckpt, cfg):
     """Read what the run actually trained on out of the checkpoint's sidecar.
 
     `dr_enable=True` in a config says only that the code path exists. The amount is a curriculum,
@@ -87,25 +87,27 @@ def check_curriculum(rep, run, ckpt):
         return {}
     d = json.loads(side.read_text())
     ep = d.get("env_params", {})
-    cfg_d = json.loads((run / "resolved_config.json").read_text())
+    # The config comes from the `cfg` object load_run already built, not from re-reading
+    # resolved_config.json: that file nests everything under a "config" key, so a top-level lookup
+    # silently returns None for every field and the checks below all report on a config of Nones.
     # Read the flag AND the value. With dr_enable=False, initial_params sets dr_scale to 1.0 (there
     # is no curriculum to ramp), so the sidecar of a run that did no randomisation at all reports a
     # perfect 1.000 -- the check would pass on precisely the runs it exists to catch.
-    dr_on = bool(cfg_d.get("dr_enable", False))
+    dr_on = bool(cfg.dr_enable)
     rep.add("1. trained as advertised", "domain randomisation reached full width",
             dr_on and float(ep.get("dr_scale", 0)) >= 0.9,
             f"{ep.get('dr_scale', 0):.3f}" if dr_on else "dr_enable=False", ">= 0.900",
             "dr_scale from the sidecar AND the flag, not either alone")
-    if cfg_d.get("bringup_enable"):
+    if cfg.bringup_enable:
         rep.add("1. trained as advertised", "bring-up envelope fully opened",
                 float(ep.get("bringup_scale", 0)) >= 0.9, f"{ep.get('bringup_scale', 0):.3f}", ">= 0.900")
     rep.add("1. trained as advertised", "command band opened to zero",
             float(ep.get("cmd_lo", 1)) <= 0.05, f"{ep.get('cmd_lo', 1):.3f}", "<= 0.050",
             "zero command = step in place")
     rep.add("1. trained as advertised", "control jitter reached its target",
-            float(ep.get("ctrl_jitter_ms", 0)) >= 0.9 * float(cfg_d.get("ctrl_jitter_ms_final", 1)),
+            float(ep.get("ctrl_jitter_ms", 0)) >= 0.9 * float(cfg.ctrl_jitter_ms_final),
             f"{ep.get('ctrl_jitter_ms', 0):.2f} ms",
-            f">= {0.9 * float(cfg_d.get('ctrl_jitter_ms_final', 1)):.2f} ms")
+            f">= {0.9 * float(cfg.ctrl_jitter_ms_final):.2f} ms")
     return d
 
 
@@ -360,7 +362,7 @@ def main():
           f"actor_dim={env.actor_dim}  frame={FRAME_DIM}  v_max={cfg.v_max:.2f} m/s")
 
     rep = Report()
-    check_curriculum(rep, run, ck)
+    check_curriculum(rep, run, ck, cfg)
     rows, _ = check_tracking(rep, cfg, agent, args, args.tol)
     check_bringup(rep, cfg, agent, args)
     check_dr(rep, cfg, agent, args, rows)
