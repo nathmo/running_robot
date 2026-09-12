@@ -64,6 +64,9 @@ class Sim:
                                for a in range(self.model.nu)])
         self.key_id = 0
         self.gyro_adr = self._sensor_adr("imu_gyro")
+        # base DOFs are x,y,z,roll,pitch,yaw at 0..5 (see the model's <joint name="base_*">)
+        self.i_y, self.i_yaw = 1, 5
+        self.lock = "none"
 
         # the torque-limit law's constants: from the BUNDLE, so they cannot drift from training
         self.tau_peak = np.asarray(self.bundle["forcerange"], float)
@@ -134,11 +137,37 @@ class Sim:
             lim = np.minimum(self.tau_peak, self.kt * v_avail / self.r_ohm)
             self.data.ctrl[:] = np.clip(kp * (target - qq) - kd * dd, -lim, lim)
             mujoco.mj_step(self.model, self.data)
+            self._apply_lock()
         self.t += self.control_dt
 
     # ---------------------------------------------------------------- readouts
     def speed(self):
+        """FORWARD speed in the BASE frame -- what the command means.
+
+        The world-x velocity is the wrong readout: the policy tracks its own forward axis, so after a
+        half turn a perfectly obedient robot reads as running backwards. Rotate the world velocity into
+        the base frame and take its x component, exactly as env._vel_body does for the reward.
+        """
+        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")
+        R = self.data.xmat[bid].reshape(3, 3)
+        return float((R.T @ np.asarray(self.data.qvel[0:3], float))[0])
+
+    def speed_world(self):
         return float(self.data.qvel[0])
+
+    def heading_deg(self):
+        return float(np.degrees(self.data.qpos[self.i_yaw]))
+
+    def _apply_lock(self):
+        """Hold the robot on a straight line, kinematically. A sim aid, not a policy fix: the real
+        machine has no such constraint, so anything that only works locked is not deployable."""
+        if self.lock == "none":
+            return
+        self.data.qpos[self.i_yaw] = 0.0
+        self.data.qvel[self.i_yaw] = 0.0
+        if self.lock == "rail":                 # also pin lateral drift
+            self.data.qpos[self.i_y] = 0.0
+            self.data.qvel[self.i_y] = 0.0
 
     def fallen(self):
         return self._grav_body()[2] > -0.3 or float(self.data.qpos[2]) < 0.45
@@ -150,9 +179,12 @@ def main():
     ap.add_argument("--model", default=None)
     ap.add_argument("--start-stick", type=float, default=0.0)
     ap.add_argument("--step", type=float, default=0.10, help="stick increment per key press")
+    ap.add_argument("--lock", choices=("none", "yaw", "rail"), default="none",
+                    help="none = free; yaw = hold the heading straight; rail = yaw AND no lateral drift")
     args = ap.parse_args()
 
     sim = Sim(args.bundle, args.model)
+    sim.lock = args.lock
     sim.set_stick(args.start_stick)
     speed_scale = [1.0]
     quit_flag = [False]
@@ -177,7 +209,7 @@ def main():
             quit_flag[0] = True
 
     print(f"[play] bundle {Path(args.bundle).name} | v_max {sim.v_max:.2f} m/s | "
-          f"{1 / sim.control_dt:.0f} Hz control, {sim.substeps} physics substeps")
+          f"{1 / sim.control_dt:.0f} Hz control, {sim.substeps} physics substeps | lock={args.lock}")
     print("[play] W/S = stick +-10%   SPACE = 0   F = full   R = reset   [ ] = slow/fast   Q = quit")
 
     with mujoco.viewer.launch_passive(sim.model, sim.data, key_callback=on_key,
