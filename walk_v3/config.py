@@ -550,7 +550,7 @@ _V3 = dict(
     curriculum_retreat_frac=0.5,
     # --- cold-start shaping
     cmd_range_start=(0.15, 0.45), track_sigma_start=1.5, track_sigma_steps=40_000_000,
-    shape_curriculum_steps=40_000_000, shape_scale_start=0.15,
+    shape_curriculum_steps=120_000_000, shape_scale_start=0.15,
     w_alive=1.5, episode_s=30.0, sprint_curriculum_steps=0,
     # --- budget: a cold run has to find the gait before any of the above matters
     dr_curriculum_steps=60_000_000, bringup_curriculum_steps=60_000_000,
@@ -558,6 +558,7 @@ _V3 = dict(
 )
 
 _V3_PROBE = dict(_V3, total_steps=40_000_000, track_sigma_steps=20_000_000,
+                 shape_curriculum_steps=30_000_000,
                  dr_curriculum_steps=30_000_000, bringup_curriculum_steps=30_000_000,
                  cmd_curriculum_steps=30_000_000, eval_every_rollouts=150)
 
@@ -597,7 +598,8 @@ PRESETS = {
     # across both stages means the task channel never changes meaning under a warm start, which is
     # its own class of bug in this lineage.
     "v3_stage1": lambda: _v2(model_path="model/dash01_v2_planar.xml",
-                             **dict(_V3, total_steps=80_000_000), **_FAST),
+                             **dict(_V3, total_steps=80_000_000,
+                                    shape_curriculum_steps=50_000_000), **_FAST),
     # Stage 3 -- THE DELIVERABLE. Joystick, free plant, heading, bring-up and DR, warm from stage 2.
     "v3": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V3, **_FAST),
     # the same recipe on the planar model (x, z, pitch free): an iteration sandbox, and the control
