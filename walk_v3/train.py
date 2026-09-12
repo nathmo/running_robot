@@ -74,9 +74,16 @@ def make_eval_env(cfg, n=16, keep_assist=False):
     return DashEnvV2(c, n_envs=n)
 
 
-def command_ladder(cfg, n):
-    """One stick position per env, cycled over cfg.eval_ladder, in m/s."""
+def command_ladder(cfg, n, lo=0.0, hi=1.0):
+    """One stick position per env, cycled over cfg.eval_ladder, in m/s.
+
+    `lo`/`hi` rescale the ladder onto a sub-band. The full 0-100% ladder is the contract and is what
+    the keeper scores; a ladder over the CURRENT command curriculum is what shows whether the policy
+    is learning, because early in training the full ladder asks for speeds the policy has never been
+    commanded and every env simply falls -- which reads as "no progress" for tens of millions of
+    steps."""
     lad = np.asarray(cfg.eval_ladder, float)
+    lad = lo + lad * (hi - lo)
     return (np.tile(lad, int(np.ceil(n / lad.size)))[:n] * float(cfg.v_max))
 
 
@@ -88,21 +95,28 @@ def run_eval(agent, cfg, eval_env):
     neither is one that survives being dropped by standing still, so both are measured and the
     keeper weighs them explicitly (`keeper_score`)."""
     if cfg.objective != "joystick":
-        return agent.evaluate(), None
+        return agent.evaluate(), None, None
     n = eval_env.n_envs
+    n_track = int(cfg.eval_seconds / eval_env.control_dt)
     lad = command_ladder(cfg, n)
     # tracking: the settled keyframe, full command authority, no bring-up randomisation
     pt = EnvParams.final(cfg)._replace(dr_scale=0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0,
                                        pitch_assist=0.0, bringup_scale=0.0, bringup_p_drop=0.0,
                                        bringup_p_held=0.0)
-    ev = agent.evaluate(params=pt, ladder=lad)
+    ev = agent.evaluate(params=pt, ladder=lad, n_max_steps=n_track)
     # bring-up: every episode starts dirty (dropped or held-misaligned), at the FULL trained
     # envelope, and the only question asked is whether it is still upright
     pb = EnvParams.final(cfg)._replace(dr_scale=0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0,
                                        pitch_assist=0.0, bringup_scale=1.0,
                                        bringup_p_drop=0.5, bringup_p_held=0.5)
     ev_bu = agent.evaluate(params=pb, ladder=lad, n_max_steps=int(6.0 / eval_env.control_dt), seed=2000)
-    return ev, ev_bu
+    # and the same ladder over the band the curriculum is actually commanding right now
+    p = agent.env_params
+    ev_cur = None
+    if float(p.cmd_hi) - float(p.cmd_lo) < 0.95:
+        lad_c = command_ladder(cfg, n, float(p.cmd_lo), float(p.cmd_hi))
+        ev_cur = agent.evaluate(params=pt, ladder=lad_c, n_max_steps=n_track, seed=3000)
+    return ev, ev_bu, ev_cur
 
 
 def keeper_score(cfg, ev, ev_bu):
@@ -272,12 +286,14 @@ def main():
                   f"assist {row.get('curriculum/pitch_assist', 0):.2f}", flush=True)
         if eval_env is not None and cfg.eval_every_rollouts > 0 and agent.rollout_n % cfg.eval_every_rollouts == 0:
             t = time.time()
-            ev, ev_bu = run_eval(agent, cfg, eval_env)
+            ev, ev_bu, ev_cur = run_eval(agent, cfg, eval_env)
             ev_row = {"step": agent.step, "finishes": ev["finishes"], "falls": ev["falls"], "n": ev["n"],
                       "t_line_mean": ev["t_line_mean"], "dist_mean": ev["dist_mean"],
                       "speed_mean": ev["speed_mean"], "track_err": ev["track_err_mean"],
                       "heading_err": ev["heading_err_mean"], "alive_frac": ev["alive_frac"],
                       "bringup_alive": (ev_bu or {}).get("alive_frac", float("nan")),
+                      "cur_track_err": (ev_cur or {}).get("track_err_mean", float("nan")),
+                      "cur_alive_frac": (ev_cur or {}).get("alive_frac", float("nan")),
                       "eval_s": time.time() - t}
             evlog.write(ev_row)
             if tb is not None:
@@ -291,8 +307,14 @@ def main():
                       f"heading {np.degrees(ev['heading_err_mean']):.1f} deg, "
                       f"upright {ev['alive_frac'] * 100:.0f}%, "
                       f"bring-up {(ev_bu or {}).get('alive_frac', float('nan')) * 100:.0f}%  "
-                      f"({time.time() - t:.0f}s)\n"
-                      f"            per stick (err m/s / upright): {lad}", flush=True)
+                      f"({time.time() - t:.0f}s)" 
+                      f"\n            per stick (err m/s / upright): {lad}", flush=True)
+                if ev_cur is not None:
+                    cur = "  ".join(f"{v / max(cfg.v_max, 1e-9) * 100:3.0f}%:{e:.2f}/{a * 100:.0f}%"
+                                    for v, e, a in ev_cur.get("per_cmd", []))
+                    print(f"            within the CURRENT command band: cmd-err "
+                          f"{ev_cur['track_err_mean']:.2f} m/s, upright "
+                          f"{ev_cur['alive_frac'] * 100:.0f}%  |  {cur}", flush=True)
             else:
                 print(f"[eval @ {agent.step:,}] greedy: {ev['finishes']}/{ev['n']} finish, {ev['falls']} falls, "
                       f"t_line {ev['t_line_mean']:.2f} s, dist {ev['dist_mean']:.1f} m, "

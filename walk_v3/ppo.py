@@ -99,7 +99,10 @@ def initial_params(c):
     cmd_hi=float(c.cmd_range_start[1] if c.cmd_curriculum_steps > 0
                  else c.cmd_range[1]),
     gait_freq_lo=float(c.gait_freq_lo_start if c.gait_freq_floor_steps > 0
-                       else c.gait_freq_hz[0]))
+                       else c.gait_freq_hz[0]),
+    track_sigma=float(c.track_sigma_start if getattr(c, 'track_sigma_steps', 0) > 0
+                      else c.track_sigma),
+    shape_scale=float(c.shape_scale_start if getattr(c, 'shape_curriculum_steps', 0) > 0 else 1.0))
 
 
 class PPO:
@@ -473,6 +476,8 @@ class PPO:
                                                c.jitter_curriculum_steps, jg, rf, d_steps)
             kw["ctrl_drop_prob"] = self._gated("ctrl_drop_prob", ep_len, 0.0, c.ctrl_drop_prob_final,
                                                c.jitter_curriculum_steps, jg, rf, d_steps)
+        if getattr(c, "shape_curriculum_steps", 0) > 0:
+            kw["shape_scale"] = self._clock(c.shape_scale_start, 1.0, c.shape_curriculum_steps)
         if c.objective == "joystick" and getattr(c, "track_sigma_steps", 0) > 0:
             kw["track_sigma"] = self._clock(c.track_sigma_start, c.track_sigma, c.track_sigma_steps)
         if getattr(c, "gait_freq_floor_steps", 0) > 0:

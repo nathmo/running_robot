@@ -59,6 +59,7 @@ class EnvParams(NamedTuple):
     cmd_lo: float = 0.0          # joystick: fraction-of-v_max band the command is drawn from
     cmd_hi: float = 1.0          # (curriculum widens it down from cmd_range_start to cmd_range)
     track_sigma: float = 0.6     # Laplace width of the tracking income, m/s (annealed from wider)
+    shape_scale: float = 1.0     # weight on the gait-quality penalties (ramped from shape_scale_start)
     pitch_assist: float = 0.0
     stoplight_prob: float = 0.0
     gait_freq_lo: float = 0.0        # curriculum lower rail of the gait clock (0 = the config value)
@@ -80,7 +81,8 @@ class EnvParams(NamedTuple):
                    stance_ratio=float(cfg.stance_ratio_final), eff_scale=float(cfg.efficiency_target),
                    ctrl_jitter_ms=float(cfg.ctrl_jitter_ms_final),
                    ctrl_drop_prob=float(cfg.ctrl_drop_prob_final), pitch_assist=0.0, stoplight_prob=0.0,
-                   gait_freq_lo=float(cfg.gait_freq_hz[0]), track_sigma=float(cfg.track_sigma))
+                   gait_freq_lo=float(cfg.gait_freq_hz[0]), track_sigma=float(cfg.track_sigma),
+                   shape_scale=1.0)
 
 
 @struct.dataclass
@@ -1091,7 +1093,16 @@ class DashEnvV2:
         t["energy"] = pen(-es * c.w_energy * jnp.sum(jnp.maximum(tau * qd, 0.0)))
         # ---- smoothness, the latch's billing, the standing knob price, thermal
         t["action_rate"] = pen(-c.w_action_rate * jnp.sum((motor_cmd - state.prev_motor_cmd) ** 2))
-        t["spec_cycle"] = pen(-c.w_spec_cycle * spec_change)
+        # Billed ONCE at commit, which means a policy that halves its cadence halves what it pays
+        # per SECOND for rewriting the spec -- a standing discount collected by parking the clock on
+        # its floor, and this lineage has parked the clock before (the m3 clock-warp exploit, and
+        # four cold v2 seeds that sat on 1.5 Hz and never left). Normalising by cadence makes the
+        # cost per second independent of frequency, so slowing down buys nothing here. Bounded
+        # either way: f is confined to gait_freq_hz, so the factor lives in ~[0.7, 1.8].
+        f_nom = 0.5 * (c.gait_freq_hz[0] + c.gait_freq_hz[1])
+        f_now = gait.frequency(spec[gait.I_FREQ], gp)
+        rate = (f_nom / jnp.maximum(f_now, 1e-3)) if c.spec_cycle_rate_invariant else 1.0
+        t["spec_cycle"] = pen(-c.w_spec_cycle * spec_change * rate)
         t["knob"] = pen(-c.w_knob * jnp.sum(gait.knobs(spec, gp) ** 2))
         t["residual"] = pen(-c.w_residual * jnp.sum(residual ** 2))
         t["residual_rate"] = pen(-c.w_residual_rate * jnp.sum((residual - state.prev_residual) ** 2))
@@ -1116,6 +1127,30 @@ class DashEnvV2:
         if self.library_mode:
             q_ref = gait.feedforward(spec, phi, jnp.asarray(p.nominal_ctrl), gp)
             t["track_ref"] = pen(-c.w_track_ref * jnp.sum((data.qpos[p.act_qadr] - q_ref) ** 2))
+        # ---- the shaping ramp
+        # Measured 2026-09-12 with tools/reward_budget.py on two cold runs (one per plant): at the
+        # start of the curriculum LIVING is NEGATIVE -- income 1.87, cost 2.34, net -0.236/tick --
+        # so against a one-time fall_penalty of 100 dying immediately is worth 7x staying alive, and
+        # the optimiser correctly hunts for the shortest episode. That is an objective bug, not a
+        # policy failure, and it is the same one recorded in reward-budget-income-floor.
+        #
+        # The cost is not efficiency (torque, motor_vel and energy already ramp through eff_scale,
+        # and were 0.0% of it). It is GAIT QUALITY, billed at full weight to a policy that has no
+        # gait yet: residual 27.6%, phase_contact 15.5%, foot_slip 12.9% -- 56% of all cost between
+        # them. "Do not fight your own clock" and "do not scuff your feet" are corrections to a
+        # walk; charged before there is a walk they are a tax on trying.
+        #
+        # So these ramp from shape_scale_start to 1. On a CLOCK, not a competence gate: a gate would
+        # be circular, since what it would measure is exactly what these penalties suppress.
+        # NOT ramped: upright, height, alive, track, clearance, air_time, heading, lane -- the
+        # income and the safety terms, which mean the same thing on day one as at the end.
+        if c.shape_curriculum_steps > 0:
+            sh = params.shape_scale
+            for _k in ("residual", "residual_rate", "action_rate", "knob", "spec_cycle",
+                       "phase_contact", "foot_slip", "step_rate", "stance_time", "swing_floor",
+                       "duty_sym", "angmom", "ang_xy", "vz", "hip_roll", "lat_vel"):
+                if _k in t:
+                    t[_k] = jnp.asarray(t[_k], jnp.float32) * sh
         total = sum(jnp.asarray(v, dtype=jnp.float32) for v in t.values())
         book = dict(air_time=air_time, contact_time=contact_time, duty_ema=duty_ema, swing_ema=swing_ema)
         terms = {k: jnp.asarray(v, dtype=jnp.float32) for k, v in t.items()}

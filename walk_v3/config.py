@@ -199,6 +199,11 @@ class Config:
     track_sigma: float = 0.6                # Laplace width, m/s (Gaussian is flat where we live)
     track_sigma_start: float = 0.6          # cold start: begin wide so the first m/s pays, then
     track_sigma_steps: int = 0              # tighten to track_sigma over this many steps (0 = off)
+    # the gait-quality penalties (residual, phase_contact, foot_slip, smoothness, posture trim)
+    # ramp from shape_scale_start to 1. Measured: at full weight from step 0 they make LIVING
+    # net-negative for a policy with no gait yet, so dying beats trying. 0 steps = off (v2).
+    shape_curriculum_steps: int = 0
+    shape_scale_start: float = 0.15
     w_fwd_speed: float = 2.0
     sprint_world_speed: bool = False        # RUN 8 recipe: body-frame income + LP yaw + lane
     w_yaw_rate: float = 3.0                 # on the LOW-PASSED yaw rate (§10)
@@ -327,6 +332,8 @@ class Config:
     efficiency_target: float = 1.0
     w_action_rate: float = 0.1
     w_spec_cycle: float = 0.5               # ||S_{k+1} - S_k||^2 billed ONCE at commit (§02)
+    spec_cycle_rate_invariant: bool = False  # v3: divide that bill by cadence, so a slower
+                                            # clock does not buy a cheaper spec (see env.py)
     w_knob: float = 0.02                    # standing price on (Δ/Δmax, s, o/omax) per tick (contract)
     w_residual: float = 0.10                # was 0.02 (§10: every baseline lived at the bound)
     w_residual_rate: float = 0.02
@@ -459,6 +466,7 @@ class Config:
     curriculum_gate_ref_decay: float = 0.999    # per update; the reference forgets an old peak
     eval_ladder: tuple = (0.0, 0.25, 0.5, 0.75, 1.0)   # stick positions, fraction of v_max
     eval_warm_ticks: int = 200              # 2 s of bring-up transient excluded from the tracking mean
+    eval_seconds: float = 12.0              # in-training tracking block; verify.py uses longer
     eval_bringup_envs: int = 32             # a second eval block, started the dirty way
     keeper_fall_weight: float = 2.0         # m/s of tracking error that one unit of fall RATE is worth
     keeper_heading_weight: float = 1.0      # ... and per radian of mean heading error
@@ -542,6 +550,7 @@ _V3 = dict(
     curriculum_retreat_frac=0.5,
     # --- cold-start shaping
     cmd_range_start=(0.15, 0.45), track_sigma_start=1.5, track_sigma_steps=40_000_000,
+    shape_curriculum_steps=40_000_000, shape_scale_start=0.15,
     w_alive=1.5, episode_s=30.0, sprint_curriculum_steps=0,
     # --- budget: a cold run has to find the gait before any of the above matters
     dr_curriculum_steps=60_000_000, bringup_curriculum_steps=60_000_000,
@@ -554,7 +563,49 @@ _V3_PROBE = dict(_V3, total_steps=40_000_000, track_sigma_steps=20_000_000,
 
 PRESETS = {
     "default": Config,
-    # ---- v3: THE RECIPE. Cold, one command, nothing warm-started -----------------------------
+    # ---- v3: THE RECIPE. Three stages, the first from random weights --------------------------
+    # Measured 2026-09-12 (a 7-arm probe fleet, cold, 40 M each) the cold JOYSTICK does not work on
+    # this plant, and the reason is in the income, not the optimiser. The tracking income is
+    # (w_track + w_fwd*v_cmd) * exp(-|v - v_cmd| / sigma): it is FLAT far from the command, so a
+    # robot that cannot walk earns almost the same whatever it does, and `alive` (75% of all income
+    # at 10 M, measured with tools/reward_budget.py) pays identically for standing still. Every
+    # free-plant arm parked on the 1.5 Hz clock floor and went backwards; the planar arm left the
+    # floor and then railed the 4.0 Hz CEILING instead. Neither rail is a gait.
+    #
+    # A SPEED income does not have that shape: w_fwd_speed * vx is linear, so the first centimetre
+    # per second pays, and it is the one objective this project has ever trained cold successfully
+    # (walk_mit's sprint_m3_mit_s0: 600 M cold, 16/16 hundred-metre dashes at 3.07 m/s). So learn to
+    # run first, then learn the stick.
+    #
+    # Stage 1 uses objective="speed", NOT "sprint": "speed" pins task = [1, 1] and has no distance
+    # ramp, so no odometry ever enters the actor -- the no-privilege property holds from the first
+    # step of the first stage rather than being restored later.
+    #
+    #   python walk_v3/train.py --preset v3_stage1 --name v3_stage1_s0 --seed 0 ...
+    #   python walk_v3/train.py --preset v3_stage2 --name v3_stage2_s0 --seed 0     #          --warm-start walk_v3/runs/v3_stage1_s0/final.msgpack ...
+    #   python walk_v3/train.py --preset v3       --name v3_s0       --seed 0     #          --warm-start walk_v3/runs/v3_stage2_s0/final.msgpack ...
+    #
+    # All three share one observation and action layout, so each warm start is exact, and stage 1
+    # starts from random weights -- nothing outside this folder is required.
+    #
+    # Stage 1 -- RUN, on the easy plant. Planar (x, z, pitch free; y, roll and yaw absent from the
+    # model), no bring-up, no DR, no jitter. One job: produce a gait.
+    "v3_stage1": lambda: _v2(model_path="model/dash01_v2_planar.xml",
+                             **dict(_V3, objective="speed", bringup_enable=False, hold_enable=False,
+                                    dr_enable=False, jitter_curriculum_steps=0,
+                                    cmd_curriculum_steps=0, track_sigma_steps=0,
+                                    episode_s=20.0, total_steps=60_000_000),
+                             **_FAST),
+    # Stage 2 -- the same gait on the FREE plant, where roll and yaw exist. Still "run", so the
+    # income stays linear while the policy learns to stay upright in two more degrees of freedom.
+    # Heading is billed here for the first time (the planar model has no yaw to bill).
+    "v3_stage2": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                             **dict(_V3, objective="speed", bringup_enable=False, hold_enable=False,
+                                    dr_enable=False, jitter_curriculum_steps=0,
+                                    cmd_curriculum_steps=0, track_sigma_steps=0,
+                                    episode_s=20.0, total_steps=80_000_000),
+                             **_FAST),
+    # Stage 3 -- THE DELIVERABLE. Joystick, free plant, heading, bring-up and DR, warm from stage 2.
     "v3": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V3, **_FAST),
     # the same recipe on the planar model (x, z, pitch free): an iteration sandbox, and the control
     # that says whether a cold-start failure is the objective or the plant
@@ -578,6 +629,17 @@ PRESETS = {
     # E: the planar plant. If A fails and E succeeds, the free plant's roll and yaw are the blocker
     # and the recipe needs the S1 -> S2 ladder rather than a better objective.
     "v3_probe_e_planar": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V3_PROBE, **_FAST),
+    # G: the spec-cycle bill made cadence-invariant. It is charged ONCE per commit, so halving the
+    # clock halves what the policy pays per second for rewriting its spec -- a standing discount
+    # collected by exactly the 1.5 Hz rail every free-plant arm sat on.
+    "v3_probe_g_rateinv": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                                      **dict(_V3_PROBE, spec_cycle_rate_invariant=True), **_FAST),
+    # H: curricula that wait for real competence. The relative gate opened everything at ep_len 157
+    # (1.6 s of survival), and probe_a went backwards right afterwards -- the deadlock is fixed but
+    # the bar is now too low. 400 ticks still cannot deadlock the way an absolute 1200 did, because
+    # it is a floor under a relative gate, not the gate itself.
+    "v3_probe_h_lategate": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                                       **dict(_V3_PROBE, curriculum_gate_floor=400.0), **_FAST),
     # F: no dirty starts. Bring-up randomisation makes a share of episodes begin already falling;
     # on a policy that cannot walk yet that may be all cost and no lesson.
     "v3_probe_f_nobringup": lambda: _v2(model_path="model/dash01_v2_free.xml",

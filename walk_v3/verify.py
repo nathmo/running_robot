@@ -143,16 +143,27 @@ def ladder_eval(cfg, agent, n_envs, seconds, dr, bringup, seed):
     z = jnp.zeros(n_envs)
     init = (state, obs, jnp.ones(n_envs, bool), jnp.zeros((), jnp.int32), z, z, z, z, z)
     (_, _, alive, _, err, yaw, lat, vsum, n), _ = jax.lax.scan(body, init, None, length=ticks)
-    n = np.maximum(np.asarray(n), 1.0)
+    n = np.asarray(n)
+    ok = n > 0                      # envs that lived past the warm window and were measured at all
+    nz = np.maximum(n, 1.0)
     lad_np, alive = np.asarray(lad), np.asarray(alive)
     out = []
     for v in sorted(set(lad_np.tolist())):
         m = lad_np == v
-        out.append(dict(cmd=float(v), err=float((np.asarray(err)[m] / n[m]).mean()),
-                        speed=float((np.asarray(vsum)[m] / n[m]).mean()),
+        mo = m & ok
+        # A policy that died before the warm window produced no speed, so its command error is the
+        # WHOLE command -- not zero. The same arithmetic that made the training log read 0.00 m/s
+        # for a robot that fell on tick 3 would make this suite hand out a PASS to a corpse, which
+        # is worse than having no check: heading and lateral drift go NaN instead, so their checks
+        # fail rather than quietly succeeding on an empty average.
+        e = np.where(ok[m], np.asarray(err)[m] / nz[m], np.abs(v))
+        out.append(dict(cmd=float(v), err=float(e.mean()),
+                        speed=float((np.asarray(vsum)[mo] / nz[mo]).mean()) if mo.any() else 0.0,
                         upright=float(alive[m].mean()),
-                        yaw_deg=float(np.degrees((np.asarray(yaw)[m] / n[m]).mean())),
-                        lat_m=float((np.asarray(lat)[m] / n[m]).mean())))
+                        measured=float(ok[m].mean()),
+                        yaw_deg=float(np.degrees((np.asarray(yaw)[mo] / nz[mo]).mean()))
+                        if mo.any() else float("nan"),
+                        lat_m=float((np.asarray(lat)[mo] / nz[mo]).mean()) if mo.any() else float("nan")))
     return out
 
 
@@ -165,6 +176,10 @@ def check_tracking(rep, cfg, agent, args, tol):
               f"{r['speed']:5.2f}   {r['err']:5.2f}    {r['upright'] * 100:3.0f}%    "
               f"{r['yaw_deg']:5.1f}d   {r['lat_m']:4.2f}m")
     worst = max(r["err"] / max(cfg.v_max, 1e-9) for r in rows)
+    meas = min(r["measured"] for r in rows)
+    rep.add("2. command tracking", "every command produced a measurable run",
+            meas > 0.0, f"{meas * 100:.0f}%", "> 0%",
+            "envs still alive after the warm window; a mean over nothing is not a pass")
     rep.add("2. command tracking", "worst-command error, fraction of top speed",
             worst <= tol, f"{worst * 100:.1f}%", f"<= {tol * 100:.0f}%")
     rep.add("2. command tracking", "upright at every command",
@@ -279,10 +294,10 @@ def check_deploy(rep, run, ckpt, env, agent, args):
 
     sys.path.insert(0, str(PKG.parent))
     sys.path.insert(0, str(PKG.parent / "robot" / "deploy"))
-    try:
-        from robot.deploy.bundle import Bundle
-        from robot.deploy.policy_net import PolicyNet
-    except Exception as e:                      # deploy stack not importable here
+    try:                                        # robot/deploy modules import each other flat
+        from bundle import Bundle
+        from policy_net import PolicyNet
+    except Exception as e:
         rep.skip("7. deploy parity", "numpy actor == JAX actor", f"{type(e).__name__}: {e}")
         return
 
