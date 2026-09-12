@@ -155,6 +155,38 @@ def test_plant():
         check(f"{preset}: stance height ~1.01 m", abs(pl.height_stand - 1.009) < 0.01, f"{pl.height_stand:.4f}")
 
 
+def test_heading(env, cfg):
+    """The v3 heading channel: present, in the right place, and mirrored the right way.
+
+    All three are silent failures. A frame that is the right WIDTH but writes the heading into the
+    wrong column trains a policy on garbage and the widths still check out; a mirror that copies the
+    heading instead of negating it teaches the symmetry loss that drifting left and drifting right
+    call for the same correction, which is worse than having no symmetry loss at all."""
+    import gait
+    from env import FRAME_DIM
+    check("frame carries the heading channel", FRAME_DIM == 34, FRAME_DIM)
+    check("heading has an obs scale", "heading" in cfg.obs_scales, sorted(cfg.obs_scales))
+    # the mirror must negate heading (last column) exactly as it negates the LP yaw rate (col 24)
+    f = jnp.zeros((1, FRAME_DIM)).at[0, 24].set(0.7).at[0, FRAME_DIM - 1].set(0.3)
+    m = gait.mirror_frame(f)
+    check("mirror negates the LP yaw rate", abs(float(m[0, 24]) + 0.7) < 1e-6, f"{float(m[0, 24]):+.3f}")
+    check("mirror negates the heading", abs(float(m[0, FRAME_DIM - 1]) + 0.3) < 1e-6,
+          f"{float(m[0, FRAME_DIM - 1]):+.3f}")
+    check("mirror is an involution on the frame",
+          float(jnp.abs(gait.mirror_frame(m) - f).max()) < 1e-6,
+          f"{float(jnp.abs(gait.mirror_frame(m) - f).max()):.1e}")
+    # and the whole-observation mirror must agree, per history frame
+    import networks as nets
+    mo = nets.ObsMirror(env)
+    o = jnp.zeros((1, env.obs_dim))
+    for k in range(cfg.history_len):
+        o = o.at[0, k * FRAME_DIM + FRAME_DIM - 1].set(0.3)
+    om = mo(o[:, :env.actor_dim])
+    got = [float(om[0, k * FRAME_DIM + FRAME_DIM - 1]) for k in range(cfg.history_len)]
+    check("ObsMirror negates heading in every history frame",
+          all(abs(g + 0.3) < 1e-6 for g in got), f"{got[0]:+.3f} x{len(got)}")
+
+
 def test_env(quick):
     print("env")
     from env import DashEnvV2, EnvParams
@@ -167,6 +199,7 @@ def test_env(quick):
     envl = DashEnvV2(lib, n_envs=4)
     check("library variant: actor 363 / obs 388 / action 9", (envl.actor_dim, envl.obs_dim, envl.action_dim) == (363, 388, 9),
           f"{envl.actor_dim}/{envl.obs_dim}/{envl.action_dim}")
+    test_heading(env, cfg)
     if quick:
         return
     params = EnvParams.final(cfg)._replace(dr_scale=0.5, pitch_assist=1.0)

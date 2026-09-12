@@ -4,7 +4,7 @@ This runs the SHIPPING control law -- `robot/deploy/controller_v2.PolicyControll
 numpy path the Pi executes -- against CPU MuJoCo. It needs no JAX, so it runs on the laptop, and what
 you feel here is what the robot would run, not a re-implementation of it.
 
-    python walk_v3/tools/play_joystick.py --bundle walk_v3/results/v3_joy_s7_55M.npz
+    python walk_v3/tools/play_joystick.py --bundle walk_v3/results/v3_s0.npz
 
 Keys (focus the viewer window):
     W / S     stick up / down by 10% of v_max      SPACE  stick to zero
@@ -17,11 +17,19 @@ joint torque is the same software PD the sim used --
 motors, not position servos; MuJoCo closes no loop for us. Every constant comes out of the bundle, so
 this cannot silently drift from what was trained.
 
-Caveats worth knowing while you drive it (measured 2026-09-12, see the sweep):
-  * the stick is COMPRESSED, not linear: 50% gives ~2.2 m/s of a ~3.1 m/s top speed, not half of it;
-  * zero command is "step in place" with ~0.2 m/s of drift, not a true stand;
-  * ~1 run in 4 falls at 75-100% stick over 20 s;
-  * this policy trained on the NOMINAL plant only (dr_scale never ramped), so the sim is its best case.
+The readout reports FORWARD speed in the base frame, which is what the command means. World-x is
+the wrong number: the policy tracks its own heading, so after a half turn an obedient robot reads as
+running backwards -- and while it is pitching over, world-x flatters it (measured: 4.51 world-x
+against 3.39 true forward, the difference being body pitch as it fell).
+
+It also prints two headings. `head` is the truth from the simulator; `est` is what the POLICY thinks,
+dead-reckoned from the gyro exactly as the robot would. They should agree to a fraction of a degree;
+a growing gap is the heading estimate drifting, which is the one thing that would make a v3 policy
+veer on hardware but not in sim.
+
+`--lock yaw` pins the heading kinematically and `--lock rail` also pins lateral drift. Both are
+DIAGNOSTICS, not features: the real machine has no such constraint, so anything that only works
+locked is not deployable.
 """
 import argparse
 import sys
@@ -32,7 +40,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "walk_v2"))
+sys.path.insert(0, str(ROOT / "walk_v3"))
 sys.path.insert(0, str(ROOT / "robot" / "deploy"))   # controller_v2 imports gait_v2 flat
 
 import mujoco
@@ -48,7 +56,7 @@ class Sim:
     def __init__(self, bundle_path, model_path=None):
         self.bundle = Bundle.load(bundle_path)
         m = self.bundle.meta
-        mp = model_path or (ROOT / "walk_v2" / m["model_path"])
+        mp = model_path or (ROOT / "walk_v3" / m["model_path"])
         self.model = mujoco.MjModel.from_xml_path(str(mp))
         self.data = mujoco.MjData(self.model)
 
@@ -141,6 +149,14 @@ class Sim:
         self.t += self.control_dt
 
     # ---------------------------------------------------------------- readouts
+    def est_heading_deg(self):
+        """What the POLICY believes its heading is -- its own integrated gyro, not the simulator's.
+
+        Printing this next to the truth is the cheapest check that the v3 heading channel is honest:
+        if the estimate drifts away from the true yaw here, it will drift on the robot too, and the
+        policy will hold a heading that is not the one you pointed it at."""
+        return self.ctrl.heading_deg() if hasattr(self.ctrl, "heading_deg") else float("nan")
+
     def speed(self):
         """FORWARD speed in the BASE frame -- what the command means.
 
@@ -175,7 +191,8 @@ class Sim:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bundle", default=str(ROOT / "walk_v2" / "results" / "v3_joy_s7_55M.npz"))
+    ap.add_argument("--bundle", required=True,
+                    help="an .npz written by walk_v3/export.py")
     ap.add_argument("--model", default=None)
     ap.add_argument("--start-stick", type=float, default=0.0)
     ap.add_argument("--step", type=float, default=0.10, help="stick increment per key press")
@@ -225,7 +242,9 @@ def main():
             if sim.t - last_print >= 0.5:
                 last_print = sim.t
                 print(f"\r[play] t {sim.t:6.1f}s  stick {sim.stick * 100:3.0f}%  "
-                      f"commanded {sim.v_cmd:4.2f}  achieved {sim.speed():5.2f} m/s        ",
+                      f"cmd {sim.v_cmd:4.2f}  fwd {sim.speed():5.2f} m/s  "
+                      f"(world-x {sim.speed_world():5.2f})  "
+                      f"head {sim.heading_deg():+6.1f}d  est {sim.est_heading_deg():+6.1f}d     ",
                       end="", flush=True)
             lag = sim.control_dt / speed_scale[0] - (time.perf_counter() - t0)
             if lag > 0:

@@ -257,12 +257,14 @@ def check_privilege(rep, cfg, env, agent, args):
 
 
 # ----------------------------------------------------------------------------- 7. deploy parity
-def check_deploy(rep, run, ckpt, args):
-    """Export the bundle and replay it through the numpy control law the robot runs.
+def check_deploy(rep, run, ckpt, env, agent, args):
+    """Export the bundle, then run the ROBOT's numpy actor on the same observations as the JAX one.
 
-    A policy that only exists inside JAX is not deployable, and the failure mode is silent: a
-    mismatched frame width or a task channel pinned to the wrong constant produces a controller that
-    runs, and runs something else."""
+    A policy that only exists inside JAX is not deployable, and the failure mode is silent: a frame
+    width the deploy path does not know about, a task channel pinned to the wrong constant, or an
+    un-tanh'd last hidden layer all produce a controller that runs, and runs something else. So this
+    compares the actual numbers -- the exported numpy actor's mean action against the trained
+    policy's, on observations taken from a real rollout."""
     out = PKG / "results" / f"{run.name}_verify.npz"
     out.parent.mkdir(exist_ok=True)
     cmd = [sys.executable, str(PKG / "export.py"), "--run", str(run), "--out", str(out)]
@@ -270,19 +272,52 @@ def check_deploy(rep, run, ckpt, args):
         cmd += ["--checkpoint", str(ckpt)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        rep.add("7. deploy parity", "export.py writes a bundle", False, "error", "exit 0",
-                r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "")
+        tail = (r.stderr.strip().splitlines() or [""])[-1]
+        rep.add("7. deploy parity", "export.py writes a bundle", False, "error", "exit 0", tail)
         return
-    rep.add("7. deploy parity", "export.py writes a bundle", True, "ok", "exit 0")
-    tr = subprocess.run([sys.executable, str(PKG / "tools" / "trace.py"), "--run", str(run),
-                         "--bundle", str(out), "--compare"] + (["--checkpoint", str(ckpt)] if ckpt else []),
-                        capture_output=True, text=True)
-    if tr.returncode != 0:
-        rep.skip("7. deploy parity", "numpy law == JAX policy",
-                 "tools/trace.py --compare not available in this build")
+    rep.add("7. deploy parity", "export.py writes a bundle", True, out.name, "exit 0")
+
+    sys.path.insert(0, str(PKG.parent))
+    sys.path.insert(0, str(PKG.parent / "robot" / "deploy"))
+    try:
+        from robot.deploy.bundle import Bundle
+        from robot.deploy.policy_net import PolicyNet
+    except Exception as e:                      # deploy stack not importable here
+        rep.skip("7. deploy parity", "numpy actor == JAX actor", f"{type(e).__name__}: {e}")
         return
-    tail = tr.stdout.strip().splitlines()[-1] if tr.stdout.strip() else ""
-    rep.add("7. deploy parity", "numpy law == JAX policy", "OK" in tail.upper(), tail[-40:], "match")
+
+    b = Bundle.load(out)
+    rep.add("7. deploy parity", "bundle frame width matches the trainer",
+            int(b.meta["frame_dim"]) == FRAME_DIM, b.meta["frame_dim"], FRAME_DIM)
+    rep.add("7. deploy parity", "bundle declares the heading channel",
+            "heading" in b.meta["obs_scales"], "heading" in b.meta["obs_scales"], True,
+            "the deploy frame must build the channel the policy was trained on")
+
+    # observations from a real rollout, not random vectors: normalisation and the once-block only
+    # differ from noise on states the policy actually reaches
+    params = EnvParams.final(cfg_of(agent))._replace(dr_scale=0.0, ctrl_jitter_ms=0.0,
+                                                     ctrl_drop_prob=0.0, pitch_assist=0.0)
+    state, obs = env.reset(jax.random.PRNGKey(3), params)
+
+    def roll(carry, _):
+        state, obs = carry
+        a = jnp.clip(agent._act_greedy(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
+        s2, o2, _, _, _ = env.step(state, a, params)
+        return (s2, o2), o2[:, :env.actor_dim]
+
+    _, seq = jax.lax.scan(roll, (state, obs), None, length=40)
+    seq = np.asarray(seq).reshape(-1, env.actor_dim)[:200]
+    jax_a = np.asarray(agent._act_greedy(agent.params, agent.stats.normalize(
+        jnp.pad(jnp.asarray(seq), ((0, 0), (0, env.obs_dim - env.actor_dim))))))
+    net = PolicyNet(b)
+    np_a = np.stack([net(o) for o in seq.astype(np.float32)])
+    d = float(np.abs(np_a - jax_a[:, :np_a.shape[1]]).max())
+    rep.add("7. deploy parity", "numpy actor == JAX actor (max |delta|)", d < 2e-3, f"{d:.2e}", "< 2e-03",
+            f"over {len(seq)} observations from a live rollout")
+
+
+def cfg_of(agent):
+    return agent.cfg
 
 
 def main():
@@ -311,7 +346,7 @@ def main():
     check_dr(rep, cfg, agent, args, rows)
     check_privilege(rep, cfg, env, agent, args)
     if not args.skip_deploy:
-        check_deploy(rep, run, ck if ck.exists() else None, args)
+        check_deploy(rep, run, ck if ck.exists() else None, env, agent, args)
     return 0 if rep.print() else 1
 
 

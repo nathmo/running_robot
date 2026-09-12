@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # DASH-01 Walker v2 training on SCITAS Izar: ONE V100 (half a node: 20 cores, 94 GB), JAX + MJX.
 #
-# Submit:   sbatch --export=ALL,PRESET=v2_s1_planar,STEPS=300000000,NAME=v2_s1_planar_s0,SEED=0 \
+# Submit:   sbatch --export=ALL,PRESET=v3,NAME=v3_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9 \
 #                  walk_v3/slurm/izar_train.sbatch
 # Chain:    walk_v3/slurm/izar_chain.sh 3 --export=ALL,PRESET=...   (each link: --resume auto)
 #
@@ -24,7 +24,9 @@ source "${VENV:-$HOME/venvs/dash-v2}/bin/activate"
 
 REPO="${REPO:-$HOME/running_robot}"
 PRESET="${PRESET:?set PRESET}"
-STEPS="${STEPS:-300000000}"
+# EMPTY by default: the preset owns the budget. A hard default here silently overrode it --
+# the 40 M probe presets all launched as 300 M runs.
+STEPS="${STEPS:-}"
 NENVS="${NENVS:-1024}"
 NSTEPS="${NSTEPS:-18}"
 NAME="${NAME:-$PRESET}"
@@ -54,6 +56,6 @@ fi
 
 python walk_v3/smoke_test.py --quick
 
-python walk_v3/train.py --preset "$PRESET" --steps "$STEPS" --n-envs "$NENVS" --n-steps "$NSTEPS" \
+python walk_v3/train.py --preset "$PRESET" ${STEPS:+--steps "$STEPS"} --n-envs "$NENVS" --n-steps "$NSTEPS" \
     --resume auto --name "$NAME" --eval-envs "$EVAL_ENVS" --devices "$DEVICES" \
     ${WARM:+--warm-start "$WARM"} ${SEED:+--seed "$SEED"}
