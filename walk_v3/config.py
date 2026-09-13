@@ -358,6 +358,10 @@ class Config:
     pitch_assist_kp: float = 100.0
     pitch_assist_kd: float = 10.0
     pitch_assist_ramp_steps: int = 30_000_000
+    # v3: draw the base assist per EPISODE, so pitch_assist is the FRACTION of episodes that get
+    # help rather than the magnitude of the help. A uniformly scaled assist still corrects that
+    # share of every mistake, so the policy never meets its own errors until the wheel is gone.
+    assist_per_episode: bool = False
     pitch_assist_gate_ep_len: float = 0.0   # 0 = clock fade from step 0 (v2); >0 = full help until
                                             # ep_len > gate for 5 rollouts, then a monotonic fade (v2b)
     w_assist_penalty: float = 0.0
@@ -625,6 +629,15 @@ PRESETS = {
                              yaw_assist_kp=100.0, yaw_assist_kd=10.0,
                              pitch_assist_ramp_steps=100_000_000),
                       **_FAST),
+    # THE HANDOVER, done as a distribution instead of a dial: assist_per_episode makes
+    # pitch_assist the share of episodes that get help, so unassisted episodes are in the training
+    # distribution from the first rollout and the fade reweights rather than removes.
+    "v3_epiassist": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                                **dict(_V3, roll_assist_kp=100.0, roll_assist_kd=10.0,
+                                       yaw_assist_kp=100.0, yaw_assist_kd=10.0,
+                                       assist_per_episode=True,
+                                       pitch_assist_ramp_steps=100_000_000),
+                                **_FAST),
     # insurance against the cliff: the same recipe, handing the robot back over 150 M of 200 M
     # instead of 100. The fade length is the parameter every collapse in this lineage has turned on.
     "v3_slowfade": lambda: _v2(model_path="model/dash01_v2_free.xml",

@@ -112,6 +112,7 @@ class EnvState:
     lp_yaw_true: jnp.ndarray
     lp_yaw_obs: jnp.ndarray
     yaw_est: jnp.ndarray         # v3: heading from INTEGRATED gyro z -- the robot's own estimate
+    assist_on: jnp.ndarray       # v3: is the base assist active THIS episode? (see _assist_scale)
     reflex_prate: jnp.ndarray
     roll_lp: jnp.ndarray
     hist: jnp.ndarray            # (hist_raw_len, FRAME_DIM)
@@ -299,6 +300,16 @@ class DashEnvV2:
         except Exception:               # pragma: no cover - field layout drift
             return jnp.zeros(())
 
+    def _assist_scale(self, state, params):
+        """How much base assist this episode gets: the ramp itself, or a per-episode coin flip on it.
+
+        `assist_per_episode` turns `params.pitch_assist` from a magnitude into a PROBABILITY. Either
+        way it is zero whenever the caller sets it to zero, so the greedy eval and the exported
+        controller never see a crutch."""
+        if not self.cfg.assist_per_episode:
+            return params.pitch_assist
+        return state.assist_on * jnp.where(params.pitch_assist > 0.0, 1.0, 0.0)
+
     def _workspace_out(self, data):
         p, c = self.plant, self.cfg
         R = self._base_rot(data)
@@ -434,7 +445,8 @@ class DashEnvV2:
     # ------------------------------------------------------------------ reset
     def _reset_one(self, key, params: EnvParams, ov: Override):
         c, p, gp = self.cfg, self.plant, self.gp
-        k_draw, k_noise, k_pose, k_lib, k_push, k_gust, k_next, k_frame, k_light = jax.random.split(key, 9)
+        (k_draw, k_noise, k_pose, k_lib, k_push, k_gust, k_next, k_frame, k_light,
+         k_assist) = jax.random.split(key, 10)
         draw = draw_plant(k_draw, c, p, params.dr_scale, ov)
         mx_i = model_with(p, draw.fields)
         qpos = jnp.asarray(p.key_qpos)
@@ -488,6 +500,17 @@ class DashEnvV2:
             prev_residual=jnp.zeros(6), prev_motor_cmd=jnp.zeros(6), thermal_x=draw.thermal_x0,
             prev_vel_body=jnp.zeros(3), lp_yaw_true=jnp.zeros(()), lp_yaw_obs=jnp.zeros(()),
             yaw_est=jnp.zeros(()),
+            # THE CRUTCH IS PER EPISODE, NOT PER NEWTON. Scaling one assist down uniformly still
+            # corrects that fraction of every mistake the policy makes, so the policy never
+            # experiences its own roll errors and never learns to answer them -- measured, five
+            # seeds degraded from ep_len 600-1150 to 146-519 while the assist was still at 0.64,
+            # long before it reached zero, and four earlier seeds collapsed outright at the moment
+            # it did. Drawing it per episode instead makes params.pitch_assist the FRACTION of
+            # episodes that get help: at 0.64, 64% are fully assisted and 36% are fully on their
+            # own, so the unassisted case is in the training distribution from the first rollout
+            # and the fade is a reweighting rather than a cliff.
+            assist_on=(jax.random.uniform(k_assist) < params.pitch_assist).astype(jnp.float32)
+            if c.assist_per_episode else jnp.ones(()),
             reflex_prate=jnp.zeros(()), roll_lp=jnp.zeros(()),
             hist=jnp.zeros((self.hist_raw_len, FRAME_DIM), jnp.float32),
             gyro_bias=jnp.zeros(3), stale_left=jnp.zeros((), jnp.int32), stale_frame=jnp.zeros(6),
@@ -720,7 +743,7 @@ class DashEnvV2:
         if c.pitch_assist_kp > 0.0:
             pq = data.qpos[p.base_q["pitch"]]
             pqd = data.qvel[p.base_d["pitch"]]
-            assist = -params.pitch_assist * (c.pitch_assist_kp * pq + c.pitch_assist_kd * pqd)
+            assist = -self._assist_scale(state, params) * (c.pitch_assist_kp * pq + c.pitch_assist_kd * pqd)
             qfrc = qfrc.at[p.base_d["pitch"]].set(assist)
         else:
             assist = jnp.zeros(())
@@ -728,13 +751,13 @@ class DashEnvV2:
             # S2 roll wheel: same fade scalar, own gains; billed with the pitch torque (assist_pen = w*(ap^2+ar^2))
             rq = data.qpos[p.base_q["roll"]]
             rqd = data.qvel[p.base_d["roll"]]
-            assist_r = -params.pitch_assist * (c.roll_assist_kp * rq + c.roll_assist_kd * rqd)
+            assist_r = -self._assist_scale(state, params) * (c.roll_assist_kp * rq + c.roll_assist_kd * rqd)
             qfrc = qfrc.at[p.base_d["roll"]].set(assist_r)
             assist = jnp.sqrt(assist ** 2 + assist_r ** 2)
         if c.yaw_assist_kp > 0.0 and p.base_d["yaw"] >= 0:
             yq = data.qpos[p.base_q["yaw"]]
             yqd = data.qvel[p.base_d["yaw"]]
-            assist_y = -params.pitch_assist * (c.yaw_assist_kp * yq + c.yaw_assist_kd * yqd)
+            assist_y = -self._assist_scale(state, params) * (c.yaw_assist_kp * yq + c.yaw_assist_kd * yqd)
             qfrc = qfrc.at[p.base_d["yaw"]].set(assist_y)
             assist = jnp.sqrt(assist ** 2 + assist_y ** 2)
         data = data.replace(qvel=qvel, xfrc_applied=xfrc, qfrc_applied=qfrc)
