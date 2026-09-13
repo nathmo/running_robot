@@ -32,7 +32,12 @@ NSTEPS="${NSTEPS:-18}"
 NAME="${NAME:-$PRESET}"
 WARM="${WARM:-}"
 SEED="${SEED:-}"
-EVAL_ENVS="${EVAL_ENVS:-16}"
+# 64, not 16. The eval scores a COMMAND LADDER, so 16 envs is ~3 per rung and "upright" can only
+# read 0 / 33 / 67 / 100% -- which is what made a stage-3 seed look like it was oscillating between
+# 0% and 62% when it was mostly being measured badly. The keeper picks best.msgpack off this score,
+# so the noise is not cosmetic. The eval loop exits as soon as every env has ended, so the extra
+# envs are nearly free: they ride the same vmapped step.
+EVAL_ENVS="${EVAL_ENVS:-64}"
 DEVICES="${DEVICES:-1}"        # data-parallel GPUs; submit with --gres=gpu:$DEVICES (--partition gpu-xl for 4)
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
