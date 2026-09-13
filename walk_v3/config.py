@@ -569,7 +569,12 @@ _V3 = dict(
     # command band), stand on your own (fade the assist), do it well (the gait-quality penalties),
     # do it from a bad start (bring-up), do it on a different robot (DR), do it with a worse
     # controller (jitter and dropped ticks).
-    curriculum_order=(("cmd_lo", "cmd_hi", "cmd_zero_p"), "pitch_assist", "shape_scale",
+    # eff_scale and stance_ratio ride in the "do it well" group rather than being left out: a name
+    # omitted from this tuple is NOT disabled, it advances unqueued, which is how DR ended up ramping
+    # during a stage 1 that was supposed to have none. Grouping them with shape_scale costs no extra
+    # budget -- a group takes as long as its longest member.
+    curriculum_order=(("cmd_lo", "cmd_hi", "cmd_zero_p"), "pitch_assist",
+                      ("shape_scale", "eff_scale", "stance_ratio"),
                       "bringup_scale", "dr_scale", ("ctrl_jitter_ms", "ctrl_drop_prob")),
     # --- budget. SEQUENTIAL ramps do not overlap, so the run needs the SUM of them, not the max.
     # Sized so the whole queue completes inside the budget with room to consolidate afterwards:
