@@ -571,7 +571,8 @@ class PPO:
         if getattr(c, "bringup_enable", False) and c.bringup_curriculum_steps > 0:
             # open the drop height and the release tilt as competence is earned: the measured envelope
             # today is +-5 deg, and the target is +-20, so starting wide would begin most episodes lost
-            kw["bringup_scale"] = self._gated("bringup_scale", ep_len, 0.0, 1.0,
+            kw["bringup_scale"] = self._gated("bringup_scale", ep_len, 0.0,
+                                              float(getattr(c, "bringup_target", 1.0)),
                                               c.bringup_curriculum_steps, _g(c.bringup_gate_ep_len), rf, _q("bringup_scale", d_steps))
         if c.objective == "joystick" and c.cmd_curriculum_steps > 0:
             # widen the command band DOWNWARD from what the warm start already does. Opening it to

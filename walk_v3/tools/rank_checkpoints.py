@@ -12,8 +12,9 @@ weighting (tracking error, falls, heading), and prints them worst to best so the
 line. `--write-best` then copies the winner over `best.msgpack` -- which is what `export.py` and the
 next stage's warm start both read.
 
-The env and the jitted rollout are built ONCE and the parameters swapped per checkpoint, so the cost
-is one compile plus one rollout each rather than one compile each.
+The env and the jitted rollout are built ONCE and the weights passed in as arguments, so the cost is
+one compile for the whole sweep plus one rollout per checkpoint -- not one compile each, which at
+2-4 minutes a trace is the difference between three minutes and ninety.
 """
 import argparse
 import shutil
@@ -62,10 +63,14 @@ def main():
     cfg, _env, agent = load_run(run, cks[0])
     n_envs = int(len(cfg.eval_ladder) * args.n_per)
 
+    # one compile, then one rollout per checkpoint: every call here differs ONLY in the policy
+    # parameters, which is exactly the invariant `cache` requires
+    cache = {}
     out = []
     for ck in cks:
         agent.load(ck, warm_start=False)
-        rows = ladder_eval(cfg, agent, n_envs, args.seconds, dr=False, bringup=False, seed=11)
+        rows = ladder_eval(cfg, agent, n_envs, args.seconds, dr=False, bringup=False, seed=11,
+                           cache=cache)
         s, err, fall, head = score(rows, args.fall_weight, args.heading_weight)
         out.append((s, ck, err, fall, head, rows))
 
@@ -82,7 +87,8 @@ def main():
     cur = run / "best.msgpack"
     if cur.exists():
         agent.load(cur, warm_start=False)
-        rows = ladder_eval(cfg, agent, n_envs, args.seconds, dr=False, bringup=False, seed=11)
+        rows = ladder_eval(cfg, agent, n_envs, args.seconds, dr=False, bringup=False, seed=11,
+                           cache=cache)
         s, err, fall, head = score(rows, args.fall_weight, args.heading_weight)
         print(f"training keeper:     best.msgpack   score {s:.3f}  err {err:.2f}  "
               f"upright {(1 - fall) * 100:.0f}%")

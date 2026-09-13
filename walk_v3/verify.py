@@ -41,7 +41,7 @@ import jax.numpy as jnp
 from config import config_from_dict
 from env import DashEnvV2, EnvParams, FRAME_DIM
 from evaluate import load_run
-from ppo import initial_params
+from ppo import ObsStats, initial_params
 from train import command_ladder, make_eval_env
 
 
@@ -115,59 +115,81 @@ def check_curriculum(rep, run, ckpt, cfg):
 
 # ------------------------------------------------------------- 2/3/5. the ladder, straight, plant
 def ladder_eval(cfg, agent, n_envs, seconds, dr, bringup, seed, quiet=True, greedy=True,
-                bringup_scale=1.0):
+                bringup_scale=1.0, cache=None):
     """Greedy rollout on a pinned command ladder. Returns per-command (err, upright, heading, |y|).
 
     `dr=True` means the PLANT is drawn from the DR ranges and every disturbance stays off. That
     distinction is the whole game: this lineage's `load_run(dr=True)` also re-enables pushes, wind,
     trips and a hot thermal start, and it killed a known-good policy in 0.21 s -- which was then
-    reported as the policy being fragile. Draw the plant; leave the weather alone."""
-    # `quiet` is the difference between "can this policy do the job" and "what does a training
-    # rollout see". The eval env turns the weather off -- obs noise, pushes, wind, trips, a hot
-    # thermal start -- and every one of those is ON in training, so a policy can read 100% upright
-    # here and still produce 85-tick episodes there. Pass quiet=False to ask the second question.
-    c = replace(cfg, dr_enable=bool(dr),
-                pitch_assist_kp=0.0, roll_assist_kp=0.0, yaw_assist_kp=0.0,
-                **(dict(obs_noise_enable=False, push_interval_s=0.0, wind_force_max=0.0,
-                        wind_gust_n=0.0, trip_prob=0.0, thermal_hot_start_max=0.0)
-                   if quiet else {}))
-    env = DashEnvV2(c, n_envs=n_envs)
-    params = EnvParams.final(cfg)._replace(
-        dr_scale=1.0 if dr else 0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0, pitch_assist=0.0,
-        bringup_scale=float(bringup_scale) if bringup else 0.0,
-        bringup_p_drop=0.5 if bringup else 0.0, bringup_p_held=0.5 if bringup else 0.0)
-    lad = jnp.asarray(command_ladder(cfg, n_envs))
-    ticks = int(seconds / env.control_dt)
-    warm = int(cfg.eval_warm_ticks)
-    net = agent.net
-    stats = agent.stats
+    reported as the policy being fragile. Draw the plant; leave the weather alone.
 
-    def body(carry, _):
-        state, obs, alive, t, err, yaw, lat, vsum, n = carry
-        if greedy:
-            a = net.apply(agent.params, stats.normalize(obs), method=net.actor_mean)
-        else:
-            # the policy TRAINING actually runs: a SAMPLE at the current std, not the mean. This
-            # lineage has a rule about that gap (greedy ep_len and rollout ep_len are different
-            # numbers) and a stage handover is exactly where it bites.
-            mu, log_std, _v, _e = net.apply(agent.params, stats.normalize(obs))
-            a = mu + jnp.exp(log_std) * jax.random.normal(
-                jax.random.fold_in(jax.random.PRNGKey(seed + 77), t), mu.shape)
-        a = jnp.clip(a, -1.0, 1.0)
-        state2, obs2, _, done, info = env.step(state, a, params)
-        on = alive & (t >= warm)
-        err = err + jnp.where(on, jnp.abs(info["v_body_x"] - lad), 0.0)
-        vsum = vsum + jnp.where(on, info["v_body_x"], 0.0)
-        yaw = yaw + jnp.where(on, jnp.abs(info["yaw_true"]), 0.0)
-        lat = lat + jnp.where(on, jnp.abs(info["lateral_y"]), 0.0)
-        n = n + on.astype(jnp.float32)
-        return (state2, obs2, alive & ~done, t + 1, err, yaw, lat, vsum, n), None
+    `cache` is a caller-owned dict. Without it every call builds a fresh env and traces a fresh
+    scan, which is a 2-4 minute compile -- fine once, ruinous in a loop over 14 checkpoints. Pass a
+    dict that you know spans calls differing ONLY in the policy parameters (same run, same cfg) and
+    the compiled rollout is reused with the weights and obs statistics passed in as arguments. The
+    caller owns it precisely because only the caller knows that invariant holds.
+    """
+    key = (n_envs, float(seconds), bool(dr), bool(bringup), int(seed), bool(quiet), bool(greedy),
+           float(bringup_scale))
+    built = None if cache is None else cache.get(key)
+    if built is None:
+        # `quiet` is the difference between "can this policy do the job" and "what does a training
+        # rollout see". The eval env turns the weather off -- obs noise, pushes, wind, trips, a hot
+        # thermal start -- and every one of those is ON in training, so a policy can read 100%
+        # upright here and still produce 85-tick episodes there. Pass quiet=False for the second.
+        c = replace(cfg, dr_enable=bool(dr),
+                    pitch_assist_kp=0.0, roll_assist_kp=0.0, yaw_assist_kp=0.0,
+                    **(dict(obs_noise_enable=False, push_interval_s=0.0, wind_force_max=0.0,
+                            wind_gust_n=0.0, trip_prob=0.0, thermal_hot_start_max=0.0)
+                       if quiet else {}))
+        env = DashEnvV2(c, n_envs=n_envs)
+        params = EnvParams.final(cfg)._replace(
+            dr_scale=1.0 if dr else 0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0, pitch_assist=0.0,
+            bringup_scale=float(bringup_scale) if bringup else 0.0,
+            bringup_p_drop=0.5 if bringup else 0.0, bringup_p_held=0.5 if bringup else 0.0)
+        lad = jnp.asarray(command_ladder(cfg, n_envs))
+        ticks = int(seconds / env.control_dt)
+        warm = int(cfg.eval_warm_ticks)
+        net = agent.net
 
-    state, obs = env.reset(jax.random.PRNGKey(seed), params)
-    state = state.replace(v_cmd=lad, cmd_left=jnp.full_like(state.cmd_left, 1e9))
-    z = jnp.zeros(n_envs)
-    init = (state, obs, jnp.ones(n_envs, bool), jnp.zeros((), jnp.int32), z, z, z, z, z)
-    (_, _, alive, _, err, yaw, lat, vsum, n), _ = jax.lax.scan(body, init, None, length=ticks)
+        def run(policy_params, mean, var, count):
+            stats = ObsStats(mean=mean, var=var, count=count)
+
+            def body(carry, _):
+                state, obs, alive, t, err, yaw, lat, vsum, n = carry
+                if greedy:
+                    a = net.apply(policy_params, stats.normalize(obs), method=net.actor_mean)
+                else:
+                    # the policy TRAINING actually runs: a SAMPLE at the current std, not the mean.
+                    # This lineage has a rule about that gap (greedy ep_len and rollout ep_len are
+                    # different numbers) and a stage handover is exactly where it bites.
+                    mu, log_std, _v, _e = net.apply(policy_params, stats.normalize(obs))
+                    a = mu + jnp.exp(log_std) * jax.random.normal(
+                        jax.random.fold_in(jax.random.PRNGKey(seed + 77), t), mu.shape)
+                a = jnp.clip(a, -1.0, 1.0)
+                state2, obs2, _, done, info = env.step(state, a, params)
+                on = alive & (t >= warm)
+                err = err + jnp.where(on, jnp.abs(info["v_body_x"] - lad), 0.0)
+                vsum = vsum + jnp.where(on, info["v_body_x"], 0.0)
+                yaw = yaw + jnp.where(on, jnp.abs(info["yaw_true"]), 0.0)
+                lat = lat + jnp.where(on, jnp.abs(info["lateral_y"]), 0.0)
+                n = n + on.astype(jnp.float32)
+                return (state2, obs2, alive & ~done, t + 1, err, yaw, lat, vsum, n), None
+
+            state, obs = env.reset(jax.random.PRNGKey(seed), params)
+            state = state.replace(v_cmd=lad, cmd_left=jnp.full_like(state.cmd_left, 1e9))
+            z = jnp.zeros(n_envs)
+            init = (state, obs, jnp.ones(n_envs, bool), jnp.zeros((), jnp.int32), z, z, z, z, z)
+            (_, _, alive, _, err, yaw, lat, vsum, n), _ = jax.lax.scan(body, init, None,
+                                                                      length=ticks)
+            return alive, err, yaw, lat, vsum, n
+
+        built = (jax.jit(run), lad)
+        if cache is not None:
+            cache[key] = built
+    run_jit, lad = built
+    alive, err, yaw, lat, vsum, n = run_jit(agent.params, agent.stats.mean, agent.stats.var,
+                                            agent.stats.count)
     n = np.asarray(n)
     ok = n > 0                      # envs that lived past the warm window and were measured at all
     nz = np.maximum(n, 1.0)
@@ -263,34 +285,36 @@ def check_bringup(rep, cfg, agent, args):
         return
     # TWO envelopes, and the PASS is on the smaller one.
     #
-    # `bringup_scale=1.0` is a 5-10 cm drop with the base at +-20 deg of pitch. That is a training
-    # target, not an operator: measured on the real robot (2026-09-10 bring-up probe) the envelope
-    # a person can actually produce is upright to 5 deg BACK with both feet flat after a >=1 s
-    # hold -- +5 deg FORWARD gave 16/16 floor violations and any roll lifted a foot. Scoring the
-    # deliverable at the full trained width asks the policy to survive something the hardware
-    # bring-up will never do, so a FAIL there says nothing about whether the robot can be let go.
+    # The TRAINED envelope (`bringup_target`) is a training target, not an operator: at 1.0 it is a
+    # 5-10 cm free drop at +-20 deg of pitch. Measured on the real robot the bring-up a person can
+    # actually produce is upright to 5 deg BACK with both feet flat after a >=1 s hold; +5 deg
+    # FORWARD gave 16/16 floor violations and any roll lifted a foot. Scoring the deliverable at
+    # the trained width asks the policy to survive something the hardware bring-up will never do,
+    # so a FAIL there says nothing about whether the robot can be let go.
     #
     # `bringup_operator_scale` (0.25 => +-6.5 deg of pitch, 2-3 cm of drop) is what the contract is
-    # written against. The full width is still measured and printed, because a policy that only
+    # written against. The trained width is still measured and printed, because a policy that only
     # survives the narrow band has no margin and that is worth seeing.
     op = float(getattr(cfg, "bringup_operator_scale", 0.25))
+    tgt = float(getattr(cfg, "bringup_target", 1.0))
     rows = ladder_eval(cfg, agent, args.n_envs, 6.0, dr=False, bringup=True, seed=23,
                        bringup_scale=op)
     wide = ladder_eval(cfg, agent, args.n_envs, 6.0, dr=False, bringup=True, seed=23,
-                       bringup_scale=1.0)
+                       bringup_scale=tgt)
     up = float(np.mean([r["upright"] for r in rows]))
     up_wide = float(np.mean([r["upright"] for r in wide]))
     print(f"\n[bring-up | dropped or released misaligned]   operator envelope "
-          f"(scale {op:.2f}) {up * 100:.0f}%   full trained envelope {up_wide * 100:.0f}%")
+          f"(scale {op:.2f}) {up * 100:.0f}%   trained envelope (scale {tgt:.2f}) "
+          f"{up_wide * 100:.0f}%")
     for r, w in zip(rows, wide):
         print(f"                          {r['cmd'] / cfg.v_max * 100:3.0f}%  upright "
-              f"{r['upright'] * 100:3.0f}%   (full envelope {w['upright'] * 100:3.0f}%)")
+              f"{r['upright'] * 100:3.0f}%   (trained envelope {w['upright'] * 100:3.0f}%)")
     rep.add("4. bring-up", "survives being let go (operator envelope)", up >= 0.8,
             f"{up * 100:.0f}%", ">= 80%",
             f"bringup_scale {op:.2f} = the bring-up a person can actually produce")
-    rep.add("4. bring-up", "margin: the full trained envelope", up_wide >= 0.5,
+    rep.add("4. bring-up", "margin: the trained envelope", up_wide >= 0.5,
             f"{up_wide * 100:.0f}%", ">= 50%",
-            "5-10 cm drop at +-20 deg -- harsher than any hardware bring-up, kept as margin")
+            f"bringup_scale {tgt:.2f} = the widest this run was trained on")
 
 
 # ------------------------------------------------------------------------- 6. the privilege audit

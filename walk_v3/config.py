@@ -403,6 +403,17 @@ class Config:
     bringup_roll_deg_start: float = 2.0
     bringup_hold_s: tuple = (0.3, 2.5)      # how long the hand stays on
     bringup_grace_s: float = 0.35           # no fall termination while dropping / just released
+    # HOW WIDE THE RAMP GOES, not just how fast. 1.0 is a 5-10 cm free drop at +-20 deg of pitch,
+    # and measured 2026-09-13 that target does not merely fail, it DESTROYS the policy: three seeds
+    # sitting at 0.15-0.29 m/s error and 98-100% upright at 14.7 M were at instant death by 29.5 M,
+    # the gate then correctly retreated bringup_scale all the way from 0.30 back to 0.000 -- and at
+    # 40 M, with bring-up fully off again, ep_len was still ~100 and the return still -100. The
+    # retreat does not undo the damage, so the curriculum has to be gentle enough never to do it.
+    #
+    # 0.40 is ~+-9 deg of pitch and a 2-4 cm drop, comfortably outside the MEASURED hardware
+    # bring-up envelope (upright to 5 deg back, feet flat) that the contract is scored on. Training
+    # a stunt envelope the robot will never see, at the cost of the policy, is a bad trade.
+    bringup_target: float = 1.0
     bringup_curriculum_steps: int = 40_000_000
     bringup_gate_ep_len: float = 600.0
     # THE ENVELOPE THE CONTRACT IS SCORED ON, as a fraction of the trained one. Training opens to
@@ -807,6 +818,7 @@ PRESETS = {
                                     # person holds the robot and lets go. Nobody drops it 10 cm onto its feet.
                                     bringup_drop_frac=0.10,
                                     bringup_held_frac=0.25,
+                                    bringup_target=0.40,
                                     bringup_curriculum_steps=40_000_000,
                                     dr_curriculum_steps=40_000_000,
                                     jitter_curriculum_steps=25_000_000,
@@ -906,6 +918,7 @@ PRESETS = {
                                         # person holds the robot and lets go. Nobody drops it 10 cm onto its feet.
                                         bringup_drop_frac=0.10,
                                         bringup_held_frac=0.25,
+                                        bringup_target=0.40,
                                         bringup_curriculum_steps=40_000_000,
                                         dr_curriculum_steps=40_000_000,
                                         jitter_curriculum_steps=25_000_000,

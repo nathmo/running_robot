@@ -104,10 +104,12 @@ def run_eval(agent, cfg, eval_env):
                                        pitch_assist=0.0, bringup_scale=0.0, bringup_p_drop=0.0,
                                        bringup_p_held=0.0)
     ev = agent.evaluate(params=pt, ladder=lad, n_max_steps=n_track)
-    # bring-up: every episode starts dirty (dropped or held-misaligned), at the FULL trained
-    # envelope, and the only question asked is whether it is still upright
+    # bring-up: every episode starts dirty (dropped or held-misaligned) and the only question asked
+    # is whether it is still upright. At the envelope this run actually TRAINS, not a fixed 1.0 --
+    # scoring the keeper on a width the curriculum never opens ranks checkpoints on noise.
     pb = EnvParams.final(cfg)._replace(dr_scale=0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0,
-                                       pitch_assist=0.0, bringup_scale=1.0,
+                                       pitch_assist=0.0,
+                                       bringup_scale=float(getattr(cfg, "bringup_target", 1.0)),
                                        bringup_p_drop=0.5, bringup_p_held=0.5)
     ev_bu = agent.evaluate(params=pb, ladder=lad, n_max_steps=int(6.0 / eval_env.control_dt), seed=2000)
     # and the same ladder over the band the curriculum is actually commanding right now
