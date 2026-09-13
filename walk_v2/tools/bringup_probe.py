@@ -128,7 +128,7 @@ def make_runner(env, agent, n_max):
 
 
 def rollout(run, agent, seed, hold_s, hold_z, pitch, roll, dr=False, policy_at=0.0, dr_scale=1.0,
-            start_red=0.0):
+            start_red=0.0, rv=(0.0, 0.0, 0.0)):
     """Greedy rollout: held for hold_s, then free plant to the end of the compiled window."""
     params = EnvParams.final(agent.cfg)._replace(
         dr_scale=dr_scale if (dr and agent.cfg.dr_enable) else 0.0,
@@ -136,7 +136,8 @@ def rollout(run, agent, seed, hold_s, hold_z, pitch, roll, dr=False, policy_at=0
         ctrl_drop_prob=agent.cfg.ctrl_drop_prob_final * dr_scale if dr else 0.0,
         pitch_assist=0.0, stoplight_prob=0.0,
         hold_s=float(hold_s), hold_z=float(hold_z), hold_pitch=float(pitch), hold_roll=float(roll),
-        start_red_s=float(start_red))
+        start_red_s=float(start_red), release_vx=float(rv[0]), release_vy=float(rv[1]),
+        release_vz=float(rv[2]))
     st, alive, qs = run(jax.random.PRNGKey(seed), params, jnp.float32(policy_at))
     st = {k: np.asarray(v) for k, v in st.items()}
     st["alive"] = np.asarray(alive)
@@ -170,7 +171,8 @@ def main():
     ap.add_argument("--pitch", type=float, default=0.0, help="base pitch while held (deg, + = nose DOWN / leaning forward)")
     ap.add_argument("--roll", type=float, default=0.0, help="base roll while held (deg)")
     ap.add_argument("--dz", type=float, default=0.0, help="mm above the touching height at release")
-    ap.add_argument("--sweep", default=None, choices=["hold", "phase", "tilt", "dz", "handover", "early", "drpair", "stopped", "all"])
+    ap.add_argument("--sweep", default=None, choices=["hold", "phase", "tilt", "dz", "handover", "early", "drpair", "stopped",
+                             "pitchfine", "rollfine", "dzfine", "combo", "all"])
     ap.add_argument("--video", default=None)
     ap.add_argument("--npz", default=None, help="single mode: save env 0's qpos trajectory")
     ap.add_argument("--policy-at", type=float, default=0.0,
@@ -198,11 +200,11 @@ def main():
           .format(hold_max + args.after, n_max, args.episodes))
     run = make_runner(env, agent, n_max)
 
-    def run_one(hold, pitch, roll, dz, qpos=False):
+    def run_one(hold, pitch, roll, dz, qpos=False, rv=(0.0, 0.0, 0.0)):
         zt, _ = touch_height(cfg, pitch * DEG, roll * DEG)
         st, qs = rollout(run, agent, args.seed, hold, zt + dz * 1e-3, pitch * DEG, roll * DEG,
                          dr=args.dr, policy_at=args.policy_at, dr_scale=args.dr_scale,
-                         start_red=args.start_red)
+                         start_red=args.start_red, rv=rv)
         return (st, qs) if qpos else st
 
     out, t0 = {}, __import__("time").time()
@@ -234,6 +236,32 @@ def main():
                             (0, -10), (7, 7), (-7, 7)]:
             note("tilt_p{}_r{}".format(pitch, roll), "pitch {:+3d} roll {:+3d} deg".format(pitch, roll),
                  run_one(args.hold, pitch, roll, args.dz), False)
+    if args.sweep == "pitchfine":
+        print("\n[pitch tolerance]  hold {:.0f} s, both feet flat, + = leaning FORWARD".format(args.hold))
+        for pitch in [-10, -8, -6, -4, -2, -1, 0, 1, 2, 3, 4, 5]:
+            note("pf_{}".format(pitch), "pitch {:+5.1f} deg ({})".format(
+                pitch, "forward" if pitch > 0 else ("back" if pitch < 0 else "level")),
+                run_one(args.hold, pitch, 0.0, args.dz), False)
+    if args.sweep == "rollfine":
+        print("\n[roll tolerance]  hold {:.0f} s; roll lifts one foot off the floor".format(args.hold))
+        for roll in [-5, -3, -2, -1, -0.5, 0, 0.5, 1, 2, 3, 5]:
+            note("rf_{}".format(roll), "roll {:+5.1f} deg (one foot {:+.0f} mm)".format(
+                roll, 1000 * abs(touch_height(cfg, 0.0, roll * DEG)[0] - z_touch) * 2),
+                run_one(args.hold, 0.0, roll, args.dz), False)
+    if args.sweep == "dzfine":
+        print("\n[height tolerance]  hold {:.0f} s, upright; 0 = feet just touching".format(args.hold))
+        for dz in [-10, -7, -5, -2, 0, 10, 20, 25, 30, 35, 40]:
+            note("df_{}".format(dz), "height {:+5.0f} mm".format(dz),
+                run_one(args.hold, 0.0, 0.0, dz), False)
+    if args.sweep == "combo":
+        print("\n[combined tilt, then release velocity]  hold {:.0f} s".format(args.hold))
+        for pitch, roll in [(0, 0), (-2, 1), (-2, 2), (0, 1), (0, 2), (2, 1), (-4, 2)]:
+            note("cb_{}_{}".format(pitch, roll), "pitch {:+3.0f} roll {:+3.0f} deg".format(pitch, roll),
+                run_one(args.hold, pitch, roll, args.dz), False)
+        for v in [(0, 0, -0.05), (0, 0, -0.1), (0, 0, -0.2), (0, 0, -0.4), (0.1, 0, 0), (-0.1, 0, 0),
+                  (0.2, 0, 0), (0, 0.1, 0), (0, 0.2, 0)]:
+            note("rv_{}".format(v), "release v ({:+.2f} {:+.2f} {:+.2f}) m/s".format(*v),
+                run_one(args.hold, 0.0, 0.0, args.dz, rv=v), False)
     if args.sweep == "stopped":
         print("[STOPPED bring-up]  the deployed runtime comes up with the run flag down; "
               "held {:.0f} s, then released, then RUN".format(args.hold))

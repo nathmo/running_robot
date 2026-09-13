@@ -90,17 +90,11 @@ def static_report(cfg, plant, out):
 
 
 # --------------------------------------------------------------------------- rollout
-def record(env, agent, seed, n_max, dr_scale=0.0, assist=0.0):
-    """Greedy rollout; per tick, per env, the plant state before the step (+ info scalars)."""
-    cfg = agent.cfg
+def make_probe(env):
+    """One per-tick reading of everything a limit is measured against (pre-step, unbatched)."""
     p = env.plant
-    params = EnvParams.final(cfg)._replace(dr_scale=float(dr_scale), ctrl_jitter_ms=0.0,
-                                           ctrl_drop_prob=0.0, pitch_assist=float(assist),
-                                           stoplight_prob=0.0)
     spring_qadr = np.array([int(p.m.jnt_qposadr[j]) for j in p.spring_jids])
     spring_dadr = np.array([int(p.m.jnt_dofadr[j]) for j in p.spring_jids])
-    spring_k = np.array([float(p.m.jnt_stiffness[j]) for j in p.spring_jids])
-    spring_c = np.array([float(p.m.dof_damping[d]) for d in spring_dadr])
     ws_ref = jnp.asarray(p.ws_ref)
 
     def probe(st):
@@ -118,6 +112,16 @@ def record(env, agent, seed, n_max, dr_scale=0.0, assist=0.0):
                     v_body=env._vel_body(d), v_world=env._vel_world(d), y=env._y(d),
                     th_scale=st.draw.thermal_scale, tq_scale=st.draw.torque_scale,
                     t=st.t, d_run=st.sprint_d, crossed=st.crossed.astype(jnp.float32))
+    return probe
+
+
+def record(env, agent, seed, n_max, dr_scale=0.0, assist=0.0):
+    """Greedy rollout; per tick, per env, the plant state before the step (+ info scalars)."""
+    cfg = agent.cfg
+    params = EnvParams.final(cfg)._replace(dr_scale=float(dr_scale), ctrl_jitter_ms=0.0,
+                                           ctrl_drop_prob=0.0, pitch_assist=float(assist),
+                                           stoplight_prob=0.0)
+    probe = make_probe(env)
 
     key = jax.random.PRNGKey(seed)
     state, obs = env.reset(key, params)
@@ -136,6 +140,83 @@ def record(env, agent, seed, n_max, dr_scale=0.0, assist=0.0):
     init = (state, obs, jnp.ones(env.n_envs, bool))
     _, rec = jax.lax.scan(body, init, None, length=n_max)
     return {k: np.asarray(v) for k, v in rec.items()}      # [T, N, ...]
+
+
+def record_brake(env, agent, seed, theta, cruise_s=6.0, brake_at=90.0, brake_s=12.0,
+                 hold_run=True, dr_scale=0.0):
+    """The DEPLOYED stop: policy to `brake_at` metres, then the fitted open-loop schedule drives the
+    latched spec for `brake_s` seconds (brake_search.py's window, one schedule on every env, no
+    stagger -- the envelope, not the stop statistics). Returns (run-up rec, brake rec).
+
+    The schedule modulates cadence and stride, so this is the phase with the HIGHEST commanded joint
+    speed of the whole deployment sequence: the s35 12 s fit multiplies the cruise frequency by up to
+    1.41. The policy's per-tick residual is kept, exactly as in brake_search."""
+    import gait
+    from brake_search import schedule_at
+    cfg = agent.cfg
+    params = EnvParams.final(cfg)._replace(dr_scale=float(dr_scale), ctrl_jitter_ms=0.0,
+                                           ctrl_drop_prob=0.0, pitch_assist=0.0, stoplight_prob=0.0)
+    p_brake = params._replace(sprint_dist_m=1e4) if hold_run else params
+    probe = make_probe(env)
+    act = agent._act_greedy
+    dt = env.control_dt
+    n_brake = int(round(brake_s / dt))
+    th = jnp.asarray(np.repeat(np.asarray(theta, np.float32)[None], env.n_envs, axis=0))
+
+    def run_step(carry, _):
+        state, obs, alive = carry
+        rec = jax.vmap(probe)(state)
+        a = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
+        state2, obs2, _, done, info = env.step(state, a, p_brake)
+        rec["alive"] = alive.astype(jnp.float32)
+        for k, v in (("fallen", info["fallen"]), ("term_ws", info["term_ws"]),
+                     ("finished", info["finished"])):
+            rec[k] = (alive & done & v).astype(jnp.float32)
+        return (state2, obs2, alive & ~done), rec
+
+    key = jax.random.PRNGKey(seed)
+    state, obs = env.reset(key, params)
+    # run-up: a fixed leg to get the speed, then extended to the brake DISTANCE (brake_search's
+    # recipe -- a time-based run-up lands late because it ignores the acceleration from rest)
+    n0 = int(round(cruise_s / dt))
+    (state, obs, alive), rec_a = jax.lax.scan(run_step, (state, obs, jnp.ones(env.n_envs, bool)),
+                                             None, length=n0)
+    v0 = float(np.asarray(state.prev_vel_body)[:, 0].mean())
+    d_now = float(np.asarray(state.sprint_d).mean())
+    n_more = int(max(0.0, (brake_at - d_now) / max(v0, 0.5)) / dt)
+    n_more = min(n_more, max(0, env.max_steps - n0 - n_brake - 10))
+    if n_more > 0:
+        (state, obs, alive), rec_b = jax.lax.scan(run_step, (state, obs, alive), None, length=n_more)
+        rec_a = {k: np.concatenate([np.asarray(rec_a[k]), np.asarray(rec_b[k])]) for k in rec_a}
+    print(f"[brake] run-up {(n0 + n_more) * dt:.1f} s to {float(np.asarray(state.sprint_d).mean()):.1f} m "
+          f"at {float(np.asarray(state.prev_vel_body)[:, 0].mean()):.2f} m/s; "
+          f"{n_brake} brake ticks ({brake_s:.0f} s), line "
+          f"{'held out of range' if hold_run else f'{cfg.sprint_dist_m:.0f} m'}")
+
+    def brake_step(carry, i):
+        state, obs, alive, cspec = carry
+        rec = jax.vmap(probe)(state)
+        cspec = jnp.where(i == 0, state.spec, cspec)
+        ch = schedule_at(th, jnp.full(env.n_envs, i / max(n_brake - 1, 1)))
+        spec = cspec
+        spec = spec.at[:, gait.I_FREQ].set(jnp.clip(cspec[:, gait.I_FREQ] * ch[:, 0], -1.0, 1.0))
+        spec = spec.at[:, gait.I_S_CAM].multiply(ch[:, 1:2])
+        spec = spec.at[:, gait.I_S_THIGH].multiply(ch[:, 1:2])
+        spec = spec.at[:, gait.I_O.start].set(jnp.clip(ch[:, 2], -1.0, 1.0))
+        spec = spec.at[:, gait.I_O.start + 1].set(jnp.clip(ch[:, 3], -1.0, 1.0))
+        pol = jnp.clip(act(agent.params, agent.stats.normalize(obs)), -1.0, 1.0)
+        a = jnp.concatenate([spec, pol[:, gait.SPEC_DIM:]], axis=1)
+        state2, obs2, _, done, info = env.step(state, a, p_brake)
+        rec["alive"] = alive.astype(jnp.float32)
+        for k, v in (("fallen", info["fallen"]), ("term_ws", info["term_ws"]),
+                     ("finished", info["finished"])):
+            rec[k] = (alive & done & v).astype(jnp.float32)
+        return (state2, obs2, alive & ~done, cspec), rec
+
+    _, rec_c = jax.lax.scan(brake_step, (state, obs, alive, jnp.zeros((env.n_envs, gait.SPEC_DIM))),
+                            jnp.arange(n_brake))
+    return ({k: np.asarray(v) for k, v in rec_a.items()},
+            {k: np.asarray(v) for k, v in rec_c.items()})
 
 
 def flat(rec, key, live):
@@ -353,11 +434,19 @@ def main():
     ap.add_argument("--assist", type=float, default=0.0)
     ap.add_argument("--json", default=None)
     ap.add_argument("--dump", default=None, help="npz of every per-tick record (offline analysis)")
+    ap.add_argument("--free-clock", action="store_true",
+                    help="the deployment clock: resync off (no contact sensor on the robot)")
     ap.add_argument("--dr-sweep", default=None,
                     help="comma-separated dr_scale levels: survival + envelope per randomization level")
+    ap.add_argument("--brake", default=None,
+                    help="fitted brake schedule json (brake_search.py): audit the DEPLOYED stop too")
+    ap.add_argument("--brake-s", type=float, default=12.0)
+    ap.add_argument("--brake-at", type=float, default=90.0)
+    ap.add_argument("--cruise-s", type=float, default=6.0)
     args = ap.parse_args()
 
-    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=False)
+    cfg, env, agent = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=False,
+                               free_clock=args.free_clock)
     n_max = int(round((args.seconds or cfg.episode_s) / env.control_dt))
     out = dict(run=str(args.run), checkpoint=str(args.checkpoint or ""), step=int(agent.step),
                episodes=args.episodes, seconds=n_max * env.control_dt)
@@ -367,14 +456,26 @@ def main():
     if args.dump:
         np.savez_compressed(args.dump, **{f"nominal_{k}": v for k, v in rec.items()})
     if args.dr:
-        cfg_d, env_d, agent_d = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=True)
+        cfg_d, env_d, agent_d = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=True,
+                                         free_clock=args.free_clock)
         rec_d = record(env_d, agent_d, args.seed, n_max, dr_scale=1.0, assist=args.assist)
         measured_report(rec_d, env_d, cfg_d, st, out, "randomized")
         if args.dump:
             np.savez_compressed(args.dump, **{f"nominal_{k}": v for k, v in rec.items()},
                                 **{f"dr_{k}": v for k, v in rec_d.items()})
+    if args.brake:
+        theta = np.asarray(json.loads(Path(args.brake).read_text())["best"]["theta"], np.float32)
+        rec_up, rec_br = record_brake(env, agent, args.seed, theta, cruise_s=args.cruise_s,
+                                      brake_at=args.brake_at, brake_s=args.brake_s)
+        measured_report(rec_up, env, cfg, st, out, "run-up to the brake point")
+        measured_report(rec_br, env, cfg, st, out, f"BRAKE window ({args.brake_s:.0f} s, "
+                                                   f"{Path(args.brake).stem})")
+        if args.dump:
+            np.savez_compressed(args.dump, **{f"nominal_{k}": v for k, v in rec.items()},
+                                **{f"brake_{k}": v for k, v in rec_br.items()})
     if args.dr_sweep:
-        cfg_s, env_s, agent_s = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=True)
+        cfg_s, env_s, agent_s = load_run(args.run, args.checkpoint, n_envs=args.episodes, dr=True,
+                                         free_clock=args.free_clock)
         print(f"\n== 3. randomization sweep ({args.episodes} greedy episodes per level, "
               f"cap {n_max * env_s.control_dt:.0f} s; the training plant with dr_scale dialled)")
         print(f"  {'dr_scale':>9s} {'mean ep':>8s} {'falls':>6s} {'ws-kill':>8s} {'dist':>7s} "

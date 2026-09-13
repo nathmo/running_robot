@@ -336,6 +336,109 @@ V2_CONTRACT.md documents the opposite order for its own implementation -- the kn
 difference), and `pitch_reflex_rate_lp` is read from the bundle rather than assumed, because the
 lineage has shipped both 0.9 and 0.0 and the difference is 0.4 rad of thigh target.
 
+## The steady-state gait: how periodic, what shape, and who writes it
+
+`tools/gait_shape.py` runs a greedy rollout, drops the start-up transient and rebuilds the control
+law off-line -- the law is additive (`gait.assemble`), so
+
+    target = feedforward(latched spec, phi)  +  reflexes(roll, pitch)  +  residual_scale * r
+
+can be split exactly. Numbers below: the S2 runner (`best_88473600.msgpack`), nominal plant,
+t = 5..25 s, 79 consecutive strides. `tools/gait_figures.py` draws three figures from the same
+`--npz` recording (dataviz palette, validated):
+
+| figure | what it shows |
+|---|---|
+| `results/gait_cycle.png` | the gait relative to the base: foot path over an averaged cycle with stance picked out, stance bars, foot height |
+| `results/gait_authors.png` | feedforward vs reflex vs residual per joint over two strides, plus their peak-to-peak amplitudes |
+| `results/gait_fourier.png` | the joint angle over time: latched Fourier alone, the full command, and what the joint actually does |
+| `results/gait_shape_s2_88M.png` | the raw diagnostic overlay (78 cycles per joint) |
+
+One thing only the last figure makes obvious: **the PD does not track the command.** Steady-state
+tracking error is 5-19 deg rms, and the hip-rolls execute only ~8 deg of a 21-23 deg commanded
+peak-to-peak (cam 28-31 of 37-42, thigh 40-44 of 37-40). The gait the robot performs is the plant's
+filtered, lagged response to a much more aggressive command -- which is the same story as the
+harmonics below, seen in the time domain.
+
+**It is a limit cycle, to the resolution of the tick grid.** Stride period **250.0 +- 0.0 ms** (every
+stride exactly 25 ticks), L->R touchdown offset **0.520 +- 0.000** of a stride, duty 0.281 +- 0.004
+(L) / 0.283 +- 0.011 (R), speed 3.50 +- 0.09 m/s. The measured joint angles repeat to **1.1-1.3 %**
+of their amplitude on cam and thigh (5.6-6.8 % on the small hip-roll). Three things make that
+stronger than it looks:
+* the clock sits on the **4.00 Hz upper rail** and the touchdown resync **never fires** (0.00 cycles
+  moved over 20 s) -- the feet are entrained to the clock, not the clock to the feet;
+* the latched spec is re-committed **nearly identically every cycle**: mean |dspec| 0.005 per commit
+  over 79 commits (max 0.175). This is the design working: walk_mit's RUNNER rewrote its spec every
+  5 ms and gamed the clock (see the CPU arm's audit); the latch plus the narrowed frequency range
+  bought an honest fixed gait;
+* the **residual is itself phase-locked** -- its waveform repeats to 1.7-6.5 % of its own p-p. The
+  per-tick feedback channel is being spent on a fixed extra waveform, not on feedback.
+  So spec, residual and contact timing all repeat: the gait is an open-loop periodic orbit.
+
+**Shape: a true run.** 43.6 % flight, **0 % double support**, 56.4 % single support, 4 Hz stride at
+3.5 m/s (~0.87 m per stride). Joint p-p: thigh 41.6 / 38.1 deg, cam 29.6 / 26.7, hip-roll 6.1 / 4.8.
+Foot path in the base frame 45.7 x 14.5 cm (L) and 41.0 x 12.5 cm (R) -- **visibly left-right
+asymmetric**, the same asymmetry the bring-up envelope shows as a one-sided roll tolerance.
+
+**The leg executes a sinusoid, whatever the spec asks for.** Harmonic share of the AC power:
+
+| | commanded feedforward | achieved joint angle |
+|---|---|---|
+| cam_L | 1st 56 % / 2nd 27 % / 3rd 17 % | **1st 99.4 %** / 2nd 0.4 % / 3rd 0.0 % |
+| thigh_L | 1st 58 % / 2nd 25 % / 3rd 16 % | **1st 98.5 %** / 2nd 0.2 % / 3rd 1.2 % |
+| hip_roll_L | 1st 57 % / 2nd 27 % / 3rd 16 % | 1st 72.9 % / 2nd 21.9 % / 3rd 4.1 % |
+
+The 2nd and 3rd harmonics live at 8 and 12 Hz, above the ~6.5 Hz closed-loop corner, and the plant
+throws them away. **Consequence worth acting on: two thirds of the Fourier budget does no mechanical
+work.** Those coefficients are pinned at arbitrary rails because the reward cannot see them --
+`n_harmonics = 3` buys the cam and thigh nothing on this plant, and the rail-saturation statistic
+below is mostly reporting unidentified dimensions, not a starved amplitude budget.
+
+**Who writes the motion** (share of the commanded target's variance; the cross terms are real, the
+feedforward and the roll reflex partly cancel on the hips):
+
+| joint | p-p total | feedforward | reflex | residual | var: ff / reflex / res / cross |
+|---|---|---|---|---|---|
+| hip_roll_L | 23.1 deg | 16.2 | 21.0 | 7.2 | 0.81 / 0.59 / 0.11 / -0.50 |
+| cam_L | 41.7 | 39.6 | 0.0 | 9.1 | 0.85 / 0.00 / 0.03 / +0.12 |
+| thigh_L | 39.1 | 36.1 | 8.0 | 9.1 | 0.83 / 0.01 / 0.08 / +0.07 |
+| hip_roll_R | 21.8 | 13.3 | 21.0 | 5.9 | 0.75 / 0.78 / 0.06 / -0.59 |
+| cam_R | 37.5 | 32.8 | 0.0 | 10.6 | 0.77 / 0.00 / 0.07 / +0.16 |
+| thigh_R | 36.1 | 30.3 | 8.0 | 11.3 | 0.63 / 0.02 / 0.12 / +0.23 |
+
+**The "reflex" column is two different things, and one of them is not learned.** `gait.assemble`
+adds a third term beside the series and the residual, and it splits by joint:
+* **cam: identically zero.** On the cams the command really is Fourier + residual, nothing else.
+* **thighs: the FIXED pitch reflex.** `u_pitch = -clip(pitch_kp * pitch + pitch_kd * pitch_rate,
+  +-pitch_clip)` with `pitch_kp` 1.0, `pitch_kd` 0.1, clip 0.25 rad, rate EMA 0.9 -- all from the
+  config, **not in the action at all**. A hand-tuned prior inherited from walk_mit. 8 deg p-p here,
+  1-2 % of the variance.
+* **hip-rolls: the LEARNED roll reflex.** Its three gains ARE latched action dims (`spec[36:39]`,
+  scaled by `reflex_kp/kd/bias_scale` = 0.5 / 0.1 / 0.2), but it is *feedback on measured roll*,
+  not a function of phase -- which is why it is not part of "Fourier". 21 deg p-p, and the dominant
+  author of that channel.
+
+Worth knowing when reading the action: only **21 of the 44 latched dims are the Fourier series**.
+The rest are the kp/kd impedance series (14), the frequency (1), the roll-reflex gains (3) and the
+five knobs. And this policy pins the reflex bias at +1.00 (= +11.5 deg on both hip-rolls) while
+pinning the `o_hip` knob at -1.00 (= -8.6 deg on the same joints): two latched channels at opposite
+rails cancelling to a net +2.9 deg. That is the negative cross term in the table, and one more sign
+that those dims are only weakly identified.
+
+So **the latched spec writes 75-85 % of the leg motion and the residual 3-12 %** (6-11 deg p-p, about
+a quarter of the peak-to-peak but a small share of the variance); the roll reflex owns the hip-roll
+channel. The residual's net effect after the joint-limit clip is 2.5 deg mean / 5.7 deg max. It is
+spent entirely on within-cycle shaping, not on a DC bias (per-cycle DC drift sd 0.08-0.16 deg against
+within-cycle sd 1.75-3.87 deg), and it saturates on 10.8 % of joint-ticks -- concentrated on
+thigh_L (46 %), cam_R (10 %), thigh_R (9 %).
+
+Neither limiter is shaping the gait: the joint-limit clip **never** binds (0.0 % of ticks) and the
+no-load rate cap is touched only on the hip-rolls (3.2 / 5.3 % of ticks) and on thigh_L (0.1 %),
+moving the applied target by a median of 0.0-0.27 deg (max 2.9). The commanded waveform is what runs.
+
+Spec at the rails: 78 % of all 44 entries (`S_thigh` 100 %, `S_cam` 86 %, `S_hip` 86 %, `o_hip` and
+the reflex bias both pinned). Knobs: Delta +0.38, s +0.09, o_cam +0.09, o_thigh +0.46, o_hip -1.00.
+
 ## Bring-up: holding the robot, starting the policy, letting go
 
 The deployment question (2026-09-10): the operator holds the base on its stand, feet on the floor,
