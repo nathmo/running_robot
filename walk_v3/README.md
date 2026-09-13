@@ -453,6 +453,50 @@ m/s undershoot that runs through the whole band: that is the policy's honest ris
 against a 100-point fall penalty, and sharpening the tracking income to close it would buy speed with
 survival — the wrong trade for a machine an operator is holding.
 
+### The keeper was picking the wrong checkpoint
+
+`best.msgpack` is chosen during training by `keeper_score`, off an eval that ran **16 envs** over a
+five-rung command ladder -- about three per rung, so `upright` could only take the values 0 / 33 /
+67 / 100%. Re-scored at 12 envs per rung (`tools/rank_checkpoints.py`), the two stage-2 runs both
+had a better checkpoint than the one the keeper kept:
+
+```
+v3_q_s2   ckpt_150405120   err 0.61   93% upright   5.5 deg      <- best
+          best.msgpack     err 0.51   80% upright             (0% at full stick)
+v3_q_s5   ckpt_160432128   err 0.39   90% upright   8.6 deg      <- best
+          best.msgpack     err 0.36   80% upright
+```
+
+The default is now 64 envs, and `rank_checkpoints.py --write-best` fixes runs already on disk.
+
+### Speed and robustness are a frontier, not a ranking
+
+The two checkpoints are not "better" and "worse", they are different points on a trade-off, and the
+difference is large enough that it changes what `v_max` should be:
+
+```
+                       ckpt_150405120        best.msgpack (176 M)
+ top speed achieved       2.14 m/s              2.81 m/s
+ upright at 3.30 cmd        100%                   0%
+ upright at 3.60 cmd         83%                   0%
+ error at 0.90 cmd          0.07 (8%)             0.14 (16%)
+ error at 3.60 cmd          1.46 (41%)            0.86 (24%)
+```
+
+`ckpt_150405120` refuses to go faster than ~2.1 m/s and never falls; the keeper's pick runs 30%
+faster and falls above 3.0. Neither is wrong. It does mean a frontier measured on one checkpoint is
+not a statement about the run -- the `v_max` 2.4 in `v3_stage3_v24` was chosen from the keeper's pick
+and the better checkpoint supports the same number for a different reason (it saturates at 2.14, so
+2.4 is a stretch it can be trained into rather than a fall it cannot avoid).
+
+### What DR costs today
+
+The same checkpoint, plant drawn from the DR ranges, disturbances off: **0% upright at every
+command, 0.00 m/s achieved everywhere.** Not degraded -- dead. `dr_scale` never left 0.000 in any
+stage-2 run, so this is out-of-distribution rather than fragility, and it is the single clearest
+statement of why stage 3 exists.
+
+
 ### Still open
 
 1. **The queue oscillates.** The gates retreat, so when episode length drops after a fade the command
