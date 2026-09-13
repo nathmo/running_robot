@@ -189,6 +189,67 @@ class Sim:
         return self._grav_body()[2] > -0.3 or float(self.data.qpos[2]) < 0.45
 
 
+def headless(args):
+    """The same control law, no window: a ladder of stick positions, each held for `--seconds`.
+
+    This is the last independent check the deliverable has. `verify.py` proves the exported numpy
+    actor agrees with the JAX one on identical observations; this runs the WHOLE shipping law --
+    gait reconstruction, latch, clock, heading integrator, PD -- against a different physics
+    backend (CPU MuJoCo, not MJX) and asks whether the robot walks. Nothing here imports JAX, so it
+    runs on the laptop and on the Pi's own numpy.
+
+    It prints the policy's own heading estimate next to the simulator's truth. They should agree to
+    a fraction of a degree; a growing gap is the integrated-gyro estimate drifting, which is the one
+    failure that would make a v3 policy veer on hardware and not in sim.
+    """
+    sim = Sim(args.bundle, args.model)
+    sim.lock = args.lock
+    ticks = int(args.seconds / sim.control_dt)
+    warm = int(args.warm / sim.control_dt)
+    print(f"\n[headless] {Path(args.bundle).name}   v_max {sim.v_max:.2f} m/s   "
+          f"{args.seconds:.0f} s per rung, first {args.warm:.0f} s discarded   lock={sim.lock}")
+    print(f"{'stick':>6} {'commanded':>10} {'achieved':>9} {'err':>7} {'upright':>8} "
+          f"{'|y| m':>7} {'yaw avg':>8} {'yaw end':>8} {'est gap':>7}")
+    bad = 0
+    for frac in [i / 8.0 for i in range(9)]:
+        sim.reset()
+        sim.set_stick(frac)
+        sim.ctrl.set_speed(sim.v_cmd, immediate=True)
+        vs, ys, hs, ds, n, alive = [], [], [], [], 0, True
+        for t in range(ticks):
+            sim.control_tick()
+            if sim.fallen():
+                alive = False
+                break
+            if t >= warm:
+                vs.append(sim.speed())
+                ys.append(abs(float(sim.data.qpos[sim.i_y])))
+                hs.append(abs(sim.heading_deg()))
+                ds.append(abs(sim.heading_deg() - sim.est_heading_deg()))
+                n += 1
+        v = float(np.mean(vs)) if vs else 0.0
+        y = float(np.mean(ys)) if ys else float("nan")
+        # BOTH heading statistics, because they answer different questions and this project has
+        # confused them. The MEAN |yaw| is what the trainer's eval and verify.py report -- how far
+        # off straight it sits on average. The FINAL yaw is where it ended up, which is what an
+        # operator watching it cross a room actually sees, and for a steady drift the final is
+        # about twice the mean. A policy can look fine on the mean and still walk a diagonal.
+        h_mean = float(np.mean(hs)) if hs else float("nan")
+        h_end = sim.heading_deg()
+        # the estimator gap while UPRIGHT only: once it is falling, integrating the gyro of a
+        # tumbling body is meaningless and the number says nothing about the channel
+        gap = float(np.mean(ds)) if ds else float("nan")
+        err = abs(v - sim.v_cmd) if alive and vs else sim.v_cmd
+        print(f"{frac * 100:>5.0f}% {sim.v_cmd:>10.2f} {v:>9.2f} {err:>7.2f} "
+              f"{'yes' if alive else 'FELL':>8} {y:>7.2f} {h_mean:>7.1f}d {h_end:>7.1f}d "
+              f"{gap:>6.1f}d")
+        if not alive:
+            bad += 1
+    print(f"\n{9 - bad}/9 stick positions stayed upright for {args.seconds:.0f} s "
+          f"on the CPU arm, through the shipping control law.")
+    return 0 if bad == 0 else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle", required=True,
@@ -196,9 +257,17 @@ def main():
     ap.add_argument("--model", default=None)
     ap.add_argument("--start-stick", type=float, default=0.0)
     ap.add_argument("--step", type=float, default=0.10, help="stick increment per key press")
+    ap.add_argument("--headless", action="store_true",
+                    help="no viewer: sweep a stick ladder and print achieved speed, survival and "
+                         "the heading estimate against the truth")
+    ap.add_argument("--seconds", type=float, default=10.0, help="headless: seconds per stick rung")
+    ap.add_argument("--warm", type=float, default=2.0, help="headless: seconds discarded as the "
+                                                            "start-up transient")
     ap.add_argument("--lock", choices=("none", "yaw", "rail"), default="none",
                     help="none = free; yaw = hold the heading straight; rail = yaw AND no lateral drift")
     args = ap.parse_args()
+    if args.headless:
+        return headless(args)
 
     sim = Sim(args.bundle, args.model)
     sim.lock = args.lock
