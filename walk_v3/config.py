@@ -617,7 +617,23 @@ PRESETS = {
     "v3_stage1b": lambda: _v2(model_path="model/dash01_v2_noyaw.xml",
                               **dict(_V3, total_steps=80_000_000,
                                      shape_curriculum_steps=50_000_000), **_FAST),
-    # Stage 2 -- THE DELIVERABLE. Joystick, free plant, heading, bring-up and DR, warm from stage 1.
+    # Stage 2 -- THE DELIVERABLE, AND THE OPEN PROBLEM AS OF 2026-09-13.
+    #
+    # Stage 1 is solved and reproducible. This stage is not yet: warm-starting a planar policy onto
+    # the free plant needs a base assist to survive at all, and NO way of removing that assist has
+    # worked. Measured, in order:
+    #   * no assist            -- 0% upright through 44 M; 44 of 64 deaths to the WORKSPACE check
+    #   * roomier workspace    -- peaks at ep_len ~250 by 6 M, back to 145 by 14.7 M
+    #   * assist, 30 M fade    -- 4/4 seeds collapse at assist 0; dr_scale retreats 0.25 -> 0.000
+    #   * assist, 100 M fade   -- 3/3 degrade from ep_len 600-1150 to 102-168 by assist 0.30
+    #   * assist, 150 M fade   -- same shape, slower
+    #   * per-episode assist   -- best at matched assist (ep_len 736 vs 276-542 at 0.73) but the
+    #                             greedy eval is still 0%: the mean is carried by the assisted
+    #                             share, and unassisted episodes die too fast to contribute samples
+    # The rung under test is `v3_stage1b`, which introduces roll WITHOUT yaw so that no assist is
+    # needed. Read walk_v3/README.md "Known limits" before spending GPU hours here.
+    #
+    # Joystick, free plant, heading, bring-up and DR, warm from stage 1.
     #
     # ROLL AND YAW GET TRAINING WHEELS, on the same competence-gated fade as the pitch assist.
     # Measured 2026-09-13: a stage-1 policy warm-started straight onto the free plant died in 0.38 s
@@ -639,6 +655,7 @@ PRESETS = {
     "v3": lambda: _v2(model_path="model/dash01_v2_free.xml",
                       **dict(_V3, roll_assist_kp=100.0, roll_assist_kd=10.0,
                              yaw_assist_kp=100.0, yaw_assist_kd=10.0,
+                             assist_per_episode=True,          # the best-measured handover so far
                              pitch_assist_ramp_steps=100_000_000),
                       **_FAST),
     # THE HANDOVER, done as a distribution instead of a dial: assist_per_episode makes

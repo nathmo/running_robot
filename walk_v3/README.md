@@ -274,6 +274,44 @@ every episode. The trainer and `robot/deploy/controller_v2.py` must agree on thi
 never an actor input, and `export.py` never writes it (`networks.py`, `ppo.py`, `export.py`). Check 6
 is what keeps that true.
 
+## Where this stands (2026-09-13)
+
+**Stage 1 is solved and reproducible.** Four seeds, cold from random weights, 80 M steps each. Best
+checkpoint, per stick position (command error m/s / fraction upright):
+
+```
+v3_stage1_s1     0%: 0.32/100%   25%: 0.25/100%   50%: 0.80/100%   75%: 1.36/100%   100%: 1.88/62%
+v3_stage1g_s3    0%: 0.51/ 62%   25%: 0.14/ 88%   50%: 0.79/100%   75%: 1.47/100%   100%: 2.12/100%
+```
+
+**Stage 2 is not.** The transfer to the free plant is the open problem, and it is worth reading before
+you spend GPU hours on it, because six things have been tried and measured:
+
+| attempt | result |
+|---|---|
+| no assist at all | 0% upright through 44 M; **44 of 64 deaths to the workspace check**, none to falling |
+| roomier workspace box | peaks at ep_len ~250 by 6 M, back to 145 by 14.7 M |
+| roll+yaw assist, 30 M fade | 4/4 seeds collapse at assist 0; `dr_scale` retreats 0.25 → 0.000 |
+| roll+yaw assist, 100 M fade | 3/3 degrade from ep_len 600–1150 to 102–168 by assist 0.30 |
+| roll+yaw assist, 150 M fade | same shape, slower |
+| per-episode assist | best at matched assist (ep_len 736 vs 276–542 at 0.73) — but greedy still 0% |
+
+One stage-2 checkpoint did reach the target behaviour before collapsing, which is why this is a
+handover problem and not an objective problem: **0.87 m/s on a 0.90 command, 1.60 on 1.80, 3.19 m/s at
+full stick, heading drift 4–11°**. The command channel, the reward and the heading term all work.
+
+The diagnosis that explains all six rows: the workspace check measures foot travel in the **base
+frame**, and roll spends most of its ±0.14 m budget geometrically before the legs move — a foot 0.15 m
+off the centreline sits `h(1−cos φ) + y·sin φ` lower, about 0.11 m at 20°. A planar-trained policy
+rolls the instant it can and is killed by a limit it cannot attribute to anything it chose to do. An
+assist prevents that, and then cannot be removed: at any scale it still corrects that share of every
+error, so the policy never meets its own mistakes.
+
+**What is under test:** `v3_stage1b`, a third rung on `model/dash01_v2_noyaw.xml` (the free plant minus
+heading, nq 17). It introduces roll *without* yaw, so the policy meets one new degree of freedom at a
+time and may need no assist at all. If that works, the recipe is planar → no-yaw → free and the
+`v3` preset's assist should be switched off.
+
 ## Known limits
 
 * **Turning is not implemented.** `task[1]` is reserved for a yaw command; nothing drives it yet.
