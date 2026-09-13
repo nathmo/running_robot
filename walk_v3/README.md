@@ -1,30 +1,40 @@
 # walk_v3 — a forward joystick for DASH-01, trained from scratch
 
-Two commands train the policy, from random weights. No warm start from another project, no
-checkpoint you have to be given -- stage 2 warm-starts from stage 1's own output and nothing else:
+Three commands train the policy, from random weights. No warm start from another project, no
+checkpoint you have to be given -- each stage warm-starts from the previous stage's own output:
 
 ```bash
-# stage 1 -- learn the gait on the planar plant (~1 h on 2 V100s)
+# 1  the gait and the stick, on the planar plant where balance is free (~1 h on 2 V100s)
 python walk_v3/train.py --preset v3_stage1 --name v3_stage1_s0 --seed 0 \
        --devices 2 --n-envs 4096 --n-steps 9
-# stage 2 -- the free plant, with heading, bring-up and DR (~3 h)
-python walk_v3/train.py --preset v3 --name v3_s0 --seed 0 \
+# 2  the free plant: roll, yaw and heading, on training wheels that fade (~3 h)
+python walk_v3/train.py --preset v3 --name v3_q_s0 --seed 0 \
        --warm-start walk_v3/runs/v3_stage1_s0/best.msgpack \
+       --devices 2 --n-envs 4096 --n-steps 9
+# 3  being droppable, and running on a plant that is not the nominal one (~2 h)
+python walk_v3/train.py --preset v3_stage3_v24 --name v3_s3_s0 --seed 0 \
+       --warm-start walk_v3/runs/v3_q_s0/best.msgpack \
        --devices 2 --n-envs 4096 --n-steps 9
 ```
 
 and one command tells you whether the result is usable:
 
 ```bash
-python walk_v3/verify.py --run walk_v3/runs/v3_s0
+python walk_v3/verify.py --run walk_v3/runs/v3_s3_s0
 ```
 
-**Why two stages.** Measured with a seven-arm probe fleet (40 M steps each, one variable per arm):
-cold on the **free** plant -- where roll and yaw exist -- every arm went backwards, while the same
-recipe on the **planar** plant reached ep_len 473 and a positive return. The blocker is the plant,
-not the command: learning a gait and learning to stay upright sideways at the same time is too much.
-Both stages use the same objective, so the task channel never changes meaning under the warm start --
-which is its own class of bug here (see `task[1]` below).
+**Why stage 1 is separate.** Measured with a seven-arm probe fleet (40 M steps each, one variable per
+arm): cold on the **free** plant -- where roll and yaw exist -- every arm went backwards, while the
+same recipe on the **planar** plant reached ep_len 473 and a positive return. The blocker is the
+plant, not the command: learning a gait and learning to stay upright sideways at the same time is too
+much. Every stage uses the same objective, so the task channel never changes meaning under a warm
+start -- which is its own class of bug here (see `task[1]` below).
+
+**Why stage 3 is separate.** The curricula run one at a time (see *One difficulty at a time*), and
+sequential curricula cost the SUM of their ramps. Stage 2's 200 M reaches the command band, the
+assist fade and the gait-quality penalties, and stops -- every seed finishes with `bringup_scale`
+near zero and `dr_scale` at **0.000**. Being droppable and running on a randomised plant are the last
+two groups in the queue and they need their own budget.
 
 `verify.py` prints a PASS/FAIL table and exits non-zero if anything failed. **Do not ship a policy on
 the strength of a training curve** — this lineage has produced a run that reported healthy episode
@@ -58,26 +68,51 @@ inside the reset is not jit-able, so it is a table. Without it `bringup_enable` 
 
 ## Running it
 
+Three stages. Each one warm-starts from the previous stage's **`best.msgpack`**, never
+`final.msgpack` -- the keeper exists because runs degrade, and this lineage has lost usable policies
+to a late collapse more than once.
+
 ```bash
-# cluster, requeue-safe (the same line is correct for the first start and every restart)
+# 1  planar plant, from random weights -- learn the joystick where balance is free
 sbatch --export=ALL,PRESET=v3_stage1,NAME=v3_stage1_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9 \
        walk_v3/slurm/izar_train.sbatch
-sbatch --export=ALL,PRESET=v3,NAME=v3_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9,\
-WARM=$HOME/running_robot/walk_v3/runs/v3_stage1_s0/best.msgpack walk_v3/slurm/izar_train.sbatch
+
+# 2  free plant -- roll, yaw and heading, on training wheels that fade
+sbatch --export=ALL,PRESET=v3,NAME=v3_q_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9,\
+WARM=$HOME/running_robot/walk_v3/runs/v3_stage1_s0/best.msgpack \
+       walk_v3/slurm/izar_train.sbatch
+
+# 3  the rest of the queue -- bring-up, then DR, then a jittery controller
+sbatch --export=ALL,PRESET=v3_stage3_v24,NAME=v3_s3_s0,SEED=0,DEVICES=2,NENVS=4096,NSTEPS=9,\
+WARM=$HOME/running_robot/walk_v3/runs/v3_q_s0/best.msgpack \
+       walk_v3/slurm/izar_train.sbatch
 ```
 
-Warm-start stage 2 from **`best.msgpack`**, not `final.msgpack`. The keeper exists because runs
-degrade: stage 1's own last checkpoint sits past its last evaluation, and this lineage has lost usable
-policies to a late collapse more than once.
+Stage 3 is not optional. Stage 2 spends its whole 200 M budget on the first three curriculum groups
+and finishes with `bringup_scale` near zero and **`dr_scale` at 0.000** -- without the two properties
+the deliverable is specified on. Stage 3 buys them with the first three groups pinned at final.
+`v3_stage3` is the same thing at the inherited `v_max` of 3.6; `v3_stage3_v24` puts full stick at
+2.4, which is where the closed-loop frontier actually is (see *Where this stands*).
 
-`STEPS` is deliberately unset by default: the preset owns the budget. Setting it in the sbatch
-environment overrides the preset silently, which once turned a set of 40 M probes into 300 M runs.
+### Four ways to waste a run
 
-`--n-envs` is the **total across devices**, not per device. `--n-envs 4096 --devices 2` runs 2048 per
-GPU. Getting this wrong halves the batch silently.
+* **Check the parent THROUGH the warm start, not as it was saved.** `warmstart_var_floor` rewrites
+  the obs statistics on load, and measured it takes a good policy from 100% upright to 0% at every
+  command. `python walk_v3/tools/speed_frontier.py --run <parent> --warm-start` loads through the
+  same surgery training applies, so it shows what the next stage will actually inherit.
+* **`STEPS` is deliberately unset.** The preset owns the budget; setting it in the sbatch
+  environment overrides the preset silently, which once turned a set of 40 M probes into 300 M runs.
+* **`--n-envs` is the total across devices**, not per device. `--n-envs 4096 --devices 2` runs 2048
+  per GPU. Getting this wrong halves the batch with nothing in the log to say so.
+* **Always train at least three seeds.** Outcomes here are bimodal: of five stage-2 seeds, two
+  finished at 80% upright and one at 0%. Rank them with `tools/compare_runs.py`, which compares at
+  matched steps and refuses to print training return.
 
-**Always train at least two seeds.** Outcomes in this project are bimodal; a single seed is an
-anecdote.
+Judge a run on the greedy ladder, never on rollout `ep_len`. The two are different numbers: on the
+stage-2 keeper over 20 s, the same weights hold 100% upright at 1.80 m/s greedy on a quiet plant and
+30% when sampling at their own std with the weather on. Short rollout episodes right after a handover
+are the normal regime, not evidence of a collapse.
+
 
 ## Driving it
 
