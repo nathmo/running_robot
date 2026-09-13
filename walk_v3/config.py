@@ -561,7 +561,7 @@ _V3 = dict(
     curriculum_retreat_frac=0.5,
     # --- cold-start shaping
     cmd_range_start=(0.15, 0.45), track_sigma_start=1.5, track_sigma_steps=40_000_000,
-    shape_curriculum_steps=120_000_000, shape_scale_start=0.15,
+    shape_scale_start=0.15,
     w_alive=1.5, episode_s=30.0, sprint_curriculum_steps=0,
     # --- ONE DIFFICULTY AT A TIME. See ppo._queued: every run before this one followed the same
     # arc, climbing to a peak and then declining from the point where the curricula started biting
@@ -571,9 +571,16 @@ _V3 = dict(
     # controller (jitter and dropped ticks).
     curriculum_order=("cmd_lo", "cmd_hi", "cmd_zero_p", "pitch_assist", "shape_scale",
                       "bringup_scale", "dr_scale", "ctrl_jitter_ms", "ctrl_drop_prob"),
-    # --- budget: a cold run has to find the gait before any of the above matters
-    dr_curriculum_steps=60_000_000, bringup_curriculum_steps=60_000_000,
-    cmd_curriculum_steps=60_000_000, total_steps=200_000_000,
+    # --- budget. SEQUENTIAL ramps do not overlap, so the run needs the SUM of them, not the max.
+    # Sized so the whole queue completes inside the budget with room to consolidate afterwards:
+    # 25 + 30 + 25 + 30 + 40 + 25 = 175 M of 200 M, and stage 1's shorter queue inside its 80 M.
+    cmd_curriculum_steps=25_000_000,
+    pitch_assist_ramp_steps=30_000_000,
+    shape_curriculum_steps=25_000_000,
+    bringup_curriculum_steps=30_000_000,
+    dr_curriculum_steps=40_000_000,
+    jitter_curriculum_steps=25_000_000,
+    total_steps=200_000_000,
 )
 
 _V3_PROBE = dict(_V3, total_steps=40_000_000, track_sigma_steps=20_000_000,
@@ -617,8 +624,14 @@ PRESETS = {
     # across both stages means the task channel never changes meaning under a warm start, which is
     # its own class of bug in this lineage.
     "v3_stage1": lambda: _v2(model_path="model/dash01_v2_planar.xml",
-                             **dict(_V3, total_steps=80_000_000,
-                                    shape_curriculum_steps=50_000_000), **_FAST),
+                             **dict(_V3, total_steps=100_000_000,
+                                    # stage 1 only has to produce a walker that obeys the stick and
+                                    # stands on its own. Bring-up, DR and jitter all restart from
+                                    # zero in stage 2 anyway (curriculum state is per run), so
+                                    # spending stage 1's budget on them buys nothing.
+                                    curriculum_order=("cmd_lo", "cmd_hi", "cmd_zero_p",
+                                                      "pitch_assist", "shape_scale")),
+                             **_FAST),
     # Stage 1b -- the rung that introduces ROLL, and only roll. `dash01_v2_noyaw.xml` is the free
     # plant minus heading: x, y, z, roll, pitch. Roll is the degree of freedom that kills a
     # planar-trained policy on the free plant -- the workspace box is measured in the BASE frame and
@@ -629,8 +642,10 @@ PRESETS = {
     #
     # Heading is a no-op here (no yaw DOF to bill), so the objective is one term simpler too.
     "v3_stage1b": lambda: _v2(model_path="model/dash01_v2_noyaw.xml",
-                              **dict(_V3, total_steps=80_000_000,
-                                     shape_curriculum_steps=50_000_000), **_FAST),
+                              **dict(_V3, total_steps=100_000_000,
+                                     curriculum_order=("cmd_lo", "cmd_hi", "cmd_zero_p",
+                                                       "pitch_assist", "shape_scale")),
+                              **_FAST),
     # Stage 2 -- THE DELIVERABLE, AND THE OPEN PROBLEM AS OF 2026-09-13.
     #
     # Stage 1 is solved and reproducible. This stage is not yet: warm-starting a planar policy onto
@@ -669,8 +684,7 @@ PRESETS = {
     "v3": lambda: _v2(model_path="model/dash01_v2_free.xml",
                       **dict(_V3, roll_assist_kp=100.0, roll_assist_kd=10.0,
                              yaw_assist_kp=100.0, yaw_assist_kd=10.0,
-                             assist_per_episode=True,          # the best-measured handover so far
-                             pitch_assist_ramp_steps=100_000_000),
+                             assist_per_episode=True),         # the best-measured handover so far
                       **_FAST),
     # THE HANDOVER, done as a distribution instead of a dial: assist_per_episode makes
     # pitch_assist the share of episodes that get help, so unassisted episodes are in the training
