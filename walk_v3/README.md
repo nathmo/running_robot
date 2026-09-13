@@ -355,10 +355,35 @@ rolls the instant it can and is killed by a limit it cannot attribute to anythin
 assist prevents that, and then cannot be removed: at any scale it still corrects that share of every
 error, so the policy never meets its own mistakes.
 
-**What is under test:** `v3_stage1b`, a third rung on `model/dash01_v2_noyaw.xml` (the free plant minus
-heading, nq 17). It introduces roll *without* yaw, so the policy meets one new degree of freedom at a
-time and may need no assist at all. If that works, the recipe is planar → no-yaw → free and the
-`v3` preset's assist should be switched off.
+**What the curriculum queue changed.** Sequencing the curricula (see §0) is the only thing that has
+got a policy through the handover. Stage 1, greedy, with the assist faded to zero — three seeds, all
+of which survived where every earlier configuration read 0%:
+
+```
+v3_seq_s3   0.45 m/s / 60% upright / 32% from a dirty start
+v3_seq_s2   0.69 m/s / 42% / 35%      per stick:  0%: 0.70/100%   25%: 0.22/100%   50%: 0.42/12%
+v3_seq_s1   2.63 m/s / 22% / 30%
+```
+
+Stage 2 on the free plant, same mechanism, at 59 M of 200 M with the assist at zero: `v3_q_s1` reads
+**0.66 m/s / 28% upright**, the first free-plant policy here to stand unassisted at all. Three other
+seeds are at 0%. Training episodes at 15 M were 1752–2615 of a 3000 cap against 150–250 for every
+earlier free-plant attempt.
+
+**Two things still short of the contract**, and both are honest open items rather than tuning:
+
+1. **Upright at 28% is not 90%.** The recipe gets a policy across the handover; it does not yet get it
+   across reliably, and only one seed in four made it.
+2. **The queue oscillates.** The gates retreat, so when episode length drops after a fade the command
+   curricula fall back below 0.99 and the queue returns to group 1 — visible in the log as
+   `now advancing cmd_lo+cmd_hi+cmd_zero_p (0/6 complete)` appearing a second and third time. That is
+   the servo behaving as designed, but it means a run can spend its budget re-doing early groups and
+   never reach DR. Check the queue log before trusting a finished run, and read `dr_scale` out of the
+   sidecar — `verify.py` check 1 does exactly this.
+
+`v3_stage1b` (roll without yaw, `model/dash01_v2_noyaw.xml`, nq 17) was the alternative to the queue
+and is **not** the recipe: its seeds read 0% upright after the fade where the planar rung read 22–60%.
+The model and preset stay for anyone who wants to retry that route.
 
 ## Known limits
 
