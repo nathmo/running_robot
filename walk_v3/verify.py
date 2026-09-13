@@ -362,14 +362,21 @@ def check_privilege(rep, cfg, env, agent, args):
     lo = obs_of(lambda s: s.replace(v_cmd=jnp.zeros_like(s.v_cmd)))
     hi = obs_of(lambda s: s.replace(v_cmd=jnp.full_like(s.v_cmd, cfg.v_max)))
     ctrl = float(np.abs(hi - lo).max())
-    if 100.0 * floor > 1.0:
+    # 20x, not 100x. `floor` is already the threshold a leak must stay under, and what the positive
+    # control has to establish is that the probe can resolve a channel-sized effect COMFORTABLY
+    # above that threshold -- an order of magnitude of headroom, not two. 100x was picked on the
+    # planar plant and is unreachable on the free one by construction: the channel's full swing is
+    # 1.0 and the free plant's re-run noise puts 100x floor at 1.87, so the test could only ever
+    # SKIP. A 20x bar still means a leak twenty times smaller than the command channel is caught.
+    MARGIN = 20.0
+    if MARGIN * floor > 1.0:
         # the channel's full swing IS 1.0, so a floor this high means the env's own
         # non-determinism swamps any channel-sized effect and NOTHING here can be concluded
         rep.skip("6. no privilege", "POSITIVE CONTROL: the command does reach the actor",
                  f"re-run noise {floor / 4:.2e} leaves no headroom under a full-scale swing of 1.0")
     else:
         rep.add("6. no privilege", "POSITIVE CONTROL: the command does reach the actor",
-                ctrl > 100.0 * floor, f"{ctrl:.2e}", f"> {100.0 * floor:.2e}",
+                ctrl > MARGIN * floor, f"{ctrl:.2e}", f"> {MARGIN * floor:.2e}",
                 "full-scale command swing, rail to rail")
 
     probes = [("odometry origin shifted 60 m", lambda s: s.replace(x0=s.x0 - 60.0), "x0"),
