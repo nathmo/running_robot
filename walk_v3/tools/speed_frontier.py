@@ -44,6 +44,11 @@ def main():
     ap.add_argument("--upright-bar", type=float, default=0.90)
     ap.add_argument("--err-bar", type=float, default=0.15, help="fraction of the COMMAND")
     ap.add_argument("--dr", action="store_true", help="draw the plant from the DR ranges")
+    ap.add_argument("--train-env", action="store_true",
+                    help="leave the weather ON (obs noise, pushes, wind, trips, hot thermal start) "
+                         "-- what a TRAINING rollout sees, not what the eval env shows")
+    ap.add_argument("--stochastic", action="store_true",
+                    help="sample the action at the policy's own std instead of taking the mean")
     ap.add_argument("--var-floor", type=float, default=None,
                     help="override warmstart_var_floor for --warm-start (0 = no floor)")
     ap.add_argument("--count-cap", type=float, default=None,
@@ -79,10 +84,14 @@ def main():
     rungs = np.concatenate([[0.0], rungs])
     c = replace(cfg, eval_ladder=tuple(float(r) for r in rungs))
     n_envs = int(len(rungs) * args.n_per)
-    rows = ladder_eval(c, agent, n_envs, args.seconds, dr=args.dr, bringup=False, seed=11)
+    rows = ladder_eval(c, agent, n_envs, args.seconds, dr=args.dr, bringup=False, seed=11,
+                       quiet=not args.train_env, greedy=not args.stochastic)
 
     print(f"\n[frontier] {run.name}  {ckpt.name}  v_max={cfg.v_max:.2f}  "
-          f"plant={'DR' if args.dr else 'nominal'}  {args.n_per} envs/rung  {args.seconds:.0f}s")
+          f"plant={'DR' if args.dr else 'nominal'}  "
+          f"{'TRAINING env (weather on)' if args.train_env else 'eval env (quiet)'}  "
+          f"{'stochastic' if args.stochastic else 'greedy'}  "
+          f"{args.n_per} envs/rung  {args.seconds:.0f}s")
     print(f"{'commanded':>10} {'achieved':>9} {'err':>7} {'err/cmd':>8} {'upright':>8} {'heading':>8}")
     ok = []
     for r in rows:

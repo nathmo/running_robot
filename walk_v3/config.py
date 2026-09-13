@@ -405,6 +405,13 @@ class Config:
     bringup_grace_s: float = 0.35           # no fall termination while dropping / just released
     bringup_curriculum_steps: int = 40_000_000
     bringup_gate_ep_len: float = 600.0
+    # THE ENVELOPE THE CONTRACT IS SCORED ON, as a fraction of the trained one. Training opens to
+    # +-20 deg of pitch and a 5-10 cm drop, which no operator produces: measured on the real robot
+    # the bring-up a person can actually do is upright to 5 deg BACK with both feet flat after a
+    # >=1 s hold, and +5 deg FORWARD was 16/16 floor violations. 0.25 puts the scored band at
+    # ~+-6.5 deg and 2-3 cm, a little wider than the measured envelope so it is not scored on its
+    # own edge. verify.py reports the full width too, as margin.
+    bringup_operator_scale: float = 0.25
 
     # ----- PPO (§04) ---------------------------------------------------------------------------
     n_envs: int = 1024

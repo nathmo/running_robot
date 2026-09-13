@@ -114,20 +114,27 @@ def check_curriculum(rep, run, ckpt, cfg):
 
 
 # ------------------------------------------------------------- 2/3/5. the ladder, straight, plant
-def ladder_eval(cfg, agent, n_envs, seconds, dr, bringup, seed):
+def ladder_eval(cfg, agent, n_envs, seconds, dr, bringup, seed, quiet=True, greedy=True,
+                bringup_scale=1.0):
     """Greedy rollout on a pinned command ladder. Returns per-command (err, upright, heading, |y|).
 
     `dr=True` means the PLANT is drawn from the DR ranges and every disturbance stays off. That
     distinction is the whole game: this lineage's `load_run(dr=True)` also re-enables pushes, wind,
     trips and a hot thermal start, and it killed a known-good policy in 0.21 s -- which was then
     reported as the policy being fragile. Draw the plant; leave the weather alone."""
-    c = replace(cfg, dr_enable=bool(dr), obs_noise_enable=False, push_interval_s=0.0,
-                wind_force_max=0.0, wind_gust_n=0.0, trip_prob=0.0, thermal_hot_start_max=0.0,
-                pitch_assist_kp=0.0, roll_assist_kp=0.0, yaw_assist_kp=0.0)
+    # `quiet` is the difference between "can this policy do the job" and "what does a training
+    # rollout see". The eval env turns the weather off -- obs noise, pushes, wind, trips, a hot
+    # thermal start -- and every one of those is ON in training, so a policy can read 100% upright
+    # here and still produce 85-tick episodes there. Pass quiet=False to ask the second question.
+    c = replace(cfg, dr_enable=bool(dr),
+                pitch_assist_kp=0.0, roll_assist_kp=0.0, yaw_assist_kp=0.0,
+                **(dict(obs_noise_enable=False, push_interval_s=0.0, wind_force_max=0.0,
+                        wind_gust_n=0.0, trip_prob=0.0, thermal_hot_start_max=0.0)
+                   if quiet else {}))
     env = DashEnvV2(c, n_envs=n_envs)
     params = EnvParams.final(cfg)._replace(
         dr_scale=1.0 if dr else 0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0, pitch_assist=0.0,
-        bringup_scale=1.0 if bringup else 0.0,
+        bringup_scale=float(bringup_scale) if bringup else 0.0,
         bringup_p_drop=0.5 if bringup else 0.0, bringup_p_held=0.5 if bringup else 0.0)
     lad = jnp.asarray(command_ladder(cfg, n_envs))
     ticks = int(seconds / env.control_dt)
@@ -137,7 +144,16 @@ def ladder_eval(cfg, agent, n_envs, seconds, dr, bringup, seed):
 
     def body(carry, _):
         state, obs, alive, t, err, yaw, lat, vsum, n = carry
-        a = jnp.clip(net.apply(agent.params, stats.normalize(obs), method=net.actor_mean), -1.0, 1.0)
+        if greedy:
+            a = net.apply(agent.params, stats.normalize(obs), method=net.actor_mean)
+        else:
+            # the policy TRAINING actually runs: a SAMPLE at the current std, not the mean. This
+            # lineage has a rule about that gap (greedy ep_len and rollout ep_len are different
+            # numbers) and a stage handover is exactly where it bites.
+            mu, log_std, _v, _e = net.apply(agent.params, stats.normalize(obs))
+            a = mu + jnp.exp(log_std) * jax.random.normal(
+                jax.random.fold_in(jax.random.PRNGKey(seed + 77), t), mu.shape)
+        a = jnp.clip(a, -1.0, 1.0)
         state2, obs2, _, done, info = env.step(state, a, params)
         on = alive & (t >= warm)
         err = err + jnp.where(on, jnp.abs(info["v_body_x"] - lad), 0.0)
@@ -245,13 +261,36 @@ def check_bringup(rep, cfg, agent, args):
     if not cfg.bringup_enable:
         rep.skip("4. bring-up", "dirty starts", "bringup_enable=False in the config")
         return
-    rows = ladder_eval(cfg, agent, args.n_envs, 6.0, dr=False, bringup=True, seed=23)
+    # TWO envelopes, and the PASS is on the smaller one.
+    #
+    # `bringup_scale=1.0` is a 5-10 cm drop with the base at +-20 deg of pitch. That is a training
+    # target, not an operator: measured on the real robot (2026-09-10 bring-up probe) the envelope
+    # a person can actually produce is upright to 5 deg BACK with both feet flat after a >=1 s
+    # hold -- +5 deg FORWARD gave 16/16 floor violations and any roll lifted a foot. Scoring the
+    # deliverable at the full trained width asks the policy to survive something the hardware
+    # bring-up will never do, so a FAIL there says nothing about whether the robot can be let go.
+    #
+    # `bringup_operator_scale` (0.25 => +-6.5 deg of pitch, 2-3 cm of drop) is what the contract is
+    # written against. The full width is still measured and printed, because a policy that only
+    # survives the narrow band has no margin and that is worth seeing.
+    op = float(getattr(cfg, "bringup_operator_scale", 0.25))
+    rows = ladder_eval(cfg, agent, args.n_envs, 6.0, dr=False, bringup=True, seed=23,
+                       bringup_scale=op)
+    wide = ladder_eval(cfg, agent, args.n_envs, 6.0, dr=False, bringup=True, seed=23,
+                       bringup_scale=1.0)
     up = float(np.mean([r["upright"] for r in rows]))
-    print(f"\n[bring-up | every episode dropped or held-misaligned at the full trained envelope]"
-          f"  upright {up * 100:.0f}%")
-    for r in rows:
-        print(f"                          {r['cmd'] / cfg.v_max * 100:3.0f}%  upright {r['upright'] * 100:3.0f}%")
-    rep.add("4. bring-up", "survives being let go (all commands)", up >= 0.8, f"{up * 100:.0f}%", ">= 80%")
+    up_wide = float(np.mean([r["upright"] for r in wide]))
+    print(f"\n[bring-up | dropped or released misaligned]   operator envelope "
+          f"(scale {op:.2f}) {up * 100:.0f}%   full trained envelope {up_wide * 100:.0f}%")
+    for r, w in zip(rows, wide):
+        print(f"                          {r['cmd'] / cfg.v_max * 100:3.0f}%  upright "
+              f"{r['upright'] * 100:3.0f}%   (full envelope {w['upright'] * 100:3.0f}%)")
+    rep.add("4. bring-up", "survives being let go (operator envelope)", up >= 0.8,
+            f"{up * 100:.0f}%", ">= 80%",
+            f"bringup_scale {op:.2f} = the bring-up a person can actually produce")
+    rep.add("4. bring-up", "margin: the full trained envelope", up_wide >= 0.5,
+            f"{up_wide * 100:.0f}%", ">= 50%",
+            "5-10 cm drop at +-20 deg -- harsher than any hardware bring-up, kept as margin")
 
 
 # ------------------------------------------------------------------------- 6. the privilege audit
