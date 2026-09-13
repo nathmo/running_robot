@@ -627,6 +627,17 @@ PRESETS = {
                       **_FAST),
     # the same, without the wheels: the control that says whether they are what mattered
     "v3_nowheels": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V3, **_FAST),
+    # ... and the other way of paying for roll: leave the robot to hold itself up, and stop the
+    # WORKSPACE BOX from calling body attitude a reach violation. The box is what killed the
+    # unassisted transfer (44 of 64 deaths), and it was calibrated on a plant that cannot roll: a
+    # planted foot 0.15 m off centre moves ~0.11 m in the base frame at 20 deg of roll, against a
+    # 0.14 m budget. Widening it by roughly that much, and tripling the 0.10 s grace, asks whether
+    # the box alone was the problem -- which would be a better answer than a training wheel, because
+    # a wheel has to be taken away again and this lineage falls over every time it is.
+    "v3_roomybox": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                               **dict(_V3, workspace_dz_max=0.22, workspace_dz_min=-0.26,
+                                      workspace_dx_max=0.40, workspace_grace_s=0.30),
+                               **_FAST),
     # the same recipe on the planar model (x, z, pitch free): an iteration sandbox, and the control
     # that says whether a cold-start failure is the objective or the plant
     "v3_planar": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V3, **_FAST),
