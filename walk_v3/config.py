@@ -748,6 +748,30 @@ PRESETS = {
                                     # bring-up and DR supply directly. So keep the parent's log_std
                                     # and CAP it where the parent left off, or the entropy bonus
                                     # simply walks it back up to 0.70 over the first few updates.
+                                    # AND DO NOT FLOOR THE OBSERVATION VARIANCE.
+                                    # `warmstart_var_floor` raises every obs channel's variance to
+                                    # 0.01 before normalising, which shrinks the normalised
+                                    # magnitude of every channel that genuinely varies less than
+                                    # that -- 59 of 412 dims here. Measured 2026-09-13 by applying
+                                    # the surgery to the stage-2 keeper and re-running the ladder:
+                                    #
+                                    #            floor 0.01   no floor
+                                    #   1.80 m/s   0% upright  100% upright
+                                    #   heading      23.6 deg     2.0 deg (at rest)
+                                    #
+                                    # i.e. the thing that is supposed to protect a warm start is
+                                    # what was destroying it, and had been doing so at every stage
+                                    # handover in this lineage. The count cap is innocent: capped
+                                    # at 1e5, 1e7 or not at all, the ladder is identical.
+                                    #
+                                    # The floor is not WRONG in general -- it exists because v2's
+                                    # task[0] had variance 6.5e-5, so a command of 0.89 normalised
+                                    # to -13.6 sigma, and because a channel that is identically
+                                    # zero on one plant (lateral velocity on planar) and non-zero
+                                    # on the next divides by ~0 in a stage-1 -> stage-2 transfer.
+                                    # Neither applies here: the joystick command sweeps its whole
+                                    # range, and stage 3 inherits the SAME plant it will train on.
+                                    warmstart_var_floor=0.0,
                                     warmstart_reset_log_std=False,
                                     max_log_std=-1.3863,          # ln(0.25) = the parent's clamp
                                     std_anneal_target=0.12,
@@ -804,6 +828,30 @@ PRESETS = {
                                         roll_assist_kp=0.0, roll_assist_kd=0.0,
                                         yaw_assist_kp=0.0, yaw_assist_kd=0.0,
                                         assist_per_episode=False,
+                                        # AND DO NOT FLOOR THE OBSERVATION VARIANCE.
+                                        # `warmstart_var_floor` raises every obs channel's variance to
+                                        # 0.01 before normalising, which shrinks the normalised
+                                        # magnitude of every channel that genuinely varies less than
+                                        # that -- 59 of 412 dims here. Measured 2026-09-13 by applying
+                                        # the surgery to the stage-2 keeper and re-running the ladder:
+                                        #
+                                        #            floor 0.01   no floor
+                                        #   1.80 m/s   0% upright  100% upright
+                                        #   heading      23.6 deg     2.0 deg (at rest)
+                                        #
+                                        # i.e. the thing that is supposed to protect a warm start is
+                                        # what was destroying it, and had been doing so at every stage
+                                        # handover in this lineage. The count cap is innocent: capped
+                                        # at 1e5, 1e7 or not at all, the ladder is identical.
+                                        #
+                                        # The floor is not WRONG in general -- it exists because v2's
+                                        # task[0] had variance 6.5e-5, so a command of 0.89 normalised
+                                        # to -13.6 sigma, and because a channel that is identically
+                                        # zero on one plant (lateral velocity on planar) and non-zero
+                                        # on the next divides by ~0 in a stage-1 -> stage-2 transfer.
+                                        # Neither applies here: the joystick command sweeps its whole
+                                        # range, and stage 3 inherits the SAME plant it will train on.
+                                        warmstart_var_floor=0.0,
                                         warmstart_reset_log_std=False,
                                         max_log_std=-1.3863,
                                         std_anneal_target=0.12,

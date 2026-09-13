@@ -44,11 +44,35 @@ def main():
     ap.add_argument("--upright-bar", type=float, default=0.90)
     ap.add_argument("--err-bar", type=float, default=0.15, help="fraction of the COMMAND")
     ap.add_argument("--dr", action="store_true", help="draw the plant from the DR ranges")
+    ap.add_argument("--var-floor", type=float, default=None,
+                    help="override warmstart_var_floor for --warm-start (0 = no floor)")
+    ap.add_argument("--count-cap", type=float, default=None,
+                    help="override warmstart_obs_count_cap for --warm-start (0 = no cap)")
+    ap.add_argument("--warm-start", action="store_true",
+                    help="load through the SAME obs-stat surgery a warm start applies "
+                         "(warmstart_var_floor, warmstart_obs_count_cap) -- i.e. measure the "
+                         "policy the next stage actually inherits, not the one that was saved")
     args = ap.parse_args()
 
     run = Path(args.run)
     ckpt = Path(args.checkpoint) if args.checkpoint else run / "best.msgpack"
-    cfg, _env, agent = load_run(run, ckpt)
+    # Apply the surgery HERE rather than through load_run's warm_start flag, so the floor and the
+    # cap can be swept. They are the two things a warm start does to the obs statistics, and
+    # measured 2026-09-13 they are not free: the default floor of 0.01 pins 59 of 412 dims and
+    # takes the stage-2 keeper from 100% upright at 1.80 m/s to 0% at every command.
+    cfg, _env, agent = load_run(run, ckpt, warm_start=False)
+    if args.warm_start:
+        import jax.numpy as jnp
+        cap = cfg.warmstart_obs_count_cap if args.count_cap is None else args.count_cap
+        floor = cfg.warmstart_var_floor if args.var_floor is None else args.var_floor
+        if cap > 0:
+            agent.stats = agent.stats.replace(count=jnp.minimum(agent.stats.count, cap))
+        if floor > 0:
+            agent.stats = agent.stats.replace(var=jnp.maximum(agent.stats.var, floor))
+        v = np.asarray(agent.stats.var)
+        print(f"[warm] obs-stat surgery: cap={cap:,.0f} floor={floor}  ->  "
+              f"count={float(agent.stats.count):,.0f}, "
+              f"{int((v <= floor + 1e-12).sum()) if floor > 0 else 0}/{v.size} dims on the floor")
 
     # the ladder is a FRACTION of v_max inside command_ladder, so build the fractions we want
     rungs = np.arange(args.step, float(cfg.v_max) + 1e-9, args.step) / float(cfg.v_max)

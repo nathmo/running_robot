@@ -376,3 +376,9 @@ label.chk { display: inline-flex; align-items: center; gap: 6px; }
 .pol-speedbig { font-family: ui-monospace, monospace; font-size: 20px; font-weight: 700;
   min-width: 116px; text-align: right; color: var(--fg); }
 .pol-command.go .pol-speedbig { color: var(--good); }
+/* the v3 heading readout: the policy's own bearing, so it earns the same monospace weight as the
+   speed it sits under. Colour is a warning, not a state -- green would claim a straightness this
+   number cannot prove, since it is an integral and not a compass. */
+.pol-heading { font-family: ui-monospace, monospace; font-size: 20px; font-weight: 700;
+  min-width: 116px; text-align: right; color: var(--fg); }
+.pol-heading.warn { color: var(--warn, #d08a00); }
