@@ -614,9 +614,16 @@ PRESETS = {
     #
     # The wheel is the same mechanism the pitch assist has always used (`params.pitch_assist` scales
     # all three), so it fades once the policy runs on it and is gone from the shipped controller.
+    # The fade is SLOW -- 100 M of the 200 M budget, not the inherited 30 M. Measured 2026-09-13:
+    # with a 30 M fade, three of four seeds collapsed at the moment the wheels reached zero (one
+    # went straight back to the 1.5 Hz clock floor) and the DR curriculum retreated from 0.25 to
+    # 0.000 with them, undoing the randomisation as well. The fourth survived at 60% upright and
+    # 0.62 m/s of error, so the recipe works -- it just has to hand the robot back to itself slowly
+    # enough that it notices. This is the end-of-fade cliff the v2 and v2b runs died on twice.
     "v3": lambda: _v2(model_path="model/dash01_v2_free.xml",
                       **dict(_V3, roll_assist_kp=100.0, roll_assist_kd=10.0,
-                             yaw_assist_kp=100.0, yaw_assist_kd=10.0),
+                             yaw_assist_kp=100.0, yaw_assist_kd=10.0,
+                             pitch_assist_ramp_steps=100_000_000),
                       **_FAST),
     # the same, without the wheels: the control that says whether they are what mattered
     "v3_nowheels": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V3, **_FAST),
