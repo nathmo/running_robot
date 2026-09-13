@@ -625,6 +625,13 @@ PRESETS = {
                              yaw_assist_kp=100.0, yaw_assist_kd=10.0,
                              pitch_assist_ramp_steps=100_000_000),
                       **_FAST),
+    # insurance against the cliff: the same recipe, handing the robot back over 150 M of 200 M
+    # instead of 100. The fade length is the parameter every collapse in this lineage has turned on.
+    "v3_slowfade": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                               **dict(_V3, roll_assist_kp=100.0, roll_assist_kd=10.0,
+                                      yaw_assist_kp=100.0, yaw_assist_kd=10.0,
+                                      pitch_assist_ramp_steps=150_000_000),
+                               **_FAST),
     # the same, without the wheels: the control that says whether they are what mattered
     "v3_nowheels": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V3, **_FAST),
     # ... and the other way of paying for roll: leave the robot to hold itself up, and stop the
@@ -634,6 +641,12 @@ PRESETS = {
     # 0.14 m budget. Widening it by roughly that much, and tripling the 0.10 s grace, asks whether
     # the box alone was the problem -- which would be a better answer than a training wheel, because
     # a wheel has to be taken away again and this lineage falls over every time it is.
+    # RESULT 2026-09-13: a roomier box is NOT enough on its own. Two seeds peaked at ep_len ~250
+    # around 6 M and were back to 145-155 with negative returns by 14.7 M, while the wheeled runs
+    # were at 600-1150. So the box was a contributing killer -- 44 of 64 deaths -- but the roll and
+    # yaw assists are doing more than dodging it: they hold the two new degrees of freedom still
+    # long enough for the policy to learn a gait in them at all. Kept as the record of the
+    # experiment, not as a recipe.
     "v3_roomybox": lambda: _v2(model_path="model/dash01_v2_free.xml",
                                **dict(_V3, workspace_dz_max=0.22, workspace_dz_min=-0.26,
                                       workspace_dx_max=0.40, workspace_grace_s=0.30),
