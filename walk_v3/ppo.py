@@ -134,7 +134,23 @@ class PPO:
         self.key, k = jax.random.split(self.key)
         self.params = self.net.init(k, jnp.zeros((1, env.obs_dim)))
         n_updates = self.n_rollouts_total * cfg.n_epochs * self.n_minibatches
-        self.lr = optax.linear_schedule(cfg.learning_rate, cfg.lr_final, n_updates)
+        # LR WARMUP, for the first minibatches only. Adam starts with zero moments, so its very
+        # first step is ~lr on EVERY parameter at once (m-hat / sqrt(v-hat) ~ +-1 after bias
+        # correction) -- a coordinated move of the whole network. A random policy does not care; a
+        # converged one that a warm start just loaded is destroyed by it. Measured 2026-09-13, the
+        # first update of every stage-3 run reported approx_kl 0.93 against a target_kl of 0.03,
+        # and target_kl cannot help: the early stop is checked AFTER a minibatch, so the damage is
+        # already in the weights. Warming the step size up over a few hundred minibatches lets the
+        # second moment fill in before the step is allowed to be full size.
+        warm_up = int(getattr(cfg, "lr_warmup_updates", 0))
+        if warm_up > 0:
+            self.lr = optax.join_schedules(
+                [optax.linear_schedule(cfg.learning_rate * 0.02, cfg.learning_rate, warm_up),
+                 optax.linear_schedule(cfg.learning_rate, cfg.lr_final,
+                                       max(n_updates - warm_up, 1))],
+                [warm_up])
+        else:
+            self.lr = optax.linear_schedule(cfg.learning_rate, cfg.lr_final, n_updates)
         self.lr_kl_adaptive = bool(getattr(cfg, "lr_kl_adaptive", False))
         if self.lr_kl_adaptive:
             # rl_games' adaptive schedule: the step shrinks when the KL overshoots the target and grows

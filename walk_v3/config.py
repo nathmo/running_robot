@@ -436,6 +436,12 @@ class Config:
     gae_lambda: float = 0.95
     learning_rate: float = 3.0e-4
     lr_final: float = 1.0e-4
+    # minibatch updates over which the step size ramps from 2% of learning_rate to all of it. 0 =
+    # off, which is right for a cold run. It matters for a WARM one: Adam's first step is ~lr on
+    # every parameter at once, and measured that is approx_kl 0.93 against a 0.03 target on the
+    # first update of a stage-3 run -- the converged policy the warm start just loaded, wrecked
+    # before the early stop gets a chance to look.
+    lr_warmup_updates: int = 0
     clip_range: float = 0.2
     target_kl: float = 0.03
     vf_coef: float = 0.5
@@ -818,6 +824,7 @@ PRESETS = {
                                     # person holds the robot and lets go. Nobody drops it 10 cm onto its feet.
                                     bringup_drop_frac=0.10,
                                     bringup_held_frac=0.25,
+                                    lr_warmup_updates=300,   # ~8 rollouts at 36 updates each
                                     bringup_target=0.40,
                                     bringup_curriculum_steps=40_000_000,
                                     dr_curriculum_steps=40_000_000,
@@ -918,6 +925,7 @@ PRESETS = {
                                         # person holds the robot and lets go. Nobody drops it 10 cm onto its feet.
                                         bringup_drop_frac=0.10,
                                         bringup_held_frac=0.25,
+                                        lr_warmup_updates=300,   # ~8 rollouts at 36 updates each
                                         bringup_target=0.40,
                                         bringup_curriculum_steps=40_000_000,
                                         dr_curriculum_steps=40_000_000,
