@@ -791,6 +791,22 @@ PRESETS = {
                                     # --- what this stage is for
                                     curriculum_order=("bringup_scale", "dr_scale",
                                                       ("ctrl_jitter_ms", "ctrl_drop_prob")),
+                                    # HOW MUCH OF TRAINING IS THE FIRST HALF-SECOND.
+                                    # At full bringup_scale the stock shares put 25% of episodes on a free
+                                    # drop and 35% on a held release: 60% of every rollout starts dirty, and
+                                    # almost all of those end in the 100-point fall penalty. Measured
+                                    # 2026-09-13, three seeds went from 50-62% upright at 29 M to 0-6% at
+                                    # 44 M as bring-up opened -- and that eval starts from the SETTLED
+                                    # keyframe, so what was lost is the cruise, not the bring-up.
+                                    #
+                                    # Bring-up is a transient the robot does once per run; cruising is what
+                                    # it does for the other 99% of the time, and spending 60% of the
+                                    # episodes on the transient prices it accordingly. 10% drop / 25% held
+                                    # keeps a clear majority of episodes on the task, and the split leans to
+                                    # HELD because that is the only bring-up the hardware actually has -- a
+                                    # person holds the robot and lets go. Nobody drops it 10 cm onto its feet.
+                                    bringup_drop_frac=0.10,
+                                    bringup_held_frac=0.25,
                                     bringup_curriculum_steps=40_000_000,
                                     dr_curriculum_steps=40_000_000,
                                     jitter_curriculum_steps=25_000_000,
@@ -874,6 +890,22 @@ PRESETS = {
                                         ent_coef=0.003,
                                         curriculum_order=("bringup_scale", "dr_scale",
                                                           ("ctrl_jitter_ms", "ctrl_drop_prob")),
+                                        # HOW MUCH OF TRAINING IS THE FIRST HALF-SECOND.
+                                        # At full bringup_scale the stock shares put 25% of episodes on a free
+                                        # drop and 35% on a held release: 60% of every rollout starts dirty, and
+                                        # almost all of those end in the 100-point fall penalty. Measured
+                                        # 2026-09-13, three seeds went from 50-62% upright at 29 M to 0-6% at
+                                        # 44 M as bring-up opened -- and that eval starts from the SETTLED
+                                        # keyframe, so what was lost is the cruise, not the bring-up.
+                                        #
+                                        # Bring-up is a transient the robot does once per run; cruising is what
+                                        # it does for the other 99% of the time, and spending 60% of the
+                                        # episodes on the transient prices it accordingly. 10% drop / 25% held
+                                        # keeps a clear majority of episodes on the task, and the split leans to
+                                        # HELD because that is the only bring-up the hardware actually has -- a
+                                        # person holds the robot and lets go. Nobody drops it 10 cm onto its feet.
+                                        bringup_drop_frac=0.10,
+                                        bringup_held_frac=0.25,
                                         bringup_curriculum_steps=40_000_000,
                                         dr_curriculum_steps=40_000_000,
                                         jitter_curriculum_steps=25_000_000,
