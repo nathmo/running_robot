@@ -691,6 +691,49 @@ PRESETS = {
                              yaw_assist_kp=100.0, yaw_assist_kd=10.0,
                              assist_per_episode=True),         # the best-measured handover so far
                       **_FAST),
+    # Stage 3 -- THE REST OF THE QUEUE. Measured 2026-09-13 on the five 200 M stage-2 seeds: the
+    # joystick works (0.31-0.55 m/s of error, 60-80% upright) and the queue got exactly three
+    # groups deep. Every seed finished with `bringup_scale` at 0.00-0.31 and `dr_scale` at
+    # **0.000** -- the two things the deliverable is actually specified on. Sequential curricula
+    # cost what they cost, and 200 M does not buy six of them.
+    #
+    # So stage 3 buys the last three, from the stage-2 keeper, and the first three are PINNED AT
+    # FINAL rather than left out of the order: a name omitted from `curriculum_order` advances
+    # unqueued from its START value, which would re-open the command band and re-fade an assist
+    # that is already gone. Pinning is expressed as "no ramp at all", because `initial_params`
+    # reads a zero ramp as "begin at the target".
+    #
+    # The training wheels do not come back. roll/yaw/pitch assist kp are ZERO here, not faded --
+    # the parent already stands unassisted (every eval in stage 2 ran at pitch_assist 0), so there
+    # is nothing to hand back and no second end-of-fade cliff to fall off.
+    #
+    # Order is bring-up BEFORE DR, and that way round on purpose: bring-up is what shortens
+    # episodes, and both gates are relative to `_ep_len_ref`. Letting the reference settle onto the
+    # bring-up task first means DR ramps against a stable yardstick; the other order would have DR
+    # climb against a runner's episode length and then retreat when bring-up cut it in half, which
+    # is the failure that left dr_scale at 0.000 three times in this lineage.
+    "v3_stage3": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                             **dict(_V3,
+                                    # --- pinned at final (the parent finished these)
+                                    cmd_curriculum_steps=0,        # cmd_lo/hi -> cmd_range, zero_p -> 0.25
+                                    shape_curriculum_steps=0,      # shape_scale -> 1.0
+                                    efficiency_ramp_steps=0,       # eff_scale -> efficiency_target
+                                    gait_curriculum_steps=0,       # stance_ratio -> final
+                                    track_sigma_steps=0,           # track_sigma -> 0.6
+                                    pitch_assist_ramp_steps=0,
+                                    # --- and the wheels are off for good
+                                    pitch_assist_kp=0.0, pitch_assist_kd=0.0,
+                                    roll_assist_kp=0.0, roll_assist_kd=0.0,
+                                    yaw_assist_kp=0.0, yaw_assist_kd=0.0,
+                                    assist_per_episode=False,
+                                    # --- what this stage is for
+                                    curriculum_order=("bringup_scale", "dr_scale",
+                                                      ("ctrl_jitter_ms", "ctrl_drop_prob")),
+                                    bringup_curriculum_steps=40_000_000,
+                                    dr_curriculum_steps=40_000_000,
+                                    jitter_curriculum_steps=25_000_000,
+                                    total_steps=150_000_000),
+                             **_FAST),
     # THE HANDOVER, done as a distribution instead of a dial: assist_per_episode makes
     # pitch_assist the share of episodes that get help, so unassisted episodes are in the training
     # distribution from the first rollout and the fade reweights rather than removes.
