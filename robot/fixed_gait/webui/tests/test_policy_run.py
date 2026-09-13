@@ -187,17 +187,41 @@ def test_a_privileged_observation_bundle_can_never_be_deployed(armed, tmp_path):
 
 
 @needs_bundle
-def test_a_bundle_for_another_control_rate_is_refused(armed):
-    """The action filter, the actuation delay and the slew limit are all PER-STEP constants. Run
-    at the wrong rate they are a different control law, not a slightly-off one."""
+def test_a_bundle_whose_rate_is_not_a_whole_fraction_of_the_loop_is_refused(armed):
+    """The gait clock, the slew limit and the governor's rate cap are all PER-STEP constants. Run
+    at the wrong rate they are a different control law, not a slightly-off one.
+
+    A bundle SLOWER than the loop by a whole number is fine and is how v2 runs (100 Hz out of a
+    200 Hz loop, every second tick). 150 Hz is not: there is no tick pattern that delivers it."""
     d, _cal = armed
     from bundle import Bundle
     b = Bundle.load(BUNDLE_SRC)
-    dest = os.path.join(paths.POLICY_DIR, "slow_test.npz")
+    dest = os.path.join(paths.POLICY_DIR, "odd_rate_test.npz")
     try:
-        Bundle.save(dest, b.a, dict(b.meta, control_dt=0.02))
-        ok, why, _ = d.policy_arm(spec(file="slow_test.npz"))
-        assert not ok and "50 Hz" in why and "200" in why
+        Bundle.save(dest, b.a, dict(b.meta, control_dt=1.0 / 150.0))
+        ok, why, _ = d.policy_arm(spec(file="odd_rate_test.npz"))
+        assert not ok and "150" in why and "whole fraction" in why
+    finally:
+        if os.path.exists(dest):
+            os.remove(dest)
+
+
+@needs_bundle
+def test_a_bundle_slower_than_the_loop_by_a_whole_number_runs_on_every_nth_tick(armed):
+    """v2 is 100 Hz and the loop is 200. The control law gets every second tick at its own dt, and
+    the frame it produced is re-streamed on the one in between."""
+    d, _cal = armed
+    from bundle import Bundle
+    b = Bundle.load(BUNDLE_SRC)
+    dest = os.path.join(paths.POLICY_DIR, "half_rate_test.npz")
+    try:
+        Bundle.save(dest, b.a, dict(b.meta, control_dt=0.01))
+        ok, why, info = d.policy_arm(spec(file="half_rate_test.npz"))
+        assert ok, why
+        assert info["decimation"] == 2 and info["control_hz"] == 100.0
+        # ... and the budget it is held to is its OWN period, not the loop's
+        assert info["tick_budget_ms"] == 10.0
+        d.policy_stop(hard=True)
     finally:
         if os.path.exists(dest):
             os.remove(dest)
@@ -420,10 +444,12 @@ def test_the_log_columns_match_what_is_written(staged):
     got_p = keep_alive_until(d, lambda p: p["phase"] == "done", timeout=30.0)
     assert got_p["phase"] == "done"
     got = d.get_policy()
-    assert got["log"].shape[1] == daemon_mod.POLICY_LOG_COLS == 64
+    assert got["log"].shape[1] == daemon_mod.POLICY_LOG_COLS == 65
     named = got["columns"].split("(")[0]
-    # t + eleven six-vectors + two threes + three scalars
+    # t + eleven six-vectors + two threes + four scalars (the last is the v2 command channel:
+    # the run/stop flag on one lineage, the commanded speed over v_max on the joystick one)
     assert named.count("6 |") + named.count("6 |") >= 1
+    assert "task0" in got["columns"]
     assert "MODEL actuator order" in got["columns"]
     assert np.all(np.isfinite(got["log"]))
 
@@ -481,7 +507,7 @@ def test_a_machine_too_slow_for_the_bundle_refuses_and_says_by_how_much(staged, 
     is not "a bit jittery", it is a gait clock at 0.45x and joint velocities inflated 2.2x in the
     observation. That has to be a refusal with the number in it, not a silent slow run."""
     d, _cal, fname = staged
-    monkeypatch.setattr(daemon_mod, "POLICY_MAX_STEP_MS", 1e-6)
+    monkeypatch.setattr(daemon_mod, "policy_max_step_ms", lambda hz: 1e-6)
     ok, why, _info = d.policy_arm(spec(file=fname))
     assert not ok
     assert "ms per control tick" in why and "allow_slow_loop" in why
@@ -512,7 +538,7 @@ def test_an_acknowledged_slow_loop_is_not_killed_by_the_rate_guard(staged, monke
     """Having said 'yes, slower than trained', the operator must not then be stopped for it every
     second. The acknowledgement has to disarm BOTH gates or it disarms neither usefully."""
     d, _cal, fname = staged
-    monkeypatch.setattr(daemon_mod, "POLICY_MAX_STEP_MS", 1e-6)
+    monkeypatch.setattr(daemon_mod, "policy_max_step_ms", lambda hz: 1e-6)
     monkeypatch.setattr(daemon_mod, "POLICY_MIN_RATE_FRAC", 5.0)
     ok, why, _ = d.policy_arm(spec(file=fname, max_seconds=3.0, allow_slow_loop=True))
     assert ok, why
@@ -700,3 +726,350 @@ def test_the_telemetry_age_is_the_oldest_motor_not_the_newest_frame(armed):
     assert len(d._rx_at) == paths.N_MOTORS, "the drain is not stamping arrivals"
     d._rx_at["left.cam"] = d._tick_mono - 10.0
     assert d._telemetry_age() >= 10.0
+
+
+# ===================================================================== v2: the run/stop command
+# A v2 (walk_v2) bundle is a different control law at a different rate with a different command
+# channel, and all three of those are things this daemon has to get right or the policy is being
+# run on an observation it has never seen. The bundle here is SYNTHETIC -- real widths, real meta,
+# random weights (robot/deploy/tests/v2_fixture.py) -- because what is under test is the plumbing:
+# the decimation, the run/stop flag, and the fact that a run comes up stopped.
+import sys as _sys                                                              # noqa: E402
+
+_V2_FIXTURE_DIR = os.path.join(paths.DEPLOY, "tests")
+if _V2_FIXTURE_DIR not in _sys.path:
+    _sys.path.insert(0, _V2_FIXTURE_DIR)
+try:
+    import v2_fixture
+except ImportError:                                                # pragma: no cover
+    v2_fixture = None
+
+needs_v2 = pytest.mark.skipif(v2_fixture is None, reason="robot/deploy/tests/v2_fixture.py absent")
+
+
+@pytest.fixture
+def staged_v2(armed):
+    """A synthetic v2 bundle in data/policies/, removed again afterwards."""
+    d, cal = armed
+    name = "zz_v2_fixture_test.npz"
+    dest = os.path.join(paths.POLICY_DIR, name)
+    v2_fixture.write_v2_bundle(dest)
+    yield d, cal, name
+    if os.path.exists(dest):
+        os.remove(dest)
+
+
+def v2_spec(**kw):
+    s = {"file": "zz_v2_fixture_test.npz", "supported": True, "max_seconds": 3.0,
+         "allow_uncalibrated_thermal": True, "skip_jointmap_check": True}
+    s.update(kw)
+    return s
+
+
+@needs_v2
+def test_a_v2_bundle_arms_at_its_own_rate_on_every_second_loop_tick(staged_v2):
+    d, _cal, _name = staged_v2
+    ok, why, info = d.policy_arm(v2_spec())
+    assert ok, why
+    assert info["bundle_version"] == 2
+    assert info["control_hz"] == 100.0 and info["decimation"] == 2
+    assert info["tick_budget_ms"] == 10.0, "the budget is the bundle's period, not the loop's"
+    assert info["has_run_flag"] is True
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_a_v2_run_reaches_the_policy_and_comes_up_stopped(staged_v2):
+    """The one behaviour the operator is promised: inference is live, the legs are at the stance,
+    and NOTHING is trying to travel until somebody presses RUN."""
+    d, _cal, _name = staged_v2
+    ok, why, _ = d.policy_arm(v2_spec())
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p["phase"] == "run" or p["phase"] == "done", timeout=30.0)
+    assert p["phase"] == "run", "never reached the policy: {}".format(p.get("exit_reason"))
+    assert p["run_flag"] is False
+    assert p["has_run_flag"] is True
+    assert d._pol["ctrl"].run is False, "the control law itself must be stopped, not just the UI"
+    assert d._pol["ctrl"]._obs()[d._pol["ctrl"].actor_dim - 3] == 0.0
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_the_run_button_reaches_the_policys_task_channel(staged_v2):
+    d, _cal, _name = staged_v2
+    ok, why, _ = d.policy_arm(v2_spec())
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p["phase"] in ("run", "done"), timeout=30.0)
+    assert p["phase"] == "run", p.get("exit_reason")
+    ctrl = d._pol["ctrl"]
+
+    ok, why = d.policy_set_run(True)
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p.get("run_flag") is True, timeout=5.0)
+    assert p["run_flag"] is True
+    assert ctrl.run is True
+    assert ctrl._obs()[ctrl.actor_dim - 3] == 1.0
+    # ... and it did not end the run: this is a command to the policy, not a kill
+    assert p["phase"] == "run" and p["stop"] == "running"
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_stop_is_refused_when_the_bundle_has_no_fitted_brake(staged_v2):
+    """The measured reason (walk_v2/README.md, 2026-09-11 17:00): telling this lineage it has
+    finished is 3/512 upright against 512/512 for not telling it. A bundle with no schedule has no
+    stop, and the daemon must say so rather than fall back to the flag."""
+    d, _cal, _name = staged_v2
+    ok, why, info = d.policy_arm(v2_spec())
+    assert ok, why
+    assert info["has_brake"] is False
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    ok, why = d.policy_set_run(False)
+    assert not ok and "3/512" in why
+    assert d._pol["ctrl"].run is False        # unchanged, and NOT quietly flipped
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_the_brake_runs_the_schedule_with_the_task_flag_held_at_one(staged_v2):
+    d, _cal, _name = staged_v2
+    theta = [1.0, 1.41, 1.13, 1.02, 0.96, 0.78, -0.099, 0.001, 0.408, 0.128, -0.375, 0.089]
+    dest = os.path.join(paths.POLICY_DIR, "zz_v2_brake_test.npz")
+    v2_fixture.write_v2_bundle(dest, brake={"theta": theta, "window_s": 2.0, "source": "test"})
+    try:
+        ok, why, info = d.policy_arm(v2_spec(file="zz_v2_brake_test.npz", max_seconds=6.0))
+        assert ok, why
+        assert info["has_brake"] is True and info["brake_window_s"] == 2.0
+        keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+        ctrl = d._pol["ctrl"]
+        assert d.policy_set_run(True)[0]
+        keep_alive_until(d, lambda p: p.get("run_flag") is True, timeout=5.0)
+
+        ok, why = d.policy_set_run(False)                 # STOP: the brake, not the flag
+        assert ok, why
+        p = keep_alive_until(d, lambda p: p.get("braking") is True, timeout=5.0)
+        assert p["braking"] is True
+        assert p["run_flag"] is True, "the brake must NOT drop the task flag -- that is the fall"
+        assert ctrl.run is True and ctrl.braking is True
+        p = keep_alive_until(d, lambda p: p.get("brake_frac", 0) > 0.2, timeout=8.0)
+        assert p["brake_frac"] > 0.2 and p["phase"] == "run" and p["stop"] == "running"
+
+        assert d.policy_set_run(True)[0]                  # RUN hands the gait back
+        p = keep_alive_until(d, lambda p: p.get("braking") is False, timeout=5.0)
+        assert p["braking"] is False and ctrl.braking is False
+        d.policy_stop(hard=True)
+    finally:
+        if os.path.exists(dest):
+            os.remove(dest)
+
+
+@needs_v2
+def test_the_flag_stays_reachable_for_testing_the_stop_curriculum(staged_v2):
+    """mode='flag' is the literal task input. It is not a brake today, but it is what the stop
+    curriculum trains, so it has to stay testable on the day a checkpoint learns it."""
+    d, _cal, _name = staged_v2
+    ok, why, _ = d.policy_arm(v2_spec())
+    assert ok, why
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    ctrl = d._pol["ctrl"]
+    assert d.policy_set_run(True)[0]
+    keep_alive_until(d, lambda p: p.get("run_flag") is True, timeout=5.0)
+    ok, why = d.policy_set_run(False, mode="flag")
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p.get("run_flag") is False, timeout=5.0)
+    assert p["run_flag"] is False and ctrl.run is False
+    assert ctrl._obs()[ctrl.actor_dim - 3] == 0.0
+    assert p["braking"] is False
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_the_run_flag_is_refused_when_there_is_no_run_to_flag(staged_v2):
+    d, _cal, _name = staged_v2
+    ok, why = d.policy_set_run(True)
+    assert not ok and "no policy run" in why
+
+
+@needs_v2
+def test_a_constant_task_channel_says_so_instead_of_pretending(staged_v2):
+    """objective='speed' bakes task = [1, 1]. The button cannot reach the policy, so the daemon
+    must say that rather than accept a command that changes nothing on the wire."""
+    d, _cal, _name = staged_v2
+    dest = os.path.join(paths.POLICY_DIR, "zz_v2_speed_test.npz")
+    v2_fixture.write_v2_bundle(dest, objective="speed")
+    try:
+        ok, why, info = d.policy_arm(v2_spec(file="zz_v2_speed_test.npz"))
+        assert ok, why
+        assert info["has_run_flag"] is False
+        # arming only queues the request; the CAN thread is what starts the run
+        assert keep_alive_until(d, lambda p: p["running"], timeout=10.0)["running"]
+        ok, why = d.policy_set_run(False, mode="flag")
+        assert not ok and "speed" in why
+        d.policy_stop(hard=True)
+    finally:
+        os.remove(dest)
+
+
+@needs_v2
+def test_the_control_law_ticks_at_half_the_loop_and_the_log_records_the_command(staged_v2):
+    """Two things at once, because they are the same measurement: the log has one row per CONTROL
+    tick (so ~100 rows a second, not 200) and the run flag is in it."""
+    d, _cal, _name = staged_v2
+    ok, why, _ = d.policy_arm(v2_spec(max_seconds=1.5))
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    assert p["phase"] == "run", p.get("exit_reason")
+    # hold the red light for a few control ticks first, so the log itself shows the run beginning
+    # stopped rather than that being a claim only the snapshot makes
+    keep_alive_until(d, lambda q: q["ticks"] > 10, timeout=5.0)
+    loop0 = d._tick_count
+    d.policy_set_run(True)
+    p = keep_alive_until(d, lambda p: p["phase"] == "done", timeout=30.0)
+    loop_ticks = d._tick_count - loop0
+    got = d.get_policy()
+    assert got is not None
+    n = int(got["ticks"])
+    assert n > 50 and loop_ticks > 100
+    # Against the LOOP's own tick count, not against wall-clock Hz: whether this host can hold
+    # 200 Hz at all is a property of its timer, and the thing under test is the ratio.
+    ratio = loop_ticks / n
+    assert 1.7 < ratio < 2.4, (
+        "the control law ran on 1 loop tick in {:.2f}; a 100 Hz bundle in a 200 Hz loop must run "
+        "on one in 2".format(ratio))
+    log = got["log"]
+    assert log.shape[1] == daemon_mod.POLICY_LOG_COLS
+    assert set(np.unique(log[:, 64])) <= {0.0, 1.0}
+    assert log[:, 64].max() == 1.0, "the green light never made it into the log"
+    assert log[0, 64] == 0.0, "the run began with the light green -- it must begin stopped"
+
+
+# ===================================================================== the joystick lineage
+# objective='joystick': task[0] IS the commanded speed over v_max, so the panel is a slider in m/s
+# and a run comes up at 0 -- walking in place, which is a speed this lineage was trained at. What
+# is under test here is the same thing as for the run/stop pair: that the command crosses the
+# HTTP/CAN thread boundary intact, that it reaches the number the policy reads, and that no
+# browser can make a run come up travelling.
+@pytest.fixture
+def staged_joy(armed):
+    d, cal = armed
+    name = "zz_v2_joystick_test.npz"
+    dest = os.path.join(paths.POLICY_DIR, name)
+    v2_fixture.write_v2_bundle(dest, objective="joystick", v_max=2.5, v_min=0.0)
+    yield d, cal, name
+    if os.path.exists(dest):
+        os.remove(dest)
+
+
+def joy_spec(**kw):
+    return v2_spec(file="zz_v2_joystick_test.npz", **kw)
+
+
+@needs_v2
+def test_a_joystick_run_comes_up_asking_for_zero(staged_joy):
+    """The same promise as 'a v2 run comes up STOPPED', in the units this lineage reads: the
+    policy is live, the legs are at the stance, and the commanded speed is 0 until somebody moves
+    the slider. Enforced in the daemon and in the control law, never in the browser."""
+    d, _cal, _name = staged_joy
+    ok, why, info = d.policy_arm(joy_spec())
+    assert ok, why
+    assert info["command_kind"] == "speed" and info["v_max"] == 2.5
+    assert info["has_run_flag"] is False, "there is no flag in this observation to have"
+    p = keep_alive_until(d, lambda p: p["phase"] in ("run", "done"), timeout=30.0)
+    assert p["phase"] == "run", p.get("exit_reason")
+    assert p["speed_want"] == 0.0 and p["speed_cmd"] == 0.0
+    ctrl = d._pol["ctrl"]
+    assert ctrl.speed_cmd == 0.0
+    assert ctrl._obs()[ctrl.actor_dim - 3] == 0.0
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_the_slider_reaches_the_policys_task_channel_as_a_ramp(staged_joy):
+    d, _cal, _name = staged_joy
+    ok, why, _ = d.policy_arm(joy_spec(max_seconds=8.0))
+    assert ok, why
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    ctrl = d._pol["ctrl"]
+
+    ok, why = d.policy_set_speed(2.0)
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p.get("speed_cmd", 0) > 0.05, timeout=5.0)
+    assert p["speed_want"] == 2.0
+    assert 0 < p["speed_cmd"] <= 2.0, "the applied command must ramp, not step"
+    assert ctrl._obs()[ctrl.actor_dim - 3] == pytest.approx(ctrl.speed_cmd / 2.5, abs=1e-6)
+    # ... and it did not end the run: this is a command to the policy, not a kill
+    assert p["phase"] == "run" and p["stop"] == "running"
+
+    p = keep_alive_until(d, lambda p: p.get("speed_cmd", 0) >= 1.999, timeout=6.0)
+    assert p["speed_cmd"] == pytest.approx(2.0)
+    assert d.policy_set_speed(0.0)[0]                    # 0 IS the stop on this lineage
+    p = keep_alive_until(d, lambda p: p.get("speed_cmd", 1) < 1.0, timeout=6.0)
+    assert p["speed_want"] == 0.0 and p["phase"] == "run"
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_a_speed_outside_the_trained_range_is_refused_rather_than_silently_clipped(staged_joy):
+    """The sim clips task[0] at the rails, so accepting 6 m/s would run the robot at 2.5 while the
+    panel said 6. Refuse, and say what the range is."""
+    d, _cal, _name = staged_joy
+    ok, why, _ = d.policy_arm(joy_spec())
+    assert ok, why
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    ok, why = d.policy_set_speed(6.0)
+    assert not ok and "+2.50" in why
+    ok, why = d.policy_set_speed(-1.0)
+    assert not ok and "trained over" in why
+    assert d._pol["ctrl"].speed_target == 0.0
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_the_run_stop_flag_is_refused_on_a_bundle_whose_command_is_a_speed(staged_joy):
+    d, _cal, _name = staged_joy
+    ok, why, _ = d.policy_arm(joy_spec())
+    assert ok, why
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    ok, why = d.policy_set_run(False)
+    assert not ok and "SPEED" in why and "speed" in why
+    ok, why = d.policy_set_run(True)
+    assert not ok
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_a_speed_is_refused_on_the_run_stop_lineage(staged_v2):
+    """The mirror of the test above. Two shapes of command, one per lineage, and asking for the
+    wrong one must fail loudly rather than do nothing."""
+    d, _cal, _name = staged_v2
+    ok, why, _ = d.policy_arm(v2_spec())
+    assert ok, why
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    ok, why = d.policy_set_speed(1.0)
+    assert not ok and "RUN / STOP" in why
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_the_log_records_the_commanded_speed_the_policy_actually_saw(staged_joy):
+    """Column 64 is task[0] as the policy read it -- the SLEWED command over v_max, not the
+    slider's position. A log that recorded the slider would not say what the policy was asked
+    for on the tick it fell over."""
+    d, _cal, _name = staged_joy
+    ok, why, _ = d.policy_arm(joy_spec(max_seconds=4.0))
+    assert ok, why
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    keep_alive_until(d, lambda p: p["ticks"] > 10, timeout=5.0)
+    assert d._pol["log"][0, 64] == 0.0, "the first tick asked for nothing"
+    assert d.policy_set_speed(2.5)[0]
+    keep_alive_until(d, lambda p: p.get("speed_cmd", 0) > 0.5, timeout=5.0)
+    d.policy_stop(hard=True)
+    keep_alive_until(d, lambda p: p["phase"] == "done", timeout=10.0)
+    got = d.get_policy()
+    col = got["log"][:, 64]
+    assert col[0] == 0.0 and col.max() > 0.15
+    assert col.max() <= 1.0 + 1e-6, "task[0] is a FRACTION of v_max, not a speed in m/s"
+    # the biggest jump task[0] can take in one tick is the slew rate x the control period,
+    # normalised: (v_max / DEFAULT_CMD_SLEW_S) * 0.01 / v_max = 0.005 of full scale
+    assert np.all(np.diff(col) <= 0.005 + 1e-6), "no step ever reaches the policy"
+    assert got["command_kind"] == "speed" and got["v_max"] == 2.5

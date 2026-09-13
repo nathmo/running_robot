@@ -1314,9 +1314,11 @@ def api_policy_list():
     out = []
     for f, p, where in paths.list_policy_bundles():
         try:
-            m = _load_bundle(p).meta
+            bd = _load_bundle(p)
+            m = bd.meta
             out.append({"file": f, "valid": True, "where": where,
                         "run": m.get("run"), "checkpoint": m.get("checkpoint"),
+                        "version": bd.version,
                         "hz": (round(1.0 / float(m["control_dt"]))
                                if m.get("control_dt") else None),
                         "size_kb": os.path.getsize(p) // 1024})
@@ -1329,7 +1331,7 @@ def api_policy_list():
         "approach_dps": daemon_mod.POLICY_APPROACH_DPS,
         "approach_kp": daemon_mod.POLICY_APPROACH_KP,
         "approach_kd": daemon_mod.POLICY_APPROACH_KD,
-        "control_hz": daemon_mod.TICK_HZ})
+        "loop_hz": daemon_mod.TICK_HZ})
 
 
 # Per-tick cost is a property of (this bundle, this machine's numpy), so it is measured once and
@@ -1338,12 +1340,30 @@ def api_policy_list():
 _PROBE_CACHE = {}
 
 
+def _policy_control_hz(path):
+    """The bundle's own control rate, or None if it will not load."""
+    try:
+        return _load_bundle(path).control_hz
+    except Exception:                                          # noqa: BLE001 — absence is the answer
+        return None
+
+
+def _policy_controller(bd):
+    """The runtime this bundle's generation needs. v1 and v2 are different control laws, not
+    variants of one, so this is a lookup and never a guess."""
+    if bd.version == 2:
+        from controller_v2 import PolicyControllerV2
+        return PolicyControllerV2(bd)
+    from controller import PolicyController
+    return PolicyController(bd)
+
+
 def _policy_step_ms(path):
     """Measured milliseconds per control tick for this bundle here, or None if it will not build.
 
-    This is the number that decides whether the loop can hold 200 Hz, and it is not guessable: the
-    same code on the same Pi runs ~90x slower against the reference BLAS than against OpenBLAS, and
-    nothing in the bundle or the config says which one numpy found."""
+    This is the number that decides whether the loop can hold the bundle's rate, and it is not
+    guessable: the same code on the same Pi runs ~90x slower against the reference BLAS than
+    against OpenBLAS, and nothing in the bundle or the config says which one numpy found."""
     try:
         key = (path, os.path.getmtime(path))
     except OSError:
@@ -1351,9 +1371,8 @@ def _policy_step_ms(path):
     if key in _PROBE_CACHE:
         return _PROBE_CACHE[key]
     try:
-        from controller import PolicyController
         bd = _load_bundle(path)
-        ms = _dm()._policy_probe(PolicyController(bd), bd)
+        ms = _dm()._policy_probe(_policy_controller(bd), bd)
     except Exception:                                          # noqa: BLE001 — absence is the answer
         ms = None
     _PROBE_CACHE[key] = ms
@@ -1408,18 +1427,21 @@ def _policy_preflight(bundle_path=None):
     # velocities are inflated by exactly the ratio.
     if bundle_path:
         ms = _policy_step_ms(bundle_path)
-        budget = 1000.0 / daemon_mod.TICK_HZ
-        rate_ok = ms is not None and ms <= daemon_mod.POLICY_MAX_STEP_MS
-        checks.append({"name": "loop rate", "ok": rate_ok,
+        # the budget is the BUNDLE's control period, not the loop's: a 100 Hz v2 bundle gets 10 ms
+        # per control tick out of a 200 Hz loop, because the loop hands it every second tick
+        hz = _policy_control_hz(bundle_path) or daemon_mod.TICK_HZ
+        budget = 1000.0 / hz
+        rate_ok = ms is not None and ms <= daemon_mod.policy_max_step_ms(hz)
+        checks.append({"name": "loop rate", "ok": rate_ok, "control_hz": round(hz, 1),
                        "step_ms": None if ms is None else round(ms, 2),
                        "budget_ms": round(budget, 2),
                        "why": "" if rate_ok else (
                            "the bundle would not build here"
                            if ms is None else
-                           "this machine needs {:.1f} ms per control tick and the loop period is "
-                           "{:.1f} ms — the gait would play at {:.2f}x and every observed joint "
-                           "velocity would be inflated {:.1f}x".format(
-                               ms, budget, min(1.0, budget / ms), max(1.0, ms / budget)))})
+                           "this machine needs {:.1f} ms per control tick and this bundle's "
+                           "control period is {:.1f} ms ({:.0f} Hz) — the gait would play at "
+                           "{:.2f}x and every observed joint velocity would be inflated {:.1f}x"
+                           .format(ms, budget, hz, min(1.0, budget / ms), max(1.0, ms / budget)))})
     return checks
 
 
@@ -1444,13 +1466,80 @@ def api_policy_info():
                         "is open-loop there. Run it on a gantry/boom or with the torso "
                         "supported.".format(", ".join(railed)))
     kp, kd = bd["imp_kp_base"], bd["imp_kd_base"]
+    stop = m.get("stop") or {}
+    # WHAT KIND OF COMMAND does this checkpoint take? Three answers -- a v1 velocity box set once
+    # at arm time, a v2 run/stop flag, or a joystick bundle's live speed -- and the panel shows
+    # exactly one of them, because offering a control that cannot reach the policy is an input
+    # that silently does nothing while the operator believes it did.
+    kind = bd.command_kind
+    has_run_flag = kind == "run_stop" and m.get("objective") != "speed"
+    if kind == "speed":
+        from controller_v2 import DEFAULT_CMD_SLEW_S
+        slew = float(m.get("v_cmd_rate") or 0.0) or (bd.v_max - bd.v_min) / DEFAULT_CMD_SLEW_S
+        warnings.append(
+            "joystick bundle: the command is a SPEED in m/s ({:+.2f} to {:+.2f}), which the "
+            "policy reads as task[0] = v_cmd / {:.2f}. The run comes up at 0 m/s -- walking in "
+            "place, an operating point this lineage is trained at -- and asking for 0 IS the "
+            "stop. There is no run/stop flag and no fitted brake schedule here.".format(
+                bd.v_min, bd.v_max, bd.v_max))
+        t_lo, t_hi = bd.v_trained
+        if t_lo > bd.v_min + 1e-6 or t_hi < bd.v_max - 1e-6:
+            warnings.append(
+                "MID-CURRICULUM COMMAND BAND: this checkpoint has only ever been asked for "
+                "{:+.2f} to {:+.2f} m/s, not the {:+.2f} to {:+.2f} the channel spans. The "
+                "command curriculum widens the draw band downward from the warm-start parent's "
+                "one speed, so the bottom of the slider — including 0, walking in place — is a "
+                "speed this policy has never seen a command for.".format(
+                    t_lo, t_hi, bd.v_min, bd.v_max))
+        warnings.append(
+            "the slider is SLEWED at {:.2f} m/s^2, so a drag across its whole travel still "
+            "reaches the policy as a ramp. A step change on the command channel is the one thing "
+            "measured to drop this robot (3/512 upright against 512/512 for leaving it alone), "
+            "and a browser can deliver one in a single tick.".format(slew))
+    elif bd.version == 2:
+        warnings.append(
+            "v2 bundle: the command is a RUN / STOP flag (the task channel's green light), not a "
+            "velocity. The run comes up STOPPED and holds the stance until you press RUN.")
+        if not m.get("brake"):
+            warnings.append(
+                "NO BRAKE SCHEDULE: this bundle has no fitted stop, so the panel's STOP button is "
+                "unavailable. On this lineage a stop is a 12-number open-loop schedule fitted per "
+                "checkpoint (walk_v2/tools/brake_search.py, then walk_v2/export.py --brake) run "
+                "with the task flag held at 1 -- dropping the flag instead is measured at 3/512 "
+                "upright against 512/512 for leaving it alone.")
+        else:
+            warnings.append(
+                "the brake schedule is fitted to THIS checkpoint, at one cruise speed and one "
+                "window length. It is not a general stop controller: replaying a 12 s fit over a "
+                "16 s window stopped 0/512, and a schedule fitted mid-run topples when replayed "
+                "at 88 m. Re-fit for any other checkpoint.")
+        if not has_run_flag:
+            warnings.append(
+                "this checkpoint was trained with objective='speed', whose task channel is the "
+                "constant [1, 1]. There is no run/stop signal the policy can see.")
+    if bd.version == 2:
+        if m.get("resync", {}).get("enable"):
+            warnings.append(
+                "the gait clock was resynchronised to measured foot touchdowns in training "
+                "(kappa {:.2f}). DASH-01 has no foot contact sensor, so on the robot the clock "
+                "free-runs.".format(float(m["resync"].get("kappa", 0.0))))
+        floor_steps = int(m.get("gait_freq_floor_steps") or 0)
+        if floor_steps and int(m.get("step") or 0) < floor_steps:
+            warnings.append(
+                "the frequency-floor curriculum was still ramping at this checkpoint ({:,} of "
+                "{:,} steps), so its gait clock spans {:.2f}–{:.2f} Hz rather than the config's "
+                "full range. The bundle carries the narrowed map, which is the one the policy was "
+                "trained against — but it is a mid-curriculum checkpoint.".format(
+                    int(m.get("step") or 0), floor_steps,
+                    float(m["gait"]["freq_lo"]), float(m["gait"]["freq_hi"])))
     info = {
         "file": os.path.basename(p),
         "run": m.get("run"), "checkpoint": m.get("checkpoint"),
         "control_hz": (round(1.0 / float(m["control_dt"])) if m.get("control_dt") else None),
+        "loop_hz": daemon_mod.TICK_HZ,
         "action_dim": m.get("action_dim"),
         "frame_dim": m.get("frame_dim"), "history_len": m.get("history_len"),
-        "obs_dim": bd.n_actor,
+        "obs_dim": bd.n_actor, "once_dim": m.get("once_dim"),
         # layer sizes, input → output: what "its needed controller architecture" concretely is
         "estimator": [bd.n_actor] + [int(v) for v in (m.get("est_hidden") or [])] + [3],
         "policy": ([bd.n_actor + 3] + [int(v) for v in (m.get("policy_hidden") or [])]
@@ -1460,18 +1549,59 @@ def api_policy_info():
         "cmd_box": {"fwd_ms": m.get("cmd_v_fwd_trained"), "back_ms": m.get("cmd_v_back_trained"),
                     "yaw_rads": m.get("cmd_yaw_trained")},
         "base_lock": lock,
-        "bundle_version": m.get("bundle_version"),
+        "bundle_version": bd.version,
+        "command_kind": kind,
+        # the joystick's units: what the slider spans, and how fast the panel may move it
+        "v_max": bd.v_max, "v_min": bd.v_min,
+        "v_trained": list(bd.v_trained),
+        "v_cmd_rate": float(m.get("v_cmd_rate") or 0.0),
+        "has_run_flag": has_run_flag,
+        "stop_trained": bool(float(stop.get("stoplight_prob_final") or 0.0)),
+        "brake": ({"window_s": m["brake"].get("window_s"), "source": m["brake"].get("source"),
+                   "cruise_speed": m["brake"].get("cruise_speed")}
+                  if m.get("brake") else None),
+        "stop_decel_s": stop.get("stop_decel_s"),
+        "objective": m.get("objective"),
+        "spec_source": m.get("spec_source"),
+        # v2 only: the 44 latched spec dims commit at a clock wrap, the 6 residual dims every tick
+        "latched_dims": (int(np.sum(np.asarray(bd["latched_dims"])))
+                         if bd.version == 2 else None),
     }
     # The headless equivalent, for the record and for running without a browser. It is NOT the
     # path the panel uses: run_policy.py refuses to start while this daemon is up, because the CAN
     # bus has one owner.
-    cmd = ("sudo systemctl stop runningrobot-webui.service\n"
-           "python robot/deploy/run_policy.py \\\n"
-           "    --bundle robot/fixed_gait/webui/data/policies/{} \\\n"
-           "    --jointmap robot/deploy/deploy_map.json \\\n"
-           "    --thermal robot/deploy/thermal_params.json \\\n"
-           "    --v-cmd 0.0 --max-seconds 20 --deadman-file /tmp/dash_deadman"
-           .format(os.path.basename(p)))
+    if kind == "speed":
+        cmd = ("sudo systemctl stop runningrobot-webui.service\n"
+               "python robot/deploy/run_policy.py \\\n"
+               "    --bundle robot/fixed_gait/webui/data/policies/{} \\\n"
+               "    --jointmap robot/deploy/deploy_map.json \\\n"
+               "    --thermal robot/deploy/thermal_params.json \\\n"
+               "    --command-file /tmp/dash_command --max-seconds 30 \\\n"
+               "    --deadman-file /tmp/dash_deadman\n"
+               "# then, from a second shell, while watching the robot:\n"
+               "echo 1.0 > /tmp/dash_command       # ask for 1.0 m/s\n"
+               "echo 0   > /tmp/dash_command       # walk in place again: this IS the stop"
+               .format(os.path.basename(p)))
+    elif bd.version == 2:
+        cmd = ("sudo systemctl stop runningrobot-webui.service\n"
+               "python robot/deploy/run_policy.py \\\n"
+               "    --bundle robot/fixed_gait/webui/data/policies/{} \\\n"
+               "    --jointmap robot/deploy/deploy_map.json \\\n"
+               "    --thermal robot/deploy/thermal_params.json \\\n"
+               "    --command-file /tmp/dash_command --max-seconds 30 \\\n"
+               "    --deadman-file /tmp/dash_deadman\n"
+               "# then, from a second shell, while watching the robot:\n"
+               "echo run  > /tmp/dash_command      # green light\n"
+               "echo stop > /tmp/dash_command      # red light: ask the policy to halt"
+               .format(os.path.basename(p)))
+    else:
+        cmd = ("sudo systemctl stop runningrobot-webui.service\n"
+               "python robot/deploy/run_policy.py \\\n"
+               "    --bundle robot/fixed_gait/webui/data/policies/{} \\\n"
+               "    --jointmap robot/deploy/deploy_map.json \\\n"
+               "    --thermal robot/deploy/thermal_params.json \\\n"
+               "    --v-cmd 0.0 --max-seconds 20 --deadman-file /tmp/dash_deadman"
+               .format(os.path.basename(p)))
     return _ok(info=info, warnings=warnings, preflight=_policy_preflight(p), command=cmd)
 
 
@@ -1513,11 +1643,72 @@ def api_policy_keepalive():
 
 @app.post("/api/policy/stop")
 def api_policy_stop():
-    """Soft by default (freeze the target, bleed the gains out); `hard: true` zeroes them now."""
+    """END the run. Soft by default (freeze the target, bleed the gains out); `hard: true` zeroes
+    them now. This is not the v2 run/stop command -- see /api/policy/command."""
     b = request.get_json(force=True, silent=True) or {}
     _dm().policy_stop(hard=bool(b.get("hard")))
     time.sleep(0.05)
     return _ok()
+
+
+@app.post("/api/policy/command")
+def api_policy_command():
+    """The v2 command. Two shapes, one per lineage, and the armed run decides which it accepts.
+
+    `{"speed": 1.5}` is the JOYSTICK: ask the policy for 1.5 m/s. 0 is not a stop signal, it is a
+    speed -- walking in place, which this lineage was trained at -- and it is how you stop. The
+    number is clamped to the trained range and slewed by the control law, so a slider dragged
+    across its whole travel still arrives as a ramp rather than a step.
+
+    `{"run": true}` / `{"run": false}` is the older RUN / STOP flag.
+
+    STOP defaults to `mode: "brake"` -- the open-loop schedule fitted for this checkpoint, run with
+    the policy's task flag HELD AT 1. `mode: "flag"` is the other thing: literally telling the
+    policy it has finished, which is what the stop curriculum trains and what the cluster measured
+    at 3/512 upright against 512/512 for leaving the flag alone (walk_v2/README.md, 2026-09-11
+    17:00). The panel never sends it; it exists so the flag stays testable.
+
+    Either way this is a command to the POLICY, not to the governor -- the gains are untouched and
+    the run continues. Ending the run is /api/policy/stop, and the two are deliberately separate
+    endpoints so that nothing can confuse "ask it to stop" with "take the machine away from it".
+
+    No control token and no calibration check: the run they would gate was already armed through
+    /api/policy/arm, and refusing to deliver a STOP to a policy that is already moving because a
+    token expired would be the wrong failure."""
+    b = request.get_json(force=True, silent=True) or {}
+    if "speed" in b:
+        ok, why = _dm().policy_set_speed(b["speed"])
+        if not ok:
+            return _err(why, 409)
+        time.sleep(0.02)                  # let the CAN thread pick it up so the reply shows it
+        return _ok(speed=float(b["speed"]))
+    if "run" not in b:
+        return _err("send {\"speed\": <m/s>} for a joystick bundle, or {\"run\": true} / "
+                    "{\"run\": false} for a run/stop one")
+    mode = str(b.get("mode") or "brake")
+    ok, why = _dm().policy_set_run(bool(b["run"]), mode=mode)
+    if not ok:
+        return _err(why, 409)
+    time.sleep(0.02)                      # let the CAN thread pick it up so the reply shows it
+    return _ok(run=bool(b["run"]), mode=mode)
+
+
+@app.post("/api/policy/zero_heading")
+def api_policy_zero_heading():
+    """Declare the direction the robot is pointing NOW to be straight ahead.
+
+    Only a v3 joystick bundle has a heading channel to re-aim; on anything else this 409s rather
+    than silently doing nothing. The origin is already set when the policy starts, so the normal
+    bring-up (point it, then start it) needs no call here at all -- this is for the robot that got
+    turned by hand mid-run, and for the long run whose integrated estimate has visibly walked.
+
+    Like every other command to the policy, it is applied on the CAN thread, and it does not touch
+    the governor: the run continues either way."""
+    ok, why = _dm().policy_zero_heading()
+    if not ok:
+        return _err(why, 409)
+    time.sleep(0.02)                      # let the CAN thread pick it up so the reply shows it
+    return _ok(heading_deg=0.0)
 
 
 @app.post("/api/policy/run/save")

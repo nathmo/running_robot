@@ -597,10 +597,11 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
         deploy safety governor</span></div>
       <div class="warn-box">
         <b>⚠ The torso must be physically supported.</b>
-        Every bundle that can be deployed at all was trained with the base's roll and yaw
-        <b>railed</b> — the policy has never experienced those axes free and there is nothing in it
-        that stabilises them. On a free-standing robot it is open-loop there, and a fall is the
-        expected outcome of removing the support, not a surprise. Gantry, boom, or hands.
+        A fall is the expected outcome of removing the support, not a surprise. Gantry, boom, or
+        hands. If the bundle above reports <b>railed</b> axes, the policy has never experienced
+        those degrees of freedom and there is nothing in it that stabilises them — it is open-loop
+        there. If it reports none (a v2 free-plant run), it has at least been asked to balance in
+        simulation, which is not the same as having done it on this machine.
         <br><br>
         The run happens <b>inside this daemon</b>, not in a subprocess: the CAN bus has exactly one
         owner, so <code>run_policy.py</code> refuses to start while the web UI is up. It is the same
@@ -608,10 +609,12 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
         reimplemented.
       </div>
       <div class="row">
-        <label>forward <input id="pol-v" type="number" class="num small" value="0" step="0.05">
-          m/s</label>
-        <label>yaw <input id="pol-yaw" type="number" class="num small" value="0" step="0.1">
-          rad/s</label>
+        <span id="pol-cmd-velocity">
+          <label>forward <input id="pol-v" type="number" class="num small" value="0" step="0.05">
+            m/s</label>
+          <label>yaw <input id="pol-yaw" type="number" class="num small" value="0" step="0.1">
+            rad/s</label>
+        </span>
         <label>for <input id="pol-secs" type="number" class="num small" value="10" min="1"
           max="60"> s</label>
         <span id="pol-cmd-box" class="hint"></span>
@@ -623,10 +626,46 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
       <div id="pol-acks"></div>
       <div class="row">
         <button id="btn-pol-arm" class="btn danger" disabled>▶ Arm &amp; run</button>
-        <button id="btn-pol-run-stop" class="btn" disabled>■ Stop (soft)</button>
+        <button id="btn-pol-run-stop" class="btn" disabled>■ End run (soft)</button>
         <button id="btn-pol-run-kill" class="btn" disabled>✖ Kill (limp now)</button>
         <span id="pol-run-status" class="hint"></span>
       </div>
+
+      <!-- The v2 task channel. Shown only while a run that HAS one is live, and in ONE of its two
+           shapes: a joystick bundle gets the speed slider, the older run/stop lineage gets the two
+           buttons. Either way this is a command to the POLICY, not to the governor — the pair
+           above takes the machine away from it; this asks it for something. -->
+      <div id="pol-command" class="pol-command hidden">
+        <div class="step-h">Gait command
+          <span class="hint" id="pol-command-blurb">— commands to the <b>policy</b>, at full
+            gains, with the governor untouched; nothing here ends the run.</span></div>
+        <div class="row" id="pol-cmd-speed">
+          <span id="pol-speed-val" class="pol-speedbig">0.00 m/s</span>
+          <input id="pol-speed" type="range" class="pol-slider" min="0" max="3" step="0.05"
+                 value="0" disabled aria-label="commanded speed, metres per second">
+          <button id="btn-pol-zero" class="btn small" disabled>⇤ 0 · walk in place</button>
+        </div>
+        <div class="row" id="pol-cmd-flag">
+          <button id="btn-pol-go" class="btn go" disabled>▶▶ RUN</button>
+          <button id="btn-pol-halt" class="btn halt" disabled>◼ STOP (brake)</button>
+        </div>
+        <!-- THE HEADING. v3 policies carry an integrated-gyro bearing in the observation and are
+             penalised for leaving zero, so "straight ahead" is whatever direction the estimate was
+             zeroed at -- which is where the robot was pointing when the policy started. The readout
+             is the policy's own number, not a ground truth, and that is the point: if it says 2 deg
+             while the robot is visibly crossing the floor, the integral has walked and re-aiming is
+             the fix. -->
+        <div class="row hidden" id="pol-cmd-heading">
+          <span id="pol-heading-val" class="pol-heading">0&deg;</span>
+          <button id="btn-pol-aim" class="btn small" disabled>&#8982; this way is straight</button>
+          <span id="pol-heading-note" class="hint"></span>
+        </div>
+        <div class="row">
+          <span id="pol-command-state" class="pol-cmdstate">stopped</span>
+          <span id="pol-command-note" class="hint"></span>
+        </div>
+      </div>
+
       <div id="pol-run" class="hidden"></div>
       <details class="pol-headless">
         <summary>headless equivalent — same law, no browser, web UI stopped</summary>

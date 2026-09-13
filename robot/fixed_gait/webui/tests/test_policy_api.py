@@ -133,6 +133,58 @@ def test_info_preflight_names_what_blocks_a_real_run(client, poldir):
     assert pf["IMU mount"]["why"]
 
 
+def test_info_offers_a_slider_for_a_joystick_bundle_and_says_what_it_spans(client, poldir):
+    """The panel shows ONE command control, chosen here. A joystick bundle must come back as a
+    speed in m/s with the range the policy was trained over -- offering a RUN / STOP pair for it
+    would be a control that cannot reach the policy, and offering a slider without the scale is a
+    control that means something different from what it says."""
+    import sys
+    sys.path.insert(0, os.path.join(paths.DEPLOY, "tests"))
+    import v2_fixture
+    v2_fixture.write_v2_bundle(os.path.join(poldir, "joy.npz"),
+                               objective="joystick", v_max=2.5, v_min=0.0)
+    c, _d = client
+    j = c.post("/api/policy/info", json={"file": "joy.npz"}).get_json()
+    assert j["ok"] is True
+    i = j["info"]
+    assert i["command_kind"] == "speed" and i["v_max"] == 2.5 and i["v_min"] == 0.0
+    assert i["has_run_flag"] is False
+    assert any("SPEED" in w and "walking in place" in w for w in j["warnings"])
+    assert any("SLEWED" in w for w in j["warnings"]), "the slider's rate limit must be stated"
+    assert not any("RUN / STOP" in w for w in j["warnings"])
+    assert "/tmp/dash_command" in j["command"] and "echo 1.0" in j["command"]
+
+
+def test_info_says_when_the_bottom_of_the_slider_was_never_commanded(client, poldir):
+    """The command curriculum widens the draw band DOWNWARD from the warm-start parent's one
+    speed. A checkpoint taken mid-ramp still gets a slider that reaches 0 — and 0 is then a speed
+    it has never been asked for, which is exactly the kind of thing that has to be on screen
+    before the robot is on the floor."""
+    import sys
+    sys.path.insert(0, os.path.join(paths.DEPLOY, "tests"))
+    import v2_fixture
+    v2_fixture.write_v2_bundle(os.path.join(poldir, "mid.npz"), objective="joystick", v_max=2.5,
+                               env_params_at_checkpoint={"cmd_lo": 0.8, "cmd_hi": 1.0})
+    c, _d = client
+    j = c.post("/api/policy/info", json={"file": "mid.npz"}).get_json()
+    assert j["info"]["v_trained"] == [2.0, 2.5]
+    assert any("MID-CURRICULUM" in w and "never seen a command for" in w for w in j["warnings"])
+
+
+def test_a_speed_command_is_refused_when_nothing_is_running(client, poldir):
+    c, _d = client
+    r = c.post("/api/policy/command", json={"speed": 1.0})
+    assert r.status_code == 409 and "no policy run" in r.get_json()["error"]
+
+
+def test_a_command_with_neither_shape_says_which_two_there_are(client, poldir):
+    c, _d = client
+    r = c.post("/api/policy/command", json={})
+    assert r.status_code == 400
+    err = r.get_json()["error"]
+    assert "speed" in err and "run" in err
+
+
 def test_info_is_jailed_to_the_policy_dir(client, poldir, tmp_path):
     outside = tmp_path / "outside.npz"
     make_bundle(str(outside))

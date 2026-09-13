@@ -48,7 +48,7 @@ def main():
 
     run = Path(args.run)
     ckpt = Path(args.checkpoint) if args.checkpoint else run / "best.msgpack"
-    cfg, agent, _ = load_run(run, ckpt)
+    cfg, _env, agent = load_run(run, ckpt)
 
     # the ladder is a FRACTION of v_max inside command_ladder, so build the fractions we want
     rungs = np.arange(args.step, float(cfg.v_max) + 1e-9, args.step) / float(cfg.v_max)

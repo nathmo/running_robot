@@ -353,3 +353,26 @@ label.chk { display: inline-flex; align-items: center; gap: 6px; }
 .pol-temps .hot { color: var(--warn); }
 .pol-headless { margin-top: 8px; font-size: 12px; color: var(--dim); }
 .pol-headless summary { cursor: pointer; }
+/* the v2 gait command. Sized and coloured to be unmistakable from the End-run / Kill pair beside
+   it: those take the machine away from the policy, these two ask the policy for something. */
+.pol-command { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+  margin-top: 8px; background: var(--panel2); }
+.pol-command.go { border-color: var(--good); box-shadow: 0 0 0 1px var(--good); }
+.btn.go { background: #14532a; border-color: var(--good); font-weight: 700; min-width: 110px; }
+.btn.go:hover:not(:disabled) { border-color: #6ee7a0; }
+.btn.halt { background: #5a3a10; border-color: var(--warn); font-weight: 700; min-width: 110px; }
+.btn.halt:hover:not(:disabled) { border-color: #ffd684; }
+.pol-cmdstate { font-family: ui-monospace, monospace; font-weight: 700; letter-spacing: .06em;
+  padding: 2px 10px; border-radius: 10px; border: 1px solid var(--line); }
+.pol-cmdstate.on { color: #fff; background: var(--good); border-color: var(--good); }
+.pol-cmdstate.off { color: var(--dim); }
+.pol-cmdstate.braking { color: #101317; background: var(--warn);
+  border-color: var(--warn); }
+.pol-cmdstate.ramp { color: var(--warn); border-color: var(--warn); }
+/* the joystick. The slider is deliberately the widest control in the panel: it is the only thing
+   an operator drives during a run, and a 40 px slider is how you ask for 3 m/s by accident. */
+.pol-slider { flex: 1 1 260px; min-width: 180px; accent-color: var(--good); height: 26px; }
+.pol-slider:disabled { accent-color: var(--dim); opacity: .5; }
+.pol-speedbig { font-family: ui-monospace, monospace; font-size: 20px; font-weight: 700;
+  min-width: 116px; text-align: right; color: var(--fg); }
+.pol-command.go .pol-speedbig { color: var(--good); }

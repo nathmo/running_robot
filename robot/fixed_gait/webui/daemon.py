@@ -275,10 +275,22 @@ POLICY_UPRIGHT_GRAV = np.array([0.0, 0.0, -1.0])   # --no-imu fallback: faked up
 # The probe times controller.step ALONE, so its ceiling is the tick budget minus everything else
 # in the tick -- and that is now measured rather than assumed: governor+observer 2.3 ms, send prep
 # 0.4, plus drain, measure, log and the black-box sample. Call it 3.0 ms of non-controller work.
-POLICY_MAX_STEP_MS = 2.0
+POLICY_TICK_OVERHEAD_MS = 3.0
 POLICY_PROBE_TICKS = 40           # enough to see past the first-call allocations
-POLICY_RATE_WINDOW = 200          # realised-rate window, ticks (1 s at nominal)
-POLICY_MIN_RATE_FRAC = 0.90       # kill below 180 Hz sustained
+POLICY_RATE_WINDOW = 200          # realised-rate window, ticks (1 s at 200 Hz)
+POLICY_MIN_RATE_FRAC = 0.90       # kill below 90% of the bundle's own rate
+
+
+def policy_max_step_ms(control_hz):
+    """The per-tick budget for the control law alone, at a bundle's own control rate.
+
+    A v2 (walk_v2) bundle runs at 100 Hz, which is the single biggest thing that makes a policy
+    deployable on this Pi at all: the budget goes from 5 ms to 10 ms while the v2 nets are SMALLER
+    than v1's (232k MACs against 305k), because the once-block replaced 213 dims of history."""
+    return max(0.5, 1000.0 / float(control_hz) - POLICY_TICK_OVERHEAD_MS)
+
+
+POLICY_MAX_STEP_MS = policy_max_step_ms(TICK_HZ)     # 2.0 ms at the loop's own 200 Hz
 
 # ===================================================================== the runaway that got out
 # 2026-09-01, first policy run on the real drives. Four of six drives faulted simultaneously with
@@ -306,11 +318,42 @@ POLICY_MIN_RATE_FRAC = 0.90       # kill below 180 Hz sustained
 # generates the over-voltage -- going limp lets the joint spin down through friction instead.
 POLICY_MAX_ERPM = 8000.0
 
-POLICY_LOG_COLS = 64
+POLICY_LOG_COLS = 65
 POLICY_LOG_COLUMNS = ("t | pos6 | vel6 | tau6 | amps6 | temp6 | grav3 | gyro3 | target6 | kp6 | "
-                      "kd6 | t_winding6 | gait_phase | gait_freq | stop  "
+                      "kd6 | t_winding6 | gait_phase | gait_freq | stop | task0  "
                       "(every six-vector is in MODEL actuator order: "
-                      "hip_roll_L, cam_L, thigh_L, hip_roll_R, cam_R, thigh_R)")
+                      "hip_roll_L, cam_L, thigh_L, hip_roll_R, cam_R, thigh_R; task0 is the v2 "
+                      "command channel exactly as the policy saw it -- 1/0 green light on a "
+                      "run/stop bundle, commanded speed / v_max on a joystick bundle, always 0 "
+                      "for a v1 bundle, whose command is a velocity fixed at arm time)")
+
+
+# ===================================================================== the v2 run/stop command
+# A v2 (walk_v2) policy has no velocity command. Its task channel is [run, distance_to_go], and
+# `run` is a green light: 1 while the policy is being asked to travel, 0 for the red-light phases
+# of the stop curriculum and for everything past the finish line. Dropping it stops the speed
+# income and (in a stoplight-trained checkpoint) pays the policy for tracking a deceleration ramp
+# down to standing still.
+#
+# So the panel's RUN / STOP button IS that flag, and it is the ONLY command a v2 run takes. Two
+# things follow, and both are deliberate:
+#
+#   * a run always comes up STOPPED. The approach crawls the legs to the stance, the policy takes
+#     over holding it, and nothing moves off until somebody presses RUN. A policy that came up
+#     already asked to travel would take its first step before anyone had pressed anything.
+#   * pressing STOP is not the same as stopping the run. STOP asks the POLICY to halt, at full
+#     gains, with the governor untouched -- whether the robot actually stops is a property of the
+#     checkpoint, which is what the stop curriculum is being trained for. Ending the run is the
+#     separate soft-stop/kill pair, which take the machine away from the policy instead.
+#
+# THE JOYSTICK LINEAGE (objective='joystick') REPLACES THE BUTTON WITH A SLIDER. There, task[0] is
+# not a flag at all: it is the commanded speed over v_max, a number the policy has been trained at
+# every value of. The panel offers a slider in m/s, a run comes up at 0 -- walking in place, which
+# is a trained operating point rather than a red light -- and there is no separate stop, because
+# asking for 0 IS the stop. Everything below that says "run flag" applies to the run/stop lineage
+# only, and `command_kind` on the armed run says which one is loaded. What the two share is the
+# rule in the first bullet: the command starts at rest and the browser cannot change that.
+POLICY_V2_START_RUNNING = False
 
 
 def _clamp_period(v):
@@ -453,6 +496,9 @@ class RobotDaemon(threading.Thread):
         self.bypass = {n: False for n in BYPASS_NAMES}
         self._pol_req = None               # dict: a request already validated by policy_arm
         self._pol_stop = None              # "soft" | "hard", consumed by _tick_policy
+        self._pol_run_req = None           # v2 run/stop flag posted by the panel; see policy_set_run
+        self._pol_speed_req = None         # joystick speed (m/s) posted by the panel; see policy_set_speed
+        self._pol_zero_heading = False     # "this way is straight ahead"; see policy_zero_heading
         self._pol = None                   # live/finished policy run; see _start_policy
         self._pol_deadman = 0.0            # monotonic stamp of the last panel keepalive
         self._measure_req = None           # dict: excitation spec (MEASURE_DEFAULTS merged)
@@ -2493,10 +2539,11 @@ class RobotDaemon(threading.Thread):
 
         # ---- the acknowledgement no software check can replace ---------------------------------
         if spec.get("supported") is not True:
-            return False, ("confirm the torso is physically supported. Every deployable bundle was "
-                           "trained with the base's roll and yaw RAILED -- it has never experienced "
-                           "them free and nothing in it stabilises them. On a free-standing robot "
-                           "it is open-loop there and a fall is the expected outcome."), info
+            return False, ("confirm the torso is physically supported. A fall is the expected "
+                           "outcome of removing that support: a planar-plant bundle was trained "
+                           "with the base's roll and yaw RAILED, has never experienced them free "
+                           "and is open-loop there -- and a free-plant v2 bundle has only ever "
+                           "balanced in simulation, which is not the same as on this machine."), info
 
         # ---- the bundle -----------------------------------------------------------------------
         fname = os.path.basename(str(spec.get("file", "")))
@@ -2510,17 +2557,30 @@ class RobotDaemon(threading.Thread):
         try:
             from bundle import Bundle
             from controller import PolicyController
+            from controller_v2 import PolicyControllerV2
             import thermal as TH
             b = Bundle.load(path)
         except Exception as e:                              # noqa: BLE001 -- surfaced as data
             return False, "not a loadable policy bundle: {}".format(e), info
 
+        # ---- the control rate ------------------------------------------------------------------
+        # control_dt is a CONSTANT inside both control laws, so the loop must give the bundle its
+        # own rate exactly -- but it does not have to BE that rate. The CAN loop runs at 200 Hz for
+        # every other mode, and a 100 Hz bundle (walk_v2) simply gets every second tick, with the
+        # frame it produced re-sent on the tick in between so the drives keep hearing from us at
+        # the rate they are used to. An integer ratio only: 200/150 is not a control law, it is a
+        # rounding error with gains.
         hz = 1.0 / float(b.control_dt)
-        if abs(hz - TICK_HZ) > 1.0:
-            return False, ("this bundle wants {:.0f} Hz control and the daemon runs at {:.0f}. The "
-                           "action filter, the actuation delay and the slew limit are all per-step "
-                           "constants -- running it at the wrong rate is a different control law."
-                           .format(hz, TICK_HZ)), info
+        decim = int(round(TICK_HZ / hz))
+        if decim < 1 or abs(TICK_HZ / decim - hz) > 0.5:
+            why = ("faster than the loop itself" if hz > TICK_HZ
+                   else "not a whole fraction of the loop rate")
+            return False, ("this bundle wants {:.1f} Hz control and the loop runs at {:.0f} -- "
+                           "{}. The gait clock, the slew limit and the governor's rate cap are all "
+                           "per-step constants, so there is no tick pattern that delivers it and "
+                           "running it at a rate it was not trained at is a different control law."
+                           .format(hz, TICK_HZ, why)), info
+        ctrl_dt = 1.0 / hz
         if bool(b.meta.get("obs_base_vel")):
             return False, ("this bundle was trained with the PRIVILEGED base velocity in its "
                            "observation (obs_base_vel=True). No robot can produce that number, so "
@@ -2573,7 +2633,11 @@ class RobotDaemon(threading.Thread):
                            "guess. Fit them (thermal panel), or acknowledge "
                            "allow_uncalibrated_thermal.".format(", ".join(uncal))), info
         try:
-            thermal = TH.MotorThermalModel(chain, dt=1.0 / TICK_HZ, t_amb=amb,
+            # dt is the CONTROL period, not the loop period: the observer is stepped once per
+            # control tick (`gov.observe` has exactly one caller). Give it the loop's 5 ms while
+            # it is only stepped every 10 and it integrates half the heating that happened --
+            # the one error in this file that would not be conservative.
+            thermal = TH.MotorThermalModel(chain, dt=ctrl_dt, t_amb=amb,
                                            names=list(JM.MODEL_ACTUATORS),
                                            allow_uncalibrated=True)
         except ValueError as e:
@@ -2609,9 +2673,13 @@ class RobotDaemon(threading.Thread):
 
         limits = SAFE.Limits.from_bundle(b, hard_lo=hard_lo, hard_hi=hard_hi, tau_cont=tau_cont,
                                          deadman_s=POLICY_DEADMAN_S,
-                                         telemetry_stale_s=POLICY_TELEMETRY_STALE_S)
+                                         telemetry_stale_s=POLICY_TELEMETRY_STALE_S,
+                                         # persist_ticks is a DWELL, so it is a time, not a count:
+                                         # 40 ticks at 200 Hz is the 0.2 s this was tuned to, and
+                                         # at 100 Hz that is 20.
+                                         persist_ticks=max(1, int(round(0.2 * hz))))
         limits.tau_peak = peak
-        gov = SAFE.SafetyGovernor(limits, 1.0 / TICK_HZ, thermal=thermal,
+        gov = SAFE.SafetyGovernor(limits, ctrl_dt, thermal=thermal,
                                   names=list(JM.MODEL_ACTUATORS))
 
         # ---- the stance has to be somewhere this robot can actually stand ----------------------
@@ -2631,44 +2699,68 @@ class RobotDaemon(threading.Thread):
                                "[{:+.0f}, {:+.0f}] -- the joint map or the calibration is wrong"
                                .format(n, v, lo, hi)), info
 
-        # ---- the command, inside the box this checkpoint was trained to ------------------------
-        try:
-            v_want = float(spec.get("v_cmd", 0.0))
-            yaw_want = float(spec.get("yaw_cmd", 0.0))
-        except (TypeError, ValueError):
-            return False, "v_cmd and yaw_cmd must be numbers", info
-        if not (v_want == v_want and yaw_want == yaw_want):
-            return False, "v_cmd and yaw_cmd must be numbers", info
-        v_cmd = float(np.clip(v_want, -float(b.cmd_v_back_trained), float(b.cmd_v_fwd_trained)))
-        yaw_lim = float(b.cmd_yaw_trained)
-        yaw_cmd = float(np.clip(yaw_want, -yaw_lim, yaw_lim))
+        # ---- the command channel ----------------------------------------------------------------
+        # v1 takes a velocity and a yaw rate, inside the box the checkpoint was trained to. v2 has
+        # neither: its whole command is the run/stop flag, and it always starts stopped, so there
+        # is nothing here to validate and nothing the arming form can get wrong.
+        v_cmd = yaw_cmd = 0.0
+        v_want = yaw_want = 0.0
+        if b.version == 1:
+            try:
+                v_want = float(spec.get("v_cmd", 0.0))
+                yaw_want = float(spec.get("yaw_cmd", 0.0))
+            except (TypeError, ValueError):
+                return False, "v_cmd and yaw_cmd must be numbers", info
+            if not (v_want == v_want and yaw_want == yaw_want):
+                return False, "v_cmd and yaw_cmd must be numbers", info
+            v_cmd = float(np.clip(v_want, -float(b.cmd_v_back_trained),
+                                  float(b.cmd_v_fwd_trained)))
+            yaw_lim = float(b.cmd_yaw_trained)
+            yaw_cmd = float(np.clip(yaw_want, -yaw_lim, yaw_lim))
 
-        ctrl = PolicyController(b)
+        try:
+            ctrl = PolicyControllerV2(b) if b.version == 2 else PolicyController(b)
+        except ValueError as e:                             # noqa: BLE001 -- surfaced as data
+            return False, str(e), info
         # Can this machine actually run it? Timed HERE, on the HTTP thread, with the real bundle
         # and the real numpy -- not estimated. ctrl.step mutates the controller, which is fine:
         # _tick_policy calls ctrl.start() when it enters RUN and start() reallocates everything.
         step_ms = self._policy_probe(ctrl, b)
-        slow = step_ms > POLICY_MAX_STEP_MS
+        budget_ms = 1000.0 / hz
+        max_step_ms = policy_max_step_ms(hz)
+        slow = step_ms > max_step_ms
         if slow and spec.get("allow_slow_loop") is not True:
-            budget_ms = 1000.0 / TICK_HZ
             return False, (
-                "this machine needs {:.1f} ms per control tick for this bundle and the loop period "
-                "is {:.1f} ms. The control law's dt is a CONSTANT, so running it anyway plays the "
-                "gait at about {:.2f}x speed and inflates every joint velocity the policy observes "
-                "by about {:.1f}x -- an observation it was never trained on. Acknowledge "
-                "allow_slow_loop to bring the drives up anyway and watch them move; the lasting "
-                "fix is a numpy linked against OpenBLAS, since most of that time is three matrix "
-                "multiplies running on the reference BLAS.".format(
+                "this machine needs {:.1f} ms per control tick for this bundle and its control "
+                "period is {:.1f} ms. The control law's dt is a CONSTANT, so running it anyway "
+                "plays the gait at about {:.2f}x speed and inflates every joint velocity the "
+                "policy observes by about {:.1f}x -- an observation it was never trained on. "
+                "Acknowledge allow_slow_loop to bring the drives up anyway and watch them move; "
+                "the lasting fix is a numpy linked against OpenBLAS, since most of that time is "
+                "three matrix multiplies running on the reference BLAS.".format(
                     step_ms, budget_ms, min(1.0, budget_ms / max(step_ms, 1e-6)),
                     max(1.0, step_ms / budget_ms))), info
-        # preallocated, because a 200 Hz loop must not allocate: approach budget + run + slack
-        rows = int((max_s + POLICY_APPROACH_MAX_S + 2.0) * TICK_HZ) + 8
+        # preallocated, because the loop must not allocate. One row per CONTROL tick.
+        rows = int((max_s + POLICY_APPROACH_MAX_S + 2.0) * hz) + 8
+        stop_meta = b.meta.get("stop") or {}
+        never_stopped = b.version == 2 and not float(stop_meta.get("stoplight_prob_final") or 0.0)
         req = {
             "file": fname, "bundle": b, "ctrl": ctrl, "gov": gov, "thermal": thermal, "jm": jm,
             "stance": stance, "v_cmd": v_cmd, "yaw_cmd": yaw_cmd, "max_seconds": max_s,
             "ambient_c": amb, "no_imu": no_imu, "log": np.zeros((rows, POLICY_LOG_COLS), np.float32),
             "jm_verified": jm_ok, "thermal_uncalibrated": bool(uncal),
-            "step_ms": step_ms, "slow_loop": slow,
+            "step_ms": step_ms, "slow_loop": slow, "max_step_ms": max_step_ms,
+            "version": int(b.version), "ctrl_hz": hz, "decim": decim, "ctrl_dt": ctrl_dt,
+            "command_kind": (ctrl.command_kind if b.version == 2 else "velocity"),
+            "v_max": float(getattr(ctrl, "v_max", 0.0) or 0.0),
+            "v_min": float(getattr(ctrl, "v_min", 0.0) or 0.0),
+            "cmd_slew": float(getattr(ctrl, "cmd_slew_mps2", 0.0) or 0.0),
+            "v_trained": [float(x) for x in getattr(ctrl, "v_trained", (0.0, 0.0))],
+            "has_run_flag": (b.version == 2 and ctrl.command_kind == "run_stop"
+                             and not ctrl.task_is_constant),
+            "has_brake": b.version == 2 and ctrl.brake is not None,
+            "brake_window_s": (float(ctrl.brake.window_s) if getattr(ctrl, "brake", None) else 0.0),
+            "never_stopped": never_stopped,
         }
         info = {"file": fname, "run": b.meta.get("run"), "checkpoint": b.meta.get("checkpoint"),
                 "v_cmd": v_cmd, "yaw_cmd": yaw_cmd, "max_seconds": max_s,
@@ -2679,7 +2771,13 @@ class RobotDaemon(threading.Thread):
                 "thermal_uncalibrated": bool(uncal), "jointmap_verified": jm_ok,
                 "no_imu": no_imu, "log_rows": rows,
                 "step_ms": round(step_ms, 2), "slow_loop": slow,
-                "tick_budget_ms": round(1000.0 / TICK_HZ, 2)}
+                "bundle_version": int(b.version), "control_hz": round(hz, 1), "decimation": decim,
+                "has_run_flag": req["has_run_flag"], "never_stopped": never_stopped,
+                "command_kind": req["command_kind"], "v_max": req["v_max"],
+                "v_min": req["v_min"], "cmd_slew": req["cmd_slew"],
+                "v_trained": req["v_trained"],
+                "has_brake": req["has_brake"], "brake_window_s": req["brake_window_s"],
+                "tick_budget_ms": round(budget_ms, 2)}
         self._pol_deadman = time.monotonic()          # arm the dead-man before the mode change
         with self.lock:
             self._pol_req = req
@@ -2689,8 +2787,9 @@ class RobotDaemon(threading.Thread):
         """Median milliseconds per ctrl.step() on THIS machine, with THIS bundle. Measured, never
         assumed: the same numpy on the same Pi is 90x off the figure the port was estimated at,
         because whether it found OpenBLAS is not something the code can see."""
+        nu = int(b.meta.get("nu", 6))
         pos = np.asarray(b["nominal_ctrl"], float)
-        zero6, grav, gyro = np.zeros(6), POLICY_UPRIGHT_GRAV.copy(), np.zeros(3)
+        zero6, grav, gyro = np.zeros(nu), POLICY_UPRIGHT_GRAV.copy(), np.zeros(3)
         ctrl.start(pos, zero6, zero6, grav, gyro)
         for _ in range(5):                                   # first calls allocate; discard them
             ctrl.step(pos, zero6, zero6, grav, gyro)
@@ -2717,10 +2816,115 @@ class RobotDaemon(threading.Thread):
         return ""
 
     def policy_stop(self, hard=False):
-        """Ask for a stop. SOFT freezes the target and bleeds the gains out over ~0.3 s, which
-        puts the robot down under control; HARD zeroes them this tick."""
+        """END the run. SOFT freezes the target and bleeds the gains out over ~0.3 s, which puts
+        the robot down under control; HARD zeroes them this tick.
+
+        This is not the v2 run/stop flag -- see `policy_set_run`. This one takes the machine away
+        from the policy; that one asks the policy to halt."""
         with self.lock:
             self._pol_stop = "hard" if hard else "soft"
+
+    def policy_set_run(self, run, mode="brake"):
+        """The v2 command. Returns (ok, why).
+
+        `run=True` is GO: cancel any brake and let the policy drive its own latched spec.
+        `run=False` is STOP, and there are two of those (see controller_v2's docstring):
+
+          mode="brake"  the fitted open-loop schedule, with the run flag HELD AT 1. The default,
+                        and the only one the panel offers, because the alternative is measured at
+                        3/512 upright against 512/512 for not doing it.
+          mode="flag"   drop the task flag -- literally tell the policy it has finished. Kept
+                        because it is what the stop curriculum trains and it has to stay testable
+                        on the day a checkpoint finally learns it. It is not a brake today.
+
+        Posted from the HTTP thread and consumed by the CAN thread on its next control tick, which
+        is where every command in this file crosses that boundary."""
+        p = self._pol
+        if p is None or p["phase"] == "done":
+            return False, "no policy run is active"
+        if p["version"] != 2:
+            return False, ("this is a v{} bundle. Its command is a velocity, fixed at arm time -- "
+                           "there is no run/stop channel to drive.".format(p["version"]))
+        if p.get("command_kind") == "speed":
+            return False, ("this bundle's command is a SPEED, not a flag: its task[0] is the "
+                           "commanded speed over v_max and there is no green light in it. Post "
+                           "{\"speed\": <m/s>} instead -- 0 is the stop, and it is a speed the "
+                           "policy was trained at.")
+        if mode not in ("brake", "flag"):
+            return False, "stop mode must be 'brake' or 'flag'"
+        if not run and mode == "brake" and not p.get("has_brake"):
+            return False, ("this bundle carries no brake schedule, so STOP has nothing to run. On "
+                           "this lineage a stop is a 12-number open-loop schedule fitted per "
+                           "checkpoint (walk_v2/tools/brake_search.py, then walk_v2/export.py "
+                           "--brake), NOT the task flag: dropping the flag is measured at 3/512 "
+                           "upright against 512/512 for leaving it alone. Fit one, or send "
+                           "mode='flag' if you are deliberately testing the flag itself.")
+        if mode == "flag" and not p.get("has_run_flag"):
+            return False, ("this bundle was trained with objective='speed', whose task channel is "
+                           "the constant [1, 1]. The policy cannot see a red light, so the flag "
+                           "would change nothing on the wire.")
+        with self.lock:
+            self._pol_run_req = (bool(run), mode)
+        return True, ""
+
+    def policy_set_speed(self, v_mps):
+        """THE JOYSTICK. Ask the policy for `v_mps` metres per second. Returns (ok, why).
+
+        0 is not a stop command, it is a speed -- walking in place, which this lineage is trained
+        at and which the run comes up in. That is the whole reason this replaced the RUN/STOP pair:
+        the flag was a step change onto an input the policy only ever met at the finish line, and
+        the cluster measured what that does (3/512 upright against 512/512 for leaving it alone).
+        A slider is the same channel at every value in between.
+
+        The number is clamped to the trained range and then SLEWED by the control law, so what
+        arrives here is a target and not a step, however fast the slider was dragged. Posted from
+        the HTTP thread and consumed by the CAN thread on its next control tick, like every other
+        command that crosses that boundary in this file."""
+        p = self._pol
+        if p is None or p["phase"] == "done":
+            return False, "no policy run is active"
+        if p.get("command_kind") != "speed":
+            return False, ("this bundle's command is not a speed. A v{} bundle takes a velocity "
+                           "fixed at arm time, and a v2 run/stop bundle takes the RUN / STOP flag "
+                           "-- see /api/policy/command.".format(p["version"]))
+        try:
+            v = float(v_mps)
+        except (TypeError, ValueError):
+            return False, "speed must be a number of metres per second"
+        if not np.isfinite(v):
+            return False, "speed must be finite"
+        lo, hi = p["v_min"], p["v_max"]
+        if not lo - 1e-9 <= v <= hi + 1e-9:
+            return False, ("{:+.2f} m/s is outside the range this checkpoint was trained over "
+                           "({:+.2f} to {:+.2f}). The sim clips task[0] at those rails, so asking "
+                           "for more does not ask for more -- it asks for the rail while the panel "
+                           "says something else.".format(v, lo, hi))
+        with self.lock:
+            self._pol_speed_req = float(v)
+        return True, ""
+
+    def policy_zero_heading(self):
+        """Declare the direction the robot is pointing NOW to be straight ahead. Returns (ok, why).
+
+        The v3 frame carries a heading channel built by integrating the gyro's z rate, and the
+        policy is penalised for leaving zero -- so "straight" means "the bearing the estimate was
+        zeroed at", nothing more. It is zeroed when the policy starts, which is the right default
+        (point the robot, then start it). This exists for the two cases that default cannot cover:
+        the robot was turned by hand after the start, and a long run has accumulated enough drift
+        in the integral that the policy is holding a bearing the operator can see is wrong.
+
+        Applied on the CAN thread with every other command, so the only thread that ever touches
+        the control law is the one that owns the bus."""
+        p = self._pol
+        if p is None or p["phase"] == "done":
+            return False, "no policy run is active"
+        if not p.get("has_heading"):
+            return False, ("this bundle's frame carries no heading channel, so there is no origin "
+                           "to move. Heading arrived with the v3 joystick policies (frame width "
+                           "34); a v2 bundle steers on nothing and cannot be re-aimed.")
+        with self.lock:
+            self._pol_zero_heading = True
+        return True, ""
 
     def policy_keepalive(self):
         """The dead-man. The panel refreshes this while the run is visible on screen; if it stops
@@ -2747,7 +2951,17 @@ class RobotDaemon(threading.Thread):
             "reached_run": p["reached_run"], "run_seconds": round(p["run_seconds"], 2),
             "governor": g, "no_imu": p["no_imu"],
             "step_ms": round(float(p["step_ms"]), 2), "slow_loop": bool(p["slow_loop"]),
-            "realised_hz": round(float(p["rate_hz"]), 1), "nominal_hz": float(TICK_HZ),
+            "bundle_version": p["version"], "control_hz": round(float(p["ctrl_hz"]), 1),
+            "decimation": int(p["decim"]), "loop_hz": float(TICK_HZ),
+            "has_run_flag": bool(p.get("has_run_flag")), "run_flag_s": round(p["run_flag_s"], 2),
+            "command_kind": str(p.get("command_kind") or "velocity"),
+            "v_max": float(p.get("v_max", 0.0)), "v_min": float(p.get("v_min", 0.0)),
+            "speed_want": round(float(p.get("speed_want", 0.0)), 3),
+            "moving_s": round(float(p.get("moving_s", 0.0)), 2),
+            "has_brake": bool(p.get("has_brake")), "brake_s": round(p.get("brake_s", 0.0), 2),
+            "brake_window_s": float(p.get("brake_window_s", 0.0)),
+            "commits": int(p["commits"]), "never_stopped": bool(p.get("never_stopped")),
+            "realised_hz": round(float(p["rate_hz"]), 1), "nominal_hz": float(p["ctrl_hz"]),
             "thermal_uncalibrated": p["thermal_uncalibrated"],
             "jointmap_verified": p["jm_verified"],
             "peak_winding_c": np.round(p["thermal"].peak_w, 1).tolist(),
@@ -2764,14 +2978,23 @@ class RobotDaemon(threading.Thread):
                  exit_reason=None, n=0, slip0=self._slip_count, ws_block=0, ws_blocked_total=0,
                  last_ws_target=None, prev_pos=None, approach_total=0.0, approach_f=0.0,
                  freq=0.0, gait_phase=0.0, saturated=0,
-                 rate_t0=None, rate_n=0, rate_hz=float(TICK_HZ),
+                 rate_t0=None, rate_n=0, rate_hz=float(p["ctrl_hz"]),
                  run_name=b.meta.get("run"), checkpoint=b.meta.get("checkpoint"),
-                 imu_age=0.0, tel_age=0.0)
+                 imu_age=0.0, tel_age=0.0,
+                 # the loop is 200 Hz; a 100 Hz bundle gets every `decim`-th tick and the frame it
+                 # produced is re-sent on the ones in between (see _policy_resend)
+                 sub=0, resend=None, commits=0, run_since=None, run_flag_s=0.0,
+                 braking=False, brake_frac=0.0, brake_s=0.0,
+                 speed_want=0.0, speed_cmd=0.0, speed_est=0.0, moving_s=0.0,
+                 heading_deg=0.0,
+                 has_heading=bool(getattr(p.get("ctrl"), "has_heading", False)),
+                 run_flag=bool(POLICY_V2_START_RUNNING and p["has_run_flag"]))
         self._pol = p
         with self.lock:
             # a stop posted after the previous run had already ended is still sitting there, and
             # it would kill this one on its first tick
             self._pol_stop = None
+            self._pol_run_req = None
         self._last_reject = ""
         self._enter_hold(now)
         # the observer must start at the drives' reported temperature, never at ambient: a robot
@@ -2783,6 +3006,8 @@ class RobotDaemon(threading.Thread):
                        checkpoint=p["checkpoint"], v_cmd=p["v_cmd"], yaw_cmd=p["yaw_cmd"],
                        max_seconds=p["max_seconds"], no_imu=p["no_imu"],
                        step_ms=round(p["step_ms"], 2), slow_loop=p["slow_loop"],
+                       bundle_version=p["version"], control_hz=round(p["ctrl_hz"], 1),
+                       decimation=p["decim"], run_flag=p["run_flag"],
                        jointmap_verified=p["jm_verified"],
                        thermal_uncalibrated=p["thermal_uncalibrated"],
                        bypass=[k for k, v in self.bypass.items() if v])
@@ -2822,6 +3047,7 @@ class RobotDaemon(threading.Thread):
         kp_m = np.asarray(kp_model, float)[jm.motor_from_model]
         kd_m = np.asarray(kd_model, float)[jm.motor_from_model]
         clamped = set()
+        frames = []
         self._cmd_zero_epoch = self.calib.zero_epoch          # commanding absolute positions
         for i, n in enumerate(paths.MOTOR_NAMES):
             m = self.by_name[n]
@@ -2829,9 +3055,27 @@ class RobotDaemon(threading.Thread):
             payload, cl = mit.pack(np.radians(raw), float(kp_m[i]), float(kd_m[i]))
             clamped.update(cl)
             canio.force_control(m.bus, m.cid, payload)
+            frames.append((m, payload))
             self._last_cmd_raw[n] = raw
+        p["resend"] = frames
         self._force_until = self._tick_mono + POLICY_FORCE_RELEASE_S
         return clamped
+
+    def _policy_resend(self, p):
+        """Re-stream the last force-control frame, byte for byte.
+
+        This is the loop tick BETWEEN two control ticks of a bundle slower than 200 Hz. The drive
+        holds its last force-control command either way, so this is not what makes the command
+        continuous -- what it buys is that a policy run looks exactly like every other mode on the
+        bus (six frames every 5 ms), which is what the telemetry watchdogs, the flight recorder and
+        anyone with a CAN analyser expect to see. The payload is the one already packed: nothing is
+        recomputed here, so an off tick cannot produce a command a control tick did not."""
+        frames = p.get("resend")
+        if not frames:
+            return
+        for m, payload in frames:
+            canio.force_control(m.bus, m.cid, payload)
+        self._force_until = self._tick_mono + POLICY_FORCE_RELEASE_S
 
     def _policy_workspace(self, p, target_model):
         """(ok, why) for a MODEL-frame command, against the recorded safe workspace.
@@ -2850,13 +3094,16 @@ class RobotDaemon(threading.Thread):
         The same hold-before-move discipline MANUAL uses, in the force-control frame: the command
         never passes through calibration.offsets, so it is correct even against a completely wrong
         zero. Whatever the offsets say, commanding where the joint already is cannot slew."""
+        frames = []
         for n, m in self.by_name.items():
             raw = self._hold_raw.get(n)
             if raw is None:
                 continue
             payload, _ = mit.pack(np.radians(raw), POLICY_APPROACH_KP, POLICY_APPROACH_KD)
             canio.force_control(m.bus, m.cid, payload)
+            frames.append((m, payload))
             self._last_cmd_raw[n] = raw
+        p["resend"] = frames
         self._force_until = self._tick_mono + POLICY_FORCE_RELEASE_S
 
     def _policy_limp(self):
@@ -2872,6 +3119,7 @@ class RobotDaemon(threading.Thread):
         p["phase"] = "done"
         p["t_end"] = now
         p["exit_reason"] = reason
+        p["resend"] = None                 # nothing to re-stream once we are limp
         self._policy_limp()
         self._force_until = self._tick_mono + POLICY_FORCE_RELEASE_S
         g = p["gov"].status()
@@ -2883,7 +3131,8 @@ class RobotDaemon(threading.Thread):
                        peak_winding_c=np.round(p["thermal"].peak_w, 1).tolist())
         self._bb_dump("policy_run", why=reason)
 
-    def _policy_log(self, p, t, pos, vel, tau, amps, temp, grav, gyro, v, stop_code):
+    def _policy_log(self, p, t, pos, vel, tau, amps, temp, grav, gyro, v, stop_code,
+                    task0=0.0):
         """One row into the preallocated buffer. `amps` arrives in MOTOR order and every other
         six-vector here is in MODEL actuator order, so it is reindexed -- a log whose columns are
         in two different orders is a log that will be read wrong once."""
@@ -2906,9 +3155,13 @@ class RobotDaemon(threading.Thread):
         row[61] = p["gait_phase"]
         row[62] = p["freq"]
         row[63] = stop_code
+        row[64] = task0
         p["n"] = n + 1
 
-    def _tick_policy(self, now, dt):
+    def _tick_policy(self, now, _loop_dt):
+        # _loop_dt is the 200 Hz loop period and is deliberately not used: below the decimation
+        # gate, `dt` is the BUNDLE's control period, which is what every per-step constant in the
+        # control law, the observer and the governor was dimensioned in.
         p = self._pol
         if p is None:
             self._set_mode("LIMP", "policy state vanished")
@@ -2923,6 +3176,32 @@ class RobotDaemon(threading.Thread):
             self._trip(why)
             return
 
+        # ---- measured speed, at the FULL loop rate ----------------------------------------------
+        # Checked before the decimation gate, not after: this is the guard that was missing on
+        # 2026-09-01 when four drives faulted at once, and a bundle running at half the loop rate
+        # is no reason to look for a runaway half as often. It reads telemetry the drain already
+        # collected, so it costs nothing.
+        if not self.bypass["speed"]:
+            for n, m in self.by_name.items():
+                if m.pos is not None and abs(m.spd) > POLICY_MAX_ERPM:
+                    why = ("{} runaway {:.0f} ERPM (> {:.0f}) -- going limp rather than braking, "
+                           "because braking a joint at this speed is what puts the bus into "
+                           "over-voltage".format(n, m.spd, POLICY_MAX_ERPM))
+                    self._policy_end(p, now, why)
+                    self._trip(why)
+                    return
+
+        # ---- the decimation gate ----------------------------------------------------------------
+        # The loop is 200 Hz and the control law is the bundle's own rate. On an off tick the last
+        # frame is re-streamed and nothing else happens: no observation is built, no action is
+        # computed, no state advances. Anything that must run at 200 Hz belongs ABOVE this line.
+        p["sub"] += 1
+        if p["sub"] < p["decim"]:
+            self._policy_resend(p)
+            return
+        p["sub"] = 0
+        dt = p["ctrl_dt"]
+
         gov = p["gov"]
         stale = self._telemetry_age()
         deadman = self._deadman_age()
@@ -2932,8 +3211,55 @@ class RobotDaemon(threading.Thread):
         with self.lock:
             req_stop = self._pol_stop
             self._pol_stop = None
+            req_run = self._pol_run_req
+            self._pol_run_req = None
+            req_speed = self._pol_speed_req
+            self._pol_speed_req = None
+            req_zero_heading = self._pol_zero_heading
+            self._pol_zero_heading = False
         if req_stop:
             gov.kill("stopped by the operator", hard=(req_stop == "hard"))
+        if req_run is not None and p["version"] == 2:
+            # the v2 command. Applied here rather than in policy_set_run so that the only thread
+            # that ever touches the controller is the one that owns the CAN bus.
+            want, mode = req_run
+            ctrl = p["ctrl"]
+            if want:
+                ctrl.cancel_brake()
+                ctrl.set_run(True)
+                p["run_flag"], p["braking"] = True, False
+            elif mode == "brake":
+                ok, why = ctrl.start_brake()
+                p["braking"] = bool(ok)
+                if not ok:                       # policy_set_run refused this already; belt+braces
+                    self._last_reject = why
+            else:
+                ctrl.set_run(False)
+                p["run_flag"] = False
+            self._bb_event("policy.command", file=p["file"], run=bool(want), mode=mode,
+                           run_flag=p["run_flag"], braking=p["braking"], phase=p["phase"],
+                           elapsed_s=round(p["run_seconds"], 2))
+        if req_zero_heading and p.get("has_heading"):
+            # the heading channel is an INTEGRATED gyro rate, so it is only ever a bearing
+            # relative to an origin, and the origin is set when the policy starts. Moving it is
+            # the operator saying "the direction it is pointing now is the one I want it to hold"
+            # -- after squaring the robot up by hand, or after a long run has walked the estimate.
+            # Nothing else touches it: a heading that re-zeroed itself would make the robot veer
+            # and there would be nothing in the log to say why.
+            p["ctrl"].zero_heading()
+            self._bb_event("policy.zero_heading", file=p["file"], phase=p["phase"],
+                           was_deg=round(float(p.get("heading_deg", 0.0)), 1),
+                           elapsed_s=round(p["run_seconds"], 2))
+            p["heading_deg"] = 0.0
+        if req_speed is not None and p.get("command_kind") == "speed":
+            # the joystick. The control law clamps and slews it; what is recorded here is what the
+            # operator asked for, which is the thing a log reader will want to line up against
+            # what the robot then did.
+            ok, applied = p["ctrl"].set_speed(req_speed)
+            if ok:
+                p["speed_want"] = float(applied)
+                self._bb_event("policy.speed", file=p["file"], speed=float(applied),
+                               phase=p["phase"], elapsed_s=round(p["run_seconds"], 2))
 
         # ---- watchdogs that apply in EVERY phase, not just under the policy --------------------
         if stale > POLICY_TELEMETRY_STALE_S:
@@ -2946,27 +3272,16 @@ class RobotDaemon(threading.Thread):
             gov.kill("IMU sample is {:.0f} ms old -- gravity is the only fall detector there is"
                      .format(imu_age * 1e3), hard=True)
 
-        # ---- measured speed, which is NOT what the governor's rate clamp bounds -------------
-        # The governor limits how fast the TARGET may move. This is how fast the joint is actually
-        # turning, and on 2026-09-01 the difference between those two was four faulted drives.
-        if not self.bypass["speed"]:
-            for n, m in self.by_name.items():
-                if m.pos is not None and abs(m.spd) > POLICY_MAX_ERPM:
-                    why = ("{} runaway {:.0f} ERPM (> {:.0f}) -- going limp rather than braking, "
-                           "because braking a joint at this speed is what puts the bus into "
-                           "over-voltage".format(n, m.spd, POLICY_MAX_ERPM))
-                    self._policy_end(p, now, why)
-                    self._trip(why)
-                    return
-
         pos, amps, temp, err = self._policy_measure(p)
         if p["prev_pos"] is None:
             p["prev_pos"] = pos.copy()
-        # Joint velocity from the DIFFERENTIATED model position at the NOMINAL period, exactly as
-        # run_policy.py does: the drive reports ERPM and nothing in this repo has ever measured the
-        # ERPM-to-joint-speed scale. Noisy but unambiguous, and inside the noise band the policy
-        # trained against.
-        vel = (pos - p["prev_pos"]) * TICK_HZ
+        # Joint velocity from the DIFFERENTIATED model position at the NOMINAL CONTROL period,
+        # exactly as run_policy.py does: the drive reports ERPM and nothing in this repo has ever
+        # measured the ERPM-to-joint-speed scale. Noisy but unambiguous, and inside the noise band
+        # the policy trained against. The period is the bundle's, not the loop's -- `prev_pos` is
+        # the position at the last CONTROL tick, so dividing by the loop period would inflate
+        # every observed joint velocity by the decimation factor.
+        vel = (pos - p["prev_pos"]) / dt
         p["prev_pos"] = pos.copy()
         tau = p["jm"].torque_to_model(amps)
         amps_model = np.abs(amps)[p["jm"].model_from_motor]
@@ -3034,10 +3349,22 @@ class RobotDaemon(threading.Thread):
                 p["t_phase"] = now
                 p["run_t0"] = now
                 p["reached_run"] = True
-                p["ctrl"].start(pos, np.zeros(6), tau, grav, gyro,
-                                v_cmd=p["v_cmd"], yaw_cmd=p["yaw_cmd"])
+                if p["version"] == 2:
+                    # v2 comes up STOPPED and holds the stance until the panel commands otherwise.
+                    # Any command posted during the approach is honoured here, once, rather than
+                    # dropped -- for the joystick that means the slider's position, and start()
+                    # has just put the applied speed back to 0, so it ramps up from rest either way.
+                    p["ctrl"].start(pos, np.zeros(6), tau, grav, gyro)
+                    if p["command_kind"] == "speed":
+                        p["ctrl"].set_speed(p["speed_want"])
+                    else:
+                        p["ctrl"].set_run(p["run_flag"])
+                else:
+                    p["ctrl"].start(pos, np.zeros(6), tau, grav, gyro,
+                                    v_cmd=p["v_cmd"], yaw_cmd=p["yaw_cmd"])
                 self._bb_event("policy.run", file=p["file"], v_cmd=p["v_cmd"],
-                               yaw_cmd=p["yaw_cmd"], max_seconds=p["max_seconds"])
+                               yaw_cmd=p["yaw_cmd"], max_seconds=p["max_seconds"],
+                               bundle_version=p["version"], run_flag=p["run_flag"])
                 return
             if el > p["approach_total"] + POLICY_APPROACH_SLACK_S:
                 self._policy_end(p, now, "the approach did not converge within its budget")
@@ -3053,23 +3380,50 @@ class RobotDaemon(threading.Thread):
         # CAN; this says it IS -- with the IMU thread, Flask, the recorder and the GC all competing
         # for the same four cores. See the POLICY_MAX_STEP_MS block for why a slow loop is not a
         # slightly-degraded control law but a different one.
+        hz_nom = p["ctrl_hz"]
         if p["rate_t0"] is None:
             p["rate_t0"], p["rate_n"] = now, 0
         p["rate_n"] += 1
-        if p["rate_n"] >= POLICY_RATE_WINDOW:
+        if p["rate_n"] >= max(1, int(round(POLICY_RATE_WINDOW * hz_nom / TICK_HZ))):
             el = max(now - p["rate_t0"], 1e-9)
             p["rate_hz"] = p["rate_n"] / el
             p["rate_t0"], p["rate_n"] = now, 0
-            if p["rate_hz"] < POLICY_MIN_RATE_FRAC * TICK_HZ and not p["slow_loop"]:
+            if p["rate_hz"] < POLICY_MIN_RATE_FRAC * hz_nom and not p["slow_loop"]:
                 gov.kill("the control loop is running at {:.0f} Hz, not {:.0f} -- the control law's "
                          "dt is a constant, so the gait is playing at {:.2f}x and every observed "
                          "joint velocity is inflated {:.1f}x".format(
-                             p["rate_hz"], TICK_HZ, p["rate_hz"] / TICK_HZ,
-                             TICK_HZ / max(p["rate_hz"], 1e-6)), hard=False)
+                             p["rate_hz"], hz_nom, p["rate_hz"] / hz_nom,
+                             hz_nom / max(p["rate_hz"], 1e-6)), hard=False)
 
         cmd = p["ctrl"].step(pos, vel, tau, grav, gyro)
         p["gait_phase"], p["freq"] = float(cmd.phase), float(cmd.freq)
         p["saturated"] += 1 if cmd.saturated else 0
+        if getattr(cmd, "commit", False):
+            p["commits"] += 1
+        if p["run_flag"]:
+            p["run_flag_s"] += dt
+        if p.get("command_kind") == "speed":
+            p["speed_cmd"] = float(getattr(cmd, "speed_cmd", 0.0) or 0.0)
+            # the policy's OWN estimate of how fast it is going, forward component. Nothing on
+            # this robot measures ground speed, so this is the only speedometer there is -- and it
+            # is the estimator the policy itself is steering by, which is what makes it worth
+            # showing next to the command.
+            ve = getattr(cmd, "vel_est", None)
+            if ve is not None and len(ve):
+                p["speed_est"] = float(ve[0])
+            if abs(p["speed_cmd"]) > 1e-3:
+                p["moving_s"] += dt
+        if p.get("has_heading"):
+            # what the POLICY thinks straight ahead is, which is the quantity it is actually
+            # steering on -- not a ground-truth bearing. Worth showing precisely because the two
+            # can disagree: a drifting integral is how a robot runs straight by its own arithmetic
+            # and diagonally across the floor.
+            p["heading_deg"] = float(p["ctrl"].heading_deg())
+        if getattr(cmd, "brake_frac", 0.0) or p["braking"]:
+            p["brake_frac"] = float(getattr(cmd, "brake_frac", 0.0))
+            p["braking"] = bool(getattr(p["ctrl"], "braking", False))
+            if p["braking"]:
+                p["brake_s"] += dt
         # the governor steps the winding observer itself, off `current` -- see
         # safety.SafetyGovernor.observe for why that is not the caller's job any more
         v = gov.step(cmd.target, cmd.kp, cmd.kd, pos, vel, grav, gyro,
@@ -3093,9 +3447,12 @@ class RobotDaemon(threading.Thread):
                 p["ws_blocked_total"] += 1
                 v.target = p["last_ws_target"].copy()
                 self._last_reject = ws_why
-                if p["ws_block"] >= POLICY_WS_PERSIST_TICKS:
+                # a DWELL, so it is a time and not a count: POLICY_WS_PERSIST_TICKS is the 100 ms
+                # this was tuned to expressed at 200 Hz, and a 100 Hz bundle gets half the ticks
+                # for the same 100 ms
+                if p["ws_block"] * 1000.0 / hz_nom >= POLICY_WS_PERSIST_TICKS * 1000.0 / TICK_HZ:
                     gov.kill("the policy has been commanding outside the safe workspace for "
-                             "{:.0f} ms: {}".format(p["ws_block"] * 1000.0 / TICK_HZ, ws_why),
+                             "{:.0f} ms: {}".format(p["ws_block"] * 1000.0 / hz_nom, ws_why),
                              hard=False)
             else:
                 # nothing safe to fall back to: the very first commanded pose is already outside
@@ -3107,7 +3464,8 @@ class RobotDaemon(threading.Thread):
         else:
             self._policy_send(p, v.target, v.kp, v.kd)
 
-        self._policy_log(p, t, pos, vel, tau, amps, temp, grav, gyro, v, float(v.stop))
+        self._policy_log(p, t, pos, vel, tau, amps, temp, grav, gyro, v, float(v.stop),
+                         task0=float(getattr(cmd, "run_flag", 0.0) or 0.0))
         if v.stop != SAFE.STOP_NONE and v.limp:
             self._policy_end(p, now, "; ".join(v.reasons) or "stopped")
 
@@ -3126,6 +3484,30 @@ class RobotDaemon(threading.Thread):
             "gait_freq_hz": round(p["freq"], 2),
             "rate_hz": round(float(p["rate_hz"]), 1), "step_ms": round(float(p["step_ms"]), 2),
             "slow_loop": bool(p["slow_loop"]),
+            # the v2 command channel. `has_run_flag` is what the panel's RUN/STOP pair keys off:
+            # false means there is nothing here a button could drive.
+            "bundle_version": p["version"], "control_hz": round(float(p["ctrl_hz"]), 1),
+            "decimation": int(p["decim"]), "nominal_hz": float(p["ctrl_hz"]),
+            "command_kind": str(p.get("command_kind") or "velocity"),
+            "v_max": float(p.get("v_max", 0.0)), "v_min": float(p.get("v_min", 0.0)),
+            "cmd_slew": round(float(p.get("cmd_slew", 0.0)), 3),
+            "v_trained": list(p.get("v_trained") or (0.0, 0.0)),
+            # the joystick: where the slider is, what the slewed command actually is this tick,
+            # and the policy's own forward-speed estimate -- the only speedometer on the robot.
+            "speed_want": round(float(p.get("speed_want", 0.0)), 3),
+            "speed_cmd": round(float(p.get("speed_cmd", 0.0)), 3),
+            "speed_est": round(float(p.get("speed_est", 0.0)), 3),
+            # the v3 heading channel: present only on a bundle whose frame carries it
+            "has_heading": bool(p.get("has_heading")),
+            "heading_deg": round(float(p.get("heading_deg", 0.0)), 1),
+            "moving_s": round(float(p.get("moving_s", 0.0)), 2),
+            "has_run_flag": bool(p.get("has_run_flag")),
+            "run_flag": bool(p["run_flag"]), "never_stopped": bool(p.get("never_stopped")),
+            "run_flag_s": round(float(p["run_flag_s"]), 2), "commits": int(p["commits"]),
+            "has_brake": bool(p.get("has_brake")), "braking": bool(p.get("braking")),
+            "brake_frac": round(float(p.get("brake_frac", 0.0)), 3),
+            "brake_s": round(float(p.get("brake_s", 0.0)), 2),
+            "brake_window_s": float(p.get("brake_window_s", 0.0)),
             "gait_phase": round(p["gait_phase"], 3),
             "stop": g["stop"], "reasons": g["reasons"], "clamps": g["clamp_counts"],
             "saturated_now": [k for k, n in g["saturated_now"].items() if n],

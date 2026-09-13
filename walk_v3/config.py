@@ -760,6 +760,61 @@ PRESETS = {
                                     jitter_curriculum_steps=25_000_000,
                                     total_steps=150_000_000),
                              **_FAST),
+    # Stage 3, with an HONEST TOP OF THE STICK.
+    #
+    # v_max is what gives the operator's stick its meaning -- task[0] = v_cmd / v_max -- and 3.6
+    # came from `tools/speed_lib.py`, a CEM search over open-loop gait specs. That search answers
+    # "what can the action space express", not "what can a policy hold". Closed loop it cannot hold
+    # 3.6. Measured 2026-09-13 on the stage-2 keeper, greedy, 8 envs per rung, 12 s
+    # (tools/speed_frontier.py):
+    #
+    #     commanded  1.80  2.10  2.40  2.70  3.00  3.30  3.60
+    #     achieved   1.64  1.82  1.98  2.16  2.50  2.64  2.79
+    #     upright    100%  100%  100%  100%   25%    0%    0%
+    #     heading     8.0   6.4   6.7   5.8  10.5  13.7  17.5  deg
+    #
+    # Two things follow. The obvious one: the top third of the shipped slider is a speed the robot
+    # falls over at, and an operator pushing the stick all the way forward is entitled to expect
+    # otherwise. The less obvious one, and the reason this is a TRAINING change and not just an
+    # export flag: `cmd_hi` reaches 1.0, so about a fifth of every episode in stage 2 was spent
+    # asking for 3.0-3.6 m/s, i.e. asking the policy to fall. That is a fifth of the sample budget
+    # spent training the failure and paying the 100-point fall penalty for it.
+    #
+    # 2.4 rather than 2.7: 2.7 is upright but it is the last rung before the cliff, and the whole
+    # point is that full stick should be comfortable. What it does NOT try to fix is the ~0.15 m/s
+    # undershoot that runs through the whole band -- that one is the policy's honest risk-adjusted
+    # optimum (income (3 + 2*v_cmd) * exp(-err/0.6) against a 100-point fall penalty), and
+    # sharpening the tracking term to close it would buy speed with survival, which is the wrong
+    # trade for a machine an operator is holding.
+    #
+    # THE WARM-START TRAP APPLIES HERE. task[0] changes meaning: 1.0 meant 3.6 m/s to the parent and
+    # means 2.4 here, so the policy starts by over-delivering against every command until the
+    # tracking income re-teaches the scale. That is a real perturbation and the reason this ships as
+    # a SEPARATE ARM next to the v_max 3.6 stage-3 runs rather than as a change to them.
+    "v3_stage3_v24": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                                 **dict(_V3,
+                                        v_max=2.4,
+                                        cmd_curriculum_steps=0,
+                                        shape_curriculum_steps=0,
+                                        efficiency_ramp_steps=0,
+                                        gait_curriculum_steps=0,
+                                        track_sigma_steps=0,
+                                        pitch_assist_ramp_steps=0,
+                                        pitch_assist_kp=0.0, pitch_assist_kd=0.0,
+                                        roll_assist_kp=0.0, roll_assist_kd=0.0,
+                                        yaw_assist_kp=0.0, yaw_assist_kd=0.0,
+                                        assist_per_episode=False,
+                                        warmstart_reset_log_std=False,
+                                        max_log_std=-1.3863,
+                                        std_anneal_target=0.12,
+                                        ent_coef=0.003,
+                                        curriculum_order=("bringup_scale", "dr_scale",
+                                                          ("ctrl_jitter_ms", "ctrl_drop_prob")),
+                                        bringup_curriculum_steps=40_000_000,
+                                        dr_curriculum_steps=40_000_000,
+                                        jitter_curriculum_steps=25_000_000,
+                                        total_steps=150_000_000),
+                                 **_FAST),
     # THE HANDOVER, done as a distribution instead of a dial: assist_per_episode makes
     # pitch_assist the share of episodes that get help, so unassisted episodes are in the training
     # distribution from the first rollout and the fade reweights rather than removes.
