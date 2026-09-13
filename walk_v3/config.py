@@ -601,8 +601,25 @@ PRESETS = {
     "v3_stage1": lambda: _v2(model_path="model/dash01_v2_planar.xml",
                              **dict(_V3, total_steps=80_000_000,
                                     shape_curriculum_steps=50_000_000), **_FAST),
-    # Stage 3 -- THE DELIVERABLE. Joystick, free plant, heading, bring-up and DR, warm from stage 2.
-    "v3": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V3, **_FAST),
+    # Stage 2 -- THE DELIVERABLE. Joystick, free plant, heading, bring-up and DR, warm from stage 1.
+    #
+    # ROLL AND YAW GET TRAINING WHEELS, on the same competence-gated fade as the pitch assist.
+    # Measured 2026-09-13: a stage-1 policy warm-started straight onto the free plant died in 0.38 s
+    # and the killer was not falling -- `why_terminated` attributed 44 of 64 deaths to the WORKSPACE
+    # check and 20 to tipping, with zero to term_low or the floor. The workspace box is +-0.14 m of
+    # dz in the BASE frame, and roll spends that budget geometrically before the legs move at all: a
+    # foot 0.15 m off the centreline sits h(1-cos phi) + y sin(phi) lower in a rolled base frame,
+    # which is ~0.11 m at 20 deg. So a policy that has never had a roll DOF rolls, trips a
+    # termination it cannot attribute to anything it did, and learns nothing from it.
+    #
+    # The wheel is the same mechanism the pitch assist has always used (`params.pitch_assist` scales
+    # all three), so it fades once the policy runs on it and is gone from the shipped controller.
+    "v3": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                      **dict(_V3, roll_assist_kp=100.0, roll_assist_kd=10.0,
+                             yaw_assist_kp=100.0, yaw_assist_kd=10.0),
+                      **_FAST),
+    # the same, without the wheels: the control that says whether they are what mattered
+    "v3_nowheels": lambda: _v2(model_path="model/dash01_v2_free.xml", **_V3, **_FAST),
     # the same recipe on the planar model (x, z, pitch free): an iteration sandbox, and the control
     # that says whether a cold-start failure is the objective or the plant
     "v3_planar": lambda: _v2(model_path="model/dash01_v2_planar.xml", **_V3, **_FAST),
