@@ -605,6 +605,18 @@ PRESETS = {
     "v3_stage1": lambda: _v2(model_path="model/dash01_v2_planar.xml",
                              **dict(_V3, total_steps=80_000_000,
                                     shape_curriculum_steps=50_000_000), **_FAST),
+    # Stage 1b -- the rung that introduces ROLL, and only roll. `dash01_v2_noyaw.xml` is the free
+    # plant minus heading: x, y, z, roll, pitch. Roll is the degree of freedom that kills a
+    # planar-trained policy on the free plant -- the workspace box is measured in the BASE frame and
+    # roll spends most of its dz budget geometrically before the legs move -- while yaw is the
+    # benign one, costing heading drift rather than terminations. Introducing them together needs a
+    # training wheel, and every wheel in this lineage has to be taken away again. Introducing them
+    # one at a time may not.
+    #
+    # Heading is a no-op here (no yaw DOF to bill), so the objective is one term simpler too.
+    "v3_stage1b": lambda: _v2(model_path="model/dash01_v2_noyaw.xml",
+                              **dict(_V3, total_steps=80_000_000,
+                                     shape_curriculum_steps=50_000_000), **_FAST),
     # Stage 2 -- THE DELIVERABLE. Joystick, free plant, heading, bring-up and DR, warm from stage 1.
     #
     # ROLL AND YAW GET TRAINING WHEELS, on the same competence-gated fade as the pitch assist.

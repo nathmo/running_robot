@@ -2,7 +2,8 @@
 
     python walk_v3/model/make_v2_model.py [--arm-cam-thigh A --arm-hip A]
 
-Writes dash01_v2_free.xml (all six base DOFs) and dash01_v2_planar.xml (x, z, pitch only).
+Writes dash01_v2_free.xml (all six base DOFs), dash01_v2_planar.xml (x, z, pitch only)
+and dash01_v2_noyaw.xml (free minus heading -- the rung that introduces roll alone).
 What changes vs the base plant, and why (artifact §07 / §12):
 
   1. RIGID ANKLE, FOLDED. The sprint lineage welded the ankle with a joint equality at the
@@ -64,6 +65,11 @@ LOOP_SOLIMP = "0.999 0.9999 0.0001"
 ACT_ORDER = ["hip_roll_L", "cam_L", "thigh_L", "hip_roll_R", "cam_R", "thigh_R"]
 NOMINAL_CTRL = np.array([0.0, 0.0, 0.12, 0.0, 0.0, -0.12])
 PLANAR_REMOVE = ("base_y", "base_roll", "base_yaw")
+# The intermediate rung: everything but yaw. Roll is what kills a planar-trained policy on
+# the free plant (the workspace box is measured in the BASE frame, and roll spends most of
+# its dz budget geometrically), so introducing roll WITHOUT also introducing heading gives a
+# stage that adds exactly one hard degree of freedom.
+NOYAW_REMOVE = ("base_yaw",)
 
 
 def _fa(s):
@@ -148,10 +154,14 @@ def fold_ankle(root, side, angle):
 
 
 def build(arm_cam_thigh=0.0216, arm_hip=0.046, planar=False, out=None, write=True,
-          leg_spring_k=LEG_SPRING_K):
+          leg_spring_k=LEG_SPRING_K, variant=None):
+    """variant: None (free), "planar" (x, z, pitch) or "noyaw" (free minus heading)."""
+    variant = variant or ("planar" if planar else "free")
+    planar = variant == "planar"
+    remove = {"planar": PLANAR_REMOVE, "noyaw": NOYAW_REMOVE, "free": ()}[variant]
     tree = ET.parse(BASE)
     root = tree.getroot()
-    root.set("model", "dash01_v2_planar" if planar else "dash01_v2_free")
+    root.set("model", f"dash01_v2_{variant}")
     root.find("compiler").set("meshdir", MESH_ABS)          # relative path restored at write time
     # visual meshes come from walk_mit/model/meshes (tracked in git); no second copy in walk_v2
     root.find("compiler").set("meshdir", "../../walk_mit/model")
@@ -212,11 +222,11 @@ def build(arm_cam_thigh=0.0216, arm_hip=0.046, planar=False, out=None, write=Tru
             elif j.get("name", "").startswith("leg_spring_"):
                 j.set("stiffness", f"{leg_spring_k:.6g}")
 
-    # 5. planar: remove base y / roll / yaw joints
-    if planar:
+    # 5. drop the base joints this variant does not have
+    if remove:
         base = next(b for b in root.iter("body") if b.get("name") == "bodyNCS-v1")
         for j in list(base.findall("joint")):
-            if j.get("name") in PLANAR_REMOVE:
+            if j.get("name") in remove:
                 base.remove(j)
 
     # 6. nominal joint targets as a <custom><numeric>; keyframe ctrl (torque) = 0, and the
@@ -270,7 +280,7 @@ def build(arm_cam_thigh=0.0216, arm_hip=0.046, planar=False, out=None, write=Tru
     xml = ET.tostring(root, encoding="unicode")
     xml = '<?xml version="1.0" encoding="utf-8"?>\n' + xml
     if write:
-        out = Path(out) if out else HERE / ("dash01_v2_planar.xml" if planar else "dash01_v2_free.xml")
+        out = Path(out) if out else HERE / f"dash01_v2_{variant}.xml"
         out.write_text(xml, encoding="utf-8")
         return out, info
     return xml, info
@@ -340,8 +350,8 @@ def main():
         v = getattr(args, k)
         if v is not None:
             kw[k] = v
-    for planar in (False, True):
-        out, info = build(planar=planar, **kw)
+    for variant in ("free", "planar", "noyaw"):
+        out, info = build(variant=variant, **kw)
         print(f"[model] wrote {out.name}: z {info['z_before']:.4f} -> {info['z_settled']:.4f} m "
               f"settled, stand torque {np.round(info['stand_torque'], 2).tolist()}")
 
