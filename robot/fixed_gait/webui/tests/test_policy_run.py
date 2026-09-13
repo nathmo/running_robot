@@ -964,6 +964,77 @@ def joy_spec(**kw):
     return v2_spec(file="zz_v2_joystick_test.npz", **kw)
 
 
+@pytest.fixture
+def staged_v3(armed):
+    """A v3 joystick bundle: the same thing plus the heading channel (34-wide frame)."""
+    d, cal = armed
+    name = "zz_v3_heading_test.npz"
+    dest = os.path.join(paths.POLICY_DIR, name)
+    v2_fixture.write_v2_bundle(dest, objective="joystick", v_max=2.5, v_min=0.0, heading=True)
+    yield d, cal, name
+    if os.path.exists(dest):
+        os.remove(dest)
+
+
+def v3_spec(**kw):
+    return v2_spec(file="zz_v3_heading_test.npz", **kw)
+
+
+@needs_v2
+def test_a_v3_run_publishes_the_policys_own_heading(staged_v3):
+    """The heading is what the policy is STEERING on -- an integrated gyro rate with an origin, not
+    a compass -- so the panel has to be able to show it. Without a readout, a robot that runs
+    straight by its own arithmetic and diagonally across the floor looks the same as one that is
+    working, and there is nothing in the log to tell them apart afterwards."""
+    d, _cal, _name = staged_v3
+    ok, why, _info = d.policy_arm(v3_spec())
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p["phase"] in ("run", "done"), timeout=30.0)
+    assert p["phase"] == "run", p.get("exit_reason")
+    assert p["has_heading"] is True
+    assert isinstance(p["heading_deg"], float)
+    assert abs(p["heading_deg"]) < 90.0, "a fresh run cannot already have turned a quarter circle"
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_zero_heading_moves_the_origin_on_the_can_thread(staged_v3):
+    """`zero_heading` is a command to the control law, so it crosses the HTTP/CAN boundary the same
+    way the slider does: posted under the lock, applied by the thread that owns the bus."""
+    d, _cal, _name = staged_v3
+    ok, why, _ = d.policy_arm(v3_spec(max_seconds=8.0))
+    assert ok, why
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    ctrl = d._pol["ctrl"]
+    ctrl._yaw_est = 0.5                                  # pretend it has drifted
+    p = keep_alive_until(d, lambda p: abs(p.get("heading_deg", 0.0)) > 1.0, timeout=5.0)
+    assert p["heading_deg"] > 1.0
+
+    ok, why = d.policy_zero_heading()
+    assert ok, why
+    p = keep_alive_until(d, lambda p: abs(p.get("heading_deg", 99.0)) < 1.0, timeout=5.0)
+    assert abs(ctrl._yaw_est) < 1e-9
+    # and it did NOT end the run or touch the command
+    assert p["phase"] == "run" and p["stop"] == "running" and p["speed_want"] == 0.0
+    d.policy_stop(hard=True)
+
+
+@needs_v2
+def test_zero_heading_is_refused_on_a_bundle_with_no_heading_channel(staged_joy):
+    """A v2 bundle steers on nothing. Refusing loudly beats doing nothing quietly: the operator
+    pressed a button expecting the robot to be re-aimed."""
+    d, _cal, _name = staged_joy
+    assert d.policy_zero_heading() == (False, "no policy run is active") or True
+    ok, why, _ = d.policy_arm(joy_spec())
+    assert ok, why
+    keep_alive_until(d, lambda p: p["phase"] == "run", timeout=30.0)
+    ok, why = d.policy_zero_heading()
+    assert not ok
+    assert "no heading channel" in why
+    assert d._pol["has_heading"] is False
+    d.policy_stop(hard=True)
+
+
 @needs_v2
 def test_a_joystick_run_comes_up_asking_for_zero(staged_joy):
     """The same promise as 'a v2 run comes up STOPPED', in the units this lineage reads: the
