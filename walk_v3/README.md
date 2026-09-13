@@ -97,6 +97,54 @@ executes) against CPU MuJoCo, so what you feel is what the robot would run.
 Every item below is a fix for something that was **measured** to be wrong, not a guess. The
 corresponding evidence is in the code comment at each site.
 
+### 0. One difficulty at a time
+
+This is the change the rest of the folder was rebuilt around, and it came last because it took a
+dozen runs to see. Every run followed the same arc -- climb to a peak, then decline from the point
+where the curricula started biting. Six of them advance off one competence gate: the command band
+widens, the gait-quality penalties come on, the starts get dirty, the plant randomises, the
+controller gets jittery, and the base assist fades. The task hardens in six directions at once and
+the policy never consolidates any of them.
+
+v2 had the opposite failure -- absolute gates set so high that nothing ever advanced, which is how
+`dr_scale` finished at **0.000** in three separate runs. The answer is neither extreme.
+
+`curriculum_order` names a sequence of groups. A curriculum may advance only once every group before
+it has reached 1.0 (`ppo._queued`):
+
+```
+("cmd_lo", "cmd_hi", "cmd_zero_p")   be able to do the job      25 M
+"pitch_assist"                       stand on your own          30 M
+"shape_scale"                        do it well                 25 M
+"bringup_scale"                      do it from a bad start     30 M
+"dr_scale"                           do it on a different robot 40 M
+("ctrl_jitter_ms", "ctrl_drop_prob") with a worse controller    25 M
+```
+
+Sequential ramps do not overlap, so a run needs their **sum**, not their maximum: 175 M of stage 2's
+200 M. Stage 1's budget reaches the first three groups and stops, which is why a stage-1 checkpoint
+honestly reports that DR never ramped.
+
+Putting the assist fade second is deliberate. Removing the crutch is the single step that has killed
+every free-plant run, and it had always been happening while five other things also got harder.
+
+Measured, with only the command band advancing and everything else verifiably frozen: the three
+planar seeds reached **ep_len 2503-2798 of a 3000 cap** with returns of 4491-5186, against 1013 and
+1197 for the same stage under parallel curricula.
+
+**Three bugs lived in this mechanism before it worked**, all the same shape -- a curriculum whose real
+behaviour did not match its config, which is exactly what this folder exists to prevent:
+
+* clock-based ramps read the global step and never saw the queue, so `shape_scale` climbed to 0.45
+  while the log said only `cmd_lo` was advancing;
+* a name *omitted* from the order is not frozen, it advances unqueued, so DR ramped to 0.146 during a
+  stage 1 whose order had been shortened for readability;
+* `cmd_lo`, `cmd_hi` and `cmd_zero_p` are one curriculum wearing three names; queued separately they
+  cost three ramps and would have eaten 75 M of a 100 M budget, leaving the assist fade unreached.
+
+All three were caught because the queue prints which curriculum is live and the progress line prints
+the values beside it. None would have been visible otherwise.
+
 ### 1. The curricula can no longer silently never happen
 
 v2 advanced every curriculum only while the exploring policy's episodes exceeded a fixed tick count,
