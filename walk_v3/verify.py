@@ -199,7 +199,17 @@ def check_tracking(rep, cfg, agent, args, tol):
         rep.add("2. command tracking", "zero command = step in place (drift)",
                 abs(zero[0]["speed"]) <= 0.3, f"{abs(zero[0]['speed']):.2f} m/s", "<= 0.30 m/s")
     fast = [r for r in rows if r["cmd"] >= 0.9 * cfg.v_max]
-    if fast:
+    # A plant with no yaw joint cannot drift in heading, so this check would pass at exactly 0.0 deg
+    # no matter how bad the policy is -- the same empty pass this suite removes elsewhere. Say so
+    # instead: straightness is not testable until the model has the degree of freedom to get it
+    # wrong. `planar` has x, z and pitch; `noyaw` has no heading either.
+    planar_like = "planar" in cfg.model_path or "noyaw" in cfg.model_path
+    if planar_like:
+        rep.skip("3. straight", "heading drift at full stick",
+                 f"{Path(cfg.model_path).stem} has no yaw DOF -- nothing to drift")
+        rep.skip("3. straight", "lateral drift at full stick",
+                 f"{Path(cfg.model_path).stem} has no lateral DOF -- nothing to drift")
+    elif fast:
         rep.add("3. straight", "heading drift at full stick",
                 fast[0]["yaw_deg"] <= 15.0, f"{fast[0]['yaw_deg']:.1f} deg", "<= 15 deg")
         rep.add("3. straight", "lateral drift at full stick",
