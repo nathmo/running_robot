@@ -453,15 +453,41 @@ class PPO:
         rel = gate / max(c.curriculum_gate_ep_len, 1e-9)
         return max(c.curriculum_gate_floor, rel * c.curriculum_gate_frac * ref)
 
+    def _queued(self, key):
+        """In SEQUENTIAL mode, has this curriculum's turn arrived yet?
+
+        Every curriculum in v3 advances off the same competence gate, which means the task hardens
+        in six directions at once: the command band widens, the gait-quality penalties come on, the
+        starts get dirty, the plant is randomised, the controller gets jittery, and the assist
+        fades. Measured 2026-09-13 across a dozen runs, every one of them follows the same arc --
+        climb to a peak, then decline from the point where the curricula start biting together.
+
+        v2 had the opposite failure: absolute gates set so high that nothing ever advanced. The
+        answer is neither, it is ONE AT A TIME. `curriculum_order` names the sequence; a curriculum
+        may advance only once every curriculum before it has reached 1.0, so the policy is asked to
+        absorb one new difficulty at a time and keeps whatever it has already learned."""
+        order = self.cfg.curriculum_order
+        if not order:
+            return True
+        if key not in order:
+            return True
+        for earlier in order[:order.index(key)]:
+            st = self.cur.get(earlier)
+            if st is None or st.get("progress", 0.0) < 0.99:
+                return False
+        return True
+
     def update_curricula(self, ep_len, d_steps):
         c = self.cfg
         p = self.env_params
         ref = self._gate_ref(ep_len)
         _g = lambda g: self._eff_gate(g, ref)
         gate, rf = _g(c.curriculum_gate_ep_len), c.curriculum_retreat_frac
+        # a queued curriculum is frozen at its current value: gate 0 with a zero step
+        _q = lambda key, steps: (steps if self._queued(key) else 0)
         kw = dict(p._asdict())
         if c.dr_enable and c.dr_curriculum_steps > 0:
-            kw["dr_scale"] = self._gated("dr_scale", ep_len, 0.0, 1.0, c.dr_curriculum_steps, gate, rf, d_steps)
+            kw["dr_scale"] = self._gated("dr_scale", ep_len, 0.0, 1.0, c.dr_curriculum_steps, gate, rf, _q("dr_scale", d_steps))
         if c.objective == "sprint" and c.sprint_curriculum_steps > 0:
             kw["sprint_dist_m"] = self._clock(c.sprint_dist_start_m, c.sprint_dist_m, c.sprint_curriculum_steps)
         if c.gait_curriculum_steps > 0 and c.w_phase_contact > 0:
@@ -469,13 +495,13 @@ class PPO:
                                              c.gait_curriculum_steps, _g(c.gait_curriculum_gate_ep_len), rf, d_steps)
         if c.efficiency_ramp_steps > 0:
             kw["eff_scale"] = self._gated("eff_scale", ep_len, 0.0, c.efficiency_target,
-                                          c.efficiency_ramp_steps, _g(c.efficiency_gate_ep_len), rf, d_steps)
+                                          c.efficiency_ramp_steps, _g(c.efficiency_gate_ep_len), rf, _q("eff_scale", d_steps))
         if c.jitter_curriculum_steps > 0:
             jg = _g(c.jitter_curriculum_gate_ep_len)
             kw["ctrl_jitter_ms"] = self._gated("ctrl_jitter_ms", ep_len, 0.0, c.ctrl_jitter_ms_final,
-                                               c.jitter_curriculum_steps, jg, rf, d_steps)
+                                               c.jitter_curriculum_steps, jg, rf, _q("ctrl_jitter_ms", d_steps))
             kw["ctrl_drop_prob"] = self._gated("ctrl_drop_prob", ep_len, 0.0, c.ctrl_drop_prob_final,
-                                               c.jitter_curriculum_steps, jg, rf, d_steps)
+                                               c.jitter_curriculum_steps, jg, rf, _q("ctrl_drop_prob", d_steps))
         if getattr(c, "shape_curriculum_steps", 0) > 0:
             # CLOCK by default, gate optional. The gated variant was tried first, on the theory
             # that a clock ramp kills runs on arrival -- training return did fall from 1197 to -18
@@ -492,7 +518,7 @@ class PPO:
             # settles at the highest weight the policy can afford rather than insisting on 1.0.
             kw["shape_scale"] = (
                 self._gated("shape_scale", ep_len, c.shape_scale_start, 1.0,
-                            c.shape_curriculum_steps, gate, rf, d_steps)
+                            c.shape_curriculum_steps, gate, rf, _q("shape_scale", d_steps))
                 if c.shape_curriculum_gated else
                 self._clock(c.shape_scale_start, 1.0, c.shape_curriculum_steps))
         if c.objective == "joystick" and getattr(c, "track_sigma_steps", 0) > 0:
@@ -504,19 +530,19 @@ class PPO:
             # open the drop height and the release tilt as competence is earned: the measured envelope
             # today is +-5 deg, and the target is +-20, so starting wide would begin most episodes lost
             kw["bringup_scale"] = self._gated("bringup_scale", ep_len, 0.0, 1.0,
-                                              c.bringup_curriculum_steps, _g(c.bringup_gate_ep_len), rf, d_steps)
+                                              c.bringup_curriculum_steps, _g(c.bringup_gate_ep_len), rf, _q("bringup_scale", d_steps))
         if c.objective == "joystick" and c.cmd_curriculum_steps > 0:
             # widen the command band DOWNWARD from what the warm start already does. Opening it to
             # [0, 1] at step 0 would spend most episodes asking a runner for speeds it has never
             # produced, which is how the v2 stop runs burned their budget.
             kw["cmd_lo"] = self._gated("cmd_lo", ep_len, float(c.cmd_range_start[0]), float(c.cmd_range[0]),
-                                       c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, d_steps)
+                                       c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, _q("cmd_lo", d_steps))
             kw["cmd_hi"] = self._gated("cmd_hi", ep_len, float(c.cmd_range_start[1]), float(c.cmd_range[1]),
-                                       c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, d_steps)
+                                       c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, _q("cmd_hi", d_steps))
             # and the zero share with it -- "stop" is the hardest command this lineage has, so it
             # arrives last, not alongside the first rollout
             kw["cmd_zero_p"] = self._gated("cmd_zero_p", ep_len, 0.0, float(c.cmd_zero_frac),
-                                           c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, d_steps)
+                                           c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, _q("cmd_zero_p", d_steps))
         if getattr(c, "stoplight_prob_final", 0.0) > 0 and c.stoplight_curriculum_steps > 0:
             kw["stoplight_prob"] = self._gated("stoplight_prob", ep_len, 0.0, c.stoplight_prob_final,
                                                c.stoplight_curriculum_steps, _g(c.stoplight_gate_ep_len), rf, d_steps)
@@ -532,8 +558,18 @@ class PPO:
                         st["open"] = True
                         print(f"[ppo] pitch-assist fade opened at {self.step:,} steps (ep_len {ep_len:.0f})")
                 else:
-                    st["progress"] = min(1.0, st["progress"] + d_steps / max(c.pitch_assist_ramp_steps, 1))
+                    st["progress"] = min(1.0, st["progress"]
+                                         + _q("pitch_assist", d_steps) / max(c.pitch_assist_ramp_steps, 1))
                 kw["pitch_assist"] = 1.0 - st["progress"]
+        if self.cfg.curriculum_order:
+            live = next((k for k in self.cfg.curriculum_order
+                         if self.cur.get(k, {}).get("progress", 0.0) < 0.99), None)
+            if live != getattr(self, "_live_curriculum", "<none>"):
+                self._live_curriculum = live
+                done = [k for k in self.cfg.curriculum_order
+                        if self.cur.get(k, {}).get("progress", 0.0) >= 0.99]
+                print(f"[ppo] curriculum queue at {self.step:,}: now advancing {live!r}"
+                      f" ({len(done)}/{len(self.cfg.curriculum_order)} complete)")
         self.env_params = EnvParams(**{k: float(v) for k, v in kw.items()})
 
     def update_entropy(self, swing_min, ep_len=None):

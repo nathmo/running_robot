@@ -469,6 +469,12 @@ class Config:
     curriculum_gate_frac: float = 0.6       # relative: gate at 60% of the recent best episode
     curriculum_gate_floor: float = 150.0    # ... but never below 1.5 s of survival
     curriculum_gate_ref_decay: float = 0.999    # per update; the reference forgets an old peak
+    # SEQUENTIAL curricula: a name may advance only once every name before it has reached 1.0.
+    # Empty = the v2/early-v3 behaviour, everything advancing off one gate at once. The order
+    # below is 'be able to do the job, then do it well, then do it from a bad start, then do
+    # it on a different robot, then do it with a worse controller' -- with the crutch removed
+    # first, while the task is still at its easiest.
+    curriculum_order: tuple = ()
     eval_ladder: tuple = (0.0, 0.25, 0.5, 0.75, 1.0)   # stick positions, fraction of v_max
     eval_warm_ticks: int = 200              # 2 s of bring-up transient excluded from the tracking mean
     eval_seconds: float = 12.0              # in-training tracking block; verify.py uses longer
@@ -557,6 +563,14 @@ _V3 = dict(
     cmd_range_start=(0.15, 0.45), track_sigma_start=1.5, track_sigma_steps=40_000_000,
     shape_curriculum_steps=120_000_000, shape_scale_start=0.15,
     w_alive=1.5, episode_s=30.0, sprint_curriculum_steps=0,
+    # --- ONE DIFFICULTY AT A TIME. See ppo._queued: every run before this one followed the same
+    # arc, climbing to a peak and then declining from the point where the curricula started biting
+    # together -- six of them advancing off one gate. The order is: be able to do the job (widen the
+    # command band), stand on your own (fade the assist), do it well (the gait-quality penalties),
+    # do it from a bad start (bring-up), do it on a different robot (DR), do it with a worse
+    # controller (jitter and dropped ticks).
+    curriculum_order=("cmd_lo", "cmd_hi", "cmd_zero_p", "pitch_assist", "shape_scale",
+                      "bringup_scale", "dr_scale", "ctrl_jitter_ms", "ctrl_drop_prob"),
     # --- budget: a cold run has to find the gait before any of the above matters
     dr_curriculum_steps=60_000_000, bringup_curriculum_steps=60_000_000,
     cmd_curriculum_steps=60_000_000, total_steps=200_000_000,
