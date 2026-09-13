@@ -483,12 +483,18 @@ class PPO:
         order = self.cfg.curriculum_order
         if not order:
             return True
-        if key not in order:
+        # An entry may be a NAME or a TUPLE of names that advance together. cmd_lo, cmd_hi and
+        # cmd_zero_p are one curriculum wearing three names -- queued separately they cost three
+        # ramps (75 M of a 100 M budget) and the assist fade never got its turn.
+        groups = [(g,) if isinstance(g, str) else tuple(g) for g in order]
+        pos = next((i for i, g in enumerate(groups) if key in g), None)
+        if pos is None:
             return True
-        for earlier in order[:order.index(key)]:
-            st = self.cur.get(earlier)
-            if st is None or st.get("progress", 0.0) < 0.99:
-                return False
+        for g in groups[:pos]:
+            for earlier in g:
+                st = self.cur.get(earlier)
+                if st is None or st.get("progress", 0.0) < 0.99:
+                    return False
         return True
 
     def update_curricula(self, ep_len, d_steps):
@@ -579,14 +585,15 @@ class PPO:
                                          + _q("pitch_assist", d_steps) / max(c.pitch_assist_ramp_steps, 1))
                 kw["pitch_assist"] = 1.0 - st["progress"]
         if self.cfg.curriculum_order:
-            live = next((k for k in self.cfg.curriculum_order
-                         if self.cur.get(k, {}).get("progress", 0.0) < 0.99), None)
+            groups = [(g,) if isinstance(g, str) else tuple(g) for g in self.cfg.curriculum_order]
+            done_g = lambda g: all(self.cur.get(k, {}).get("progress", 0.0) >= 0.99 for k in g)
+            live = next((g for g in groups if not done_g(g)), None)
             if live != getattr(self, "_live_curriculum", "<none>"):
                 self._live_curriculum = live
-                done = [k for k in self.cfg.curriculum_order
-                        if self.cur.get(k, {}).get("progress", 0.0) >= 0.99]
-                print(f"[ppo] curriculum queue at {self.step:,}: now advancing {live!r}"
-                      f" ({len(done)}/{len(self.cfg.curriculum_order)} complete)")
+                n_done = sum(1 for g in groups if done_g(g))
+                name = "+".join(live) if live else "nothing left"
+                print(f"[ppo] curriculum queue at {self.step:,}: now advancing {name}"
+                      f" ({n_done}/{len(groups)} complete)")
         self.env_params = EnvParams(**{k: float(v) for k, v in kw.items()})
 
     def update_entropy(self, swing_min, ep_len=None):

@@ -569,8 +569,8 @@ _V3 = dict(
     # command band), stand on your own (fade the assist), do it well (the gait-quality penalties),
     # do it from a bad start (bring-up), do it on a different robot (DR), do it with a worse
     # controller (jitter and dropped ticks).
-    curriculum_order=("cmd_lo", "cmd_hi", "cmd_zero_p", "pitch_assist", "shape_scale",
-                      "bringup_scale", "dr_scale", "ctrl_jitter_ms", "ctrl_drop_prob"),
+    curriculum_order=(("cmd_lo", "cmd_hi", "cmd_zero_p"), "pitch_assist", "shape_scale",
+                      "bringup_scale", "dr_scale", ("ctrl_jitter_ms", "ctrl_drop_prob")),
     # --- budget. SEQUENTIAL ramps do not overlap, so the run needs the SUM of them, not the max.
     # Sized so the whole queue completes inside the budget with room to consolidate afterwards:
     # 25 + 30 + 25 + 30 + 40 + 25 = 175 M of 200 M, and stage 1's shorter queue inside its 80 M.
