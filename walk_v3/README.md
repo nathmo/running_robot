@@ -332,8 +332,22 @@ v3_stage1_s1     0%: 0.32/100%   25%: 0.25/100%   50%: 0.80/100%   75%: 1.36/100
 v3_stage1g_s3    0%: 0.51/ 62%   25%: 0.14/ 88%   50%: 0.79/100%   75%: 1.47/100%   100%: 2.12/100%
 ```
 
-**Stage 2 is not.** The transfer to the free plant is the open problem, and it is worth reading before
-you spend GPU hours on it, because six things have been tried and measured:
+**Stage 2 is solved too**, by the curriculum queue (§0). Five seeds, 200 M each, warm from stage 1.
+The greedy ladder over the full 0–100% stick, on the free plant, with the assist at zero:
+
+```
+step          v3_q_s1        v3_q_s2        v3_q_s5     err m/s / upright / dirty
+ 88,473,600  0.58/65%/28%   0.57/30%/ 5%   0.54/78%/ 5%
+147,456,000  1.10/100%/25%  0.44/60%/20%   0.34/80%/ 8%
+191,692,800  1.44/100%/25%  0.51/80%/28%   1.37/ 0%/ 0%
+```
+
+The full acceptance suite on the best of them (`v3_q_s5`, 176.9 M) passes command tracking, step-in-
+place, straightness, the privilege audit and deploy parity (numpy actor vs JAX actor, 4.5e-07). It
+is what the two open items below are measured against.
+
+Six earlier attempts at this handover all failed, and the table is worth keeping because each one
+looked plausible:
 
 | attempt | result |
 |---|---|
@@ -344,42 +358,76 @@ you spend GPU hours on it, because six things have been tried and measured:
 | roll+yaw assist, 150 M fade | same shape, slower |
 | per-episode assist | best at matched assist (ep_len 736 vs 276–542 at 0.73) — but greedy still 0% |
 
-One stage-2 checkpoint did reach the target behaviour before collapsing, which is why this is a
-handover problem and not an objective problem: **0.87 m/s on a 0.90 command, 1.60 on 1.80, 3.19 m/s at
-full stick, heading drift 4–11°**. The command channel, the reward and the heading term all work.
+The diagnosis that explains all six: the workspace check measures foot travel in the **base frame**,
+and roll spends most of its ±0.14 m budget geometrically before the legs move — a foot 0.15 m off the
+centreline sits `h(1−cos φ) + y·sin φ` lower, about 0.11 m at 20°. A planar-trained policy rolls the
+instant it can and is killed by a limit it cannot attribute to anything it chose to do. Sequencing
+the curricula is what got a policy through; nothing else did.
 
-The diagnosis that explains all six rows: the workspace check measures foot travel in the **base
-frame**, and roll spends most of its ±0.14 m budget geometrically before the legs move — a foot 0.15 m
-off the centreline sits `h(1−cos φ) + y·sin φ` lower, about 0.11 m at 20°. A planar-trained policy
-rolls the instant it can and is killed by a limit it cannot attribute to anything it chose to do. An
-assist prevents that, and then cannot be removed: at any scale it still corrects that share of every
-error, so the policy never meets its own mistakes.
+### What stage 2 does NOT deliver, and why stage 3 exists
 
-**What the curriculum queue changed.** Sequencing the curricula (see §0) is the only thing that has
-got a policy through the handover. Stage 1, greedy, with the assist faded to zero — three seeds, all
-of which survived where every earlier configuration read 0%:
+Every one of the five seeds finished with `bringup_scale` between 0.00 and 0.31 and **`dr_scale` at
+0.000**. Sequential curricula cost what they cost and 200 M does not buy six of them, so the queue
+reached the command band, the assist fade and the shaping, and stopped. The two groups it never
+reached are the two the deliverable is actually specified on. `v3_stage3` buys them from the stage-2
+keeper with the first three groups pinned at final.
+
+### Two measurements that changed the recipe
+
+**1. The warm start was destroying the policy, at every handover.** Four stage-3 seeds warm-started
+from a policy holding 100% upright at 2.70 m/s and fell to ep_len 82 within 3 M steps — on an env
+strictly easier than the one the checkpoint came from, at the parent's own action noise, with every
+`EnvParams` field matching. `tools/speed_frontier.py --warm-start` applies the obs-stat surgery a
+warm start applies and re-runs the ladder on the same weights:
 
 ```
-v3_seq_s3   0.45 m/s / 60% upright / 32% from a dirty start
-v3_seq_s2   0.69 m/s / 42% / 35%      per stick:  0%: 0.70/100%   25%: 0.22/100%   50%: 0.42/12%
-v3_seq_s1   2.63 m/s / 22% / 30%
+                       floor 0.01     no floor
+ 1.80 m/s commanded     0% upright   100% upright
+ achieved                     2.08           1.64
+ heading at rest           23.6 deg        2.0 deg
 ```
 
-Stage 2 on the free plant, same mechanism, at 59 M of 200 M with the assist at zero: `v3_q_s1` reads
-**0.66 m/s / 28% upright**, the first free-plant policy here to stand unassisted at all. Three other
-seeds are at 0%. Training episodes at 15 M were 1752–2615 of a 3000 cap against 150–250 for every
-earlier free-plant attempt.
+`warmstart_var_floor` raises every channel's variance to 0.01 before normalising, which shrinks the
+normalised magnitude of every channel that varies less than that — **59 of 412 dims** here. The count
+cap is innocent (1e5, 1e7 and uncapped give an identical ladder). The floor is not wrong in general:
+it exists because v2's `task[0]` had variance 6.5e-5, so a command of 0.89 normalised to −13.6 σ, and
+because a channel that is identically zero on the planar plant divides by ~0 on the free one. Neither
+applies to a same-plant continuation, so it is **off for stage 3 and left alone elsewhere**. This is
+very likely the real cost of every handover in this lineage, including the 59 M steps stage 2 spent at
+0% upright, and nothing in the logs says so — the run just looks like it is learning slowly.
 
-**Two things still short of the contract**, and both are honest open items rather than tuning:
+Run `speed_frontier.py --warm-start` on any parent checkpoint before spending a stage on it. It
+measures the policy the next stage actually *inherits*, not the one that was saved.
 
-1. **Upright at 28% is not 90%.** The recipe gets a policy across the handover; it does not yet get it
-   across reliably, and only one seed in four made it.
-2. **The queue oscillates.** The gates retreat, so when episode length drops after a fade the command
+**2. The top of the stick was asking for a fall.** `v_max` came from `tools/speed_lib.py`, a CEM
+search over open-loop gait specs — which answers what the action space can express, not what a policy
+can hold. Closed loop, `v3_q_s5` greedy, 8 envs per rung:
+
+```
+commanded  1.80  2.10  2.40  2.70  3.00  3.30  3.60
+achieved   1.64  1.82  1.98  2.16  2.50  2.64  2.79
+upright    100%  100%  100%  100%   25%    0%    0%
+heading     8.0   6.4   6.7   5.8  10.5  13.7  17.5  deg
+```
+
+The cliff is at 3.0, and `cmd_hi` reaches 1.0 — so about a fifth of every stage-2 episode was spent
+asking the policy for a speed it falls over at, and paying the 100-point fall penalty for the answer.
+`v3_stage3_v24` puts full stick at 2.4 (2.7 is upright but it is the last rung before the cliff, and
+full stick should be comfortable rather than marginal). It deliberately does **not** chase the ~0.15
+m/s undershoot that runs through the whole band: that is the policy's honest risk-adjusted optimum
+against a 100-point fall penalty, and sharpening the tracking income to close it would buy speed with
+survival — the wrong trade for a machine an operator is holding.
+
+### Still open
+
+1. **The queue oscillates.** The gates retreat, so when episode length drops after a fade the command
    curricula fall back below 0.99 and the queue returns to group 1 — visible in the log as
    `now advancing cmd_lo+cmd_hi+cmd_zero_p (0/6 complete)` appearing a second and third time. That is
    the servo behaving as designed, but it means a run can spend its budget re-doing early groups and
    never reach DR. Check the queue log before trusting a finished run, and read `dr_scale` out of the
    sidecar — `verify.py` check 1 does exactly this.
+2. **Seed variance is large.** Of five stage-2 seeds, two finished at 80% upright and one at 0%. Run
+   at least three and rank them with `tools/compare_runs.py`, never on training return.
 
 `v3_stage1b` (roll without yaw, `model/dash01_v2_noyaw.xml`, nq 17) was the alternative to the queue
 and is **not** the recipe: its seeds read 0% upright after the fade where the planar rung read 22–60%.
