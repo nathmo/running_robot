@@ -497,6 +497,40 @@ stage-2 run, so this is out-of-distribution rather than fragility, and it is the
 statement of why stage 3 exists.
 
 
+### The first optimizer step was wrecking every handover
+
+Every stage-3 arm collapsed inside 15-30 M steps, across the variance-floor fix, the log_std fix,
+the dirty-start cut, the bring-up target and four different parent checkpoints. None of those was
+the cause. **Adam's first update was.**
+
+`optax.adam` starts with zero moments, so after bias correction `m̂/√v̂ ≈ ±1` on every parameter and
+the first step is about `lr` everywhere at once -- a coordinated move of the whole network. A random
+policy does not care; a converged one that `--warm-start` has just loaded is destroyed by it. And
+`target_kl` cannot help, because the early stop is checked AFTER a minibatch: by then it is in the
+weights.
+
+```
+first update of a stage-3 run, same checkpoint, same env
+  no warmup                  approx_kl 0.9332      (target_kl is 0.03)
+  lr_warmup_updates = 300    approx_kl 0.0072
+```
+
+At 12 M steps, three of six seeds then had positive return and 305-645-tick episodes. Every
+previous arm was at return ≈ −100 at the same point. The diagnostic is free: **read the `kl` on the
+first progress line of any warm-started run**, and if it is more than a few times `target_kl`, stop.
+
+This was invisible. The run looked like it was learning slowly, and the competence-gated curricula
+then retreated on the damaged policy -- which read as the curriculum being too aggressive, and sent
+five separate investigations after the wrong thing.
+
+**It also puts a caveat on two numbers above.** `bringup_target=0.40` and the 10%/25% dirty shares
+were chosen from runs that had already been damaged on update one, so they are conservative choices
+rather than measured optima. 0.40 is still the right target for the deliverable -- it is ±9.2° of
+pitch and a 2.6-5.2 cm drop, comfortably outside the measured hardware bring-up envelope -- but if a
+wider envelope is ever wanted, re-measure rather than assuming 1.0 is unreachable. The `v_max`
+frontier is unaffected: it was measured on checkpoints, not on damaged runs.
+
+
 ### Still open
 
 1. **The queue oscillates.** The gates retreat, so when episode length drops after a fade the command
