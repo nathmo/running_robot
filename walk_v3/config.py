@@ -825,6 +825,20 @@ PRESETS = {
                                     bringup_drop_frac=0.10,
                                     bringup_held_frac=0.25,
                                     lr_warmup_updates=300,   # ~8 rollouts at 36 updates each
+                                    # HOW LONG THE HAND STAYS ON -- a TRAINING cost, not a realism dial.
+                                    # While held, env.py pins every base DOF (x, y, z, roll, pitch, yaw) and
+                                    # zeroes every base velocity at each 1 kHz substep. So on a held episode the
+                                    # robot is commanded, say, 2.4 m/s, achieves exactly 0, earns
+                                    # exp(-2.4/0.6) = 1.8% of the tracking income -- and NOTHING it does can
+                                    # change any of that. At the stock 0.3-2.5 s that is up to 250 control ticks
+                                    # of uncontrollable, low-reward transitions entering the PPO batch as
+                                    # ordinary ones, on states that look exactly like normal stance.
+                                    #
+                                    # That is why a bring-up share of 8% at +-6 deg of tilt could destroy a
+                                    # policy sitting at 81% upright: it was never the tilt, it was the dead
+                                    # ticks. The hold only has to last long enough for the feet to settle into
+                                    # contact before the release -- a few ticks, not a few hundred.
+                                    bringup_hold_s=(0.05, 0.25),
                                     bringup_target=0.40,
                                     bringup_curriculum_steps=40_000_000,
                                     dr_curriculum_steps=40_000_000,
@@ -926,6 +940,20 @@ PRESETS = {
                                         bringup_drop_frac=0.10,
                                         bringup_held_frac=0.25,
                                         lr_warmup_updates=300,   # ~8 rollouts at 36 updates each
+                                        # HOW LONG THE HAND STAYS ON -- a TRAINING cost, not a realism dial.
+                                        # While held, env.py pins every base DOF (x, y, z, roll, pitch, yaw) and
+                                        # zeroes every base velocity at each 1 kHz substep. So on a held episode the
+                                        # robot is commanded, say, 2.4 m/s, achieves exactly 0, earns
+                                        # exp(-2.4/0.6) = 1.8% of the tracking income -- and NOTHING it does can
+                                        # change any of that. At the stock 0.3-2.5 s that is up to 250 control ticks
+                                        # of uncontrollable, low-reward transitions entering the PPO batch as
+                                        # ordinary ones, on states that look exactly like normal stance.
+                                        #
+                                        # That is why a bring-up share of 8% at +-6 deg of tilt could destroy a
+                                        # policy sitting at 81% upright: it was never the tilt, it was the dead
+                                        # ticks. The hold only has to last long enough for the feet to settle into
+                                        # contact before the release -- a few ticks, not a few hundred.
+                                        bringup_hold_s=(0.05, 0.25),
                                         bringup_target=0.40,
                                         bringup_curriculum_steps=40_000_000,
                                         dr_curriculum_steps=40_000_000,
