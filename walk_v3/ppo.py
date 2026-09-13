@@ -490,11 +490,25 @@ class PPO:
         pos = next((i for i, g in enumerate(groups) if key in g), None)
         if pos is None:
             return True
+        #
+        # ...BUT THE QUEUE DOES NOT WAIT FOREVER. Every ramp here is competence-gated and retreats,
+        # so a group can hover below 0.99 indefinitely and starve everything behind it. That is not
+        # hypothetical: all five 200 M stage-2 seeds finished with `dr_scale` at 0.000 because the
+        # three groups ahead of it never all completed. `curriculum_group_max_steps` bounds how long
+        # one group may hold the queue -- it keeps whatever progress it has and the next group
+        # starts anyway. A partly-open curriculum that the policy has absorbed beats a fully-open
+        # one it never reached.
+        cap = float(getattr(self.cfg, "curriculum_group_max_steps", 0.0))
         for g in groups[:pos]:
             for earlier in g:
                 st = self.cur.get(earlier)
-                if st is None or st.get("progress", 0.0) < 0.99:
+                if st is None:
                     return False
+                if st.get("progress", 0.0) >= 0.99:
+                    continue
+                if cap > 0.0 and st.get("turn", 0.0) >= cap:
+                    continue
+                return False
         return True
 
     def update_curricula(self, ep_len, d_steps):
@@ -503,8 +517,15 @@ class PPO:
         ref = self._gate_ref(ep_len)
         _g = lambda g: self._eff_gate(g, ref)
         gate, rf = _g(c.curriculum_gate_ep_len), c.curriculum_retreat_frac
-        # a queued curriculum is frozen at its current value: gate 0 with a zero step
-        _q = lambda key, steps: (steps if self._queued(key) else 0)
+        # a queued curriculum is frozen at its current value: gate 0 with a zero step. The steps a
+        # curriculum is ALLOWED to advance by are also the steps it has held the queue, so the turn
+        # clock that `_queued` reads is accumulated here and nowhere else.
+        def _q(key, steps):
+            if not self._queued(key):
+                return 0
+            st = self.cur.setdefault(key, {"streak": 0, "open": False, "progress": 0.0})
+            st["turn"] = st.get("turn", 0.0) + steps
+            return steps
         kw = dict(p._asdict())
         if c.dr_enable and c.dr_curriculum_steps > 0:
             kw["dr_scale"] = self._gated("dr_scale", ep_len, 0.0, 1.0, c.dr_curriculum_steps, gate, rf, _q("dr_scale", d_steps))
@@ -592,8 +613,17 @@ class PPO:
                 self._live_curriculum = live
                 n_done = sum(1 for g in groups if done_g(g))
                 name = "+".join(live) if live else "nothing left"
+                # say WHY the previous group handed over: finished, or ran out of turn. A group
+                # that timed out leaves a partly-open curriculum behind and that is worth seeing in
+                # the log rather than inferring from a sidecar afterwards.
+                timed = [k for g in groups for k in g
+                         if self.cur.get(k, {}).get("progress", 0.0) < 0.99
+                         and self.cur.get(k, {}).get("turn", 0.0) > 0
+                         and (live is None or k not in live)]
+                why = (f" -- {'+'.join(timed)} handed over at "
+                       f"{self.cur[timed[0]].get('progress', 0.0):.2f}, out of turn" if timed else "")
                 print(f"[ppo] curriculum queue at {self.step:,}: now advancing {name}"
-                      f" ({n_done}/{len(groups)} complete)")
+                      f" ({n_done}/{len(groups)} complete){why}")
         self.env_params = EnvParams(**{k: float(v) for k, v in kw.items()})
 
     def update_entropy(self, swing_min, ep_len=None):

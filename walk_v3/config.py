@@ -476,6 +476,11 @@ class Config:
     curriculum_gate_frac: float = 0.6       # relative: gate at 60% of the recent best episode
     curriculum_gate_floor: float = 150.0    # ... but never below 1.5 s of survival
     curriculum_gate_ref_decay: float = 0.999    # per update; the reference forgets an old peak
+    # HOW LONG ONE GROUP MAY HOLD THE QUEUE. 0 = forever, which is what stage 2 did: every ramp is
+    # competence-gated and retreats, so a group can hover below 0.99 indefinitely and starve the
+    # rest -- all five 200 M seeds finished with dr_scale at 0.000 for exactly this reason. With a
+    # cap the group keeps whatever progress it has and the next one starts anyway.
+    curriculum_group_max_steps: int = 0
     # SEQUENTIAL curricula: a name may advance only once every name before it has reached 1.0.
     # Empty = the v2/early-v3 behaviour, everything advancing off one gate at once. The order
     # below is 'be able to do the job, then do it well, then do it from a bad start, then do
@@ -789,6 +794,10 @@ PRESETS = {
                                     bringup_curriculum_steps=40_000_000,
                                     dr_curriculum_steps=40_000_000,
                                     jitter_curriculum_steps=25_000_000,
+                                    # 40 + 40 + 25 = 105 M of ramp in a 150 M budget. The cap is
+                                    # what guarantees DR gets its turn: bring-up may hold the queue
+                                    # for 50 M and then hands over at whatever width it reached.
+                                    curriculum_group_max_steps=50_000_000,
                                     total_steps=150_000_000),
                              **_FAST),
     # Stage 3, with an HONEST TOP OF THE STICK.
@@ -868,6 +877,7 @@ PRESETS = {
                                         bringup_curriculum_steps=40_000_000,
                                         dr_curriculum_steps=40_000_000,
                                         jitter_curriculum_steps=25_000_000,
+                                        curriculum_group_max_steps=50_000_000,
                                         total_steps=150_000_000),
                                  **_FAST),
     # THE HANDOVER, done as a distribution instead of a dial: assist_per_episode makes

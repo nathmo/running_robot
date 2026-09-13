@@ -247,6 +247,48 @@ def test_net():
     check("entropy masked the same way", abs(float(ent[0]) - 6 * (0.5 + 0.5 * np.log(2 * np.pi))) < 1e-5)
 
 
+def test_queue():
+    """The curriculum queue -- the mechanism the whole recipe rests on, tested without a GPU.
+
+    Two properties, both of which have been wrong in this folder and cost runs:
+      * a name NOT in the order advances freely (that is how dr_scale ramped during a stage 1 that
+        was supposed to have none), and a name behind an unfinished group does not;
+      * a group may not hold the queue forever. Every ramp is competence-gated and retreats, so
+        without a cap one group starves the rest -- which is how five 200 M seeds finished with
+        dr_scale at 0.000.
+    """
+    print("curriculum queue")
+    from ppo import PPO
+    from dataclasses import replace
+    cfg = get_config("v3_stage3_v24")
+
+    class FakeQ:                       # just enough of PPO for _queued / _q
+        _queued = PPO._queued
+        def __init__(self, cfg):
+            self.cfg, self.cur, self.step = cfg, {}, 0
+
+    q = FakeQ(cfg)
+    q.cur = {"bringup_scale": {"progress": 0.4, "turn": 0.0},
+             "dr_scale": {"progress": 0.0, "turn": 0.0}}
+    check("the live group advances", q._queued("bringup_scale") is True)
+    check("a group behind an unfinished one waits", q._queued("dr_scale") is False)
+    check("a name not in the order is NOT frozen", q._queued("cmd_lo") is True,
+          "(omitting a name does not disable it -- pin it at final instead)")
+
+    q.cur["bringup_scale"]["progress"] = 0.995
+    check("a finished group hands over", q._queued("dr_scale") is True)
+
+    q.cur["bringup_scale"]["progress"] = 0.4
+    check("and it waits again if that group retreats", q._queued("dr_scale") is False)
+    q.cur["bringup_scale"]["turn"] = cfg.curriculum_group_max_steps
+    check("a group out of turn hands over anyway", q._queued("dr_scale") is True,
+          f"(cap {cfg.curriculum_group_max_steps:,} steps)")
+
+    q2 = FakeQ(replace(cfg, curriculum_group_max_steps=0))
+    q2.cur = {"bringup_scale": {"progress": 0.4, "turn": 1e12}, "dr_scale": {"progress": 0.0}}
+    check("cap 0 means wait forever (the old behaviour)", q2._queued("dr_scale") is False)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
@@ -256,6 +298,7 @@ def main():
     test_drive()
     test_plant()
     test_net()
+    test_queue()
     test_env(args.quick)
     print(f"\n{'ALL OK' if OK == 0 else f'{OK} FAILURE(S)'}")
     sys.exit(1 if OK else 0)
