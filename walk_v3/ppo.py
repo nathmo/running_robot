@@ -427,6 +427,20 @@ class PPO:
         frac = 1.0 if warmup <= 0 else min(1.0, self.step / warmup)
         return start + frac * (target - start)
 
+    def _clock_q(self, key, start, target, warmup, d_steps):
+        """A clock ramp that only ticks while it is this curriculum's turn.
+
+        `_clock` reads self.step, so a queued curriculum on a clock advances anyway -- which is
+        exactly what happened the first time the queue ran: `shape_scale` climbed to 0.45 while the
+        queue reported it was still advancing `cmd_lo`, because shape_curriculum_gated defaults to
+        False and the clock branch never saw the queue. Accumulate queued steps instead."""
+        st = self.cur.setdefault(key, {"streak": 0, "open": True, "progress": 0.0})
+        if warmup > 0:
+            st["progress"] = float(min(1.0, st["progress"] + d_steps / warmup))
+        else:
+            st["progress"] = 1.0
+        return start + st["progress"] * (target - start)
+
     def _gate_ref(self, ep_len):
         """The yardstick a RELATIVE gate measures against: the best episode length this run has
         reached lately, decayed so an old peak is eventually forgotten."""
@@ -520,7 +534,8 @@ class PPO:
                 self._gated("shape_scale", ep_len, c.shape_scale_start, 1.0,
                             c.shape_curriculum_steps, gate, rf, _q("shape_scale", d_steps))
                 if c.shape_curriculum_gated else
-                self._clock(c.shape_scale_start, 1.0, c.shape_curriculum_steps))
+                self._clock_q("shape_scale", c.shape_scale_start, 1.0, c.shape_curriculum_steps,
+                              _q("shape_scale", d_steps)))
         if c.objective == "joystick" and getattr(c, "track_sigma_steps", 0) > 0:
             kw["track_sigma"] = self._clock(c.track_sigma_start, c.track_sigma, c.track_sigma_steps)
         if getattr(c, "gait_freq_floor_steps", 0) > 0:
@@ -549,7 +564,9 @@ class PPO:
         if c.pitch_assist_kp > 0 and c.pitch_assist_ramp_steps > 0:
             pg = float(getattr(c, "pitch_assist_gate_ep_len", 0.0))
             if pg <= 0:
-                kw["pitch_assist"] = self._clock(1.0, 0.0, c.pitch_assist_ramp_steps)
+                kw["pitch_assist"] = self._clock_q("pitch_assist", 1.0, 0.0,
+                                                   c.pitch_assist_ramp_steps,
+                                                   _q("pitch_assist", d_steps))
             else:       # v2b: full help until the policy runs on it, then a monotonic fade (no retreat)
                 st = self.cur.setdefault("pitch_assist", {"streak": 0, "open": False, "progress": 0.0})
                 if not st["open"]:
