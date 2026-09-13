@@ -625,12 +625,13 @@ PRESETS = {
     # its own class of bug in this lineage.
     "v3_stage1": lambda: _v2(model_path="model/dash01_v2_planar.xml",
                              **dict(_V3, total_steps=100_000_000,
-                                    # stage 1 only has to produce a walker that obeys the stick and
-                                    # stands on its own. Bring-up, DR and jitter all restart from
-                                    # zero in stage 2 anyway (curriculum state is per run), so
-                                    # spending stage 1's budget on them buys nothing.
-                                    curriculum_order=("cmd_lo", "cmd_hi", "cmd_zero_p",
-                                                      "pitch_assist", "shape_scale")),
+                                    # stage 1 keeps the FULL queue and simply runs out of budget
+                                    # partway through it: 80 M covers the command band, the assist
+                                    # fade and the shaping, and bring-up / DR / jitter never start.
+                                    # A name left out of the order is NOT frozen -- it advances
+                                    # unqueued -- so "off" has to be expressed as "queued behind
+                                    # something this budget will not reach".
+                                    ),
                              **_FAST),
     # Stage 1b -- the rung that introduces ROLL, and only roll. `dash01_v2_noyaw.xml` is the free
     # plant minus heading: x, y, z, roll, pitch. Roll is the degree of freedom that kills a
@@ -643,8 +644,7 @@ PRESETS = {
     # Heading is a no-op here (no yaw DOF to bill), so the objective is one term simpler too.
     "v3_stage1b": lambda: _v2(model_path="model/dash01_v2_noyaw.xml",
                               **dict(_V3, total_steps=100_000_000,
-                                     curriculum_order=("cmd_lo", "cmd_hi", "cmd_zero_p",
-                                                       "pitch_assist", "shape_scale")),
+                                     ),
                               **_FAST),
     # Stage 2 -- THE DELIVERABLE, AND THE OPEN PROBLEM AS OF 2026-09-13.
     #
