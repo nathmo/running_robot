@@ -287,10 +287,27 @@ def check_privilege(rep, cfg, env, agent, args):
     # ground-truth odometry, also reported clean -- it was measuring nothing. So move a channel the
     # actor legitimately DOES read, and require a large delta. If this row fails, every row under it
     # is meaningless.
-    ctrl = delta(lambda s: s.replace(v_cmd=s.v_cmd + 1.0))
-    rep.add("6. no privilege", "POSITIVE CONTROL: the command does reach the actor",
-            ctrl > 100.0 * floor, f"{ctrl:.2e}", f"> {100.0 * floor:.2e}",
-            "if this fails, the leak probes below prove nothing")
+    #
+    # Move it ACROSS ITS FULL RANGE, not by a fixed 1.0 m/s. The earlier version added 1 m/s to
+    # v_cmd, which cannot move the channel by more than 1/v_max because `_task` divides by v_max
+    # and clips to [0, 1] -- so on the free plant (v_max 3.6) the probe's ceiling was 0.278 against
+    # a 0.749 bar and the positive control could not pass no matter how cleanly the command was
+    # wired. That is a broken test reporting a broken policy. Rail to rail gives exactly 1.0.
+    def obs_of(mod):
+        return np.asarray(env.step(mod(state), a, params)[1])[:, :ad]
+
+    lo = obs_of(lambda s: s.replace(v_cmd=jnp.zeros_like(s.v_cmd)))
+    hi = obs_of(lambda s: s.replace(v_cmd=jnp.full_like(s.v_cmd, cfg.v_max)))
+    ctrl = float(np.abs(hi - lo).max())
+    if 100.0 * floor > 1.0:
+        # the channel's full swing IS 1.0, so a floor this high means the env's own
+        # non-determinism swamps any channel-sized effect and NOTHING here can be concluded
+        rep.skip("6. no privilege", "POSITIVE CONTROL: the command does reach the actor",
+                 f"re-run noise {floor / 4:.2e} leaves no headroom under a full-scale swing of 1.0")
+    else:
+        rep.add("6. no privilege", "POSITIVE CONTROL: the command does reach the actor",
+                ctrl > 100.0 * floor, f"{ctrl:.2e}", f"> {100.0 * floor:.2e}",
+                "full-scale command swing, rail to rail")
 
     probes = [("odometry origin shifted 60 m", lambda s: s.replace(x0=s.x0 - 60.0), "x0"),
               ("touchdown phase estimate forced", lambda s: s.replace(

@@ -726,6 +726,32 @@ PRESETS = {
                                     roll_assist_kp=0.0, roll_assist_kd=0.0,
                                     yaw_assist_kp=0.0, yaw_assist_kd=0.0,
                                     assist_per_episode=False,
+                                    # --- DO NOT REFILL THE ACTION NOISE.
+                                    # Measured 2026-09-13, 13 M steps into the first attempt at
+                                    # this stage: four seeds warm-started from a policy running at
+                                    # ep_len 1413 and immediately fell to 120-241, one straight
+                                    # onto the 1.5 Hz clock floor -- on an env EASIER than the one
+                                    # the checkpoint came from (bringup_scale starts at 0). The
+                                    # task did not change; the exploration did. The parent had
+                                    # annealed to std_mean 0.17 and `warmstart_reset_log_std`
+                                    # refills log_std to max_log_std, i.e. std 0.70. Four times the
+                                    # action noise on a policy already at its stability edge reads
+                                    # as a collapse and costs tens of millions of steps to undo --
+                                    # which is also, in hindsight, where stage 2 spent the 59 M it
+                                    # took to get off 0% upright.
+                                    #
+                                    # Resetting exploration is right when the TASK changes and the
+                                    # old policy's habits are wrong. Here the plant, the objective
+                                    # and the command band are identical and the two new curricula
+                                    # ramp from zero; the exploration this stage needs is state
+                                    # diversity (drops, held releases, randomised plants), which
+                                    # bring-up and DR supply directly. So keep the parent's log_std
+                                    # and CAP it where the parent left off, or the entropy bonus
+                                    # simply walks it back up to 0.70 over the first few updates.
+                                    warmstart_reset_log_std=False,
+                                    max_log_std=-1.3863,          # ln(0.25) = the parent's clamp
+                                    std_anneal_target=0.12,
+                                    ent_coef=0.003,
                                     # --- what this stage is for
                                     curriculum_order=("bringup_scale", "dr_scale",
                                                       ("ctrl_jitter_ms", "ctrl_drop_prob")),
