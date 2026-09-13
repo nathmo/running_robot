@@ -218,7 +218,11 @@ def check_dr(rep, cfg, agent, args, nominal_rows):
               f"{r['speed']:5.2f}   {r['err']:5.2f}    {r['upright'] * 100:3.0f}%    "
               f"{r['yaw_deg']:5.1f}d   {r['lat_m']:4.2f}m")
     up = min(r["upright"] for r in rows)
-    rep.add("5. randomised plant", "upright at every command", up >= 0.8, f"{up * 100:.0f}%", ">= 80%")
+    # This draws the plant at FULL dr_scale. If check 1 says the run's DR curriculum stopped short,
+    # a failure here is out-of-distribution rather than fragility -- read the two together, and fix
+    # the curriculum before concluding anything about the policy.
+    rep.add("5. randomised plant", "upright at every command", up >= 0.8, f"{up * 100:.0f}%", ">= 80%",
+            "drawn at dr_scale 1.0; compare against check 1's trained width")
     worst = max(r["err"] / max(cfg.v_max, 1e-9) for r in rows)
     rep.add("5. randomised plant", "worst-command error", worst <= 0.25, f"{worst * 100:.1f}%", "<= 25%")
     # the honest comparison: how much did a randomised plant cost, relative to the nominal one?
@@ -267,6 +271,17 @@ def check_privilege(rep, cfg, env, agent, args):
         return float(np.abs(o2 - base).max())
 
     floor = max(delta(lambda s: s) * 4.0, 1e-8)
+    # POSITIVE CONTROL FIRST. A "nothing leaked" verdict is worthless from a test that cannot
+    # detect a leak, and this project has published one before: an earlier audit called v3 clean
+    # while the same test, run on a v2 checkpoint whose clock IS contact-driven and whose task[1] IS
+    # ground-truth odometry, also reported clean -- it was measuring nothing. So move a channel the
+    # actor legitimately DOES read, and require a large delta. If this row fails, every row under it
+    # is meaningless.
+    ctrl = delta(lambda s: s.replace(v_cmd=s.v_cmd + 1.0))
+    rep.add("6. no privilege", "POSITIVE CONTROL: the command does reach the actor",
+            ctrl > 100.0 * floor, f"{ctrl:.2e}", f"> {100.0 * floor:.2e}",
+            "if this fails, the leak probes below prove nothing")
+
     probes = [("odometry origin shifted 60 m", lambda s: s.replace(x0=s.x0 - 60.0), "x0"),
               ("touchdown phase estimate forced", lambda s: s.replace(
                   phi_td_hat=jnp.full_like(s.phi_td_hat, 3.0),
