@@ -531,6 +531,35 @@ wider envelope is ever wanted, re-measure rather than assuming 1.0 is unreachabl
 frontier is unaffected: it was measured on checkpoints, not on damaged runs.
 
 
+### The held bring-up was feeding PPO 250 dead ticks an episode
+
+With the optimizer fixed, the seeds still collapsed as bring-up opened -- at a share of **8% of
+episodes at ±6° of tilt**, which is far too small a perturbation to explain it. It was never the
+tilt.
+
+While a held start is held, `env.py` pins every base DOF -- x, y, z, roll, pitch **and yaw** -- and
+zeroes every base velocity at each 1 kHz substep. So the robot is commanded 2.4 m/s, achieves
+exactly 0, earns `exp(-2.4/0.6)` = 1.8% of the tracking income, and **nothing it does can change any
+of it**. At the stock `bringup_hold_s` of 0.3-2.5 s that is up to **250 control ticks per episode**
+of uncontrollable, low-reward transitions entering the PPO batch as ordinary ones — on observations
+that look exactly like normal stance, which is how the value function learns to expect nothing from
+standing still.
+
+The hold only has to last long enough for the feet to settle into contact before the release. Stage
+3 uses 0.05-0.25 s: 5-25 ticks instead of 30-250. At 9 M steps, with nothing else changed:
+
+```
+                       ep_len    return
+  0.3-2.5 s hold       74-400    -100 to +30
+  0.05-0.25 s hold    566-1136    +211 to +543
+```
+
+**The general shape of both this and the optimizer bug**: something was putting transitions into the
+batch that the policy could not have influenced. The test worth applying to any clamp, grace window
+or scripted phase is *could the policy have changed this outcome?* — and if not, those ticks should
+be short, masked, or not collected.
+
+
 ### Still open
 
 1. **The queue oscillates.** The gates retreat, so when episode length drops after a fade the command
