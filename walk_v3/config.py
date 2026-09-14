@@ -803,7 +803,7 @@ PRESETS = {
                                     warmstart_var_floor=0.0,
                                     warmstart_reset_log_std=False,
                                     max_log_std=-1.3863,          # ln(0.25) = the parent's clamp
-                                    std_anneal_target=0.12,
+                                    std_anneal_target=0.17,   # not below where the parent ran
                                     ent_coef=0.003,
                                     # --- what this stage is for
                                     curriculum_order=("bringup_scale", "dr_scale",
@@ -919,7 +919,7 @@ PRESETS = {
                                         warmstart_var_floor=0.0,
                                         warmstart_reset_log_std=False,
                                         max_log_std=-1.3863,
-                                        std_anneal_target=0.12,
+                                        std_anneal_target=0.17,   # not below where the parent ran
                                         ent_coef=0.003,
                                         curriculum_order=("bringup_scale", "dr_scale",
                                                           ("ctrl_jitter_ms", "ctrl_drop_prob")),
@@ -961,6 +961,93 @@ PRESETS = {
                                         curriculum_group_max_steps=50_000_000,
                                         total_steps=150_000_000),
                                  **_FAST),
+    # The same, with a MINIMAL bring-up: 0.15 => +-4.7 deg of pitch and a 1.6-3.2 cm drop on 5% of
+    # episodes. That is the measured hardware envelope (upright to 5 deg back, feet flat) and no
+    # more. If even this collapses, bring-up on this plant is a research problem rather than a
+    # tuning one, and the answer is to ship without it and let the operator square the robot up.
+    "v3_stage3_dr_bu": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                                   **dict(_V3,
+                                          v_max=2.4,
+                                          cmd_curriculum_steps=0, shape_curriculum_steps=0,
+                                          efficiency_ramp_steps=0, gait_curriculum_steps=0,
+                                          track_sigma_steps=0, pitch_assist_ramp_steps=0,
+                                          pitch_assist_kp=0.0, pitch_assist_kd=0.0,
+                                          roll_assist_kp=0.0, roll_assist_kd=0.0,
+                                          yaw_assist_kp=0.0, yaw_assist_kd=0.0,
+                                          assist_per_episode=False,
+                                          warmstart_var_floor=0.0,
+                                          warmstart_reset_log_std=False,
+                                          max_log_std=-1.3863, std_anneal_target=0.17,
+                                          ent_coef=0.003, lr_warmup_updates=300,
+                                          bringup_target=0.15,
+                                          bringup_drop_frac=0.10, bringup_held_frac=0.25,
+                                          bringup_hold_s=(0.05, 0.25),
+                                          # DR FIRST this time. Bring-up is what has broken every
+                                          # run, so it goes last, where the budget it can spoil is
+                                          # the smallest.
+                                          curriculum_order=("dr_scale", "bringup_scale",
+                                                            ("ctrl_jitter_ms", "ctrl_drop_prob")),
+                                          dr_curriculum_steps=50_000_000,
+                                          bringup_curriculum_steps=30_000_000,
+                                          jitter_curriculum_steps=25_000_000,
+                                          curriculum_group_max_steps=60_000_000,
+                                          total_steps=150_000_000),
+                                   **_FAST),
+    # Stage 3, DR ONLY -- bring-up left out entirely.
+    #
+    # Measured 2026-09-14, after five separate structural fixes (the warm-start variance floor, the
+    # log_std refill, Adam's first step, the held-start dead ticks, the queue deadline): every seed
+    # still reaches 0.27-0.43 m/s of error at 61-92% upright by 15 M and then falls off a cliff
+    # between 30 M and 59 M, from which it never returns. The cliff is sharp -- reward_mean +0.42 ->
+    # -3.81 across four rollouts, 1381 of 1381 episodes falling at ep_len 103 -- and it arrives when
+    # `bringup_scale` is around 0.34, i.e. +-8 deg of tilt on 12% of episodes.
+    #
+    # It is NOT the objective being upside down. `tools/reward_budget.py` on the parent under this
+    # exact preset: income 4.36, cost 2.05, LIVING **+1.157/tick** at curriculum start and +1.091 at
+    # final. Living pays. (That check is the project's own gate and running it earlier would have
+    # saved a day: see the cold-start note.)
+    #
+    # So bring-up is the thing that breaks it, and the deliverable does not actually need the
+    # trained envelope. DASH-01's measured bring-up is upright to 5 deg BACK with both feet flat
+    # after a >=1 s hold -- an operator holding the robot and letting go, not a drop. This preset
+    # buys what stage 2 demonstrably lacks (`dr_scale` 0.000 in all five seeds, and 0% upright at
+    # every command on a randomised plant) and leaves the start state alone.
+    #
+    # bringup_enable=False is what freezes it: a name omitted from `curriculum_order` advances
+    # UNQUEUED, so "off" has to be expressed as the feature being off, not as the ramp being absent.
+    "v3_stage3_dr": lambda: _v2(model_path="model/dash01_v2_free.xml",
+                                **dict(_V3,
+                                       v_max=2.4,
+                                       cmd_curriculum_steps=0,
+                                       shape_curriculum_steps=0,
+                                       efficiency_ramp_steps=0,
+                                       gait_curriculum_steps=0,
+                                       track_sigma_steps=0,
+                                       pitch_assist_ramp_steps=0,
+                                       pitch_assist_kp=0.0, pitch_assist_kd=0.0,
+                                       roll_assist_kp=0.0, roll_assist_kd=0.0,
+                                       yaw_assist_kp=0.0, yaw_assist_kd=0.0,
+                                       assist_per_episode=False,
+                                       warmstart_var_floor=0.0,
+                                       warmstart_reset_log_std=False,
+                                       max_log_std=-1.3863,
+                                       # do NOT anneal the action noise below where the parent ran.
+                                       # It finished at std_mean 0.17; annealing to 0.12 leaves a
+                                       # nearly deterministic policy with no way back out of a bad
+                                       # basin, which is what "collapses and never recovers" looks
+                                       # like from the inside.
+                                       std_anneal_target=0.17,
+                                       ent_coef=0.003,
+                                       lr_warmup_updates=300,
+                                       bringup_enable=False,
+                                       hold_enable=False,
+                                       curriculum_order=("dr_scale",
+                                                         ("ctrl_jitter_ms", "ctrl_drop_prob")),
+                                       dr_curriculum_steps=50_000_000,
+                                       jitter_curriculum_steps=25_000_000,
+                                       curriculum_group_max_steps=60_000_000,
+                                       total_steps=150_000_000),
+                                **_FAST),
     # THE HANDOVER, done as a distribution instead of a dial: assist_per_episode makes
     # pitch_assist the share of episodes that get help, so unassisted episodes are in the training
     # distribution from the first rollout and the fade reweights rather than removes.

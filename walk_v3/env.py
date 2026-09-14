@@ -775,8 +775,17 @@ class DashEnvV2:
             hold_qadr = np.array([p.base_q[n] for n in names])
             hold_dadr = np.array([p.base_d[n] for n in names])
             held_at = dict(x=p.key_qpos[p.base_q["x"]], y=0.0, yaw=0.0,
+                           # hold it WHERE IT WAS PLACED, the way roll and pitch below do. The
+                           # keyframe height is the height the feet touch at zero tilt; a bring-up
+                           # episode is placed at `_touch_z(pitch, roll)`, which is a different
+                           # number, so clamping z back to the keyframe presses the robot into the
+                           # floor (or hangs it) for the whole hold. Small at the tilts stage 3
+                           # uses -- 5 mm at 9 deg, inside this plant's own 5 mm stance deflection
+                           # -- but 26 mm at the 20 deg stage 2 opens to, which is not.
                            z=jnp.where(params.hold_z > 0.0, params.hold_z,
-                                       p.key_qpos[p.base_q["z"]]),
+                                       jnp.where(c.bringup_enable,
+                                                 state.data.qpos[p.base_q["z"]],
+                                                 p.key_qpos[p.base_q["z"]])),
                            roll=jnp.where(c.bringup_enable, state.data.qpos[p.base_q["roll"]]
                                           if p.base_q["roll"] >= 0 else 0.0, params.hold_roll),
                            pitch=jnp.where(c.bringup_enable, state.data.qpos[p.base_q["pitch"]]
