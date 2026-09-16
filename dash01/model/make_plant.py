@@ -53,6 +53,10 @@ HERE = Path(__file__).resolve().parent
 PKG = HERE.parent
 CAD_DIR = PKG.parent / "Dash-01CAD"
 CAD = CAD_DIR / "dash01.xml"
+# The plant this one replaces, vendored here as the reference for the joint-zero cross-check.  It
+# is the only thing outside Dash-01CAD that this package reads, and it is kept so the check keeps
+# working once the old training tree is gone -- the robot's homing convention is defined by it.
+PREVIOUS_PLANT = "previous_plant.xml"
 
 # ---------------------------------------------------------------------------------------------
 # Naming.  The CAD export names bodies "bodyNCS-v1" and joints "HipLeftNCS-v1_Revolution-3" with a
@@ -1084,7 +1088,7 @@ def build(variant="free", leg_kg=LEG_KG, verbose=True,
     root = _cut_and_rename()
     root.find("compiler").set("meshdir", str(CAD_DIR.resolve()))
     _apply_zero_shift(root)
-    check_zero_convention(root, PKG.parent / "walk_v4" / "model" / "dash01_base.xml", verbose)
+    check_zero_convention(root, HERE / PREVIOUS_PLANT, verbose)
     mass_report = _apply_masses(root, leg_kg)
     _apply_joint_dynamics(root)
     _scaffold(root)

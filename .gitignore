@@ -58,46 +58,30 @@ Thumbs.db
 MUJOCO_LOG.TXT
 
 # scratch validation renders
-training/model/_*.png
 robot/model/_*.png
 robot/fixed_gait/calibration/_selftest/
 
-# web UI runtime data — machine-local: session calibration (only valid until the motors are power
+# web UI runtime data -- machine-local: session calibration (only valid until the motors are power
 # cycled), the active workspace, the fitted model map, and the raw sys-ID captures.
 robot/fixed_gait/webui/data/*
 # ...except the HAND-AUTHORED artifacts. A drawn workspace and a taught gait are work, not runtime
-# state, and they only exist on whichever machine drew them — one reimaged Pi loses them. The Pi has
-# no uplink (it serves the AP), so these arrive here by scp and get pushed from the desktop.
+# state, and they only exist on whichever machine drew them -- one reimaged Pi loses them. The Pi
+# has no uplink (it serves the AP), so these arrive here by scp and get pushed from the desktop.
 !robot/fixed_gait/webui/data/workspaces/
 !robot/fixed_gait/webui/data/trajectories/
 
-# RL run intermediates — keep only final model + summary artifacts
-training/runs/**/ppo_*_steps.zip
-training/runs/**/ppo_vecnormalize_*_steps.pkl
-training/runs/**/events.out.tfevents.*
-training/runs/**/*.mp4
-
-# archived pre-2026-07-17 run outputs (moved out of the deleted rl/ tree; delete when done)
-old_runs/
-
-# training run outputs: checkpoints/videos are pulled on demand, not versioned
-training/runs/
-
-# GPU-port virtualenv (walk_v2/, MJX/JAX) - machine-local
+# MJX/JAX virtualenv -- machine-local
 .venv_v2/
-# walk_v2 (JAX/MJX) local venv, run outputs, mesh copy
-walk_v2/runs/
-walk_v2/model/meshes/
-walk_v2/**/__pycache__/
 
-# walk_v3 (JAX/MJX from-scratch joystick): run outputs, exported bundles, mesh copy, logs
-walk_v3/runs/
-walk_v3/logs/
-walk_v3/results/
-walk_v3/model/meshes/
-walk_v3/**/__pycache__/
+# dash01: run outputs and checkpoints are pulled on demand, not versioned.  The generated plant
+# XMLs and the validation renders ARE tracked: they are what the model builder is judged on, and a
+# reader should not have to run MuJoCo to see what the robot looks like.
+dash01/runs/
+dash01/logs/
+dash01/**/__pycache__/
 
-# walk_v4 (walk_v3 without the reflexes): same layout, same rule
+# walk_v4 -- the previous training stack, kept only as the source for the dash01 port.  Delete the
+# whole tree once dash01 trains.
 walk_v4/runs/
 walk_v4/logs/
 walk_v4/results/
