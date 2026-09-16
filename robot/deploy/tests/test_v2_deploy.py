@@ -2,7 +2,7 @@
 
     python -m pytest robot/deploy/tests/test_v2_deploy.py -q
 
-THE ONE THAT MATTERS is `TestAgainstTheTrainedLoop`. `walk_v2/tools/trace.py` records, from the
+THE ONE THAT MATTERS is `TestAgainstTheTrainedLoop`. `walk_v4/tools/trace.py` records, from the
 real MJX training environment, every per-tick number of a deterministic 85-tick rollout: the spec,
 the phase, the commanded target, the gains, the measurements and the 33-dim observation frame. It
 is the fixture the two training arms (MJX/JAX on GPU, classic MuJoCo on CPU) cross-check each
@@ -37,18 +37,27 @@ from v2_fixture import (ACTION_DIM, ACTOR_DIM, ACTOR_DIM_V3, FRAME_DIM,  # noqa:
                         HIST_STRIDE, N_RESIDUAL, ONCE_DIM, Q_LO, SPEC_DIM,
                         VEL_LIMIT, v2_bundle)
 
-TRACE = REPO / "walk_v2" / "results" / "trace_mjx.json"
+# The v4 trace, NOT walk_v2's: that one was recorded against a 44-dim spec and a control law with
+# two reflexes in it, so replaying it here would be checking this runtime against a generation it
+# deliberately no longer implements.
+TRACE = REPO / "walk_v4" / "results" / "trace_mjx.json"
 
 
 def _trace():
     if not TRACE.exists():
-        pytest.skip("no walk_v2/results/trace_mjx.json (the walk_v2 package is not checked out)")
-    return json.loads(TRACE.read_text())
+        pytest.skip("no walk_v4/results/trace_mjx.json (the walk_v4 package is not checked out)")
+    tr = json.loads(TRACE.read_text())
+    got = len(tr["rows"][0]["spec"])
+    assert got == SPEC_DIM, (
+        "this trace carries a {}-dim spec and the deployed generator is {} -- it was recorded by a "
+        "walk_v4/tools/trace.py that still writes the pre-reflex-deletion layout. Re-record it "
+        "rather than comparing two different control laws.".format(got, SPEC_DIM))
+    return tr
 
 
 # ===================================================================== the vendored generator
 class TestGaitPortIsTheTrainedLaw:
-    """`gait_v2.py` is a hand copy of `walk_v2/gait.py` with jax removed. This is the net under it."""
+    """`gait_v2.py` is a hand copy of `walk_v4/gait.py` with jax removed. This is the net under it."""
 
     def test_targets_and_gains_match_the_recorded_mjx_rollout(self):
         tr = _trace()
@@ -60,13 +69,9 @@ class TestGaitPortIsTheTrainedLaw:
         for row in tr["rows"]:
             if row.get("done"):
                 break               # the done row holds the auto-reset state, not this tick's cmd
-            grav = np.array(prev["grav"]) if prev else np.array([0.0, 0.0, -1.0])
-            gyro = np.array(prev["gyro"]) if prev else np.zeros(3)
             phi = prev["phase"] if prev else 0.0
             res = 0.05 * np.sin(2 * np.pi * 3.0 * (row["t"] - dt) + np.arange(6))
-            # this fixture was recorded with pitch_reflex_rate_lp = 0, i.e. the raw pitch rate
-            tgt, kp, kd, _ = G.assemble(np.array(row["spec"]), res, phi, grav[1], gyro[0],
-                                        grav[0], gyro[1], nominal, gp)
+            tgt, kp, kd, _ = G.assemble(np.array(row["spec"]), res, phi, nominal, gp)
             tgt = np.clip(tgt, Q_LO, -Q_LO)
             tgt, prev_v = G.slew_limit(tgt, prev_t, prev_v, VEL_LIMIT, 0.0, dt)
             worst = np.maximum(worst, [np.abs(np.array(row["target"]) - tgt).max(),
@@ -80,16 +85,61 @@ class TestGaitPortIsTheTrainedLaw:
             "kd {:.2e}".format(*worst))
 
     def test_the_mirror_symmetric_spec_produces_a_mirror_symmetric_stance(self):
-        # spec 0 is the neutral gait: the series are flat, the knobs are zero, so the target is
-        # the nominal stance plus the reflexes, and with the robot upright and still that is the
-        # stance exactly. A sign slip in the L/R structure shows up here and nowhere else.
+        # spec 0 is the neutral gait: the series are flat, the knobs are zero, so the target is the
+        # nominal stance exactly. A sign slip in the L/R structure shows up here and nowhere else.
         gp = G.GaitParams.from_meta(v2_bundle().meta["gait"])
         nominal = np.array([0.0, 0.0, 0.12, 0.0, 0.0, -0.12])
         for phi in (0.0, 1.0, 3.3, 6.0):
-            tgt, kp, kd, _ = G.assemble(np.zeros(SPEC_DIM), np.zeros(6), phi,
-                                        0.0, 0.0, 0.0, 0.0, nominal, gp)
+            tgt, kp, kd, _ = G.assemble(np.zeros(SPEC_DIM), np.zeros(6), phi, nominal, gp)
             assert np.allclose(tgt, nominal, atol=1e-12)
             assert np.allclose(kp, gp.drive_kp) and np.allclose(kd, gp.drive_kd)
+
+    def test_the_control_law_cannot_read_a_sensor_at_all(self):
+        """v4 deleted both reflexes, so the measurement's ONLY route into the command is the
+        observation. That is structural, not a tuning: `reflexes()` is gone and neither entry point
+        takes an IMU argument. Written down here because the failure mode it replaces was silent --
+        a runtime that kept calling a reflex with gains a v4 bundle no longer carries would have
+        added a quiet zero forever, and one that kept the three latched dims would have shifted
+        every index after them by three."""
+        import inspect
+        assert not hasattr(G, "reflexes")
+        assert not hasattr(G, "I_REFLEX")
+        assert list(inspect.signature(G.assemble).parameters) == [
+            "spec", "residual", "phi", "nominal", "p"]
+        assert list(inspect.signature(G.GaitEval.__call__).parameters) == [
+            "self", "spec", "residual", "phi"]
+        for f in ("reflex_kp_scale", "reflex_kd_scale", "reflex_bias_scale",
+                  "pitch_kp", "pitch_kd", "pitch_bias", "pitch_clip"):
+            assert f not in G.GaitParams._fields
+        # and the layout the deleted dims used to occupy is the shifted one
+        assert (G.I_FREQ, G.I_DELTA, G.I_S, G.I_O) == (35, 36, 37, slice(38, 41))
+        assert (G.SPEC_DIM, G.ACTION_DIM) == (41, 47)
+
+    def test_a_v4_bundle_has_a_per_joint_residual(self):
+        # walk_v4 exports residual_scale as a 6-list (actuator order). Two things must hold: each
+        # residual unit moves exactly its own joint by its own scale, and the batched GaitEval
+        # agrees with assemble bit for bit -- the tuple path is new code on the Pi's hot loop, and
+        # this is the only place it is pinned.
+        meta = dict(v2_bundle().meta["gait"], residual_scale=[0.2, 0.1, 0.2, 0.2, 0.1, 0.2])
+        gp = G.GaitParams.from_meta(meta)
+        assert gp.residual_scale == (0.2, 0.1, 0.2, 0.2, 0.1, 0.2)
+        nominal = np.array([0.0, 0.0, 0.12, 0.0, 0.0, -0.12])
+        rng = np.random.default_rng(4)
+        spec = rng.uniform(-1, 1, SPEC_DIM).astype(np.float32)
+        res = rng.uniform(-1, 1, 6).astype(np.float32)
+        ref = G.assemble(spec, res, 1.3, nominal, gp)
+        ev = G.GaitEval(gp, nominal)
+        fast = ev(spec, res, 1.3)
+        assert all(np.array_equal(a, b) for a, b in zip(fast, ref)), "GaitEval != assemble on the tuple path"
+        base = G.assemble(spec, np.zeros(6, np.float32), 1.3, nominal, gp)[0]
+        for j, scale in enumerate(gp.residual_scale):
+            r = np.zeros(6, np.float32)
+            r[j] = 1.0
+            moved = G.assemble(spec, r, 1.3, nominal, gp)[0] - base
+            assert moved[j] == pytest.approx(scale, abs=1e-7)
+            assert np.abs(np.delete(moved, j)).max() == 0.0
+        # and the product is taken in float32, the trainer's dtype, not float64
+        assert (G.residual_scale_of(gp) * res).dtype == np.float32
 
     def test_the_impedance_channel_stays_inside_the_drives_wire_ranges(self):
         # the force-control frame encodes kp over 0-500 and kd over 0-5; a spec that asks for more
@@ -100,8 +150,7 @@ class TestGaitPortIsTheTrainedLaw:
             spec[G.I_KP] = sign
             spec[G.I_KD] = sign
             for phi in np.linspace(0, 2 * np.pi, 17):
-                _, kp, kd, _ = G.assemble(spec, np.zeros(6), phi, 0, 0, 0, 0,
-                                          np.zeros(6), gp)
+                _, kp, kd, _ = G.assemble(spec, np.zeros(6), phi, np.zeros(6), gp)
                 assert kp.min() > 0.0 and kp.max() <= 500.0, kp
                 assert kd.min() > 0.0 and kd.max() <= 5.0, kd
 
@@ -154,6 +203,24 @@ class TestTheHeadingChannel:
         frame = c._obs()[(HIST_LEN - 1) * FRAME_DIM_V3:HIST_LEN * FRAME_DIM_V3]
         assert frame[-1] == pytest.approx(np.pi / 2, abs=1e-5)
 
+    def test_a_v4_bundle_integrates_the_euler_rate_and_a_v3_bundle_gyro_z(self):
+        """A body leaning 0.3 rad in pitch and 0.2 in roll, turning 1 rad/s about WORLD z. Body gyro
+        z reads cos(roll) cos(pitch) of that rate -- the drift that took a sim runner 10 deg off its
+        heading in 15 s. A v4 bundle (`heading_euler`) must read all of it, as walk_v4/env.py
+        `heading_rate` does; a v3 bundle must keep integrating gyro z. 49 ticks, as above."""
+        roll, pitch, r = 0.2, 0.3, 1.0
+        cr, sr, cp, sp = np.cos(roll), np.sin(roll), np.cos(pitch), np.sin(pitch)
+        Rb = (np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+              @ np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]]))
+        w, g = Rb.T @ np.array([0.0, 0.0, r]), Rb.T @ np.array([0.0, 0.0, -1.0])
+        z6 = np.zeros(6)
+        v4, v3 = self._ctrl(heading=True, heading_euler=True), self._ctrl(heading=True)
+        for _ in range(50):
+            v4.step(z6, z6, z6, g, w)
+            v3.step(z6, z6, z6, g, w)
+        assert v4.heading_deg() == pytest.approx(np.degrees(0.49 * r), abs=1e-4)
+        assert v3.heading_deg() == pytest.approx(np.degrees(0.49 * r * cr * cp), abs=1e-4)
+
     def test_zero_heading_moves_the_origin_and_nothing_else_does(self):
         """The operator declares which way is straight. Nothing may re-zero it implicitly: a
         heading that silently reset itself would make the robot veer."""
@@ -185,7 +252,7 @@ class TestBundleGenerations:
 
     def test_a_v2_bundle_missing_a_meta_field_the_runtime_reads_is_refused(self):
         b = v2_bundle()
-        for key in ("pitch_reflex_rate_lp", "motor_accel_limit", "objective", "gait"):
+        for key in ("motor_accel_limit", "objective", "gait", "lp_yaw_tau_s"):
             meta = dict(b.meta)
             meta.pop(key)
             with pytest.raises(ValueError, match=key):
@@ -398,44 +465,48 @@ class TestTheCommandIsSafeToSend:
             assert np.all(step <= VEL_LIMIT + 1e-6), step
             prev = c.target.copy()
 
-    def test_the_pitch_reflex_pushes_the_thighs_in_opposite_directions(self):
-        # (+,-) on the thighs is the mirror-SYMMETRIC pattern: both feet move the same fore-aft
-        # way. A sign slip here drives the balance correction backwards at 200 N*m/rad.
-        ctrl = PolicyControllerV2(v2_bundle())
+    def test_the_measurement_does_not_reach_the_target_except_through_the_policy(self):
+        """The v4 replacement for the pitch-reflex test that used to live here. That test pinned a
+        sign: a nose-down gravity vector had to push the thighs (+,-). There is no such term any
+        more, so the invariant is the opposite one and it is worth just as much -- with the action
+        held fixed, two controllers fed wildly different IMUs must command the SAME target. Anything
+        else means a sensor has crept back into the control law."""
         grav, gyro = _upright()
-        ctrl.start(ctrl.nominal, np.zeros(6), np.zeros(6), grav, gyro)
-        flat = ctrl.step(ctrl.nominal, np.zeros(6), np.zeros(6), grav, gyro,
-                         override_action=np.zeros(ACTION_DIM)).target_prefilter
-        tipped = np.array([0.2, 0.0, -0.98])               # nose down
-        ctrl2 = PolicyControllerV2(v2_bundle())
-        ctrl2.start(ctrl2.nominal, np.zeros(6), np.zeros(6), tipped, gyro)
-        lean = ctrl2.step(ctrl2.nominal, np.zeros(6), np.zeros(6), tipped, gyro,
-                          override_action=np.zeros(ACTION_DIM)).target_prefilter
-        d = lean - flat
-        assert d[2] != 0.0
-        assert d[2] == pytest.approx(-d[5], abs=1e-12)
-        assert np.allclose(d[[0, 1, 3, 4]], 0.0)
+        tipped, spun = np.array([0.2, -0.15, -0.97]), np.array([1.5, -2.0, 0.7])
+        out = []
+        for g, w in ((grav, gyro), (tipped, spun)):
+            ctrl = PolicyControllerV2(v2_bundle())
+            ctrl.start(ctrl.nominal, np.zeros(6), np.zeros(6), g, w)
+            a = np.zeros(ACTION_DIM)
+            a[SPEC_DIM:] = [0.3, -0.7, 0.1, 0.9, -0.2, 0.5]
+            for _ in range(5):
+                c = ctrl.step(ctrl.nominal, np.zeros(6), np.zeros(6), g, w, override_action=a)
+            out.append(c.target_prefilter)
+        assert np.array_equal(out[0], out[1])
 
 
 # ===================================================================== against the trained loop
 class TestAgainstTheTrainedLoop:
     """Drive the deployed runtime through the MJX trace's own recorded states.
 
-    This is the whole point of the file. `walk_v2/tools/trace.py` played a FIXED spec plus a known
+    This is the whole point of the file. `walk_v4/tools/trace.py` played a FIXED spec plus a known
     sinusoidal residual through the real training environment and wrote down, per tick, the state,
     the command it produced and the observation frame it published. Feeding those states to
     `PolicyControllerV2` with the same actions must reproduce both -- and it exercises exactly the
-    things a port gets wrong: which measurement the reflexes read, which phase the generator
-    assembles at, where the previous residual goes, and what order the clip and the slew limit
-    come in."""
+    things a port gets wrong: which phase the generator assembles at, where the previous residual
+    goes, and what order the clip and the slew limit come in."""
 
     def _replay(self):
         tr = _trace()
         gpd = dict(tr["gait_params"])
+        # the bundle has to be the generation the trace was recorded by: a v4 trace publishes the
+        # 34-wide frame (the heading channel) and integrates the EULER heading rate, and replaying
+        # it against a 33-wide v2 bundle compares two different observations
+        wide = len(tr["rows"][0]["frame"]) == FRAME_DIM_V3
         b = v2_bundle(gait_params=gpd, nominal=tr["nominal_ctrl"],
                       default_motor_pos=tr["default_motor_pos"],
-                      pitch_lp=0.0,          # this fixture predates the EMA; it used the raw rate
-                      control_dt=tr["control_dt"])
+                      control_dt=tr["control_dt"],
+                      heading=wide, **({"heading_euler": True} if wide else {}))
         ctrl = PolicyControllerV2(b)
         spec = np.array(tr["fixed_spec"])
         dt = tr["control_dt"]
@@ -767,17 +838,16 @@ class TestTheFastGeneratorIsTheReference:
             # clipped branch is where a Python-float rewrite silently changes dtype
             yield (rng.uniform(-1.6, 1.6, SPEC_DIM).astype(dtype),
                    rng.uniform(-1.6, 1.6, N_RESIDUAL).astype(dtype),
-                   float(rng.uniform(-8.0, 8.0)),
-                   tuple(float(x) for x in rng.normal(size=4)))
+                   float(rng.uniform(-8.0, 8.0)))
 
     def _both(self, dtype):
         b = v2_bundle()
         p, nominal = b.gait_params(), np.asarray(b["nominal_ctrl"], float)
         ev = G.GaitEval(p, nominal)
         worst = 0.0
-        for spec, resid, phi, (roll, rr, pitch, pr) in self._cases(dtype):
-            ref = G.assemble(spec, resid, phi, roll, rr, pitch, pr, nominal, p)
-            fast = ev(spec, resid, phi, roll, rr, pitch, pr)
+        for spec, resid, phi in self._cases(dtype):
+            ref = G.assemble(spec, resid, phi, nominal, p)
+            fast = ev(spec, resid, phi)
             for r, f in zip(ref, fast):
                 worst = max(worst, float(np.max(np.abs(np.asarray(r) - np.asarray(f)))))
         return worst
@@ -798,9 +868,9 @@ class TestTheFastGeneratorIsTheReference:
         spec[G.I_DELTA] = 0.3               # a delta whose float32 and float64 products differ
         spec[G.I_KP] = 0.7
         ev = G.GaitEval(p, nominal)
-        _t, kp, _kd, _q = ev(spec, np.zeros(N_RESIDUAL, np.float32), 1.0, 0.0, 0.0, 0.0, 0.0)
+        _t, kp, _kd, _q = ev(spec, np.zeros(N_RESIDUAL, np.float32), 1.0)
         _t2, kp_ref, _kd2, _q2 = G.assemble(spec, np.zeros(N_RESIDUAL, np.float32), 1.0,
-                                            0.0, 0.0, 0.0, 0.0, nominal, p)
+                                            nominal, p)
         assert np.array_equal(kp, kp_ref)
         # and the right leg genuinely reads a different phase from the left, so this is not vacuous
         assert kp[3] != kp[0]

@@ -19,8 +19,11 @@ true for that to be safe rather than merely convenient:
 
     python -m pytest robot/fixed_gait/webui/tests/test_policy_run.py -v
 """
+import atexit
 import json
 import os
+import shutil
+import tempfile
 import time
 import types
 
@@ -47,7 +50,27 @@ def _find_bundle():
     return None
 
 
-BUNDLE_SRC = _find_bundle()
+def _at_loop_rate(path):
+    """The bundle, relabelled to the loop's own rate when it is faster than the loop.
+
+    The daemon ticks at 100 Hz and refuses a bundle faster than that, and the bundles on this
+    machine are 200 Hz v1 control laws. What these tests exercise is plumbing -- arming, the
+    watchdogs, the governor, the workspace freeze -- so they run that law relabelled at the loop's
+    rate, under a name of its own so staging never collides with the original."""
+    if path is None:
+        return None
+    from bundle import Bundle
+    b = Bundle.load(path)
+    if 1.0 / float(b.control_dt) <= daemon_mod.TICK_HZ + 1e-6:
+        return path
+    tmp = tempfile.mkdtemp(prefix="policy_test_")
+    atexit.register(shutil.rmtree, tmp, True)
+    dest = os.path.join(tmp, "looprate_" + os.path.basename(path))
+    Bundle.save(dest, b.a, dict(b.meta, control_dt=1.0 / daemon_mod.TICK_HZ))
+    return dest
+
+
+BUNDLE_SRC = _at_loop_rate(_find_bundle())
 needs_bundle = pytest.mark.skipif(BUNDLE_SRC is None,
                                   reason="no exported policy bundle (run export_policy.py)")
 
@@ -191,16 +214,16 @@ def test_a_bundle_whose_rate_is_not_a_whole_fraction_of_the_loop_is_refused(arme
     """The gait clock, the slew limit and the governor's rate cap are all PER-STEP constants. Run
     at the wrong rate they are a different control law, not a slightly-off one.
 
-    A bundle SLOWER than the loop by a whole number is fine and is how v2 runs (100 Hz out of a
-    200 Hz loop, every second tick). 150 Hz is not: there is no tick pattern that delivers it."""
+    A bundle at the loop's rate (v2, 100 Hz) or slower by a whole number (50 Hz, every second
+    tick) is fine. 66.7 Hz is not: there is no tick pattern that delivers it."""
     d, _cal = armed
     from bundle import Bundle
     b = Bundle.load(BUNDLE_SRC)
     dest = os.path.join(paths.POLICY_DIR, "odd_rate_test.npz")
     try:
-        Bundle.save(dest, b.a, dict(b.meta, control_dt=1.0 / 150.0))
+        Bundle.save(dest, b.a, dict(b.meta, control_dt=0.015))
         ok, why, _ = d.policy_arm(spec(file="odd_rate_test.npz"))
-        assert not ok and "150" in why and "whole fraction" in why
+        assert not ok and "66.7" in why and "whole fraction" in why
     finally:
         if os.path.exists(dest):
             os.remove(dest)
@@ -208,19 +231,19 @@ def test_a_bundle_whose_rate_is_not_a_whole_fraction_of_the_loop_is_refused(arme
 
 @needs_bundle
 def test_a_bundle_slower_than_the_loop_by_a_whole_number_runs_on_every_nth_tick(armed):
-    """v2 is 100 Hz and the loop is 200. The control law gets every second tick at its own dt, and
-    the frame it produced is re-streamed on the one in between."""
+    """A 50 Hz bundle out of the 100 Hz loop. The control law gets every second tick at its own dt,
+    and the frame it produced is re-sent on the one in between."""
     d, _cal = armed
     from bundle import Bundle
     b = Bundle.load(BUNDLE_SRC)
     dest = os.path.join(paths.POLICY_DIR, "half_rate_test.npz")
     try:
-        Bundle.save(dest, b.a, dict(b.meta, control_dt=0.01))
+        Bundle.save(dest, b.a, dict(b.meta, control_dt=0.02))
         ok, why, info = d.policy_arm(spec(file="half_rate_test.npz"))
         assert ok, why
-        assert info["decimation"] == 2 and info["control_hz"] == 100.0
+        assert info["decimation"] == 2 and info["control_hz"] == 50.0
         # ... and the budget it is held to is its OWN period, not the loop's
-        assert info["tick_budget_ms"] == 10.0
+        assert info["tick_budget_ms"] == 20.0
         d.policy_stop(hard=True)
     finally:
         if os.path.exists(dest):
@@ -587,7 +610,7 @@ def test_the_policy_is_frozen_then_killed_at_the_workspace_edge(staged):
     p = keep_alive_until(d, lambda p: p["phase"] == "done", timeout=5.0)
     assert p["phase"] == "done", p
     assert "safe workspace" in p["exit_reason"]
-    assert p["ws_blocked_ticks"] >= daemon_mod.POLICY_WS_PERSIST_TICKS, (
+    assert p["ws_blocked_ticks"] >= round(daemon_mod.POLICY_WS_PERSIST_S * p["control_hz"]), (
         "it must FREEZE for the dwell window before killing, not kill on the first refusal: "
         "{} blocked ticks".format(p["ws_blocked_ticks"]))
 
@@ -767,12 +790,12 @@ def v2_spec(**kw):
 
 
 @needs_v2
-def test_a_v2_bundle_arms_at_its_own_rate_on_every_second_loop_tick(staged_v2):
+def test_a_v2_bundle_arms_at_its_own_rate_on_every_loop_tick(staged_v2):
     d, _cal, _name = staged_v2
     ok, why, info = d.policy_arm(v2_spec())
     assert ok, why
     assert info["bundle_version"] == 2
-    assert info["control_hz"] == 100.0 and info["decimation"] == 2
+    assert info["control_hz"] == 100.0 and info["decimation"] == 1
     assert info["tick_budget_ms"] == 10.0, "the budget is the bundle's period, not the loop's"
     assert info["has_run_flag"] is True
     d.policy_stop(hard=True)
@@ -911,9 +934,10 @@ def test_a_constant_task_channel_says_so_instead_of_pretending(staged_v2):
 
 
 @needs_v2
-def test_the_control_law_ticks_at_half_the_loop_and_the_log_records_the_command(staged_v2):
+def test_the_control_law_ticks_on_every_loop_tick_and_the_log_records_the_command(staged_v2):
     """Two things at once, because they are the same measurement: the log has one row per CONTROL
-    tick (so ~100 rows a second, not 200) and the run flag is in it."""
+    tick (a v2 bundle is 100 Hz, the loop's own rate, so one per loop tick) and the run flag is in
+    it."""
     d, _cal, _name = staged_v2
     ok, why, _ = d.policy_arm(v2_spec(max_seconds=1.5))
     assert ok, why
@@ -931,11 +955,11 @@ def test_the_control_law_ticks_at_half_the_loop_and_the_log_records_the_command(
     n = int(got["ticks"])
     assert n > 50 and loop_ticks > 100
     # Against the LOOP's own tick count, not against wall-clock Hz: whether this host can hold
-    # 200 Hz at all is a property of its timer, and the thing under test is the ratio.
+    # 100 Hz at all is a property of its timer, and the thing under test is the ratio.
     ratio = loop_ticks / n
-    assert 1.7 < ratio < 2.4, (
-        "the control law ran on 1 loop tick in {:.2f}; a 100 Hz bundle in a 200 Hz loop must run "
-        "on one in 2".format(ratio))
+    assert 0.8 < ratio < 1.25, (
+        "the control law ran on 1 loop tick in {:.2f}; a 100 Hz bundle in the 100 Hz loop must "
+        "run on every one".format(ratio))
     log = got["log"]
     assert log.shape[1] == daemon_mod.POLICY_LOG_COLS
     assert set(np.unique(log[:, 64])) <= {0.0, 1.0}

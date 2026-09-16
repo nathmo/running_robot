@@ -6,6 +6,9 @@
   gait_cycle    the gait relative to the base: foot path over a cycle, contact bars, foot height
   gait_authors  feedforward / reflex / residual per joint over two strides, plus their amplitudes
   gait_fourier  the joint angle over time: the full command against the latched-Fourier part alone
+  gait_actuator the same limit cycle in actuator coordinates
+  gait_ee_ghost the foot paths in end-effector space over the translucent robot, side and rear view
+                (needs a recording with qpos_full)
 
 Colours are the dataviz reference palette's first three categorical slots (validated all-pairs,
 light surface); the aqua slot is below 3:1 on this surface, so every series carries a direct label.
@@ -387,6 +390,173 @@ def fig_actuator(z, e, i0, i1, tot, dt, plant_range, out):
 
 
 
+# --------------------------------------------------------------------- figure 5
+def ghost_model(cfg):
+    """The plant's MJCF for drawing only: flat sky in the surface colour, orthographic camera,
+    legs tinted to their path colour and every mesh translucent."""
+    import mujoco
+    from plant import resolve
+    s = mujoco.MjSpec.from_file(resolve(cfg.model_path))
+    bg = [int(SURFACE[i:i + 2], 16) / 255.0 for i in (1, 3, 5)]
+    s.add_texture(name="ghost_sky", type=mujoco.mjtTexture.mjTEXTURE_SKYBOX,
+                  builtin=mujoco.mjtBuiltin.mjBUILTIN_FLAT, rgb1=bg, rgb2=bg, width=16, height=16)
+    m = s.compile()
+    m.vis.global_.orthographic = 1
+    m.vis.global_.offwidth = m.vis.global_.offheight = 2600
+    m.vis.headlight.ambient[:] = 0.45
+    m.vis.headlight.diffuse[:] = 0.45
+    m.vis.headlight.specular[:] = 0.0
+    rgb = lambda h: [int(h[i:i + 2], 16) / 255.0 for i in (1, 3, 5)]
+    for g in range(m.ngeom):
+        nm = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+        c = S1 if "Left" in nm else (S2 if "Right" in nm else MUTED)
+        m.geom_rgba[g] = rgb(c) + [0.13]            # closed meshes: every pixel is >= 2 faces
+    return m
+
+
+def render_ortho(m, d, azimuth, center, half_w, half_h, px_per_m):
+    """Orthographic render looking horizontally from `azimuth`. Returns the RGBA image (sky made
+    transparent) and its extent in camera-plane coordinates (along camera-right, along up), plus
+    the two axes, so world points map as (p . right, p . up)."""
+    import mujoco
+    W, H = int(round(2 * half_w * px_per_m)), int(round(2 * half_h * px_per_m))
+    m.vis.global_.fovy = 2.0 * half_h                   # orthographic: the vertical extent, metres
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.lookat[:] = center
+    cam.distance, cam.azimuth, cam.elevation = 3.0, azimuth, 0.0
+    opt = mujoco.MjvOption()
+    opt.geomgroup[:] = 0
+    opt.geomgroup[2] = 1                                # visual meshes only: no floor, no spheres
+    r = mujoco.Renderer(m, H, W)
+    r.update_scene(d, camera=cam, scene_option=opt)
+    img = r.render()
+    # scene.camera holds the two stereo eyes, each ipd/2 (3.4 cm) off-centre; a mono render
+    # looks through their mean
+    g0, g1 = r.scene.camera[0], r.scene.camera[1]
+    pos = 0.5 * (np.array(g0.pos) + np.array(g1.pos))
+    fwd, up = np.array(g0.forward), np.array(g0.up)
+    right = np.cross(fwd, up)
+    a0 = pos @ right + 0.5 * (g0.frustum_center + g1.frustum_center)
+    b0 = pos @ up
+    hw = (g0.frustum_top - g0.frustum_bottom) * 0.5 * W / H
+    ext = (a0 - hw, a0 + hw, b0 + g0.frustum_bottom, b0 + g0.frustum_top)
+    sky = img[0, 0].astype(int)
+    alpha = (np.abs(img.astype(int) - sky).max(-1) > 2).astype(np.uint8) * 255
+    r.close()
+    return np.dstack([img, alpha]), ext, right, up
+
+
+def fig_ghost(z, e, i0, i1, cfg, out):
+    """The gait in end-effector space: both foot paths in the base frame, over the robot itself
+    drawn translucent in the same frame at left mid-stance. Side view and rear view."""
+    import mujoco
+    from matplotlib.lines import Line2D
+    base, rot, toe = z["base"][i0:i1, e], z["rot"][i0:i1, e], z["toe"][i0:i1, e]
+    grounded, phi, qfull = z["grounded"][i0:i1, e], z["phi"][i0:i1, e], z["qpos_full"][i0:i1, e]
+    fb = np.einsum("tij,tfi->tfj", rot, toe - base[:, None, :])            # m, base frame
+    dt = float(z["dt"])
+
+    # averaged cycle per foot, and the pose to draw: left mid-stance, in the middle of the window
+    prof = []
+    for f in range(2):
+        gph, mx, _, ncyc = cycle_profile(phi, fb[:, f, 0])
+        prof.append(dict(x=mx, y=cycle_profile(phi, fb[:, f, 1])[1],
+                         z=cycle_profile(phi, fb[:, f, 2])[1],
+                         st=cycle_profile(phi, grounded[:, f])[1] > 0.5))
+    ang = TP * gph[prof[0]["st"]]
+    ph_pose = np.mod(np.arctan2(np.sin(ang).mean(), np.cos(ang).mean()), TP)
+    mid = len(phi) // 2
+    k = mid + int(np.argmin(np.abs(np.angle(np.exp(1j * (phi[mid:mid + 40] - ph_pose))))))
+
+    m = ghost_model(cfg)
+    d = mujoco.MjData(m)
+    names = ["base_x", "base_y", "base_z", "base_roll", "base_pitch", "base_yaw"]
+    base_q = [int(m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)]) for n in names]
+    d.qpos[:] = qfull[k]
+    d.qpos[base_q] = 0.0                                # world frame == base frame
+    mujoco.mj_forward(m, d)
+    gids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "foot_%s_col" % s) for s in "LR"]
+    err = np.abs(d.geom_xpos[gids] - fb[k]).max() * 1000.0
+    print("ghost pose: tick %d, phase %.2f; drawn toes vs recorded toes %.2f mm" % (k, ph_pose / TP, err))
+    toe_r = float(m.geom_size[gids[0], 0])
+    z_ground = float(np.mean(np.concatenate([fb[grounded[:, f] > 0.5, f, 2] for f in (0, 1)]))) - toe_r
+
+    fig = plt.figure(figsize=(10.4, 8.8))
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.42, 1.0], wspace=0.12,
+                          left=0.08, right=0.985, top=0.80, bottom=0.075)
+    views = [(gs[0], 90.0, "Seen from the right side", "fore-aft, base frame (cm)   -> direction of travel"),
+             (gs[1], 0.0, "Seen from behind", "lateral, base frame (cm)   + = robot's right")]
+    for spec, az, title, xl in views:
+        ax = fig.add_subplot(spec)
+        img, ext, right, up = render_ortho(m, d, az, [0.0, 0.0, -0.45], 0.85, 0.62, 1500.0)
+        cm = lambda p: (100.0 * (p @ right), 100.0 * (p @ up))
+        ax.imshow(img, extent=[100.0 * v for v in ext], interpolation="antialiased", zorder=1)
+        # the robot's own extent on screen, to crop to
+        ys, xs = np.nonzero(img[..., 3])
+        H, W = img.shape[:2]
+        rx = 100.0 * (ext[0] + (ext[1] - ext[0]) * np.array([xs.min(), xs.max()]) / W)
+        rz = 100.0 * (ext[3] - (ext[3] - ext[2]) * np.array([ys.max(), ys.min()]) / H)
+        ax.axhline(100.0 * z_ground, color=INK2, lw=1.0, ls=(0, (5, 3)), zorder=2)
+        for f, c in [(0, S1), (1, S2)]:
+            P = np.stack([prof[f]["x"], prof[f]["y"], prof[f]["z"]], 1)
+            a, b = cm(P)
+            ax.plot(np.append(a, a[0]), np.append(b, b[0]), color=c, lw=2.0, zorder=4)
+            sa, sb = a.copy(), b.copy()
+            sa[~prof[f]["st"]], sb[~prof[f]["st"]] = np.nan, np.nan
+            ax.plot(sa, sb, color=c, lw=6.0, solid_capstyle="round", zorder=5)
+            i = int(0.16 * len(a))
+            ax.annotate("", (a[i + 6], b[i + 6]), (a[i], b[i]), zorder=6,
+                        arrowprops=dict(arrowstyle="-|>", color=c, lw=2.0, mutation_scale=15))
+            for frac in (0.0, 0.25, 0.5, 0.75):
+                i = int(frac * len(a))
+                ax.plot([a[i]], [b[i]], "o", ms=6, mfc=SURFACE, mec=c, mew=1.8, zorder=6)
+            pa, pb = cm(fb[k, f])
+            ax.plot([pa], [pb], "o", ms=10, mfc=c, mec=SURFACE, mew=2.0, zorder=7)
+        bx, bz = cm(np.zeros(3))
+        ax.plot([bx], [bz], "+", ms=12, mew=2.0, color=INK, zorder=7)
+        ax.annotate("base origin", (bx, bz), xytext=(0, -13), textcoords="offset points",
+                    ha="center", va="top", fontsize=8, color=INK, zorder=7)
+        allx = np.concatenate([rx] + [cm(np.stack([p["x"], p["y"], p["z"]], 1))[0] for p in prof])
+        allz = np.concatenate([rz, [100.0 * z_ground]])
+        ax.set_xlim(allx.min() - 6.0, allx.max() + 6.0)
+        ax.set_ylim(allz.min() - 5.0, allz.max() + 5.0)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_axisbelow(True)
+        ax.set_title(title)
+        ax.set_xlabel(xl)
+        if az == 90.0:
+            ax.set_ylabel("height, base frame (cm)")
+            ax.annotate("ground, stance average", (ax.get_xlim()[0], 100.0 * z_ground),
+                        xytext=(4, 4), textcoords="offset points", fontsize=8, color=INK2)
+
+    handles = [Line2D([], [], color=S1, lw=2.0, label="left foot"),
+               Line2D([], [], color=S2, lw=2.0, label="right foot"),
+               Line2D([], [], color=MUTED, lw=6.0, label="stance"),
+               Line2D([], [], ls="", marker="o", ms=6, mfc=SURFACE, mec=INK2, mew=1.8,
+                      label="clock phase 0, .25, .5, .75"),
+               Line2D([], [], ls="", marker="o", ms=10, mfc=INK2, mec=SURFACE, mew=2.0,
+                      label="feet in the pose drawn")]
+    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.072, 0.862), ncols=5,
+               handlelength=1.8, columnspacing=1.4, fontsize=8.5)
+    v = float(np.mean(z["vbody"][i0:i1, e, 0]))
+    sz = ["%s %.1f x %.1f cm" % (nm, 100 * np.ptp(prof[f]["x"]), 100 * np.ptp(prof[f]["z"]))
+          for f, nm in [(0, "left"), (1, "right")]]
+    fig.suptitle("DASH-01 v2: the running gait in end-effector space", x=0.08, ha="left",
+                 fontsize=13, fontweight="bold", color=INK)
+    for yy, line in [(0.925, "Foot paths in the base frame, averaged over %d cycles, over the robot "
+                             "drawn translucent in the same frame at left mid-stance (phase %.2f)."
+                      % (ncyc, ph_pose / TP)),
+                     (0.903, "S2 runner at 88.5 M steps, nominal plant, %.2f m/s over %.0f s. "
+                             "Averaged path, fore-aft x vertical: %s, %s."
+                      % ((v, (i1 - i0) * dt) + tuple(sz))),
+                     (0.881, "Legs are tinted like their path. The path is the centre of the foot's "
+                             "collision sphere; the ground line sits one sphere radius below it.")]:
+        fig.text(0.08, yy, line, fontsize=9, color=INK2, ha="left")
+    fig.savefig(out, dpi=160)
+    print("wrote %s" % out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--npz", required=True)
@@ -410,6 +580,8 @@ def main():
     m = mujoco.MjModel.from_xml_path(resolve(cfg.model_path))
     rng = [np.degrees(m.jnt_range[m.actuator_trnid[a, 0]]) for a in range(6)]
     fig_actuator(z, args.env, i0, i1, tot, dt, rng, out / "gait_actuator.png")
+    if "qpos_full" in z.files:                          # recordings from before 2026-09-16 lack it
+        fig_ghost(z, args.env, i0, i1, cfg, out / "gait_ee_ghost.png")
 
 
 if __name__ == "__main__":

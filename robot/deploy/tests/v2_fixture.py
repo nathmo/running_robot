@@ -14,23 +14,24 @@ import json
 
 import numpy as np
 
-SPEC_DIM, N_RESIDUAL, ACTION_DIM = 44, 6, 50
+# v4 widths: the three latched roll-reflex dims went with the reflexes, so the spec is 41 and the
+# action 47. A 44/50 bundle is a v2/v3 one and `controller_v2.py` refuses it outright.
+SPEC_DIM, N_RESIDUAL, ACTION_DIM = 41, 6, 47
 FRAME_DIM, HIST_LEN, HIST_STRIDE = 33, 10, 2
 ONCE_DIM = SPEC_DIM + 3                        # latched spec | task 2 | commit 1
-ACTOR_DIM = FRAME_DIM * HIST_LEN + ONCE_DIM    # 377
+ACTOR_DIM = FRAME_DIM * HIST_LEN + ONCE_DIM    # 374
 # v3 adds one channel to the frame: the robot's own dead-reckoned heading (integrated gyro z).
 # Everything else -- the once-block, the action, the gait vocabulary -- is unchanged, which is why
 # one control law serves both and why these two constants are all a fixture needs to switch.
 FRAME_DIM_V3 = 34
-ACTOR_DIM_V3 = FRAME_DIM_V3 * HIST_LEN + ONCE_DIM    # 387
+ACTOR_DIM_V3 = FRAME_DIM_V3 * HIST_LEN + ONCE_DIM    # 384
 Q_LO = np.array([-0.785, -1.5, -1.047, -0.785, -1.5, -1.047])
 VEL_LIMIT = np.array([10.30, 22.01, 22.01, 10.30, 22.01, 22.01])
 FORCERANGE = np.array([61.2, 144.5, 144.5, 61.2, 144.5, 144.5])
+# field-for-field `walk_v4/gait.py GaitParams`: the seven reflex numbers went with the reflexes
 DEFAULT_GAIT = dict(
     cam_amp=0.45, thigh_amp=0.45, roll_amp=0.20, delta_max=0.6, o_max=[0.06, 0.06, 0.15],
-    imp_kp_up=2.5, imp_kp_dn=3.0, imp_kd_up=1.0, imp_kd_dn=4.0,
-    reflex_kp_scale=0.5, reflex_kd_scale=0.1, reflex_bias_scale=0.2,
-    pitch_kp=1.0, pitch_kd=0.1, pitch_bias=0.0, pitch_clip=0.25, residual_scale=0.20,
+    imp_kp_up=2.5, imp_kp_dn=3.0, imp_kd_up=1.0, imp_kd_dn=4.0, residual_scale=0.20,
     freq_lo=0.5, freq_hi=5.0, drive_kp=[120.0, 200.0, 200.0, 120.0, 200.0, 200.0],
     drive_kd=[4.0, 5.0, 5.0, 4.0, 5.0, 5.0])
 
@@ -40,7 +41,7 @@ def hist_idx():
     return (raw - 1) - (np.arange(HIST_LEN) * HIST_STRIDE)[::-1]
 
 
-def v2_arrays_and_meta(gait_params=None, nominal=None, default_motor_pos=None, pitch_lp=0.0,
+def v2_arrays_and_meta(gait_params=None, nominal=None, default_motor_pos=None,
                        objective="sprint", spec_source="policy", stoplight_prob=0.5, seed=0,
                        weight_scale=0.05, heading=False, **meta_over):
     """(arrays, meta) for a bundle. `heading=True` makes it a v3 (34-wide frame) bundle.
@@ -81,7 +82,7 @@ def v2_arrays_and_meta(gait_params=None, nominal=None, default_motor_pos=None, p
         **({"heading_cap_rad": 1.5708} if heading else {}),
         "lp_yaw_tau_s": 0.7, "est_hidden": [128, 64], "policy_hidden": [256, 256],
         "task_brake_m": 8.0, "sprint_dist_m": 100.0, "objective": objective,
-        "gait": gp, "pitch_reflex_rate_lp": pitch_lp, "motor_accel_limit": 0.0, "n_harmonics": 3,
+        "gait": gp, "motor_accel_limit": 0.0, "n_harmonics": 3,
         "residual_scale": gp["residual_scale"], "action_scale": 0.5,
         "drive_delay_ms": 12.0, "motor_bus_volts": 48.0,
         "resync": {"kappa": 0.5, "window_cycle": 0.15, "ema_cycles": 5.0, "warmup_cycles": 3,

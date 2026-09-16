@@ -21,9 +21,11 @@ it by running the numpy control law inside MuJoCo against the torch policy.
 TWO GENERATIONS
 ---------------
 Version 1 is the walk_mit bundle: 200 Hz, per-step Fourier gait, a velocity/yaw command channel,
-`export_policy.py`. Version 2 is the walk_v2 (DASH-01 Walker v2) bundle: 100 Hz, a 44-dim gait
-spec LATCHED at each clock wrap plus a 6-dim per-tick residual, and a task channel that is a
-run/stop flag and a distance countdown rather than a velocity. `walk_v2/export.py` writes it.
+`export_policy.py`. Version 2 is the walk_v2 (DASH-01 Walker v2) bundle: 100 Hz, a gait spec
+LATCHED at each clock wrap plus a 6-dim per-tick residual, and a task channel that is a run/stop
+flag and a distance countdown (or, under the joystick objective, a commanded speed) rather than a
+velocity. `walk_v4/export.py` writes it, and the spec is 41 dims wide since the reflexes -- and
+the three latched dims that carried their gains -- were deleted.
 
 They are different control laws with different runtimes (`controller.py` vs `controller_v2.py`),
 so this class refuses to guess: `bundle.version` says which, and everything downstream branches on
@@ -60,9 +62,11 @@ REQUIRED_ARRAYS_V2 = _NETS + (
 )
 # meta keys the v2 runtime reads that the FIRST v2 exporter did not write. Named here so a stale
 # bundle says which field is missing instead of dying inside the control law on tick 1.
+# "pitch_reflex_rate_lp" was on this list until walk_v4 deleted the reflexes: the exporter stopped
+# writing it, and a key no runtime reads must not be the thing that refuses a bundle.
 REQUIRED_META_V2 = ("control_dt", "frame_dim", "history_len", "actor_dim", "action_dim",
                     "once_dim", "obs_scales", "clip_obs", "obs_eps", "gait", "spec_source",
-                    "pitch_reflex_rate_lp", "motor_accel_limit", "n_harmonics", "objective",
+                    "motor_accel_limit", "n_harmonics", "objective",
                     "task_brake_m", "term_gravity_z", "lp_yaw_tau_s",
                     "est_hidden", "policy_hidden")
 
@@ -196,7 +200,7 @@ class Bundle:
 
         v1: the stacked history is the whole thing. v2 adds the once-block (the live latched spec,
         the task channel and the commit flag), so the exporter states it and the history alone is
-        the wrong number by 47."""
+        the wrong number by 44."""
         if self.version == 2:
             return int(self.meta["actor_dim"])
         return int(self.meta["frame_dim"]) * int(self.meta["history_len"])

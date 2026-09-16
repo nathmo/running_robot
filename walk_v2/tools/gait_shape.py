@@ -78,7 +78,8 @@ def record(env, agent, seed, n_max):
                     freq=info["freq_hz"], toe=jax.vmap(env._toe_pos)(state2.data),
                     base=jax.vmap(env._base_pos)(state2.data),
                     rot=jax.vmap(env._base_rot)(state2.data),
-                    vbody=jax.vmap(env._vel_body)(state2.data), t=state2.t)
+                    vbody=jax.vmap(env._vel_body)(state2.data), t=state2.t,
+                    qpos_full=state2.data.qpos)      # the whole pose, for gait_figures' robot
         return (state2, obs2), {**pre, **post}
 
     state, obs = env.reset(jax.random.PRNGKey(seed), params)

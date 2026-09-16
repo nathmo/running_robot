@@ -1427,8 +1427,8 @@ def _policy_preflight(bundle_path=None):
     # velocities are inflated by exactly the ratio.
     if bundle_path:
         ms = _policy_step_ms(bundle_path)
-        # the budget is the BUNDLE's control period, not the loop's: a 100 Hz v2 bundle gets 10 ms
-        # per control tick out of a 200 Hz loop, because the loop hands it every second tick
+        # the budget is the BUNDLE's control period, not the loop's: a 100 Hz v2 bundle gets the
+        # loop's whole 10 ms tick, and a slower bundle the several ticks the loop hands it
         hz = _policy_control_hz(bundle_path) or daemon_mod.TICK_HZ
         budget = 1000.0 / hz
         rate_ok = ms is not None and ms <= daemon_mod.policy_max_step_ms(hz)

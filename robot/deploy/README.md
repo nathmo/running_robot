@@ -61,10 +61,10 @@ runtime is chosen from it rather than guessed.
 | exporter | `robot/deploy/export_policy.py` | `walk_v2/export.py` |
 | runtime | `controller.py` + `fourier_gait.py` | `controller_v2.py` + `gait_v2.py` |
 | control rate | 200 Hz | **100 Hz** |
-| action | 30 dims, all live every tick | 50 dims: **44 latched** at each clock wrap + 6 residual |
+| action | 30 dims, all live every tick | 47 dims: **41 latched** at each clock wrap + 6 residual |
 | observation | 590 = 59 × 10 frames | 377 = 33 × 10 frames + a 47-wide once-block |
 | command | forward speed + yaw rate, fixed at arm time | **a RUN / STOP flag**, driven live — or, on a joystick checkpoint, **a speed slider in m/s** ([below](#the-joystick-a-speed-instead-of-a-flag)) |
-| action filter | EMA on the target | none (the pitch reflex was retuned for its absence) |
+| action filter | EMA on the target | none (v4 has no reflex either: the residual is the only per-tick term) |
 | software actuation delay | yes — walk_mit delayed the *action* | **no** — v2 delays the *command* inside the plant, which is a model of the real 12 ms CAN transport the robot already has. Re-applying it here would double it. |
 
 ### Why 100 Hz is the thing that makes v2 deployable
@@ -72,14 +72,16 @@ runtime is chosen from it rather than guessed.
 The Pi 3B needs ~6.5 ms for a v1 control tick against a 5 ms budget, and closing that gap means
 rewriting the bit-exactness-verified deploy path. v2 doubles the budget to 10 ms while making the
 nets *smaller* (232k MACs against 305k — the once-block replaced 213 dims of stacked history). The
-webui daemon's CAN loop still runs at 200 Hz for every other mode; a v2 run simply gets every
-second tick, and the force-control frame it produced is re-streamed on the one in between, so the
-bus sees the same six frames every 5 ms it always has. Only integer ratios are accepted: 200/150 is
-not a control law, it is a rounding error with gains.
+webui daemon's loop runs at 100 Hz (`daemon.TICK_HZ`), so a v2 run gets every tick and the whole
+10 ms. It used to run at 200 Hz and hand a v2 bundle every second tick, re-sending the frame in
+between -- which gave each policy tick one 5 ms slot, and because the loop restarts its schedule
+after an overrun, a ~8.3 ms policy tick made the real policy period 13.3 ms (75 Hz), under the
+daemon's own 90 % rate kill. A bundle slower than the loop still gets every Nth tick with its frame
+re-sent in between (integer ratios only: 100/66.7 is not a control law, it is a rounding error with
+gains); a v1 bundle (200 Hz) is faster than the loop and is refused.
 
-Everything that must run at the full loop rate stays there — in particular the measured-ERPM
-runaway kill, which is checked above the decimation gate. A bundle running at half the loop rate is
-no reason to look for the 2026-09-01 four-drive over-voltage half as often.
+Everything that must run at the full loop rate stays above the decimation gate — in particular the
+measured-ERPM runaway kill, now checked every 10 ms.
 
 ### Where the tick actually goes (measured on the robot, 2026-09-11)
 

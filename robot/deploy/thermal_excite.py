@@ -113,12 +113,12 @@ MAX_WINDOW_DEG = 25.0
 # fixtures have compliance and gearboxes have backlash, so first torque always produces a small
 # step, and a single-sample threshold at 5.5 deg/s cannot tell that from a clamp letting go.
 #
-# So: the condition is DEBOUNCED -- it has to hold for BLOCKED_SLIP_TICKS consecutive control ticks
-# before it counts -- and the thresholds are set where a failing clamp lives, not where backlash
-# does.
+# So: the condition is DEBOUNCED -- it has to hold continuously for BLOCKED_SLIP_S before it
+# counts -- and the thresholds are set where a failing clamp lives, not where backlash does. A
+# time, not a tick count: the rate the caller steps at is the caller's business.
 BLOCKED_SLIP_DEG = 8.0
 BLOCKED_SLIP_ERPM = 2000.0
-BLOCKED_SLIP_TICKS = 20            # 0.1 s at 200 Hz
+BLOCKED_SLIP_S = 0.1
 
 # FREE-ROTOR mode: the motor is off the robot with nothing on the shaft. The run tracks a
 # position-mode sine so the current comes from fighting the rotor's own inertia (see the module
@@ -138,7 +138,7 @@ FREE_SINE_AMP_MAX_DEG = 60.0
 # rotation -- something dragging the shaft, or a wrong zero making set_pos slew -- and that is not
 # the declared experiment. Debounced like the blocked slip check, and for the same reason.
 FREE_DRIFT_MARGIN_DEG = 15.0
-FREE_DRIFT_TICKS = 20              # 0.1 s at 200 Hz
+FREE_DRIFT_S = 0.1
 # Position mode has no current cap this module controls. The winding-rise gate approved
 # amps^2 * duration of I^2 dt; the run aborts when the MEASURED integral exceeds that with this
 # much headroom, so it can never deposit more heat than it was cleared for.
@@ -207,9 +207,18 @@ class BurstExciter:
         self.pos_min = None
         self.pos_max = None
         self.spd_peak = 0.0
-        self.slip_ticks = 0           # consecutive ticks the slip condition has held
+        self.slip_since = None        # t at which the slip/drift condition started holding
         self.i_meas_sum = 0.0
         self.i_meas_n = 0
+
+    def _held(self, t, cond):
+        """Seconds `cond` has held continuously at time t; 0.0 the moment it stops."""
+        if not cond:
+            self.slip_since = None
+            return 0.0
+        if self.slip_since is None:
+            self.slip_since = t
+        return t - self.slip_since
 
     def step(self, t, pos_deg, spd_erpm, temp_c, err, telemetry_age, i_meas=None):
         """Return (amps, done, abort_reason). amps is 0.0 whenever anything is wrong."""
@@ -248,11 +257,11 @@ class BurstExciter:
                 raise ValueError("free-rotor runs are position-mode: drive them with step_sine()")
             slipping = (abs(pos - e.centre) > BLOCKED_SLIP_DEG
                         or abs(spd) > BLOCKED_SLIP_ERPM)
-            self.slip_ticks = self.slip_ticks + 1 if slipping else 0
-            if self.slip_ticks >= BLOCKED_SLIP_TICKS:
+            held = self._held(t, slipping)
+            if held >= BLOCKED_SLIP_S - 1e-9:
                 self.abort = ("the joint has moved {:+.1f} deg and is turning at {:.0f} ERPM, "
                               "held for {:.0f} ms -- the clamp is slipping"
-                              .format(pos - e.centre, spd, BLOCKED_SLIP_TICKS * 5.0))
+                              .format(pos - e.centre, spd, held * 1e3))
                 return 0.0, True, self.abort
             scale = min(1.0, t / self.ramp_s) if self.ramp_s > 0 else 1.0
             amps = e.amps * scale
@@ -316,8 +325,7 @@ class BurstExciter:
         # dragging the shaft, or a wrong zero is making set_pos slew. Debounced -- the first
         # cycles of a lagging position loop overshoot briefly and mean nothing.
         drifting = abs(pos - e.centre) > e.sine_amp + FREE_DRIFT_MARGIN_DEG
-        self.slip_ticks = self.slip_ticks + 1 if drifting else 0
-        if self.slip_ticks >= FREE_DRIFT_TICKS:
+        if self._held(t, drifting) >= FREE_DRIFT_S - 1e-9:
             self.abort = ("the rotor is {:+.1f} deg from the sine's centre, outside the "
                           "+-{:.0f} deg band -- net rotation means something is on the shaft, "
                           "or the zero is wrong"

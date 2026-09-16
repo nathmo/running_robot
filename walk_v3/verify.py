@@ -100,9 +100,18 @@ def check_curriculum(rep, run, ckpt, cfg):
             dr_on and float(ep.get("dr_scale", 0)) >= 0.9,
             f"{ep.get('dr_scale', 0):.3f}" if dr_on else "dr_enable=False", ">= 0.900",
             "dr_scale from the sidecar AND the flag, not either alone")
+    # the flag AND the value, for the same reason as dr_scale above: `initial_params` writes
+    # bringup_scale = 1.0 when there IS no bring-up curriculum, so reading the sidecar alone hands a
+    # PASS to a run that has dirty starts switched off entirely
+    tgt = float(getattr(cfg, "bringup_target", 1.0))
     if cfg.bringup_enable:
-        rep.add("1. trained as advertised", "bring-up envelope fully opened",
-                float(ep.get("bringup_scale", 0)) >= 0.9, f"{ep.get('bringup_scale', 0):.3f}", ">= 0.900")
+        rep.add("1. trained as advertised", "bring-up envelope reached its target",
+                float(ep.get("bringup_scale", 0)) >= 0.9 * tgt,
+                f"{ep.get('bringup_scale', 0):.3f}", f">= {0.9 * tgt:.3f}",
+                f"the target this run set is {tgt:.2f}, not 1.0")
+    else:
+        rep.skip("1. trained as advertised", "bring-up envelope reached its target",
+                 "bringup_enable=False -- this run never starts an episode dirty")
     rep.add("1. trained as advertised", "command band opened to zero",
             float(ep.get("cmd_lo", 1)) <= 0.05, f"{ep.get('cmd_lo', 1):.3f}", "<= 0.050",
             "zero command = step in place")

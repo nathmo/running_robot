@@ -5,16 +5,16 @@ telemetry that existed was ringbuffer.TelemetryRing — 4096 samples of RAM at 2
 which the HTTP API can only ever hand out the last 512 (25.6 s), and nothing on disk. By the time
 anyone looked the window had rolled past the event.
 
-THREE TIERS, because 200 Hz x 6 motors continuously is 35 kB/s = 3 GB/day and that kills the SD
-card:
+THREE TIERS, because the full loop rate x 6 motors continuously is gigabytes a day and that kills
+the SD card:
 
   A  continuous, 20 Hz, every field, fixed-width binary segments, rotated, budgeted.  ~4 kB/s
-  B  full 200 Hz, kept in a RAM ring (RING_SECONDS), dumped to its own file on a trigger —
+  B  full loop rate (RING_HZ), kept in a RAM ring (RING_SECONDS), dumped to its own file on a trigger —
      PRE-trigger history included. This is the tier that would have solved 2026-08-10.
   C  events.jsonl, append-only, fsync'd, one line per event, never deleted without archiving.
 
 THE CONTROL LOOP IS SACRED. The daemon thread only ever appends a tuple to a bounded deque
-(collections.deque append/len are O(1) and atomic under the GIL — no lock is taken, so the 200 Hz
+(collections.deque append/len are O(1) and atomic under the GIL — no lock is taken, so the control
 tick can never block on I/O). A single writer thread owns every file, the Tier-B ring, the
 decimation to Tier A, rotation and the disk budget. If the queue is full we DROP AND COUNT, and the
 count is stamped into the next accepted record so a reader can see exactly where the holes are — a
@@ -86,9 +86,9 @@ ROW_BLOCKS = MOTOR_FIELDS + ("err",)                      # each block is N valu
 ROW_LEN = len(ROW_HEAD) + len(ROW_BLOCKS) * N             # 6 + 8*6 = 54
 
 # ---------------------------------------------------------------- tuning
-TIER_A_DIV = 10                  # keep 1 sample in 10 => 20 Hz from a 200 Hz push
+TIER_A_DIV = 5                   # keep 1 sample in 5 => 20 Hz from the 100 Hz push
 RING_SECONDS = 40.0              # Tier B RAM ring (brief demands >= 30 s)
-RING_HZ = 200.0
+RING_HZ = 100.0                  # the daemon's loop rate (daemon.TICK_HZ): one push per tick
 POST_TRIGGER_S = 3.0             # keep recording this long after a trigger, then close the file
 DUMP_COOLDOWN_S = 10.0           # a storm of triggers must not write a storm of 1.7 MB files
 # ...and routine triggers (a mode toggle) get a much longer one. One dump is ~1.7 MB, Tier A
@@ -97,7 +97,7 @@ DUMP_COOLDOWN_S = 10.0           # a storm of triggers must not write a storm of
 ROUTINE_COOLDOWN_S = 120.0
 HEARTBEAT_S = 8.0                # power-off is inferred from the last heartbeat before a gap
 WRITER_PERIOD_S = 0.10
-SAMPLE_QUEUE_MAX = 4000          # 20 s of 200 Hz backlog before we start dropping
+SAMPLE_QUEUE_MAX = 4000          # 40 s of 100 Hz backlog before we start dropping
 EVENT_QUEUE_MAX = 4096
 SEGMENT_MAX_BYTES = 8 << 20      # rotate Tier A here (~30 min of 20 Hz)
 EVENTS_MAX_BYTES = 32 << 20      # archive (never delete) the event log here

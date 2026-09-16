@@ -1,12 +1,12 @@
-"""The v2 gait generator, in numpy. Vendored from `walk_v2/gait.py` (artifact §02, §06).
+"""The v2 gait generator, in numpy. Vendored from `walk_v4/gait.py` (artifact §02, §06).
 
 WHY A COPY AND NOT AN IMPORT
 ----------------------------
-`walk_v2/gait.py` is backend-agnostic by design -- every function takes `xp`, and `xp=numpy` is
+`walk_v4/gait.py` is backend-agnostic by design -- every function takes `xp`, and `xp=numpy` is
 the deploy reference. But the module imports `jax.numpy` at the top to supply its default, and jax
 is not on the robot and never will be. So the functions are copied here with `xp` removed and
 numpy inlined, in the SAME arithmetic order, and `tests/test_v2_deploy.py` diffs this against the
-trained law on the recorded MJX trace (`walk_v2/results/trace_mjx.json`) -- the same fixture the
+trained law on the recorded MJX trace (`walk_v4/results/trace_mjx.json`) -- the same fixture the
 two training arms cross-check each other on.
 
 Read this next to `controller_v2.py`: this module is the pure algebra (a spec and a phase in,
@@ -19,23 +19,32 @@ a fifth of the numpy calls, and it is what the robot actually runs -- on a Pi 3B
 5.2 ms of an 8.2 ms control tick, and a 100 Hz bundle has 10 ms. `tests/test_v2_deploy.py` pins
 the two together EXACTLY, over specs pushed past every clip, in float32 and float64.
 
-ACTION LAYOUT (50; all entries clipped to [-1, 1])
+ACTION LAYOUT (47; all entries clipped to [-1, 1])
     [ 0: 7]  S_cam    a0, a1,b1, a2,b2, a3,b3     N=3 series, x cam_amp            latched
     [ 7:14]  S_thigh                               x thigh_amp                      latched
     [14:21]  S_hip                                 x roll_amp                       latched
     [21:28]  kp(phi) series -> exp map             x2.5 / /3 on the plant's base kp latched
     [28:35]  kd(phi) series -> exp map             soften-only /4                   latched
     [35]     freq_raw  linear -> [freq_lo, freq_hi] Hz                              latched
-    [36:39]  roll reflex kp, kd, bias                                               latched
-    [39]     Delta  x delta_max rad   right footfall pi+Delta after the left        latched
-    [40]     s      g_L = 1+s, g_R = 1-s                                            latched
-    [41:44]  o_cam, o_thigh, o_hip  x o_max, joint bias (+,+)                       latched
-    [44:50]  residual r0..r5, x residual_scale rad                                  EVERY tick
+    [36]     Delta  x delta_max rad   right footfall pi+Delta after the left        latched
+    [37]     s      g_L = 1+s, g_R = 1-s                                            latched
+    [38:41]  o_cam, o_thigh, o_hip  x o_max, joint bias (+,+)                       latched
+    [41:47]  residual r0..r5, x residual_scale[j] rad (per joint from v4)            EVERY tick
 
     u_L(phi) = n_L + (1+s) A S(phi)             + o
     u_R(phi) = n_R - (1-s) A S(phi - pi - Delta) + o
 
 Actuator order throughout: hip_roll_L, cam_L, thigh_L, hip_roll_R, cam_R, thigh_R.
+
+THE REFLEXES ARE GONE, AND SO ARE THEIR THREE LATCHED DIMS (walk_v4, 2026-09-16). The control law
+was `feedforward + roll reflex + pitch reflex + residual`; it is now `feedforward + residual`, and
+the three latched roll-gain dims that used to sit at [36:39] are deleted, so every index after them
+shifts down by 3 and the action is 47 wide rather than 50. That is a DIFFERENT CONTROL LAW and a
+different action width, which is why `controller_v2.py` refuses a bundle whose spec is 44 dims
+wide instead of quietly running it without its reflexes: measured on the v2 S2 runner
+(`walk_v2/tools/reflex_ablation.py`), the roll reflex's bias is what held it up and its roll
+feedback WAS the running gait (21 deg p-p on the hips; feedback off = upright but -3 m in 20 s).
+A v2/v3 bundle must be replayed by a v2/v3 runtime, not by this one.
 """
 from typing import NamedTuple
 
@@ -49,13 +58,12 @@ I_S_HIP = slice(14, 21)
 I_KP = slice(21, 28)
 I_KD = slice(28, 35)
 I_FREQ = 35
-I_REFLEX = slice(36, 39)
-I_DELTA = 39
-I_S = 40
-I_O = slice(41, 44)
-SPEC_DIM = 44
+I_DELTA = 36
+I_S = 37
+I_O = slice(38, 41)
+SPEC_DIM = 41
 N_RESIDUAL = 6
-ACTION_DIM = SPEC_DIM + N_RESIDUAL       # 50
+ACTION_DIM = SPEC_DIM + N_RESIDUAL       # 47
 HIP_L, CAM_L, THIGH_L, HIP_R, CAM_R, THIGH_R = range(6)
 
 
@@ -70,7 +78,12 @@ HARMONIC_K = np.arange(1.0, N_HARMONICS + 1.0)
 
 class GaitParams(NamedTuple):
     """Every number that turns a spec into targets + gains. Field-for-field the training
-    `gait.GaitParams`, so `GaitParams.from_meta(bundle.meta["gait"])` is the whole conversion."""
+    `gait.GaitParams`, so `GaitParams.from_meta(bundle.meta["gait"])` is the whole conversion.
+
+    v4 dropped the seven reflex numbers (reflex_kp/kd/bias_scale, pitch_kp/kd/bias/clip) with the
+    reflexes themselves. `from_meta` ignores keys it does not know, so an old gait block still
+    converts -- the generation check that matters is the action width, and it lives in
+    `controller_v2.py`."""
     cam_amp: float
     thigh_amp: float
     roll_amp: float
@@ -80,14 +93,7 @@ class GaitParams(NamedTuple):
     imp_kp_dn: float
     imp_kd_up: float
     imp_kd_dn: float
-    reflex_kp_scale: float
-    reflex_kd_scale: float
-    reflex_bias_scale: float
-    pitch_kp: float
-    pitch_kd: float
-    pitch_bias: float
-    pitch_clip: float
-    residual_scale: float
+    residual_scale: object       # float up to v3; a 6-tuple (actuator order) from walk_v4
     freq_lo: float
     freq_hi: float
     drive_kp: tuple              # 6, actuator order (base gains the phase profile scales)
@@ -177,32 +183,29 @@ def impedance(spec, phi, p):
     return kp, kd
 
 
-def reflexes(spec, roll, roll_rate, pitch, pitch_rate, p):
-    """(u_roll, u_pitch): the learned roll reflex (gains latched, feedback every tick) and the
-    fixed pitch reflex. Both scalars.
-
-    `roll` and `pitch` are GRAVITY COMPONENTS, not angles: grav[1] and grav[0] of world-DOWN
-    expressed in body axes, exactly as the sim reads them."""
-    r = np.clip(spec[..., I_REFLEX], -1.0, 1.0)
-    u_roll = (p.reflex_kp_scale * r[..., 0] * roll + p.reflex_kd_scale * r[..., 1] * roll_rate
-              + p.reflex_bias_scale * r[..., 2])
-    u_pitch = -np.clip(p.pitch_kp * pitch + p.pitch_kd * pitch_rate + p.pitch_bias,
-                       -p.pitch_clip, p.pitch_clip)
-    return u_roll, u_pitch
-
-
-def assemble(spec, residual, phi, roll, roll_rate, pitch, pitch_rate, nominal, p):
+def assemble(spec, residual, phi, nominal, p):
     """Full control law for one tick: (target[6], kp[6], kd[6], q_ref[6]).
 
-    target = feedforward(spec, phi) + reflexes + residual_scale * residual
-      pitch reflex on the thighs (+,-); roll reflex on the hips (+,+)."""
+    target = feedforward(spec, phi) + residual_scale * residual. There is no reflex term and no IMU
+    argument: v4 deleted both reflexes from the law (see the module docstring), so the only thing
+    this tick's measurement reaches is the policy, through the observation."""
     q_ref = feedforward(spec, phi, nominal, p)
-    u_roll, u_pitch = reflexes(spec, roll, roll_rate, pitch, pitch_rate, p)
-    add = np.stack([u_roll, np.zeros_like(u_roll), u_pitch,
-                    u_roll, np.zeros_like(u_roll), -u_pitch], axis=-1)
-    target = q_ref + add + p.residual_scale * np.clip(residual, -1.0, 1.0)
+    target = q_ref + residual_scale_of(p) * np.clip(residual, -1.0, 1.0)
     kp, kd = impedance(spec, phi, p)
     return target, kp, kd, q_ref
+
+
+def residual_scale_of(p):
+    """The residual's rad-per-unit, as the trainer multiplies it. Up to v3 a scalar, and the
+    Python float is left exactly as it was: it is a weak scalar under NEP 50, so float32 residual
+    times it stays float32, which is the promotion the bit-for-bit tests pin. From walk_v4 it is
+    per joint (a 6-list in the bundle, a tuple here); the trainer holds that as a float32 array
+    (JAX, x64 off), so it is cast to float32 -- a float64 array would promote the product and
+    move the target by the float32 rounding of 0.2 * r, which verify.py's parity check reads."""
+    rs = p.residual_scale
+    if isinstance(rs, (tuple, list, np.ndarray)):
+        return np.asarray(rs, dtype=np.float32)
+    return rs
 
 
 def slew_limit(target, prev_target, prev_vel, vel_limit, accel_limit, dt):
@@ -238,12 +241,12 @@ class GaitEval:
     WHY. Measured on the Pi 3B with the real bundle, a control tick costs 8.2 ms against a 10 ms
     budget at 100 Hz, and 5.2 ms of it is this generator -- against 1.8 ms for both neural nets.
     Almost none of that is arithmetic. `assemble` evaluates the Fourier series TEN times (cam,
-    thigh, hip, kp, kd, each at the left and the right phase), clips twenty-one scalars and stacks
+    thigh, hip, kp, kd, each at the left and the right phase), clips a dozen-odd scalars and stacks
     four six-vectors, and every one of those is a separate numpy dispatch over three to seven
     elements: a few hundred flops behind ~50 interpreter round trips at 10-40 us each on a 1.2 GHz
     A53. So the fix is not faster maths, it is fewer calls. The ten series share one (10, 7)
-    coefficient block and one weighted sum; the scalar clips are Python min/max; the six-vectors
-    are written into preallocated buffers. Measured 3.62 ms -> 0.76 ms on the robot, bit-identical.
+    coefficient block and one weighted sum, the four scheduled gains share one exp map, and the
+    six-vectors are written into preallocated buffers. Measured 3.62 ms -> 0.76 ms, bit-identical.
 
     THE COSINES ARE STILL FOUR (3,) CALLS at the two phases, not one call over (10, 3). numpy can
     take a different SIMD path for a longer array and land a different last ULP, and bit-equality
@@ -256,7 +259,7 @@ class GaitEval:
     per control loop, called from the thread that owns the loop. (Nothing it returns aliases them.)"""
 
     __slots__ = ("p", "nominal", "_idx", "_amp", "_o_max", "_kp0", "_kd0", "_log_up", "_log_dn",
-                 "_w0", "_wk", "_cos", "_sin", "_add", "_kp", "_kd", "_qref")
+                 "_w0", "_wk", "_cos", "_sin", "_kp", "_kd", "_qref", "_rs")
 
     def __init__(self, p, nominal):
         self.p = p
@@ -282,13 +285,13 @@ class GaitEval:
         # constant term, computing a0 in float32. That is a 5e-5 drift in the gains, and invisible.
         self._w0 = WEIGHTS[0]
         self._wk = WEIGHTS[1:]
+        self._rs = residual_scale_of(p)     # scalar (<= v3) or a float32 (6,) (v4): see the helper
         # scratch. The four RETURNED arrays are fresh every tick -- the caller keeps them (the
         # controller's previous target, the governor's command) and a reused buffer would alias.
         self._cos = np.empty((10, N_HARMONICS))
         self._sin = np.empty((10, N_HARMONICS))
-        self._add = np.zeros(6)
 
-    def __call__(self, spec, residual, phi, roll, roll_rate, pitch, pitch_rate):
+    def __call__(self, spec, residual, phi):
         p, n = self.p, self.nominal
         # ---- the two phases. phases() itself, NOT a Python-float rewrite of it: the spec is
         #      float32, so numpy's promotion rules round `delta` -- and with it the right leg's
@@ -317,16 +320,9 @@ class GaitEval:
         q_ref[HIP_R] = n[HIP_R] - g_r * d[I_HIP_R] + o[2]
         q_ref[CAM_R] = n[CAM_R] - g_r * d[I_CAM_R] + o[0]
         q_ref[THIGH_R] = n[THIGH_R] - g_r * d[I_TH_R] + o[1]
-        # ---- the reflexes, and the target
-        r = np.clip(spec[I_REFLEX], -1.0, 1.0)
-        u_roll = (p.reflex_kp_scale * r[0] * roll + p.reflex_kd_scale * r[1] * roll_rate
-                  + p.reflex_bias_scale * r[2])
-        u_pitch = -_clip(p.pitch_kp * pitch + p.pitch_kd * pitch_rate + p.pitch_bias, p.pitch_clip)
-        add = self._add
-        add[HIP_L] = add[HIP_R] = u_roll
-        add[THIGH_L] = u_pitch
-        add[THIGH_R] = -u_pitch
-        target = q_ref + add + p.residual_scale * np.clip(residual, -1.0, 1.0)
+        # ---- the target. Feedforward plus the residual and nothing else: v4 deleted the reflexes,
+        #      so no measurement enters the control law here (see the module docstring).
+        target = q_ref + self._rs * np.clip(residual, -1.0, 1.0)
         # ---- the gains: one exp_map over the four scheduled values
         x = np.clip(v[6:] / self._w0, -1.0, 1.0)
         e = np.exp(x * np.where(x >= 0.0, self._log_up, self._log_dn))
@@ -337,9 +333,3 @@ class GaitEval:
         kd[0:3] = e[2]
         kd[3:6] = e[3]
         return target, kp * self._kp0, kd * self._kd0, q_ref
-
-
-def _clip(x, c):
-    """np.clip(x, -c, c) for one PYTHON float, without the dispatch. Only safe where the reference
-    also works in float64 -- anything carrying the spec's float32 keeps going through np.clip."""
-    return -c if x < -c else (c if x > c else x)

@@ -1,4 +1,4 @@
-"""RobotDaemon — the single thread that owns both CAN buses and runs the 200 Hz control loop.
+"""RobotDaemon — the single thread that owns both CAN buses and runs the 100 Hz control loop.
 
 Mirrors the proven loop structure of fixed_gait/play_trajectory.py:286-373 (drain -> compute ALL
 targets -> workspace-check up front -> command -> safety sweep) and the limp discipline of
@@ -63,8 +63,11 @@ MODES = ("LIMP", "MANUAL", "RECORD_GAIT", "RECORD_WS", "PLAYBACK", "MEASURE", "T
          "ESTOPPED")
 MODE_CODE = {m: i for i, m in enumerate(MODES)}
 blackbox.register_modes(MODES)            # so a recorded mode byte is decodable offline
-TICK_HZ = 200.0
-TELEMETRY_DIV = 10                        # ring/snapshot update every Nth tick (=> 20 Hz)
+TICK_HZ = 100.0
+# The drives broadcast a status frame every 5 ms whatever the loop does, so a drain meets two
+# frames per motor per tick, and the per-frame velocity filter differentiates over THIS period.
+FRAME_HZ = 200.0
+TELEMETRY_DIV = int(round(TICK_HZ / 20.0))  # ring/snapshot update every Nth tick (=> 20 Hz)
 MAX_TEMP_C = 80                           # run_hardware.py:102
 MAX_TRACK_ERR_DEG = 25.0                  # run_hardware.py:101 (position-command modes)
 DEFAULT_SLEW_DPS = 60.0
@@ -217,9 +220,9 @@ POLICY_DEADMAN_S = 1.5
 POLICY_TELEMETRY_STALE_S = 0.05
 POLICY_IMU_STALE_S = 0.2          # gravity is the ONLY fall detector; stale gravity is blind
 # A workspace refusal is frozen-then-killed rather than killed outright, on the governor's own
-# clamp-now-kill-if-persistent rule: 100 ms at 200 Hz, longer than a footfall and far shorter than
-# the 0.31 s fall timescale.
-POLICY_WS_PERSIST_TICKS = 20
+# clamp-now-kill-if-persistent rule: 100 ms, longer than a footfall and far shorter than the
+# 0.31 s fall timescale.
+POLICY_WS_PERSIST_S = 0.1
 # A drive holds its last force-control frame, and SET_CURRENT 0 is not the release for that mode.
 # After the last force frame, keep streaming the zero-gain frame for this long.
 POLICY_FORCE_RELEASE_S = 1.0
@@ -277,7 +280,7 @@ POLICY_UPRIGHT_GRAV = np.array([0.0, 0.0, -1.0])   # --no-imu fallback: faked up
 # 0.4, plus drain, measure, log and the black-box sample. Call it 3.0 ms of non-controller work.
 POLICY_TICK_OVERHEAD_MS = 3.0
 POLICY_PROBE_TICKS = 40           # enough to see past the first-call allocations
-POLICY_RATE_WINDOW = 200          # realised-rate window, ticks (1 s at 200 Hz)
+POLICY_RATE_WINDOW_S = 1.0        # realised-rate window
 POLICY_MIN_RATE_FRAC = 0.90       # kill below 90% of the bundle's own rate
 
 
@@ -290,7 +293,7 @@ def policy_max_step_ms(control_hz):
     return max(0.5, 1000.0 / float(control_hz) - POLICY_TICK_OVERHEAD_MS)
 
 
-POLICY_MAX_STEP_MS = policy_max_step_ms(TICK_HZ)     # 2.0 ms at the loop's own 200 Hz
+POLICY_MAX_STEP_MS = policy_max_step_ms(TICK_HZ)     # 7.0 ms at the loop's own 100 Hz
 
 # ===================================================================== the runaway that got out
 # 2026-09-01, first policy run on the real drives. Four of six drives faulted simultaneously with
@@ -417,14 +420,15 @@ MEASURE_FRAC = 0.8
 # 15 Hz because the drive now closes at ~4.7-5.0 Hz on both legs, so the interesting part of the
 # response -- gain crossover and the phase margin that goes with it -- lives at 5-12 Hz and was
 # entirely outside the old window. The measurement CANNOT see a margin it never excites.
-# Not higher than 15: the command stream and the log both run at ~200 Hz, so 15 Hz is already only
-# ~13 samples per cycle and the commanded "sine" degrades into a staircase above that.
+# Not higher than TICK_HZ / 13.3: the command stream and the log both run at the loop rate, and
+# below ~13 samples per cycle the commanded "sine" degrades into a staircase. That was 15 Hz on the
+# old 200 Hz loop; on the 100 Hz loop it is 7.5 Hz, which no longer reaches the top of that band.
 # NOTE this raises what a HAND-TYPED spec may ask for. measure_defaults() still sizes amplitude
 # against no-load speed and predicted tracking error, but a manual spec bypasses that sizing --
 # at 12 Hz, 15 deg peaks at 1131 deg/s, which is 90% of no-load for cam/thigh and ~192% for
 # abduction. Type the amplitude DOWN when you raise the frequency; the max_speed and max_track_err
 # trips are the net, and a latching trip costs the whole run.
-MEASURE_F_MAX = 15.0
+MEASURE_F_MAX = round(TICK_HZ / 13.3, 1)
 MEASURE_F_STATIC = 0.03                 # quasi-static: velocity ~ 0, every sample is gravity
 
 # Measured closed-loop response of the drive's POSITION loop (swept-sine on all six joints,
@@ -1185,14 +1189,14 @@ class RobotDaemon(threading.Thread):
                     self._meas["running"] = False       # keep the partial log; stop exciting
                 if self._pol is not None and self._pol["phase"] != "done":
                     # end it rather than drop it: an e-stop during a policy run is exactly when
-                    # the 200 Hz log is worth keeping
+                    # the full-rate log is worth keeping
                     self._policy_end(self._pol, now, self.estop_reason or "e-stop")
                 with self.lock:
                     self._manual_targets = {}
                     self._manual_override = False
 
             # 2) always drain feedback (telemetry works even limp)
-            self._drain(t_mono, dt)
+            self._drain(t_mono, 1.0 / FRAME_HZ)
 
             # 3) consume web requests
             self._consume_requests(now)
@@ -1242,7 +1246,7 @@ class RobotDaemon(threading.Thread):
 
     def _set_mode(self, mode, reason, **fields):
         """The ONE place the mode changes, so every transition is on the timeline with its reason
-        and gets a Tier B dump of the 200 Hz window around it."""
+        and gets a Tier B dump of the full-rate window around it."""
         old = self.mode
         self.mode = mode
         if old == mode:
@@ -1333,7 +1337,7 @@ class RobotDaemon(threading.Thread):
         return bb.trigger_dump(reason, cooldown_s=cooldown_s, **fields) if bb is not None else None
 
     def _bb_tick(self, t_mono, t_wall, dt_actual):
-        """One 200 Hz sample into the recorder, plus the two watchdogs that need every tick.
+        """One full-rate sample into the recorder, plus the two watchdogs that need every tick.
 
         Everything here is O(6) arithmetic on preallocated lists and one deque append — no locks,
         no allocation beyond the outgoing tuple, no file I/O. The tick already slips ~12%; this
@@ -2192,7 +2196,7 @@ class RobotDaemon(threading.Thread):
 
     # ---------------------------------------------------------------- joint identify
     # A plan costs two _safe_room scans -- about 40 _validate_pose evaluations -- and it is
-    # served from the process that runs the 200 Hz CAN loop, on the same GIL. It is also POLLED by
+    # served from the process that runs the CAN loop, on the same GIL. It is also POLLED by
     # the panel, and on 2026-08-29 a stale browser tab polled it 4x a second. The client is rate
     # limited now, but a client is not a safety boundary: memoise the answer briefly so no caller
     # can turn a poll into control-loop jitter. Keyed on the pose, so it still tracks a joint that
@@ -2529,7 +2533,7 @@ class RobotDaemon(threading.Thread):
 
         Runs on the HTTP thread on purpose: loading a bundle, building the nets and scanning the
         workspace for the stance are tens of milliseconds of work, and none of it may happen inside
-        the 200 Hz tick. What crosses into the CAN thread is finished objects only."""
+        the control tick. What crosses into the CAN thread is finished objects only."""
         info = {}
         busy = self._policy_busy_with()
         if busy:
@@ -2565,11 +2569,11 @@ class RobotDaemon(threading.Thread):
 
         # ---- the control rate ------------------------------------------------------------------
         # control_dt is a CONSTANT inside both control laws, so the loop must give the bundle its
-        # own rate exactly -- but it does not have to BE that rate. The CAN loop runs at 200 Hz for
-        # every other mode, and a 100 Hz bundle (walk_v2) simply gets every second tick, with the
-        # frame it produced re-sent on the tick in between so the drives keep hearing from us at
-        # the rate they are used to. An integer ratio only: 200/150 is not a control law, it is a
-        # rounding error with gains.
+        # own rate exactly. The loop runs at TICK_HZ (100 Hz), a v2 bundle's own rate, so v2 gets
+        # every tick and the whole 10 ms. A slower bundle gets every Nth tick, with the frame it
+        # produced re-sent on the ticks in between; a v1 bundle (200 Hz) is faster than the loop
+        # and is refused. An integer ratio only: 100/66.7 is not a control law, it is a rounding
+        # error with gains.
         hz = 1.0 / float(b.control_dt)
         decim = int(round(TICK_HZ / hz))
         if decim < 1 or abs(TICK_HZ / decim - hz) > 0.5:
@@ -2634,9 +2638,9 @@ class RobotDaemon(threading.Thread):
                            "allow_uncalibrated_thermal.".format(", ".join(uncal))), info
         try:
             # dt is the CONTROL period, not the loop period: the observer is stepped once per
-            # control tick (`gov.observe` has exactly one caller). Give it the loop's 5 ms while
-            # it is only stepped every 10 and it integrates half the heating that happened --
-            # the one error in this file that would not be conservative.
+            # control tick (`gov.observe` has exactly one caller). Give it the loop period while it
+            # is only stepped every second tick and it integrates half the heating that happened
+            # -- the one error in this file that would not be conservative.
             thermal = TH.MotorThermalModel(chain, dt=ctrl_dt, t_amb=amb,
                                            names=list(JM.MODEL_ACTUATORS),
                                            allow_uncalibrated=True)
@@ -2981,7 +2985,7 @@ class RobotDaemon(threading.Thread):
                  rate_t0=None, rate_n=0, rate_hz=float(p["ctrl_hz"]),
                  run_name=b.meta.get("run"), checkpoint=b.meta.get("checkpoint"),
                  imu_age=0.0, tel_age=0.0,
-                 # the loop is 200 Hz; a 100 Hz bundle gets every `decim`-th tick and the frame it
+                 # a bundle slower than the loop gets every `decim`-th tick and the frame it
                  # produced is re-sent on the ones in between (see _policy_resend)
                  sub=0, resend=None, commits=0, run_since=None, run_flag_s=0.0,
                  braking=False, brake_frac=0.0, brake_s=0.0,
@@ -3064,10 +3068,10 @@ class RobotDaemon(threading.Thread):
     def _policy_resend(self, p):
         """Re-stream the last force-control frame, byte for byte.
 
-        This is the loop tick BETWEEN two control ticks of a bundle slower than 200 Hz. The drive
+        This is the loop tick BETWEEN two control ticks of a bundle slower than the loop. The drive
         holds its last force-control command either way, so this is not what makes the command
         continuous -- what it buys is that a policy run looks exactly like every other mode on the
-        bus (six frames every 5 ms), which is what the telemetry watchdogs, the flight recorder and
+        bus (six frames every loop tick), which is what the telemetry watchdogs, the flight recorder and
         anyone with a CAN analyser expect to see. The payload is the one already packed: nothing is
         recomputed here, so an off tick cannot produce a command a control tick did not."""
         frames = p.get("resend")
@@ -3159,7 +3163,7 @@ class RobotDaemon(threading.Thread):
         p["n"] = n + 1
 
     def _tick_policy(self, now, _loop_dt):
-        # _loop_dt is the 200 Hz loop period and is deliberately not used: below the decimation
+        # _loop_dt is the loop period and is deliberately not used: below the decimation
         # gate, `dt` is the BUNDLE's control period, which is what every per-step constant in the
         # control law, the observer and the governor was dimensioned in.
         p = self._pol
@@ -3192,9 +3196,10 @@ class RobotDaemon(threading.Thread):
                     return
 
         # ---- the decimation gate ----------------------------------------------------------------
-        # The loop is 200 Hz and the control law is the bundle's own rate. On an off tick the last
+        # The loop is TICK_HZ and the control law is the bundle's own rate. On an off tick the last
         # frame is re-streamed and nothing else happens: no observation is built, no action is
-        # computed, no state advances. Anything that must run at 200 Hz belongs ABOVE this line.
+        # computed, no state advances. Anything that must run at the full loop rate belongs ABOVE
+        # this line.
         p["sub"] += 1
         if p["sub"] < p["decim"]:
             self._policy_resend(p)
@@ -3384,7 +3389,7 @@ class RobotDaemon(threading.Thread):
         if p["rate_t0"] is None:
             p["rate_t0"], p["rate_n"] = now, 0
         p["rate_n"] += 1
-        if p["rate_n"] >= max(1, int(round(POLICY_RATE_WINDOW * hz_nom / TICK_HZ))):
+        if p["rate_n"] >= max(1, int(round(POLICY_RATE_WINDOW_S * hz_nom))):
             el = max(now - p["rate_t0"], 1e-9)
             p["rate_hz"] = p["rate_n"] / el
             p["rate_t0"], p["rate_n"] = now, 0
@@ -3447,10 +3452,8 @@ class RobotDaemon(threading.Thread):
                 p["ws_blocked_total"] += 1
                 v.target = p["last_ws_target"].copy()
                 self._last_reject = ws_why
-                # a DWELL, so it is a time and not a count: POLICY_WS_PERSIST_TICKS is the 100 ms
-                # this was tuned to expressed at 200 Hz, and a 100 Hz bundle gets half the ticks
-                # for the same 100 ms
-                if p["ws_block"] * 1000.0 / hz_nom >= POLICY_WS_PERSIST_TICKS * 1000.0 / TICK_HZ:
+                # a DWELL, so it is a time and not a count
+                if p["ws_block"] >= POLICY_WS_PERSIST_S * hz_nom - 1e-9:
                     gov.kill("the policy has been commanding outside the safe workspace for "
                              "{:.0f} ms: {}".format(p["ws_block"] * 1000.0 / hz_nom, ws_why),
                              hard=False)
@@ -3612,7 +3615,7 @@ class RobotDaemon(threading.Thread):
         self._measure_log(t, cmd_row)
 
     def _measure_log(self, t, cmd_row):
-        """Append one high-rate (200 Hz) row: t + per-motor commanded/measured pos, speed, current."""
+        """Append one high-rate (loop-rate) row: t + per-motor commanded/measured pos, speed, current."""
         meas = self._meas
         posn = [np.nan] * paths.N_MOTORS
         posr = [np.nan] * paths.N_MOTORS

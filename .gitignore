@@ -96,3 +96,10 @@ walk_v3/logs/
 walk_v3/results/
 walk_v3/model/meshes/
 walk_v3/**/__pycache__/
+
+# walk_v4 (walk_v3 without the reflexes): same layout, same rule
+walk_v4/runs/
+walk_v4/logs/
+walk_v4/results/
+walk_v4/model/meshes/
+walk_v4/**/__pycache__/

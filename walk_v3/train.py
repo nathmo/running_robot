@@ -281,7 +281,7 @@ def main():
             # place that was written down was a csv column nobody read. If DR is not happening, the
             # log should say so while the run is still cheap to kill.
             print(f"               dr {row.get('curriculum/dr_scale', 0):.3f} "
-                  f"bringup {row.get('curriculum/bringup_scale', 0):.3f} "
+                  f"bringup {'off' if not cfg.bringup_enable else format(row.get('curriculum/bringup_scale', 0), '.3f')} "
                   f"cmd [{row.get('curriculum/cmd_lo', 0):.2f},{row.get('curriculum/cmd_hi', 0):.2f}] "
                   f"zero {row.get('curriculum/cmd_zero_p', 0):.2f} "
                   f"jit {row.get('curriculum/ctrl_jitter_ms', 0):.2f}ms "

@@ -492,7 +492,7 @@ class TestBurstExciter:
         a single twitch is backlash — see TestSlipDebounce."""
         ex = TE.BurstExciter(_env(), ramp_s=0.0)
         done = False
-        for k in range(TE.BLOCKED_SLIP_TICKS + 5):
+        for k in range(int(round(TE.BLOCKED_SLIP_S / 0.005)) + 5):
             a, done, ab = ex.step(k * 0.005, 0.0, TE.BLOCKED_SLIP_ERPM + 50.0, 30, 0, 0.0)
             if done:
                 break
@@ -641,7 +641,7 @@ class TestSlipDebounce:
     def test_sustained_motion_still_aborts(self):
         ex = TE.BurstExciter(_env(), ramp_s=0.0)
         done = False
-        for k in range(TE.BLOCKED_SLIP_TICKS + 5):
+        for k in range(int(round(TE.BLOCKED_SLIP_S / 0.005)) + 5):
             _a, done, ab = ex.step(k * 0.005, 0.0, TE.BLOCKED_SLIP_ERPM + 500.0, 30, 0, 0.0)
             if done:
                 break
@@ -721,13 +721,13 @@ class TestFreeRotorSine:
         ex = self.free()
         e = ex.env
         far = e.centre + e.sine_amp + TE.FREE_DRIFT_MARGIN_DEG + 2.0
-        for k in range(TE.FREE_DRIFT_TICKS - 2):            # brief excursion: loop overshoot
+        for k in range(int(round(TE.FREE_DRIFT_S / 0.005)) - 2):            # brief excursion: loop overshoot
             _w, done, ab = ex.step_sine(0.1 + k * 0.005, far, 0.0, 30, 0, 0.0, i_meas=e.amps)
             assert not done, ab
         _w, done, ab = ex.step_sine(0.5, e.centre, 0.0, 30, 0, 0.0, i_meas=e.amps)
         assert not done                                     # back inside: counter resets
         done = False
-        for k in range(TE.FREE_DRIFT_TICKS + 2):            # sustained: something is on the shaft
+        for k in range(int(round(TE.FREE_DRIFT_S / 0.005)) + 2):            # sustained: something is on the shaft
             _w, done, ab = ex.step_sine(0.6 + k * 0.005, far, 0.0, 30, 0, 0.0, i_meas=e.amps)
             if done:
                 break

@@ -72,9 +72,12 @@ def test_rotation_and_budget_enforcement(tmp_path):
     b.start()
     try:
         t0 = time.monotonic()
-        for i in range(4000):
+        # sized in RECORDS on disk (400 of them, ~40 per writer batch), so the segment and budget
+        # arithmetic below does not depend on the Tier A decimation
+        k = blackbox.TIER_A_DIV
+        for i in range(400 * k):
             b.push_sample(row(t0 + i * 0.005))
-            if i % 400 == 0:
+            if i % (40 * k) == 0:
                 time.sleep(0.12)
         drain_writer(b, cycles=12)
     finally:
@@ -96,7 +99,7 @@ def test_rotation_and_budget_enforcement(tmp_path):
 
 
 def test_tier_a_is_decimated_not_full_rate(tmp_path):
-    """The whole point of the tiering: 200 Hz never touches the disk continuously."""
+    """The whole point of the tiering: the full rate never touches the disk continuously."""
     b = blackbox.BlackBox(directory=str(tmp_path), heartbeat_s=99, space_check_s=99)
     b.start()
     try:
@@ -107,7 +110,8 @@ def test_tier_a_is_decimated_not_full_rate(tmp_path):
     finally:
         b.stop()
     h, rec = blackbox.read_segment(tmp_path / files_of(str(tmp_path), blackbox.SEG_EXT)[0])
-    assert 90 <= len(rec) <= 110, f"expected ~1/10 of 1000 samples on disk, got {len(rec)}"
+    n = 1000 // blackbox.TIER_A_DIV
+    assert 0.9 * n <= len(rec) <= 1.1 * n, f"expected ~{n} of 1000 samples on disk, got {len(rec)}"
     assert h["rate_hz"] == pytest.approx(20.0)
     assert h["motor_names"] == list(paths.MOTOR_NAMES)          # right leg first, explicitly
 
@@ -166,7 +170,7 @@ def test_dump_contains_genuine_pre_trigger_history(bb, tmp_path):
 
     h, rec = blackbox.read_segment(tmp_path / name)
     assert h["tier"] == "B"
-    assert h["rate_hz"] == pytest.approx(200.0)
+    assert h["rate_hz"] == pytest.approx(blackbox.RING_HZ)
     assert h["n_pre_trigger"] > 0
     assert h["pre_trigger_s"] >= 10.0, f"only {h['pre_trigger_s']} s of pre-trigger history"
     t_trig = h["trigger"]["t_trig_mono"]
@@ -260,9 +264,10 @@ def test_reader_round_trip_and_torn_tail(bb, tmp_path):
 
     seg = tmp_path / files_of(str(tmp_path), blackbox.SEG_EXT)[0]
     h, rec = blackbox.read_segment(seg)
-    assert len(rec) == 50                                       # 500 / TIER_A_DIV
-    assert rec["pos_raw"][1, 0] == pytest.approx(1.5 * 10, abs=1e-3)
-    assert rec["cmd_raw"][1, 0] == pytest.approx(1.5 * 10 + 0.25, abs=1e-3)
+    k = blackbox.TIER_A_DIV
+    assert len(rec) == 500 // k
+    assert rec["pos_raw"][1, 0] == pytest.approx(1.5 * k, abs=1e-3)
+    assert rec["cmd_raw"][1, 0] == pytest.approx(1.5 * k + 0.25, abs=1e-3)
     assert rec["mode"][0] == 1
 
     frame = blackbox_read.to_frame(rec)
@@ -592,7 +597,7 @@ def test_acceptance_reproduces_the_2026_08_10_incident(robot):
     assert dumps, "the incident produced no Tier B dump"
     f, h = max(dumps, key=lambda x: x[1]["pre_trigger_s"])
     assert h["pre_trigger_s"] >= 10.0, f"only {h['pre_trigger_s']} s of pre-trigger data"
-    assert h["rate_hz"] == pytest.approx(200.0)
+    assert h["rate_hz"] == pytest.approx(blackbox.RING_HZ)
     assert h["config_hash"] and h["config"]["calibration"]["stage"] == "complete"
 
     hh, rec = blackbox.read_segment(os.path.join(bdir, f))

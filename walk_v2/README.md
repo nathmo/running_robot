@@ -352,6 +352,8 @@ t = 5..25 s, 79 consecutive strides. `tools/gait_figures.py` draws three figures
 | `results/gait_cycle.png` | the gait relative to the base: foot path over an averaged cycle with stance picked out, stance bars, foot height |
 | `results/gait_authors.png` | feedforward vs reflex vs residual per joint over two strides, plus their peak-to-peak amplitudes |
 | `results/gait_fourier.png` | the joint angle over time: latched Fourier alone, the full command, and what the joint actually does |
+| `results/gait_ee_ghost.png` | the gait in end-effector space: both foot paths in the base frame over the robot itself, drawn translucent at left mid-stance, orthographic side and rear views (needs a recording with `qpos_full`, i.e. made after 2026-09-16) |
+| `results/gait_actuator_space.png` | the gait in actuator coordinates on top of the three things that claim to bound them: the MJCF box, the 4-bar assembly band, and the safe band recorded by hand on the robot. Drawn by `tools/gait_actuator_space.py`, which also re-fits the deploy calibration and prints the verdict |
 | `results/gait_shape_s2_88M.png` | the raw diagnostic overlay (78 cycles per joint) |
 
 One thing only the last figure makes obvious: **the PD does not track the command.** Steady-state
@@ -379,6 +381,38 @@ stronger than it looks:
 3.5 m/s (~0.87 m per stride). Joint p-p: thigh 41.6 / 38.1 deg, cam 29.6 / 26.7, hip-roll 6.1 / 4.8.
 Foot path in the base frame 45.7 x 14.5 cm (L) and 41.0 x 12.5 cm (R) -- **visibly left-right
 asymmetric**, the same asymmetry the bring-up envelope shows as a one-sided roll tolerance.
+
+**Does the gait fit the actuators?** `tools/gait_actuator_space.py` draws the cam/thigh loop on top
+of the three different things that claim to bound it, and prints the verdict. Against the MODEL it
+fits with room to spare: the gait spends **7-9 % of the hip-roll range, 16-18 % of cam, 34-36 % of
+thigh**, clips no tick, keeps a worst commanded margin of +28.8 deg, and is **100 % inside the 4-bar
+assembly band** -- the band solved from this plant directly (Gauss-Newton on the `connect` equality,
+BFS-seeded to stay on one assembly branch; it agrees with the webui `fk_lut.npz` band at IoU 0.993).
+
+Against the ROBOT the answer needs a calibration, and the calibration is where the finding is:
+* **`robot/deploy/deploy_map.json` is stale.** It was fitted 2026-08-29, but
+  `session_calibration.json` was re-captured 2026-09-01 (`zero_epoch 2`) and the normalized frame is
+  anchored to that zero. It still reads `verified: true` on all six joints, so `check_ready()`
+  passes on a frame that no longer exists. Re-fitting by fklut's own criterion (maximise the
+  fraction of hand-recorded cells landing inside the assembly band) gives **cam +1 / -9.0 deg,
+  thigh -1 / +4.0 (L), +5.0 (R) at coverage 1.000**, runner-up sign combo 0.848. The stored offsets
+  score 0.814 (L) and 0.303 (R).
+* **The right leg is missing its mirror.** The model's right cam/thigh axes are (0,-1,0) against the
+  left's (0,+1,0), so a right-leg model angle is the NEGATIVE of the same pose in the left-leg frame
+  the LUT and the band live in. `make_deploy_map.py` transcribes fklut's per-side fit straight
+  across without that flip -- the exact failure `robot/deploy/jointmap.py`'s docstring records. The
+  gait is 0.0 % inside the recorded band under the stored map, 20.2 % with the mirror alone, and
+  **93.5 % with mirror + re-fit**.
+* **`workspace_active.npz` cannot verify any calibration.** On that legacy 79x63 deg patch all four
+  sign combos reach coverage 1.000 -- the fit is degenerate. Only the full sweep
+  `data/workspaces/workspace_full_default.npz` (~12 k cells, the full crank) is decisive, so any
+  "verified at coverage 1.00" claim has to name the file it fitted.
+
+With the calibration corrected the gait **does** fit the machine: **97.5 % (L) / 93.5 % (R)** of
+ticks inside the hand-recorded safe band and 100 % inside the abduction band, and every escaping
+tick is in flight, at most 2.3 deg past the band edge and 2.8 deg from a hand-swept sample -- inside
+the 3.0 deg safety erosion, i.e. poses the operator did demonstrate. Before any hardware run of a v2
+policy: re-zero, re-fit fklut, re-run `make_deploy_map.py`, and fix the right-leg mirror.
 
 **The leg executes a sinusoid, whatever the spec asks for.** Harmonic share of the AC power:
 

@@ -4,7 +4,7 @@ This is a line-by-line mirror of `walk_v2/env.py DashEnvV2._step_one` with the p
 Everything that shapes the observation or the command is reproduced in the same ORDER, because the
 order is load-bearing. The four places a naive port goes wrong, all of them silent:
 
-  * THE LATCH. 44 of the 50 action dims are a gait SPEC that reaches the generator only on a tick
+  * THE LATCH. 41 of the 47 action dims are a gait SPEC that reaches the generator only on a tick
     whose observation carried `commit = 1`; on every other tick they are thrown away and the spec
     from the last commit is replayed. The clock wrapping is what sets `commit` for the NEXT tick,
     and the flag the policy reads is the last entry of the observation. Latch on every tick and you
@@ -105,6 +105,22 @@ import numpy as np
 import gait_v2 as gait
 
 TWO_PI = 2.0 * np.pi
+
+
+def heading_rate(gyro, grav, euler):
+    """The rate integrated into the heading channel -- walk_v4/env.py `heading_rate`, in numpy.
+
+    v3 bundles integrate body gyro z. That is the heading rate only while the body is level: on a
+    runner leaning 2 deg with 2 deg of roll it drifted 10 deg from the true heading in 15 s (sim,
+    identical with sensor noise off). v4 bundles (`heading_euler` in the manifest) integrate the ZYX
+    Euler yaw rate (w_y sin r + w_z cos r) / cos p, roll and pitch from the measured gravity."""
+    if not euler:
+        return float(gyro[2])
+    g = np.asarray(grav, float)
+    g = g / max(float(np.linalg.norm(g)), 1e-6)
+    sp = float(np.clip(g[0], -0.95, 0.95))
+    roll = float(np.arctan2(-g[1], -g[2]))
+    return (float(gyro[1]) * np.sin(roll) + float(gyro[2]) * np.cos(roll)) / np.sqrt(1.0 - sp * sp)
 
 # Seconds a 'speed' command takes to cross the WHOLE commandable range when the bundle does not
 # record the rate the trainer moved it at. A number, not a philosophy: two seconds is slow enough
@@ -248,7 +264,8 @@ class PolicyControllerV2:
         self.s_heading = float(s.get("heading", 0.0)) if isinstance(s, dict) else 0.0
         self.has_heading = "heading" in s and int(m["frame_dim"]) > 33
         self.heading_cap = float(m.get("heading_cap_rad", 0.5 * np.pi))
-        self.pitch_lp = float(m["pitch_reflex_rate_lp"])
+        # v4 bundles integrate the Euler yaw rate; v3 bundles (no key) keep integrating gyro z
+        self.heading_euler = bool(m.get("heading_euler", False))
 
         # the task channel. Three command kinds, one per objective -- see the module docstring.
         self.objective = str(m["objective"])
@@ -310,7 +327,6 @@ class PolicyControllerV2:
         # heading is measured from where the operator was pointing when the policy started: zero
         # here, and zero again on any `zero_heading()` the operator asks for
         self._yaw_est = 0.0
-        self._reflex_prate = 0.0
         self._phi_td_hat = np.array([0.0, np.pi])
         self._resynced = np.zeros(2, bool)
         self._grounded_prev = np.zeros(2, bool)
@@ -466,12 +482,12 @@ class PolicyControllerV2:
     def _proprio(self, motor_pos, motor_vel, motor_tau, grav, gyro):
         """One measurement frame, in the exact layout of DashEnvV2._frame.
 
-        There is no sensor-noise model here: on the robot the measurement IS the noisy one. The
-        reflexes below read the same measured gravity that goes into this frame, whereas the sim
-        reads a clean copy for the reflexes and a corrupted one for the observation. That is an
-        inherent sim2real difference and it sits inside the band this run trained against."""
+        There is no sensor-noise model here: on the robot the measurement IS the noisy one, while
+        the sim corrupts a clean copy. That is an inherent sim2real difference and it sits inside
+        the band this run trained against. Since v4 deleted the reflexes this frame is the ONLY
+        route a measurement takes into the command -- nothing downstream reads a sensor."""
         self._lp_yaw = self.lp_yaw_a * self._lp_yaw + (1.0 - self.lp_yaw_a) * float(gyro[2])
-        self._yaw_est += float(gyro[2]) * self.control_dt
+        self._yaw_est += heading_rate(gyro, grav, self.heading_euler) * self.control_dt
         tail = []
         if self.has_heading:
             # wrap to (-pi, pi] then clip, matching walk_v3/env.py exactly: the policy was trained
@@ -499,7 +515,7 @@ class PolicyControllerV2:
         self._history[-1] = frame
 
     def _obs(self):
-        """history (stride-sampled, newest last) ++ once-block [spec 44, task 2, commit 1]."""
+        """history (stride-sampled, newest last) ++ once-block [spec 41, task 2, commit 1]."""
         run, d = self._task()
         self._once[:self.spec_dim] = self._spec
         self._once[self.spec_dim] = run
@@ -603,7 +619,7 @@ class PolicyControllerV2:
         drive = action if override_action is None else np.clip(
             np.asarray(override_action, np.float32), -1.0, 1.0)
 
-        # 3) THE LATCH: the 44 spec dims commit only on a commit tick; the 6 residual dims are live
+        # 3) THE LATCH: the 41 spec dims commit only on a commit tick; the 6 residual dims are live
         commit = self._commit
         if commit:
             self._spec = drive[:self.spec_dim].copy()
@@ -620,30 +636,21 @@ class PolicyControllerV2:
             self._brake_i += 1
         freq = float(gait.frequency(spec[gait.I_FREQ], self.gp))
 
-        # 4) the reflexes, on the measurement just taken. The pitch rate is EMA-filtered with the
-        #    state carried across ticks; alpha 0 means the raw rate (both configs exist).
-        roll, roll_rate = float(grav[1]), float(gyro[0])
-        pitch, pitch_rate = float(grav[0]), float(gyro[1])
-        if self.pitch_lp > 0.0:
-            self._reflex_prate = (self.pitch_lp * self._reflex_prate
-                                  + (1.0 - self.pitch_lp) * pitch_rate)
-            pitch_rate = self._reflex_prate
-
-        # 5) the generator, at the CURRENT phase
-        target, kp, kd, _q_ref = self.gait_eval(spec, residual, self._phase,
-                                                roll, roll_rate, pitch, pitch_rate)
+        # 4) the generator, at the CURRENT phase. The measurement does not enter here: v4 deleted
+        #    both reflexes from the control law, so the ONLY path from this tick's IMU to this
+        #    tick's target is the policy's own residual, through the observation built above.
+        target, kp, kd, _q_ref = self.gait_eval(spec, residual, self._phase)
         target_prefilter = target.copy()
 
-        # 6) the actuation chain the sim runs before the substeps, in the same order: joint range,
-        #    then the no-load slew cap. There is NO action filter in v2 (walk_mit's EMA is gone --
-        #    the pitch reflex was retuned for its absence).
+        # 5) the actuation chain the sim runs before the substeps, in the same order: joint range,
+        #    then the no-load slew cap. There is NO action filter in v2 (walk_mit's EMA is gone).
         tgt = np.minimum(np.maximum(target, self.q_lo), self.q_hi)
         saturated = bool(np.any(tgt != target))
         tgt, tvel = gait.slew_limit(tgt, self._prev_target, self._prev_target_vel,
                                     self.vel_limit, self.accel_limit, self.control_dt)
         self._prev_target, self._prev_target_vel = tgt.copy(), tvel
 
-        # 7) advance the clock; wrapping is the NEXT tick's commit flag
+        # 6) advance the clock; wrapping is the NEXT tick's commit flag
         self._commit = self._advance_clock(freq)
         self._prev_residual = residual
         self.n_steps += 1
