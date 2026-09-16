@@ -115,9 +115,11 @@ MEASURED_KG = {
     # is the dominant cost term for a runner, so this is the number to replace first.
     "leg_L": ("leg_L", [], None), "leg_R": ("leg_R", [], None),
 }
-# CAD said 405 g.  The parts it replaces (shin 222 g CAD / 324 g weighed, foot 259 g CAD / 222 g
-# weighed) came in 13.5% heavier than CAD in total, so 405 g * 1.135.  PROVISIONAL -- weigh it.
-LEG_KG = 0.460
+# The merged leg/foot's CAD mass, used as-is on the user's instruction.  Every other segment here
+# is a weighed figure and the CAD densities were wrong for them by up to 5x, so this one number is
+# on a different footing from the rest -- flagged rather than hidden, because distal mass is the
+# dominant cost term for a runner and it is the first thing to replace with a scale reading.
+LEG_KG = 0.405
 LEG_KG_IS_MEASURED = False
 
 # Motor mounting points, in the frame of the body they are welded to (torso for the hip-roll
@@ -151,24 +153,42 @@ ROD_TIP = {"L": np.array([0.000743214, 0.007, -0.397969]),
 LOOP_SOLREF = "0.002 1"
 LOOP_SOLIMP = "0.999 0.9999 0.0001"
 
-# Leg-axis series spring.  The robot's 5 mm sink under one body weight is structural compliance
-# along the leg axis, not loop yield (a vertical stance load barely loads the four-bar -- the leg
-# is near full reach and the load path is axial).  It is modelled explicitly as a prismatic joint
-# at the sole along the leg axis.  MEASURED ON THE PREVIOUS LEG; the merged leg is a different
-# structure and this wants re-measuring.
-LEG_SPRING_K = 148.5 / 0.005          # N/m, foot-referred: 5 mm at one body weight on one leg
-LEG_SPRING_B = 600.0                  # N s/m, zeta ~0.45 against the robot's mass in stance
-LEG_SPRING_RANGE = 0.03               # m, hard stop either way
+# There is NO leg-axis series spring.  The previous plant carried one because the old leg -- a
+# carbon shin plus a 249 g ankle-spring assembly -- was measured to sink 5 mm under one body
+# weight.  The merged rigid leg replaces both of those parts and has no such compliance, so the
+# spring, its sprung shell and the machinery that kept it numerically stable are all gone.
 
 # Contact.  Two spheres per foot, at the two ends of the flat sole, positioned by
-# _discover_sole() from the mesh rather than by hand.
-SOLE_SPHERE_R = 0.012
-FRICTION = "1 0.008 0.001"
+# _sole_geometry() from the mesh rather than by hand.
+# The sole is a 3 mm TPU pad glued under the CAD's sole face, so ground contact happens 3 mm
+# beyond the mesh.  It is modelled as two BOXES per foot -- front half and rear half of the pad --
+# rather than as spheres.  That matters: a box-plane contact gives four corner points, so the foot
+# has a real support polygon and the centre of pressure can travel across it.  Two spheres at the
+# pad's ends are a LINE contact, and with one the solver loaded only the front pair, pinning the
+# centre of pressure at the toe and tipping the robot however well its centre of mass was placed.
+# Splitting the pad in two keeps a toe-down / heel-down contact bit per foot for the gait reward.
+SOLE_PAD_M = 0.003
+FRICTION_MU = 0.7                      # floor friction is at least this; DR samples upward
+FRICTION = f"{FRICTION_MU} 0.005 0.0001"
+CONTACT_CONDIM = 3                     # a box already supplies the patch; no faked rolling friction
 CONTACT_SOLREF = "0.01 1"
 CONTACT_SOLIMP = "0.95 0.99 0.001"
 
-# Joint targets the gait is centred on (the homed-zero convention, see ZERO_SHIFT).
-NOMINAL_CTRL = np.array([0.0, 0.0, 0.12, 0.0, 0.0, -0.12])
+# Nominal stance.  The leg is rigid from knee to sole, so the sole's angle to the ground is not a
+# free variable -- it is fixed by cam and thigh.  The nominal posture is therefore SOLVED, not
+# chosen: find (cam, thigh) that lays the sole flat, and among that one-parameter family take the
+# tallest stance.  solve_flat_stance() does it; NOMINAL_CTRL below is its answer, cached so a
+# build is reproducible without the solve, and re-checked on every build.
+NOMINAL_CTRL = np.array([0.0, 0.1265, -0.2025, 0.0, -0.1265, 0.2025])
+
+# Gains for the POSE SOLVER only -- not the robot's stance gains.  Stiff enough that gravity sag
+# is negligible, which is free in a quasi-static relaxation where velocities are zeroed each step,
+# and unclipped because this is a kinematic tool rather than a claim about the motors.
+KEYFRAME_BITE_M = 0.0005     # contact penetration at the keyframe, so all four spheres engage
+POSE_KP = (2.0e4,) * 6
+POSE_KD = (2.0e2,) * 6
+STANCE_TILT_TOL_DEG = 1.0
+FLAT_TOL_DEG = STANCE_TILT_TOL_DEG   # the same bar while solving and when re-checking
 
 BASE_JOINTS = [("base_x", "slide", "1 0 0"), ("base_y", "slide", "0 1 0"),
                ("base_z", "slide", "0 0 1"), ("base_roll", "hinge", "1 0 0"),
@@ -217,6 +237,17 @@ def _joint_key(name):
     return name.rsplit("_", 1)[0]
 
 
+def mirror_targets(cam, thigh, hip_roll=0.0):
+    """Joint targets for a left/right symmetric posture, in ACTUATED order.
+
+    The right leg's joint axes point along -y where the left's point along +y, so a mirror-image
+    pose needs the right commands NEGATED, not copied: reflecting a rotation about +y through the
+    sagittal plane gives a rotation about -y of the same sign, which the right joint reads as the
+    opposite number.  Verified in the smoke test by mirroring the whole posture and comparing the
+    two legs' world poses."""
+    return np.array([hip_roll, cam, thigh, -hip_roll, -cam, -thigh])
+
+
 # =============================================================================================
 # stage 1 -- read the CAD, prove the loops close, cut them
 # =============================================================================================
@@ -263,14 +294,29 @@ def check_loops_close(verbose=True):
     return m, d, worst
 
 
-def _loop_anchors(m, d):
-    """The rod's outboard hinge expressed in the LEG's frame, read off the CAD's closed pose."""
+def _loop_anchors(m, d, symmetric=True, verbose=True):
+    """The rod's outboard hinge expressed in the LEG's frame, read off the CAD's closed pose.
+
+    Derived rather than measured: the rod body is bit-identical to the previous plant, so its
+    outboard hole is known, and the CAD's exported pose is a closed assembly, so mapping that
+    point into the leg frame gives the matching hole on the leg.  It lands 3 mm inside the mesh
+    surface on both sides, which is what a hinge-hole centre should look like.
+
+    The two sides come out 1.4 mm apart because the CAD was saved with the left and right cams
+    0.09 deg from mirror-symmetric, and that pose error lands in the derived anchor.  The two leg
+    parts are mirror images of each other, so the anchor is mirrored from the left rather than
+    derived twice; left as-is it tilts the robot enough to start every episode on one foot."""
     out = {}
     for side in "LR":
         rod = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"Pushrod{'Left' if side=='L' else 'Right'}NCS-v1")
         leg = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"FootFlat{'Left' if side=='L' else 'Right'}NCS-v1")
         w = d.xpos[rod] + d.xmat[rod].reshape(3, 3) @ ROD_TIP[side]
         out[side] = d.xmat[leg].reshape(3, 3).T @ (w - d.xpos[leg])
+    if verbose:
+        print(f"  [loop] anchors differ L vs mirrored R by "
+              f"{np.linalg.norm(out['L'] - out['R'] * np.array([1, -1, 1])) * 1000:.2f} mm")
+    if symmetric:
+        out["R"] = out["L"] * np.array([1.0, -1.0, 1.0])
     return out
 
 
@@ -455,23 +501,49 @@ def _apply_joint_dynamics(root):
                                       _fa(j.get("pos", "0 0 0")))))
 
 
-def _add_leg_spring(root, side, k):
-    """A prismatic joint at the leg's distal end along the leg axis: the structural compliance
-    that produces the measured 5 mm stance sink.  Placed in the leg body, so it sits in series
-    between the four-bar and the ground."""
-    leg = next(b for b in root.iter("body") if b.get("name") == f"leg_{side}")
-    j = ET.Element("joint")
-    j.set("name", f"leg_spring_{side}")
-    j.set("type", "slide")
-    j.set("axis", "-1 0 0")          # the leg runs along -x in its own frame; sole at -x
-    j.set("pos", "0 0 0")
-    j.set("limited", "true")
-    j.set("range", f"{-LEG_SPRING_RANGE:g} {LEG_SPRING_RANGE:g}")
-    j.set("stiffness", f"{k:.6g}")
-    j.set("damping", f"{LEG_SPRING_B:g}")
-    j.set("springref", "0")
-    j.set("armature", "0.02")
-    leg.insert(0, j)
+def _add_sole_geoms(root, sole, stance_R, pad=SOLE_PAD_M):
+    """The sole pad: two boxes per foot, front half and rear half, on the leg itself.
+
+    A box-plane contact gives four corner points, so each foot has a genuine support polygon and
+    the centre of pressure can move across it.  Spheres at the pad's two ends cannot do that --
+    they are a line contact, and the solver loaded only the front pair, pinning the centre of
+    pressure at the toe and tipping the robot over however well its centre of mass was placed.
+    Splitting the pad front/rear keeps one contact bit per half, so toe-down and heel-down stay
+    distinguishable for the gait reward.
+
+    The pad is the 3 mm TPU layer glued under the CAD's sole face, so it sits OUTSIDE the mesh:
+    ground contact happens 3 mm beyond the surface the stance was solved against."""
+    for side in "LR":
+        leg = next(b for b in root.iter("body") if b.get("name") == f"leg_{side}")
+        o = sole[side]
+        n = np.asarray(o["normal"], float)          # unit, points at the ground
+        n = n / np.linalg.norm(n)
+        a, b = np.asarray(o["a"], float), np.asarray(o["b"], float)
+        # Toe and heel by where they sit fore-aft in the nominal stance.  Ordering by distance
+        # from the knee gets it backwards on this leg: the foot bracket hangs forward of the
+        # shin, so the sole end further down the leg is the REAR of the foot.
+        if (stance_R[side] @ a)[0] < (stance_R[side] @ b)[0]:
+            a, b = b, a                              # a = toe end, b = heel end
+        u = b - a
+        length = float(np.linalg.norm(u))
+        u = u / length
+        w = -n                                       # box local z: up, into the foot
+        u = u - w * float(u @ w)
+        u = u / np.linalg.norm(u)
+        v = np.cross(w, u)
+        R = np.column_stack([u, v, w])
+        q = np.zeros(4)
+        mujoco.mju_mat2Quat(q, R.ravel())
+        half = length / 4.0                          # each box spans half the pad
+        for k, tag in enumerate(("foot", "heel")):
+            mid = a + u * (length * (0.25 + 0.5 * k))
+            g = ET.SubElement(leg, "geom")
+            g.set("name", f"{tag}_{side}_col")
+            g.set("class", "collision")
+            g.set("type", "box")
+            g.set("size", f"{half:.6g} {o['width'] / 2:.6g} {pad / 2:.6g}")
+            g.set("pos", _fs(mid + n * (pad / 2)))   # pad hangs below the CAD sole face
+            g.set("quat", _fs(q))
 
 
 def _add_sites_and_loop(root, anchors):
@@ -549,7 +621,7 @@ def _scaffold(root):
     d1 = ET.SubElement(d0, "default")
     d1.set("class", "collision")
     g = ET.SubElement(d1, "geom")
-    for k, v in (("contype", "1"), ("conaffinity", "1"), ("group", "3"), ("condim", "6"),
+    for k, v in (("contype", "1"), ("conaffinity", "1"), ("group", "3"), ("condim", str(CONTACT_CONDIM)),
                  ("friction", FRICTION), ("solref", CONTACT_SOLREF), ("solimp", CONTACT_SOLIMP),
                  ("rgba", "0.2 0.8 0.2 0.4")):
         g.set(k, v)
@@ -576,7 +648,7 @@ def _scaffold(root):
     wb.insert(0, lt)
     fl = ET.Element("geom")
     for k, v in (("name", "floor"), ("type", "plane"), ("size", "0 0 0.05"),
-                 ("material", "grid"), ("contype", "1"), ("conaffinity", "1"), ("condim", "6"),
+                 ("material", "grid"), ("contype", "1"), ("conaffinity", "1"), ("condim", str(CONTACT_CONDIM)),
                  ("friction", FRICTION), ("solref", CONTACT_SOLREF), ("solimp", CONTACT_SOLIMP)):
         fl.set(k, v)
     wb.insert(1, fl)
@@ -604,75 +676,266 @@ def _scaffold(root):
 # =============================================================================================
 # stage 4 -- the sole, discovered from the mesh
 # =============================================================================================
-def discover_sole(root, verbose=True):
-    """Where is the flat sole, in the leg's own frame?
-
-    Compiled without any collision geometry and held at the nominal joint targets, the lowest
-    mesh vertices of the leg ARE the sole.  Fit a plane to them, then place one sphere at each end
-    of the contact line.  Doing it this way means the contact model cannot silently disagree with
-    the CAD -- if the part changes, the spheres move with it."""
+def _leg_mesh(side):
     import trimesh
-    probe = copy.deepcopy(root)
-    m = mujoco.MjModel.from_xml_string(ET.tostring(probe, encoding="unicode"), {})
-    d = mujoco.MjData(m)
-    for i, name in enumerate(ACTUATED):
-        j = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name)
-        d.qpos[m.jnt_qposadr[j]] = NOMINAL_CTRL[i]
-    mujoco.mj_forward(m, d)
+    name = f"FootFlat{'Left' if side == 'L' else 'Right'}NCS-v1"
+    tm = trimesh.load(CAD_DIR / "meshes" / f"{name}.stl")
+    v = np.asarray(tm.vertices) * 0.001
+    return v, trimesh.Trimesh(v, np.asarray(tm.faces))
 
-    out = {}
-    for side in "LR":
-        bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"leg_{side}")
-        mesh = f"FootFlat{'Left' if side == 'L' else 'Right'}NCS-v1"
-        tm = trimesh.load(CAD_DIR / "meshes" / f"{mesh}.stl")
-        v = np.asarray(tm.vertices) * 0.001
-        R, p = d.xmat[bid].reshape(3, 3), d.xpos[bid]
-        w = v @ R.T + p                                        # mesh vertices in world
-        zmin = w[:, 2].min()
-        sole = v[w[:, 2] < zmin + 0.004]                       # the 4 mm closest to the ground
-        # principal in-plane direction of that patch, in the leg frame
-        c = sole.mean(0)
-        u, s, vt = np.linalg.svd(sole - c)
-        long_axis = vt[0]
-        t = (sole - c) @ long_axis
-        a, b = c + long_axis * t.min(), c + long_axis * t.max()
-        normal = vt[2]                                         # plane normal, leg frame
-        if (R @ normal)[2] > 0:
-            normal = -normal                                   # point it at the ground
-        out[side] = dict(toe=a, heel=b, normal=normal, length=float(t.max() - t.min()),
-                         width=float(np.ptp((sole - c) @ vt[1])),
-                         flatness=float(np.abs((sole - c) @ vt[2]).max()), n=len(sole),
-                         world_z=float(zmin))
-        if verbose:
-            o = out[side]
-            print(f"  [sole] {side}: {o['n']:4d} verts, patch {o['length']*1000:6.1f} x "
-                  f"{o['width']*1000:5.1f} mm, flat to {o['flatness']*1000:.3f} mm, "
-                  f"normal (leg frame) {np.round(o['normal'], 4)}")
-    # the toe is the end further from the leg's attachment (the origin)
-    for side, o in out.items():
-        if np.linalg.norm(o["toe"]) < np.linalg.norm(o["heel"]):
-            o["toe"], o["heel"] = o["heel"], o["toe"]
+
+def _sole_from_patch(side, R, verbose=True):
+    """Given a leg orientation R that rests the foot flat, read the sole off the mesh: the set of
+    vertices at the bottom, expressed back in the leg's own frame."""
+    v, tm = _leg_mesh(side)
+    hull = np.asarray(tm.convex_hull.vertices)
+    z = hull @ (R.T @ np.array([0.0, 0.0, 1.0]))          # height of each vertex, up to an offset
+    pts = hull[z < z.min() + 0.002]
+    if len(pts) < 3:
+        raise SystemExit(f"leg_{side}: the resting patch has only {len(pts)} points -- not a sole")
+    c = pts.mean(0)
+    e = np.linalg.svd(pts - c)[2]
+    nrm = e[2]
+    if (R @ nrm)[2] > 0:
+        nrm = -nrm
+    long_axis = e[0] if abs(e[0][1]) < 0.5 else e[1]
+    t = (pts - c) @ long_axis
+    beyond = float((v @ nrm).max() - float(np.median(pts @ nrm)))
+    out = dict(normal=nrm, a=c + long_axis * t.min(), b=c + long_axis * t.max(),
+               length=float(t.max() - t.min()), width=float(np.ptp(pts[:, 1])),
+               flatness=float(np.abs((pts - c) @ e[2]).max()), n=len(pts), beyond=beyond)
+    if verbose:
+        print(f"  [sole] {side}: resting patch {out['length']*1000:5.1f} x "
+              f"{out['width']*1000:5.1f} mm from {out['n']} hull points, flat to "
+              f"{out['flatness']*1000:.3f} mm, normal (leg frame) {np.round(nrm, 4)}")
+    if beyond > 1e-3:
+        raise SystemExit(f"leg_{side}: {beyond*1e3:.2f} mm of material sits below the resting "
+                         f"patch -- it is not the lowest face")
     return out
 
 
-def _add_sole_geoms(root, sole):
+def find_sole_posture(m, verbose=True):
+    """Which leg posture rests the foot FLAT on the floor, with the robot balanced on it?
+
+    Nothing here assumes which face is the sole.  Pass one sweeps the two leg joints, closes the
+    four-bar at each, drops the leg's convex hull onto a level floor and measures the resting
+    patch; a face lying flat gives a long patch, an edge or a corner a short one.  The winner
+    defines the sole, and from then on "flat" is measured as the tilt of that plane, which is a
+    continuous quantity rather than a vertex count.
+
+    Pass two picks WHICH flat posture.  Laying the sole flat is one condition on two joints, so
+    its solutions form a family, and along it the foot sweeps fore and aft under the robot while
+    the centre of mass barely moves.  The second condition is balance: put the centre of mass in
+    the middle of the contact patch, so the robot stands by itself with equal margin forward and
+    back.  Two conditions, two joints, one answer -- no stance height to invent, and static
+    stability comes out of the solve instead of being hoped for.
+
+    The previous robot could not satisfy this at all: it was a point-foot machine whose centre of
+    mass sat 87 mm behind its toe contacts, so standing still was never an equilibrium and the
+    policy had to catch it on every step.  The flat sole is what makes the condition solvable."""
+    grid = [(float(c), float(t)) for c in np.arange(-0.9, 1.0, 0.05)
+            for t in np.arange(-0.9, 1.0, 0.05)]
+    coarse = [(c, t, r) for c, t in grid for r in [_patch_at(m, c, t)] if r]
+    if not coarse:
+        raise SystemExit("no posture rests the foot on the floor within joint range")
+    c0, t0, r0 = max(coarse, key=lambda x: x[2]["span"])
+    sole = _sole_from_patch("L", r0["R"], verbose)
+
+    scan = [(c, t, r) for c, t, r in
+            [(c, t, _patch_at(m, c, t, sole)) for c, t in grid] if r]
+    flat = [x for x in scan if x[2]["tilt"] < FLAT_TOL_DEG]
+    if not scan:
+        raise SystemExit("no posture rests the sole on the floor within joint range")
+    if verbose:
+        hs = [r["height"] for _, _, r in flat] or [float("nan")]
+        print(f"  [sole] {len(scan)} reachable postures, {len(flat)} with the sole flat to "
+              f"{FLAT_TOL_DEG} deg (stance height {min(hs):.3f}-{max(hs):.3f} m)")
+
+    # Two conditions, two joints: drive both to zero with a damped Newton step on the pair
+    #   f1 = the sole normal's fore-aft lean  (zero when the sole is exactly horizontal)
+    #   f2 = margin_front - margin_back       (zero when the centre of mass is mid-patch)
+    # A coordinate search cannot do this -- the two conditions trade off against each other along
+    # the flat family -- and the residual matters: 1 mm of leftover tilt over an 86 mm sole lifts
+    # one of the two contact spheres clear of the floor and the robot tips over that edge.
+    def residual(r):
+        return np.array([r["lean"], r["margin_front"] - r["margin_back"]])
+
+    # Seed from the whole scan, not just the flat subset: the seed only has to be on the right
+    # assembly branch and near the solution, and Newton drives both conditions to zero from there.
+    cam, thigh, r = min(scan, key=lambda x: np.abs(residual(x[2]) * np.array([1.0, 5.0])).sum())
+    for _ in range(12):
+        f = residual(r)
+        if np.abs(f).max() < 1e-5:
+            break
+        h = 1e-3
+        J = np.zeros((2, 2))
+        ok = True
+        for k, (dc, dt) in enumerate(((h, 0.0), (0.0, h))):
+            q = _patch_at(m, cam + dc, thigh + dt, sole)
+            if q is None:
+                ok = False
+                break
+            J[:, k] = (residual(q) - f) / h
+        if not ok or abs(np.linalg.det(J)) < 1e-9:
+            break
+        step = np.linalg.solve(J, -f)
+        step = step * min(1.0, 0.2 / max(np.abs(step).max(), 1e-12))     # trust region
+        q = _patch_at(m, cam + step[0], thigh + step[1], sole)
+        if q is None or np.abs(residual(q)).sum() >= np.abs(f).sum():
+            break
+        cam, thigh, r = cam + step[0], thigh + step[1], q
+    if verbose:
+        print(f"  [sole] newton residual: lean {r['lean']:+.2e}, "
+              f"balance {(r['margin_front']-r['margin_back'])*1000:+.3f} mm")
+        print(f"  [sole] chosen: cam {cam:+.4f} thigh {thigh:+.4f} -> sole tilt "
+              f"{r['tilt']:.3f} deg, stance {r['height']:.4f} m, centre of mass "
+              f"{r['margin_back']*1000:+.1f} mm ahead of the heel edge and "
+              f"{r['margin_front']*1000:+.1f} mm behind the toe edge")
+    if min(r["margin_back"], r["margin_front"]) <= 0:
+        raise SystemExit("no balanced sole-flat posture: the centre of mass never lies over the "
+                         "contact patch")
+    return mirror_targets(cam, thigh), r, sole
+
+
+def _patch_at(m, cam, thigh, sole=None):
+    """Close the four-bar at this posture, rest the leg on a level floor, and measure the contact
+    patch and the whole robot's balance over it.  With `sole` known, the patch is the sole's own
+    two end points and `tilt` says how far the sole plane is from horizontal."""
+    pose = _leg_pose(m, cam, thigh)
+    if pose is None or pose["loop"] > 1e-4:
+        return None
+    R, p = pose["R"], pose["p"]
+    if sole is None:
+        v, tm = _leg_mesh("L")
+        pts = np.asarray(tm.convex_hull.vertices) @ R.T + p
+        patch = pts[pts[:, 2] < pts[:, 2].min() + 0.002]
+        tilt = lean = float("nan")
+    else:
+        patch = np.array([sole["a"], sole["b"]]) @ R.T + p
+        nw = R @ sole["normal"]
+        tilt = float(np.degrees(np.arccos(np.clip(-nw[2], -1.0, 1.0))))
+        lean = float(nw[0])            # signed: which way the sole leans, fore or aft
+    height = float(pose["base_z"] - patch[:, 2].min())
+    if height < 0.4 or len(patch) < 2:
+        return None
+    d = pose["data"]
+    com = np.sum(d.xipos * m.body_mass[:, None], axis=0) / m.body_mass.sum()
+    return dict(span=float(np.ptp(patch[:, 0])), height=height, n=len(patch), R=R, tilt=tilt,
+                lean=lean if sole is not None else float("nan"),
+                loop=pose["loop"], com_x=float(com[0]),
+                x_back=float(patch[:, 0].min()), x_front=float(patch[:, 0].max()),
+                margin_back=float(com[0] - patch[:, 0].min()),
+                margin_front=float(patch[:, 0].max() - com[0]))
+
+
+def cad_pose():
+    """The actuated joint values that reproduce the CAD's exported pose.
+
+    Body frames were rotated by -ZERO_SHIFT to move the joint zeros onto the robot's homing
+    convention, so the exported pose now sits at qpos = +ZERO_SHIFT.  It is the one configuration
+    we know is ASSEMBLED: with the passive joints at zero the loop closes exactly there (the
+    duplicate-body check proves it to sub-micron).  Everything else has to be reached from it."""
+    return mirror_targets(ZERO_SHIFT["cam"], ZERO_SHIFT["thigh"], ZERO_SHIFT["hip_roll"])
+
+
+def relax_to(m, d, targets, held, n_ramp=1500, n_hold=600, from_pose=None):
+    """Walk quasi-statically from the assembled configuration to `targets`.
+
+    A four-bar has TWO assembly branches for the same crank angle -- knee forward and knee back --
+    and a solver handed an open loop (the passive joints at zero, metres from closure) picks one
+    per leg, independently.  That is not hypothetical: settling straight to the nominal posture
+    put the left leg on the opposite branch from the right, with its foot 0.86 m in the air and
+    the robot standing on one leg.  Ramping from a configuration that is already closed keeps
+    both legs on the branch the CAD was drawn in, because the path never passes through an open
+    loop.  Velocities are zeroed every step so this is a continuation, not a swing.
+
+    The ramp is PD-driven, because forcing qpos along it would drag the mechanism through
+    configurations it cannot actually reach and it lands on nonsense branches.  The FINAL
+    configuration is then pinned: a finite-gain PD leaves the legs ~0.09 rad short under their
+    own weight, and if that sag is left in, the posture that gets analysed is not the posture that
+    was asked for -- the stance solve and the keyframe end up describing different configurations,
+    one flat and one 12 deg up on its toes.  After the pin, `targets` means the configuration and
+    the passive joints are what relaxes around it."""
+    start = cad_pose() if from_pose is None else np.asarray(from_pose, float)
+    targets = np.asarray(targets, float)
+    act = [int(m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)])
+           for n in ACTUATED]
+    d.qpos[act] = start
+    hold = d.qpos[held].copy()
+    for i in range(n_ramp + n_hold):
+        a = min(1.0, (i + 1) / max(n_ramp, 1))
+        d.ctrl[:] = _pd(m, d, start + a * (targets - start), kp=POSE_KP, kd=POSE_KD, clip=False)
+        mujoco.mj_step(m, d)
+        d.qpos[held] = hold
+        d.qvel[:] = 0.0
+    mujoco.mj_forward(m, d)
+    return d
+
+
+def _leg_pose(m, cam, thigh, n=1200):
+    """Close the four-bar at (cam, thigh) with the base pinned in the air, and return the leg's
+    world frame.  The leg angle is not free: cam and thigh fix it through the rod."""
+    d = mujoco.MjData(m)
+    zadr = int(m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "base_z")])
+    zdof = int(m.jnt_dofadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "base_z")])
+    d.qpos[zadr] = 1.4
+    held, heldv = _held(m, planar=False)
+    held, heldv = held + [zadr], heldv + [zdof]
+    relax_to(m, d, mirror_targets(cam, thigh), held, n_ramp=n, n_hold=max(n // 2, 200))
+    if not np.all(np.isfinite(d.qpos)):
+        return None
+    loop = float(np.abs(d.efc_pos[:m.neq * 3]).max()) if m.neq else 0.0
+    out = dict(base_z=1.4, loop=loop, data=d)
     for side in "LR":
-        leg = next(b for b in root.iter("body") if b.get("name") == f"leg_{side}")
-        o = sole[side]
-        for tag, pt in (("foot", o["toe"]), ("heel", o["heel"])):
-            # sink the sphere centre so the sphere is TANGENT to the sole plane
-            c = np.asarray(pt) - o["normal"] * SOLE_SPHERE_R
-            g = ET.SubElement(leg, "geom")
-            g.set("name", f"{tag}_{side}_col")
-            g.set("class", "collision")
-            g.set("type", "sphere")
-            g.set("size", f"{SOLE_SPHERE_R:g}")
-            g.set("pos", _fs(c))
+        b = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"leg_{side}")
+        out[f"R_{side}"] = d.xmat[b].reshape(3, 3).copy()
+        out[f"p_{side}"] = d.xpos[b].copy()
+    out["R"], out["p"] = out["R_L"], out["p_L"]
+    return out
+
+
+def stance_tilt(m, sole, cam, thigh):
+    """Sole tilt from horizontal, stance height and balance margins at (cam, thigh)."""
+    return _patch_at(m, cam, thigh, sole)
+
+
+def check_nominal_stance(m, sole, nominal, verbose=True):
+    """The cached NOMINAL_CTRL must still lay the sole flat on this build."""
+    r = stance_tilt(m, sole, float(nominal[1]), float(nominal[2]))
+    if r is None:
+        raise SystemExit("nominal posture does not close the four-bar")
+    if verbose:
+        print(f"  [stance] NOMINAL_CTRL cam {nominal[1]:+.4f} thigh {nominal[2]:+.4f}: "
+              f"sole tilt {r['tilt']:.4f} deg (tol {STANCE_TILT_TOL_DEG}), "
+              f"stance height {r['height']:.4f} m, loop residual {r['loop']*1e6:.3f} um")
+    if r["tilt"] > STANCE_TILT_TOL_DEG:
+        raise SystemExit(f"NOMINAL_CTRL leaves the sole {r['tilt']:.3f} deg off the floor -- "
+                         f"re-run with --solve-stance")
+    return r
 
 
 # =============================================================================================
 # stage 5 -- settle the keyframe
 # =============================================================================================
+def _geom_floor_gap(m, d, g):
+    """Height of a collision geom's LOWEST point above z = 0.
+
+    Not `xpos.z - size[0]`: that is the radius only for a sphere.  For the box pads size[0] is
+    the half LENGTH, about twenty times the pad's half thickness, so using it placed the keyframe
+    20 mm in the air and every standing test began with a drop and a bounce."""
+    R = d.geom_xmat[g].reshape(3, 3)
+    t = int(m.geom_type[g])
+    if t == int(mujoco.mjtGeom.mjGEOM_SPHERE):
+        drop = float(m.geom_size[g, 0])
+    elif t == int(mujoco.mjtGeom.mjGEOM_BOX):
+        drop = float(np.abs(R[2, :3]) @ m.geom_size[g, :3])
+    elif t == int(mujoco.mjtGeom.mjGEOM_CAPSULE):
+        drop = float(abs(R[2, 2]) * m.geom_size[g, 1] + m.geom_size[g, 0])
+    else:
+        raise NotImplementedError(f"floor gap for geom type {t}")
+    return float(d.geom_xpos[g][2] - drop)
+
+
 def _held(m, planar):
     names = (["base_x", "base_pitch"] if planar else
              ["base_x", "base_y", "base_roll", "base_pitch", "base_yaw"])
@@ -680,48 +943,136 @@ def _held(m, planar):
     return [int(m.jnt_qposadr[j]) for j in ids], [int(m.jnt_dofadr[j]) for j in ids]
 
 
-def _pd(m, d, target, kp=(120, 200, 200, 120, 200, 200), kd=(4, 5, 5, 4, 5, 5)):
+def _pd(m, d, target=None, kp=(120, 200, 200, 120, 200, 200), kd=(4, 5, 5, 4, 5, 5), clip=True):
+    target = NOMINAL_CTRL if target is None else target
     tau = np.zeros(m.nu)
     for a in range(m.nu):
         jid = m.actuator_trnid[a, 0]
         tau[a] = (kp[a] * (target[a] - d.qpos[m.jnt_qposadr[jid]])
                   - kd[a] * d.qvel[m.jnt_dofadr[jid]])
+    if not clip:
+        return tau
     lim = m.actuator_forcerange[:, 1]
     return np.clip(tau, -lim, lim)
 
 
-def settle(m, z0=1.05, t_s=3.0, planar=True):
-    """Gravity-settle onto the floor with the base held except z, motors holding NOMINAL_CTRL.
+def settle(m, nominal=None, z0=1.05, planar=True, verbose=True):
+    """The keyframe pose: the nominal posture, set down so the soles just touch the floor.
 
-    Held, not free: on a free base the solver sees six loose DOFs inside every step and the legs
-    walk sideways over a 3 s settle.  The settled LEG posture is what we want; the base pose is
-    imposed."""
+    Two steps, and neither of them is a gravity settle under contact.
+
+    First, close the four-bar in the air by continuation from the CAD's assembled configuration
+    (see relax_to) -- the leg's closed configuration does not depend on base height, so this is
+    free, and starting anywhere else lets the two legs pick opposite assembly branches.
+
+    Then place the base by KINEMATICS: drop it until the lowest contact sphere touches z = 0.
+    Simulating the touchdown instead was the tempting thing to do and it is wrong here -- with
+    the series spring off there is nothing left to equilibrate, so all a contact settle can add
+    is impact transients, and it did: it rolled the stance 13 degrees onto the toes and put the
+    keyframe 47 mm below the posture the stance was solved for.  The nominal posture is the
+    answer; the keyframe just has to express it."""
+    nominal = NOMINAL_CTRL if nominal is None else np.asarray(nominal, float)
     d = mujoco.MjData(m)
     zadr = int(m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "base_z")])
-    d.qpos[zadr] = z0
-    for i, name in enumerate(ACTUATED):
-        j = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name)
-        d.qpos[m.jnt_qposadr[j]] = NOMINAL_CTRL[i]
+    zdof = int(m.jnt_dofadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "base_z")])
+    d.qpos[zadr] = z0 + 0.2
     held, heldv = _held(m, planar)
-    hold = d.qpos[held].copy()
-    for _ in range(int(t_s / m.opt.timestep)):
-        d.ctrl[:] = _pd(m, d, NOMINAL_CTRL)
-        mujoco.mj_step(m, d)
-        d.qpos[held] = hold
-        d.qvel[heldv] = 0.0
-    if not np.all(np.isfinite(d.qpos)):
-        raise RuntimeError("settle diverged")
+    relax_to(m, d, nominal, held + [zadr])
+
+    loop = float(np.abs(d.efc_pos[:m.neq * 3]).max()) if m.neq else 0.0
+    if loop > 1e-4:
+        raise RuntimeError(f"four-bar did not close in the air: {loop*1e3:.4f} mm")
+
+    cols = [g for g in range(m.ngeom)
+            if (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "").endswith("_col")]
+    heights = [_geom_floor_gap(m, d, g) for g in cols]
+    # Seat ALL FOUR contacts, not just the lowest one.  MuJoCo only reports a contact once the
+    # geoms actually overlap, so placing the robot with its lowest sphere exactly on z = 0 leaves
+    # the other three a fraction of a millimetre clear and the episode starts balanced on a single
+    # point -- which tips, however well centred the centre of mass is.  Sink by the spread plus a
+    # small bite so every sphere is engaged at t = 0.
+    d.qpos[zadr] -= max(heights) + KEYFRAME_BITE_M
+    d.qvel[:] = 0.0
     mujoco.mj_forward(m, d)
-    return d.qpos.copy(), dict(z=float(d.qpos[zadr]),
-                               stand_torque=[float(x) for x in _pd(m, d, NOMINAL_CTRL)],
-                               max_qvel=float(np.abs(d.qvel).max()),
-                               loop_err=float(np.abs(d.efc_pos[:0]).max()) if False else 0.0)
+    lows = {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g): _geom_floor_gap(m, d, g)
+            for g in cols}
+    if verbose:
+        print("  [key] contact heights above the floor: "
+              + ", ".join(f"{k.replace('_col','')} {v*1000:+.2f} mm" for k, v in lows.items()))
+    return d.qpos.copy(), dict(z=float(d.qpos[zadr]), loop_residual=loop,
+                               contact_heights=lows,
+                               spread_mm=(max(lows.values()) - min(lows.values())) * 1000)
 
 
 # =============================================================================================
 # build
 # =============================================================================================
-def build(variant="free", leg_kg=LEG_KG, leg_spring_k=LEG_SPRING_K, verbose=True):
+STANCE_KP = (120.0, 200.0, 200.0, 120.0, 200.0, 200.0)   # the drives' design position gains
+STANCE_KD = (4.0, 5.0, 5.0, 4.0, 5.0, 5.0)
+
+
+def check_static_stability(m, qpos, nominal, t_s=4.0, verbose=True,
+                           scales=(1, 2, 4, 8, 10, 12, 16, 24)):
+    """Spawn the robot at its keyframe with the base COMPLETELY FREE and see whether it stands.
+
+    No DOF is held, there is no balance controller, and the motors only hold the nominal joint
+    angles through a plain PD -- gravity decides.  A point-foot robot fails this by construction,
+    so it is the single number that says whether the flat sole did its job.
+
+    The answer depends on how stiff that PD is, so this reports the THRESHOLD rather than a
+    pass/fail at one arbitrary gain.  Standing is a statics question (is the centre of mass over
+    the contact patch, and is the torque within the motors?) and a stiffness question (does the
+    leg droop far enough under that torque to walk the posture out of its own support?) -- and on
+    this robot the two answers are very different, so both are worth printing."""
+    out = []
+    for sc in scales:
+        kp = tuple(np.asarray(STANCE_KP) * sc)
+        kd = tuple(np.asarray(STANCE_KD) * np.sqrt(sc))
+        d = mujoco.MjData(m)
+        d.qpos[:] = qpos
+        mujoco.mj_forward(m, d)
+        q = {n: int(m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)])
+             for n in ("base_x", "base_z", "base_pitch")}
+        start = {k: float(d.qpos[v]) for k, v in q.items()}
+        peak, ok = 0.0, True
+        for _ in range(int(t_s / m.opt.timestep)):
+            tau = _pd(m, d, nominal, kp=kp, kd=kd)
+            d.ctrl[:] = tau
+            peak = max(peak, float(np.abs(tau).max()))
+            mujoco.mj_step(m, d)
+            if not np.all(np.isfinite(d.qpos)):
+                ok = False
+                break
+        r = dict(kp=kp[1], kd=kd[1],
+                 drift_x=float(d.qpos[q["base_x"]] - start["base_x"]) if ok else float("nan"),
+                 drop_z=float(start["base_z"] - d.qpos[q["base_z"]]) if ok else float("nan"),
+                 pitch_deg=float(np.degrees(d.qpos[q["base_pitch"]] - start["base_pitch"]))
+                 if ok else float("nan"),
+                 peak_tau=peak, speed=float(np.abs(d.qvel[:6]).max()) if ok else float("inf"))
+        r["stands"] = bool(ok and abs(r["pitch_deg"]) < 10.0
+                           and d.qpos[q["base_z"]] > 0.95 * start["base_z"])
+        out.append(r)
+        if verbose:
+            print(f"  [stand] kp {r['kp']:6.0f} kd {r['kd']:5.1f}: drop {r['drop_z']*1000:+7.1f} mm, "
+                  f"pitch {r['pitch_deg']:+7.2f} deg, peak tau {r['peak_tau']:6.1f} N*m, "
+                  f"|base vel| {r['speed']:7.3f} -> {'STANDS' if r['stands'] else 'falls'}")
+    held = [r for r in out if r["stands"]]
+    summary = dict(runs=out, stands=bool(held),
+                   kp_min=min((r["kp"] for r in held), default=None),
+                   tau_hold=min((r["peak_tau"] for r in held), default=None))
+    if verbose:
+        lim = float(m.actuator_forcerange[1, 1])
+        if held:
+            print(f"  [stand] STANDS from kp {summary['kp_min']:.0f} upward, holding torque "
+                  f"{summary['tau_hold']:.1f} N*m = {summary['tau_hold']/lim*100:.0f}% of the "
+                  f"{lim:.0f} N*m limit")
+        else:
+            print("  [stand] does NOT stand at any tested stiffness")
+    return summary
+
+
+def build(variant="free", leg_kg=LEG_KG, verbose=True,
+          solve_stance=False, nominal=None):
     if verbose:
         print(f"[build] {variant}")
     m_cad, d_cad, _ = check_loops_close(verbose)
@@ -740,10 +1091,31 @@ def build(variant="free", leg_kg=LEG_KG, leg_spring_k=LEG_SPRING_K, verbose=True
     _add_motor_masses(root, m_cad, d_cad)
     _add_sites_and_loop(root, anchors)
     _add_actuators_and_sensors(root)
-    sole = discover_sole(root, verbose)
-    _add_sole_geoms(root, sole)
-    for side in "LR":
-        _add_leg_spring(root, side, leg_spring_k)
+
+    # The nominal posture and the sole are found together, before any contact geometry exists:
+    # the sole is whichever face rests on the floor, and the nominal posture is the one that
+    # rests it flat.  Solving is a two-joint sweep, so it sits behind --solve-stance and the
+    # cached NOMINAL_CTRL is re-verified on every build instead.
+    m_probe = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"), {})
+    if solve_stance:
+        nominal, found, sole_L = find_sole_posture(m_probe, verbose)
+    else:
+        nominal = NOMINAL_CTRL if nominal is None else np.asarray(nominal, float)
+        pose = _leg_pose(m_probe, float(nominal[1]), float(nominal[2]))
+        if pose is None:
+            raise SystemExit("NOMINAL_CTRL does not close the four-bar")
+        sole_L = _sole_from_patch("L", pose["R"], verbose)
+    pose_nom = _leg_pose(m_probe, float(nominal[1]), float(nominal[2]))
+    # One sole definition, mirrored.  The two leg parts ARE mirror images, so fitting a plane to
+    # each one's own resting hull points only lets mesh tessellation differ between the sides --
+    # it came out 2.5 mm apart, enough that the robot started every episode on one foot.
+    sole = {"L": _sole_from_patch("L", pose_nom["R_L"], verbose)}
+    sole["R"] = {k: (v * np.array([1.0, -1.0, 1.0]) if isinstance(v, np.ndarray) and v.shape == (3,)
+                     else v) for k, v in sole["L"].items()}
+    stance = check_nominal_stance(m_probe, sole["L"], nominal, verbose)
+    root.find("custom/numeric").set("data", _fs(nominal))
+
+    _add_sole_geoms(root, sole, {s: pose_nom[f"R_{s}"] for s in "LR"})
 
     if variant == "planar":
         torso = next(b for b in root.iter("body") if b.get("name") == "torso")
@@ -760,7 +1132,7 @@ def build(variant="free", leg_kg=LEG_KG, leg_spring_k=LEG_SPRING_K, verbose=True
             if j.get("name") in PLANAR_REMOVE:
                 torso.remove(j)
     m_s = mujoco.MjModel.from_xml_string(ET.tostring(settle_root, encoding="unicode"), {})
-    q_s, info = settle(m_s)
+    q_s, info = settle(m_s, nominal, z0=stance["height"], verbose=verbose)
 
     m = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"), {})
     qpos = np.zeros(m.nq)
@@ -769,31 +1141,46 @@ def build(variant="free", leg_kg=LEG_KG, leg_spring_k=LEG_SPRING_K, verbose=True
         k = mujoco.mj_name2id(m_s, mujoco.mjtObj.mjOBJ_JOINT, name)
         if k >= 0:
             qpos[m.jnt_qposadr[j]] = q_s[m_s.jnt_qposadr[k]]
+    # The passive hinges are unlimited, so nothing stops the settle from parking one of them a
+    # few turns away from where it started -- the knee comes out around 19 rad.  Physically that
+    # is the same pose, but it is the reset state of every training episode and it feeds the
+    # observation, so wrap it onto (-pi, pi].
+    for j in range(m.njnt):
+        name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j)
+        if name in PASSIVE:
+            a = m.jnt_qposadr[j]
+            qpos[a] = (qpos[a] + np.pi) % (2 * np.pi) - np.pi
     kf = ET.SubElement(root, "keyframe")
     key = ET.SubElement(kf, "key")
     key.set("name", "stand")
     key.set("qpos", _fs(qpos))
     key.set("ctrl", _fs(np.zeros(m.nu)))
 
+    stand = check_static_stability(m, qpos, nominal, verbose=verbose) if variant == "free" else None
+
     root.find("compiler").set("meshdir", "../../Dash-01CAD")
     xml = '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")
-    return xml, dict(info, mass=mass_report, sole=sole, anchors=anchors, model=m)
+    return xml, dict(info, mass=mass_report, sole=sole, anchors=anchors, model=m,
+                     nominal=nominal, stance=stance, stand=stand)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--leg-kg", type=float, default=LEG_KG,
                     help=f"mass of the merged leg/foot segment (default {LEG_KG}, PROVISIONAL)")
-    ap.add_argument("--leg-spring-k", type=float, default=LEG_SPRING_K)
     ap.add_argument("--report", action="store_true", help="build and validate, write nothing")
+    ap.add_argument("--solve-stance", action="store_true",
+                    help="re-solve the sole-flat nominal posture instead of checking the cached "
+                         "NOMINAL_CTRL (slow; run it when the leg part changes)")
     args = ap.parse_args()
     for variant in ("free", "planar"):
-        xml, info = build(variant, args.leg_kg, args.leg_spring_k)
+        xml, info = build(variant, args.leg_kg,
+                          solve_stance=args.solve_stance)
         m = info["model"]
         print(f"  [plant] nq={m.nq} nv={m.nv} nu={m.nu} nbody={m.nbody} "
               f"mass={m.body_subtreemass[1]:.4f} kg")
-        print(f"  [plant] settled stand height {info['z']:.4f} m, "
-              f"stand torque {np.round(info['stand_torque'], 2).tolist()}")
+        print(f"  [plant] keyframe stand height {info['z']:.4f} m, contacts within "
+              f"{info['spread_mm']:.2f} mm of one plane, loop {info['loop_residual']*1e6:.2f} um")
         if not args.report:
             out = HERE / f"dash01_{variant}.xml"
             out.write_text(xml, encoding="utf-8")

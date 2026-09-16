@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="dash01">
+    <compiler angle="radian" meshdir="../../Dash-01CAD" autolimits="true" />
+    <option timestep="0.001" integrator="implicitfast" cone="elliptic" impratio="10" solver="Newton" iterations="100" ls_iterations="50" /><default><default class="dash01"><geom contype="0" conaffinity="0" group="2" /><site group="4" size="0.012" rgba="0.95 0.45 0.1 1" /><default class="collision"><geom contype="1" conaffinity="1" group="3" condim="3" friction="0.7 0.005 0.0001" solref="0.01 1" solimp="0.95 0.99 0.001" rgba="0.2 0.8 0.2 0.4" /></default></default></default><asset>
+        <mesh name="bodyNCS-v1" file="meshes/bodyNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="HipLeftNCS-v1" file="meshes/HipLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="HipRightNCS-v1" file="meshes/HipRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="CamLeftNCS-v1" file="meshes/CamLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="CamRightNCS-v1" file="meshes/CamRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="ThighLeftNCS-v1" file="meshes/ThighLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="ThighRightNCS-v1" file="meshes/ThighRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="PushrodLeftNCS-v1" file="meshes/PushrodLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="PushrodRightNCS-v1" file="meshes/PushrodRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="FootFlatLeftNCS-v1" file="meshes/FootFlatLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
+        <mesh name="FootFlatRightNCS-v1" file="meshes/FootFlatRightNCS-v1.stl" scale="0.001 0.001 0.001" />
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.2 0.3 0.4" rgb2="0.1 0.15 0.2" width="300" height="300" /><material name="grid" texture="grid" texrepeat="6 6" reflectance="0.1" /></asset>
+    <worldbody>
+        <light name="top" pos="0 0 3" dir="0 0 -1" directional="true" /><geom name="floor" type="plane" size="0 0 0.05" material="grid" contype="1" conaffinity="1" condim="3" friction="0.7 0.005 0.0001" solref="0.01 1" solimp="0.95 0.99 0.001" /><body name="torso" pos="0.0 0.0 0.0" euler="-0.0 0.0 -0.0" childclass="dash01">
+            <joint name="base_x" type="slide" axis="1 0 0" limited="false" damping="0" armature="0" /><joint name="base_y" type="slide" axis="0 1 0" limited="false" damping="0" armature="0" /><joint name="base_z" type="slide" axis="0 0 1" limited="false" damping="0" armature="0" /><joint name="base_roll" type="hinge" axis="1 0 0" limited="false" damping="0" armature="0" /><joint name="base_pitch" type="hinge" axis="0 1 0" limited="false" damping="0" armature="0" /><joint name="base_yaw" type="hinge" axis="0 0 1" limited="false" damping="0" armature="0" /><site name="imu" pos="0 0 0" size="0.015" rgba="0.1 0.5 0.95 1" /><geom name="torso_visual" type="mesh" mesh="bodyNCS-v1" pos="0 0 0" euler="0 0 0" />
+            <inertial mass="4.264" pos="0.0016690918854414011 4.297697354650468e-07 9.498539066587414e-06" fullinertia="0.03014143189 0.01095569588 0.03575228772 2.08952358e-07 3.439278785e-06 1.405669795e-06" />
+            <body name="hip_L" pos="0.027294924660796353 0.12800000000861275 2.943479682215866e-11" euler="1.3877787807814452e-16 -1.4966300947946358e-15 -2.2837196633848203e-15">
+                <joint name="hip_roll_L" type="hinge" axis="1 0 0" pos="7.533920365e-08 0 0" damping="0.1" armature="0.046" limited="true" range="-0.785 0.785" />
+                <geom name="hip_L_visual" type="mesh" mesh="HipLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+                <inertial mass="0.471" pos="-0.023170080111601363 0.01601844798341781 0.00019232179773001414" fullinertia="0.000460274929 0.006937030492 0.006754895282 0.0001470865181 1.478776084e-07 2.541274951e-06" />
+                <body name="cam_L" pos="-0.14899999999999997 0.051900000000000585 -2.9692362349778064e-17" quat="0.9999999209 5.539059356e-16 0.0003977549286 1.563545524e-15">
+                    <joint name="cam_L" type="hinge" axis="0 1 0" pos="-2.274454591e-08 0 7.182396593e-08" damping="0.1" armature="0.0216" limited="true" range="-1.5 1.5" />
+                    <geom name="cam_L_visual" type="mesh" mesh="CamLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+                    <inertial mass="0.066" pos="0.04624089887284015 0.0010000000000000106 3.122502256758253e-17" fullinertia="1.203905304e-05 0.0001518971402 0.0001399020872 3.759538131e-20 1.081635694e-19 2.37182278e-19" />
+                    <body name="rod_L" pos="0.12000000000000109 0.0019999999999999575 -3.552713678800501e-17" euler="3.1415926535897922 -0.44814693397087935 3.141592653589793">
+                        <joint name="rod_L" type="hinge" axis="0 -1 0" pos="-3.428169664e-08 0 -2.969398569e-07" damping="0.2" armature="0.001" limited="false" />
+                        <geom name="rod_L_visual" type="mesh" mesh="PushrodLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+                        <inertial mass="0.071" pos="-0.0014465158232321168 0.0009770750294905667 -0.19135709372461385" fullinertia="0.001566417162 0.001567254291 4.310053269e-06 -9.401946754e-08 -3.237930254e-07 3.440470992e-08" />
+                        <site name="rod_tip_L" pos="0.000743214 0.007 -0.397969" /></body>
+                </body>
+                <body name="thigh_L" pos="0.10100000000000037 0.04610000000000028 -5.890610538771576e-15" quat="0.9999999796 1.154005571e-15 0.0002019082665 9.568531097e-16">
+                    <joint name="thigh_L" type="hinge" axis="0 1 0" pos="7.437970159e-08 0 -1.198567452e-08" damping="0.1" armature="0.0216" limited="true" range="-1.047 1.047" />
+                    <geom name="thigh_L_visual" type="mesh" mesh="ThighLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+                    <inertial mass="0.483" pos="0.0009733420828806905 0.014982943361960441 -0.14111184177465913" fullinertia="0.007072786947 0.007269928666 0.0002971408794 8.870359592e-07 9.395785295e-05 8.557154592e-06" />
+                    <body name="leg_L" pos="-2.3092638912203257e-16 0.014999999999994636 -0.34999999999999726" euler="1.281274698429236e-15 -0.8878198677322693 2.7186468198664694e-15">
+                        <joint name="knee_L" type="hinge" axis="0 1 0" pos="3.016606813e-08 0.009999999991 3.146825758e-07" damping="0.2" armature="0.001" limited="false" />
+                        <geom name="leg_L_visual" type="mesh" mesh="FootFlatLeftNCS-v1" pos="0 0 0" euler="0 0 0" />
+                        <inertial mass="0.405" pos="-0.34980445152443046 -9.121449945617505e-05 -0.018851679967998247" fullinertia="0.0005645507414 0.0119942718 0.01145509002 8.255679139e-06 -0.001115101846 1.251946335e-06" />
+                    <site name="leg_anchor_L" pos="-0.06133549751 -0.0002 0.02409990031" /><geom name="foot_L_col" class="collision" type="box" size="0.0215488 0.0127 0.0015" pos="-0.5082025621 5.782411587e-19 -0.1091881705" quat="0 0.5002507616 0 0.8658805781" /><geom name="heel_L_col" class="collision" type="box" size="0.0215488 0.0127 0.0015" pos="-0.5297297617 5.782411587e-19 -0.07185204646" quat="0 0.5002507616 0 0.8658805781" /></body>
+                </body>
+            <body name="motor_cam_L" pos="-0.1489999247 0.05189999999 -2.943458103e-11"><inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" /></body><body name="motor_thigh_L" pos="0.1010000753 0.04609999999 -2.943495438e-11"><inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" /></body></body>
+            <body name="hip_R" pos="0.027294924660796194 -0.12800000000861297 -2.943457144688466e-11" euler="-9.020562075079399e-17 -9.690022339013459e-16 2.685531099173177e-16">
+                <joint name="hip_roll_R" type="hinge" axis="1 0 0" pos="7.533920381e-08 0 0" damping="0.1" armature="0.046" limited="true" range="-0.785 0.785" />
+                <geom name="hip_R_visual" type="mesh" mesh="HipRightNCS-v1" pos="0 0 0" euler="0 0 0" />
+                <inertial mass="0.471" pos="-0.023158859460218346 -0.016016913267582217 0.0001934139862113593" fullinertia="0.0004602463641 0.006936869118 0.006754759258 -0.0001470035414 2.115874673e-07 -2.532197728e-06" />
+                <body name="cam_R" pos="-0.149 -0.05190000000000357 -9.462343275658146e-18" quat="0.9999999209 1.269058959e-16 -0.0003978023299 -7.930390833e-16">
+                    <joint name="cam_R" type="hinge" axis="0 -1 0" pos="-2.268638088e-08 0 7.184235949e-08" damping="0.1" armature="0.0216" limited="true" range="-1.5 1.5" />
+                    <geom name="cam_R_visual" type="mesh" mesh="CamRightNCS-v1" pos="0 0 0" euler="0 0 0" />
+                    <inertial mass="0.066" pos="0.046240898872842245 -0.0009999999999999896 6.140921104957897e-16" fullinertia="1.203905304e-05 0.0001518971402 0.0001399020872 -1.816515456e-19 3.166904508e-18 -3.441620591e-21" />
+                    <body name="rod_R" pos="0.12000000000000118 -0.0019999999999999575 -5.329070518200751e-17" euler="-3.1415926535897825 -0.449376430824731 -3.141592653589789">
+                        <joint name="rod_R" type="hinge" axis="0 -1 0" pos="3.464785489e-07 0 1.276631151e-07" damping="0.2" armature="0.001" limited="false" />
+                        <geom name="rod_R_visual" type="mesh" mesh="PushrodRightNCS-v1" pos="0 0 0" euler="0 0 0" />
+                        <inertial mass="0.071" pos="-0.0014470160711917007 -0.0005227074404326835 -0.19135653035872233" fullinertia="0.001566417981 0.00156723895 4.326139749e-06 2.367782894e-09 -3.309215038e-07 5.325295391e-06" />
+                    <site name="rod_tip_R" pos="-0.000743214 -0.007 -0.397969" /></body>
+                </body>
+                <body name="thigh_R" pos="0.10100000000000028 -0.04609999999999861 -1.6132278674730357e-15" quat="0.9999999798 -1.17631376e-16 -0.0002010113798 -3.915242625e-16">
+                    <joint name="thigh_R" type="hinge" axis="0 -1 0" pos="7.437940817e-08 0 -1.19874972e-08" damping="0.1" armature="0.0216" limited="true" range="-1.047 1.047" />
+                    <geom name="thigh_R_visual" type="mesh" mesh="ThighRightNCS-v1" pos="0 0 0" euler="0 0 0" />
+                    <inertial mass="0.483" pos="0.0009430110630470161 -0.015029284942483255 -0.14160752239628077" fullinertia="0.007078108729 0.007275022349 0.0002968982854 -7.152155531e-07 9.164845709e-05 -9.414558268e-06" />
+                    <body name="leg_R" pos="2.6645352591003756e-16 -0.015000000000005046 -0.3499999999999971" euler="9.553818297293955e-16 -0.8870140284343525 8.834397212205721e-16">
+                        <joint name="knee_R" type="hinge" axis="0 -1 0" pos="4.141040087e-07 -0.009999999991 -9.742705437e-08" damping="0.2" armature="0.001" limited="false" />
+                        <geom name="leg_R_visual" type="mesh" mesh="FootFlatRightNCS-v1" pos="0 0 0" euler="0 0 0" />
+                        <inertial mass="0.405" pos="-0.34980445152445366 3.0125382213117706e-05 -0.01885167996800119" fullinertia="0.0005645537435 0.0119942718 0.01145509302 -5.985985999e-06 -0.001115101846 -7.855346904e-07" />
+                        <site name="leg_anchor_R" pos="-0.06133549751 0.0002 0.02409990031" /><geom name="foot_R_col" class="collision" type="box" size="0.0215488 0.0127 0.0015" pos="-0.5082025621 -5.782411587e-19 -0.1091881705" quat="0 0.5002507616 0 0.8658805781" /><geom name="heel_R_col" class="collision" type="box" size="0.0215488 0.0127 0.0015" pos="-0.5297297617 -5.782411587e-19 -0.07185204646" quat="0 0.5002507616 0 0.8658805781" /></body>
+                </body>
+            <body name="motor_cam_R" pos="-0.1489999247 -0.05189999999 2.943471115e-11"><inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" /></body><body name="motor_thigh_R" pos="0.1010000753 -0.04609999999 2.943446942e-11"><inertial pos="0 0 0" mass="1.4" diaginertia="0.002 0.002 0.002" /></body></body>
+        <body name="motor_hip_roll_L" pos="0.027295 0.128 -1.292469707e-26"><inertial pos="0 0 0" mass="0.75" diaginertia="0.001 0.001 0.001" /></body><body name="motor_hip_roll_R" pos="0.027295 -0.128 -6.462348536e-27"><inertial pos="0 0 0" mass="0.75" diaginertia="0.001 0.001 0.001" /></body></body>
+    </worldbody>
+<custom><numeric name="nominal_ctrl" data="0 0.1265 -0.2025 0 -0.1265 0.2025" /></custom><equality><connect name="loop_L" site1="rod_tip_L" site2="leg_anchor_L" solref="0.002 1" solimp="0.999 0.9999 0.0001" /><connect name="loop_R" site1="rod_tip_R" site2="leg_anchor_R" solref="0.002 1" solimp="0.999 0.9999 0.0001" /></equality><actuator><motor name="hip_roll_L" joint="hip_roll_L" gear="1" forcerange="-61.2 61.2" ctrlrange="-61.2 61.2" /><motor name="cam_L" joint="cam_L" gear="1" forcerange="-144.5 144.5" ctrlrange="-144.5 144.5" /><motor name="thigh_L" joint="thigh_L" gear="1" forcerange="-144.5 144.5" ctrlrange="-144.5 144.5" /><motor name="hip_roll_R" joint="hip_roll_R" gear="1" forcerange="-61.2 61.2" ctrlrange="-61.2 61.2" /><motor name="cam_R" joint="cam_R" gear="1" forcerange="-144.5 144.5" ctrlrange="-144.5 144.5" /><motor name="thigh_R" joint="thigh_R" gear="1" forcerange="-144.5 144.5" ctrlrange="-144.5 144.5" /></actuator><sensor><accelerometer name="imu_acc" site="imu" /><gyro name="imu_gyro" site="imu" /><framequat name="base_quat" objtype="site" objname="imu" /><jointpos name="hip_roll_L_pos" joint="hip_roll_L" /><jointvel name="hip_roll_L_vel" joint="hip_roll_L" /><actuatorfrc name="hip_roll_L_frc" actuator="hip_roll_L" /><jointpos name="cam_L_pos" joint="cam_L" /><jointvel name="cam_L_vel" joint="cam_L" /><actuatorfrc name="cam_L_frc" actuator="cam_L" /><jointpos name="thigh_L_pos" joint="thigh_L" /><jointvel name="thigh_L_vel" joint="thigh_L" /><actuatorfrc name="thigh_L_frc" actuator="thigh_L" /><jointpos name="hip_roll_R_pos" joint="hip_roll_R" /><jointvel name="hip_roll_R_vel" joint="hip_roll_R" /><actuatorfrc name="hip_roll_R_frc" actuator="hip_roll_R" /><jointpos name="cam_R_pos" joint="cam_R" /><jointvel name="cam_R_vel" joint="cam_R" /><actuatorfrc name="cam_R_frc" actuator="cam_R" /><jointpos name="thigh_R_pos" joint="thigh_R" /><jointvel name="thigh_R_vel" joint="thigh_R" /><actuatorfrc name="thigh_R_frc" actuator="thigh_R" /></sensor><keyframe><key name="stand" qpos="0 0 0.8379876433 0 0 0 -7.91158682e-17 0.1265 -2.182352296 -0.2025 0.04219630152 -2.228559069e-17 -0.1265 -2.178675403 0.2025 -0.04563554081" ctrl="0 0 0 0 0 0" /></keyframe></mujoco>
