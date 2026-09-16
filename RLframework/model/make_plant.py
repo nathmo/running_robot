@@ -1029,10 +1029,16 @@ def loaded_command(m, qpos, pose, kp=None, verbose=True):
     within 2 mm.  The offset is tau_hold / kp -- roughly 22 N*m over the stance gains -- and the
     same idea as the previous pipeline re-settling its keyframe under load.
 
-    This is why the plant does not need stiffer drives.  Holding the stance with the command
+    Solved at the NEUTRAL gains, not at the impedance schedule's ceiling.  The gait's phase
+    profile multiplies drive_kp by a factor that is 1.0 at a zero action, so the neutral action is
+    what a cold policy emits and what the robot falls back to -- and it should be a standing
+    robot.  Solved at the ceiling instead, a zero action delivers 40% of the torque it needs and
+    the leg sags from the first tick of training.
+
+    This is also why the plant does not need stiffer drives.  Holding the stance with the command
     pinned AT the pose would take kp 2000, four times what the hardware can encode; holding it
-    with the right command takes 15% of the available torque."""
-    kp = np.asarray(STANCE_KP_CEILING if kp is None else kp, float)
+    with the right command takes a fraction of the available torque."""
+    kp = np.asarray(STANCE_KP if kp is None else kp, float)
     d = mujoco.MjData(m)
     d.qpos[:] = qpos                    # the keyframe is not on the model yet at build time
     mujoco.mj_forward(m, d)
@@ -1196,14 +1202,18 @@ def build(variant="free", leg_kg=LEG_KG, verbose=True,
     key.set("qpos", _fs(qpos))
     key.set("ctrl", _fs(np.zeros(m.nu)))
 
-    cmd = pose = stand = None
-    if variant == "free":
-        cmd, pose, tau_hold = loaded_command(m, qpos, nominal, verbose=verbose)
-        stand = check_static_stability(m, qpos, cmd, verbose=verbose,
-                                       scales=(2.5,))          # the drives' ceiling, kp 500
-        num = ET.SubElement(root.find("custom"), "numeric")
-        num.set("name", "nominal_cmd")
-        num.set("data", _fs(cmd))
+    # Both variants carry the holding command: the gait is centred on it, so the plant reads it
+    # on every model.  Only the free plant can be asked whether it stands by itself.
+    cmd, pose, tau_hold = loaded_command(m, qpos, nominal, verbose=verbose)
+    num = ET.SubElement(root.find("custom"), "numeric")
+    num.set("name", "nominal_cmd")
+    num.set("data", _fs(cmd))
+    # At the NEUTRAL impedance -- what a zero action asks for, and what a cold policy emits.
+    # Testing the schedule's ceiling with this same target is not meaningful: the command's offset
+    # is sized for these gains, so 2.5x the stiffness on an unchanged target is 2.5x the holding
+    # torque, and the robot pushes itself over.  A policy that stiffens also re-aims.
+    stand = check_static_stability(m, qpos, cmd, verbose=verbose,
+                                   scales=(1.0,)) if variant == "free" else None
 
     root.find("compiler").set("meshdir", "../../Dash-01CAD")
     xml = '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")

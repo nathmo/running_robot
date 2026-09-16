@@ -1,0 +1,17 @@
+# DASH-01 Walker v2: JAX + MJX training stack. Python >= 3.12.
+#   local (CPU test):  python -m venv .venv_v2 && .venv_v2/Scripts/activate && pip install -r walk_v2/requirements.txt
+#   Lyra (GPU):        see walk_v2/slurm/README.md -- jax[cuda12] instead of jax
+jax==0.11.1
+mujoco==3.13.0
+mujoco-mjx==3.13.0
+flax>=0.12
+optax>=0.2.5
+numpy>=2.0
+tensorboard>=2.15
+tensorboardX>=2.6
+matplotlib>=3.8
+imageio>=2.34
+imageio-ffmpeg>=0.4.9
+pillow>=10.0
+tqdm>=4.66
+rich>=13.0
