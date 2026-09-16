@@ -377,7 +377,22 @@ def test_env(quick):
     obs.block_until_ready()
     check("80 random ticks: finite obs, finite rewards", bool(jnp.isfinite(obs).all()) and bool(jnp.isfinite(r).all()),
           f"{80 * 4 / (time.time() - t):.0f} env-steps/s on {jax.devices()[0].platform}, {n_done} auto-resets")
-    check("commit ticks appeared mid-episode (the clock wraps)", n_commit >= 1, f"{n_commit} commits after t0")
+    # The clock must wrap mid-episode, or the latched spec is written once and never revised.
+    # Driven with ZERO actions, not random ones: a zero action is the neutral gait at the middle
+    # of the cadence band, so the wrap is due on a known tick -- with random actions the robot
+    # thrashes itself over in a dozen ticks and whether a wrap lands first is luck, which made
+    # this check pass on one machine and fail on another.
+    f_neutral = float(gait.frequency(0.0, env.gp, np))
+    ticks = int(3.0 / (f_neutral * env.control_dt))          # three full cycles
+    # nominal plant: dr_scale 0 also switches off the pushes, wind and trips, which ride on it
+    clean = EnvParams.final(cfg)._replace(dr_scale=0.0, ctrl_jitter_ms=0.0, ctrl_drop_prob=0.0)
+    state2, _ = env.reset(jax.random.PRNGKey(3), clean)
+    zero, n_commit2 = jnp.zeros((4, gait.ACTION_DIM)), 0
+    for _ in range(ticks):
+        state2, _, _, _, info2 = env.step(state2, zero, clean)
+        n_commit2 += int((info2["commit"] & (state2.step_n > 1)).sum())
+    check(f"the clock wraps mid-episode ({f_neutral:.2f} Hz neutral, {ticks} ticks = 3 cycles)",
+          n_commit2 >= 1, f"{n_commit2} commits after t0 over 4 envs")
 
 
 def test_net():
