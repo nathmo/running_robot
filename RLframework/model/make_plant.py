@@ -3,7 +3,7 @@
     python -m model.make_plant              # writes dash01_free.xml + dash01_planar.xml
     python -m model.make_plant --report     # build + print every validation number, write nothing
 
-The input is ``Dash-01CAD/dash01.xml``, a raw CAD export: meshes, body frames, joint axes and
+The input is ``dash-01CAD/dash01.xml``, a raw CAD export: meshes, body frames, joint axes and
 CAD-density inertias, with each closed kinematic loop broken by DUPLICATING a body.  It does not
 compile (repeated names) and it is not a robot model (no base DOF, no actuators, no sensors, no
 collision geometry, no ground).  This script turns it into one, and every step is checked rather
@@ -51,10 +51,10 @@ import mujoco
 
 HERE = Path(__file__).resolve().parent
 PKG = HERE.parent
-CAD_DIR = PKG.parent / "Dash-01CAD"
+CAD_DIR = PKG.parent / "dash-01CAD"
 CAD = CAD_DIR / "dash01.xml"
 # The plant this one replaces, vendored here as the reference for the joint-zero cross-check.  It
-# is the only thing outside Dash-01CAD that this package reads, and it is kept so the check keeps
+# is the only thing outside dash-01CAD that this package reads, and it is kept so the check keeps
 # working once the old training tree is gone -- the robot's homing convention is defined by it.
 PREVIOUS_PLANT = "previous_plant.xml"
 
@@ -1215,7 +1215,7 @@ def build(variant="free", leg_kg=LEG_KG, verbose=True,
     stand = check_static_stability(m, qpos, cmd, verbose=verbose,
                                    scales=(1.0,)) if variant == "free" else None
 
-    root.find("compiler").set("meshdir", "../../Dash-01CAD")
+    root.find("compiler").set("meshdir", "../../dash-01CAD")
     xml = '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")
     return xml, dict(info, mass=mass_report, sole=sole, anchors=anchors, model=m,
                      nominal=nominal, stance=stance, stand=stand)

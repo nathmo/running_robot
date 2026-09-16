@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <mujoco model="dash01">
-    <compiler angle="radian" meshdir="../../Dash-01CAD" autolimits="true" />
+    <compiler angle="radian" meshdir="../../dash-01CAD" autolimits="true" />
     <option timestep="0.001" integrator="implicitfast" cone="elliptic" impratio="10" solver="Newton" iterations="100" ls_iterations="50" /><default><default class="dash01"><geom contype="0" conaffinity="0" group="2" /><site group="4" size="0.012" rgba="0.95 0.45 0.1 1" /><default class="collision"><geom contype="1" conaffinity="1" group="3" condim="3" friction="0.7 0.005 0.0001" solref="0.01 1" solimp="0.95 0.99 0.001" rgba="0.2 0.8 0.2 0.4" /></default></default></default><asset>
         <mesh name="bodyNCS-v1" file="meshes/bodyNCS-v1.stl" scale="0.001 0.001 0.001" />
         <mesh name="HipLeftNCS-v1" file="meshes/HipLeftNCS-v1.stl" scale="0.001 0.001 0.001" />
