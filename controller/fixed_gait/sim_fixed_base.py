@@ -5,7 +5,7 @@ This is the desktop counterpart to run_hardware.py: it drives the SAME gait.py t
 MuJoCo model whose floating base has been welded to the world, so the robot hangs in the air and
 you watch all six motors cycle through the walking pattern. No balance, no ground — just the legs.
 
-The model is derived from mujoco/RLframework/dash01.xml at load time (via MjSpec): the root
+The model is derived from mujoco/dash01/dash01.xml at load time (via MjSpec): the root
 freejoint is removed (base fixed), the standing keyframe and the floor are dropped, and gravity is
 turned off by default (the gait choice you picked). Nothing about the real model is duplicated on
 disk, so this can never drift from the robot description.

@@ -31,7 +31,7 @@ so every commanded target is in range by construction.
 from dataclasses import dataclass, field
 import numpy as np
 
-# actuator/ctrl indices (order matches mujoco/RLframework/dash01.xml <actuator>)
+# actuator/ctrl indices (order matches mujoco/dash01/dash01.xml <actuator>)
 HIP_ROLL_L, CAM_L, THIGH_L, HIP_ROLL_R, CAM_R, THIGH_R = range(6)
 N_ACT = 6
 

@@ -5,7 +5,7 @@ Everything about the physical robot, self-contained so this folder can move to i
 | folder | what |
 |---|---|
 | `fixed_gait/` | hand-crafted in-air walking demo (sim + CAN/moteus streaming) and the Flask web control UI (`fixed_gait/webui/`) |
-| `robotCADdescription/` | CAD exports (URDF + the MJCF_OPEN_MUJOCO_B MuJoCo export the sim model is built from) |
+| `robotCADdescription/` | CAD of the PRE-REBUILD robot: Inventor/STEP source in `CAD/` (still the source for the nine parts the rebuild did not touch) and the `MJCF_OPEN_MUJOCO_B` export `model/dash01.xml` reads its meshes from. The six unreferenced export formats were deleted. The CURRENT robot's CAD is `Dash-01CAD/` at the repo root. |
 | `model/` | dash01.xml (simulation-ready model, meshes referenced from `robotCADdescription/`), ride-height LUT, reachability plotting |
 | `tools/` | AK60/AKE90 motor bring-up + CAN scan + URDF patching utilities |
 | `viewer/` | browser MJCF debug viewer |

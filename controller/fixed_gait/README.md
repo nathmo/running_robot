@@ -60,7 +60,7 @@ watch the legs step.
 Drives the gait in a fixed-base sim **with the leg meshes made collidable** (the normal model only
 collides the foot spheres) and checks: every joint stays in range, no *deep* link self-collision,
 and the foot path is smooth. It overlays that foot path on the reachability map from
-`mujoco/RLframework/plot_reachability.py`. The gait's foot path is a small closed loop sitting at the
+`mujoco/dash01/plot_reachability.py`. The gait's foot path is a small closed loop sitting at the
 forward edge of the reachable band — see `_gait_reachability.png`.
 
 > The pushrod grazes its adjacent hip link by ~2 mm at the top of the cam swing. That is the

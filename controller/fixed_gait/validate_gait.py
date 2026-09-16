@@ -9,7 +9,7 @@ only collides the foot spheres) and checks the three things that matter for a sa
      penetration past a threshold is flagged),
   3. the foot traces a smooth, bounded path (no lock-up / fold / NaN).
 
-It also overlays the foot path on the reachability map from mujoco/RLframework/plot_reachability.py
+It also overlays the foot path on the reachability map from mujoco/dash01/plot_reachability.py
 for context. (That idealized map holds the foot parallel to the thigh / at spring rest and uses a
 seeded kinematic solver, so it under-covers the forward edge and flags designed-adjacent meshes as
 "collisions" — the dynamic sim here is the authority, the map is a backdrop.)

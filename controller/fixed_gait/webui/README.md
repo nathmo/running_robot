@@ -47,11 +47,11 @@ saved data.
 `fk_lut.npz` is generated **on the desktop** (needs mujoco, the Pi doesn't have it):
 
 ```
-python mujoco/RLframework/gen_fk_lut.py --check
+python mujoco/dash01/gen_fk_lut.py --check
 ```
 
 It Newton-solves the closed 4-bar at every (cam, thigh) grid cell via
-`mujoco/RLframework/plot_reachability.py` and stores all linkage node positions. The Pi only
+`mujoco/dash01/plot_reachability.py` and stores all linkage node positions. The Pi only
 bilinearly interpolates it. After loading/importing a workspace, press **“verify FK map
 (sign + offset)”** in the EE panel once: per side and per sign combination it FITS the offset
 that lands the workspace band on the LUT assembly band (thin diagonal ⇒ sharp fit) and enables
