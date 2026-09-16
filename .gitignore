@@ -70,8 +70,8 @@ controller/fixed_gait/webui/data/*
 !controller/fixed_gait/webui/data/workspaces/
 !controller/fixed_gait/webui/data/trajectories/
 
-# MJX/JAX virtualenv -- machine-local
-.venv_v2/
+# virtualenv (MJX/JAX + pytest + flask) -- machine-local
+.venv/
 
 # RLframework: run outputs and checkpoints are pulled on demand, not versioned.  The generated plant
 # XMLs and the validation renders ARE tracked: they are what the model builder is judged on, and a

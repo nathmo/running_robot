@@ -1011,8 +1011,44 @@ def settle(m, nominal=None, z0=1.05, planar=True, verbose=True):
 # =============================================================================================
 # build
 # =============================================================================================
-STANCE_KP = (120.0, 200.0, 200.0, 120.0, 200.0, 200.0)   # the drives' design position gains
+# The drives' design position gains, and the ceiling the phase-scheduled impedance can reach
+# (x2.5).  That ceiling is a HARDWARE limit, not a choice: the MIT CAN frame encodes kp in 12 bits
+# over 0..500 N*m/rad (controller/deploy/mit.py) and the safety governor clamps to the same, so
+# 500 is all there is.
+STANCE_KP = (120.0, 200.0, 200.0, 120.0, 200.0, 200.0)
 STANCE_KD = (4.0, 5.0, 5.0, 4.0, 5.0, 5.0)
+STANCE_KP_CEILING = tuple(2.5 * k for k in STANCE_KP)
+
+
+def loaded_command(m, qpos, pose, kp=None, verbose=True):
+    """The command that HOLDS `pose` under gravity, as opposed to the pose itself.
+
+    A position loop only makes torque from error, so commanding the pose the robot should end up
+    in leaves it with none and the leg collapses: at the drives' 500 N*m/rad ceiling, commanding
+    the nominal pose drops the robot 1.56 m, while commanding it offset by about 2 deg holds it to
+    within 2 mm.  The offset is tau_hold / kp -- roughly 22 N*m over the stance gains -- and the
+    same idea as the previous pipeline re-settling its keyframe under load.
+
+    This is why the plant does not need stiffer drives.  Holding the stance with the command
+    pinned AT the pose would take kp 2000, four times what the hardware can encode; holding it
+    with the right command takes 15% of the available torque."""
+    kp = np.asarray(STANCE_KP_CEILING if kp is None else kp, float)
+    d = mujoco.MjData(m)
+    d.qpos[:] = qpos                    # the keyframe is not on the model yet at build time
+    mujoco.mj_forward(m, d)
+    stiff = tuple(np.asarray(STANCE_KP) * 16), tuple(np.asarray(STANCE_KD) * 4)
+    for _ in range(4000):
+        d.ctrl[:] = _pd(m, d, pose, kp=stiff[0], kd=stiff[1])
+        mujoco.mj_step(m, d)
+    tau = _pd(m, d, pose, kp=stiff[0], kd=stiff[1])
+    q_ss = np.array([d.qpos[m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)]]
+                     for n in ACTUATED])
+    cmd = q_ss + tau / kp
+    if verbose:
+        print(f"  [load] holding torque {np.round(tau, 2).tolist()} N*m "
+              f"({np.abs(tau).max() / float(m.actuator_forcerange[1, 1]) * 100:.0f}% of limit); "
+              f"command offset {np.round(np.degrees(cmd - q_ss), 2).tolist()} deg")
+    return cmd, q_ss, tau
 
 
 def check_static_stability(m, qpos, nominal, t_s=4.0, verbose=True,
@@ -1160,7 +1196,14 @@ def build(variant="free", leg_kg=LEG_KG, verbose=True,
     key.set("qpos", _fs(qpos))
     key.set("ctrl", _fs(np.zeros(m.nu)))
 
-    stand = check_static_stability(m, qpos, nominal, verbose=verbose) if variant == "free" else None
+    cmd = pose = stand = None
+    if variant == "free":
+        cmd, pose, tau_hold = loaded_command(m, qpos, nominal, verbose=verbose)
+        stand = check_static_stability(m, qpos, cmd, verbose=verbose,
+                                       scales=(2.5,))          # the drives' ceiling, kp 500
+        num = ET.SubElement(root.find("custom"), "numeric")
+        num.set("name", "nominal_cmd")
+        num.set("data", _fs(cmd))
 
     root.find("compiler").set("meshdir", "../../Dash-01CAD")
     xml = '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")
