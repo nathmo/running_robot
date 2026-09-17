@@ -108,7 +108,8 @@ def initial_params(c):
     the END of the curricula (full bring-up, full command range, assist off), which is a different and
     much harder env than the one a run begins in. Measuring the wrong one reads as a policy failure.
     """
-    return EnvParams(dr_scale=0.0 if (c.dr_enable and c.dr_curriculum_steps > 0) else 1.0,
+    return EnvParams(dr_scale=(float(getattr(c, "dr_scale_start", 0.0))
+                              if (c.dr_enable and c.dr_curriculum_steps > 0) else 1.0),
     sprint_dist_m=float(c.sprint_dist_start_m if c.sprint_curriculum_steps > 0
                         else c.sprint_dist_m),
     stance_ratio=float(c.stance_ratio_start if c.gait_curriculum_steps > 0
@@ -533,26 +534,60 @@ class PPO:
         pos = next((i for i, g in enumerate(groups) if key in g), None)
         if pos is None:
             return True
-        #
-        # ...BUT THE QUEUE DOES NOT WAIT FOREVER. Every ramp here is competence-gated and retreats,
-        # so a group can hover below 0.99 indefinitely and starve everything behind it. That is not
-        # hypothetical: all five 200 M stage-2 seeds finished with `dr_scale` at 0.000 because the
-        # three groups ahead of it never all completed. `curriculum_group_max_steps` bounds how long
-        # one group may hold the queue -- it keeps whatever progress it has and the next group
-        # starts anyway. A partly-open curriculum that the policy has absorbed beats a fully-open
-        # one it never reached.
+        # EXACTLY ONE GROUP ADVANCES. Not "every earlier group is cleared" -- that let a capped
+        # group keep ramping underneath its successor, which is the overlap this queue exists to
+        # prevent (see below).
+        return pos == self._live_group(groups)
+
+    def _live_group(self, groups):
+        """Index of the group whose turn it is: the first one not yet CLEARED.
+
+        A group is cleared when it has finished (progress >= 0.99) or when it has held the queue
+        for `curriculum_group_max_steps` without finishing.
+
+        THE QUEUE DOES NOT WAIT FOREVER. Every ramp here is competence-gated and retreats, so a
+        group can hover below 0.99 indefinitely and starve everything behind it. That is not
+        hypothetical: all five 200 M stage-2 seeds finished with `dr_scale` at 0.000 because the
+        three groups ahead of it never all completed. The cap bounds how long one group may hold
+        the queue -- it keeps whatever progress it has and the next group starts anyway.
+
+        ...AND THE CAPPED GROUP THEN STOPS. That is the 2026-09-17 fix. Previously "cleared" only
+        decided who could START; the capped group itself stayed eligible and went on ramping, so
+        from the moment the cap fired TWO curricula advanced at once. Measured on dash_s0/s1/s2:
+        the shape/eff/stance group held the queue for its full 80 M with `eff_scale` at 0.68, the
+        cap let `dr_scale` in, and the policy then had to absorb a rising effort penalty AND a
+        randomising plant together -- the exact "task hardens in several directions at once"
+        failure `_queued` was written to prevent, reintroduced by its own starvation valve. All
+        three seeds peaked within 2 M steps of that moment and collapsed from ep_len 2376 to 45.
+
+        Freezing the capped group keeps both properties: nothing starves, and the policy is still
+        asked for one new difficulty at a time. A partly-open curriculum that the policy has
+        absorbed beats a fully-open one it never reached.
+        """
         cap = float(getattr(self.cfg, "curriculum_group_max_steps", 0.0))
-        for g in groups[:pos]:
-            for earlier in g:
-                st = self.cur.get(earlier)
-                if st is None:
+
+        def cleared(g):
+            for k in g:
+                st = self.cur.get(k)
+                if st is None:                       # never started: holds the queue
                     return False
                 if st.get("progress", 0.0) >= 0.99:
                     continue
                 if cap > 0.0 and st.get("turn", 0.0) >= cap:
                     continue
                 return False
-        return True
+            return True
+
+        live = next((i for i, g in enumerate(groups) if not cleared(g)), None)
+        if live is not None:
+            return live
+        # Nothing is waiting: give the turn BACK to the first group the cap cut short. A group
+        # frozen at 0.68 is a curriculum that never reached its target, and once no one else needs
+        # the queue there is no reason to leave the rest of the budget unspent -- with the ramps
+        # done by ~250 M of a 450 M run, that tail is 200 M steps. Still exactly one at a time.
+        unfinished = next((i for i, g in enumerate(groups)
+                           if any(self.cur.get(k, {}).get("progress", 0.0) < 0.99 for k in g)), None)
+        return unfinished if unfinished is not None else len(groups)
 
     def update_curricula(self, ep_len, d_steps):
         c = self.cfg
@@ -571,12 +606,18 @@ class PPO:
             return steps
         kw = dict(p._asdict())
         if c.dr_enable and c.dr_curriculum_steps > 0:
-            kw["dr_scale"] = self._gated("dr_scale", ep_len, 0.0, 1.0, c.dr_curriculum_steps, gate, rf, _q("dr_scale", d_steps))
+            kw["dr_scale"] = self._gated("dr_scale", ep_len, float(getattr(c, "dr_scale_start", 0.0)),
+                                         1.0, c.dr_curriculum_steps, gate, rf, _q("dr_scale", d_steps))
         if c.objective == "sprint" and c.sprint_curriculum_steps > 0:
             kw["sprint_dist_m"] = self._clock(c.sprint_dist_start_m, c.sprint_dist_m, c.sprint_curriculum_steps)
         if c.gait_curriculum_steps > 0 and c.w_phase_contact > 0:
+            # _q, not d_steps: stance_ratio is named in curriculum_order, so it must take its turn
+            # and bank a turn clock like its group-mates. Passing d_steps straight through let it
+            # ramp while another group held the queue AND left its `turn` at 0, so the cap could
+            # never excuse it -- it was the member of its group that decided when DR was let in.
             kw["stance_ratio"] = self._gated("stance_ratio", ep_len, c.stance_ratio_start, c.stance_ratio_final,
-                                             c.gait_curriculum_steps, _g(c.gait_curriculum_gate_ep_len), rf, d_steps)
+                                             c.gait_curriculum_steps, _g(c.gait_curriculum_gate_ep_len), rf,
+                                             _q("stance_ratio", d_steps))
         if c.efficiency_ramp_steps > 0:
             kw["eff_scale"] = self._gated("eff_scale", ep_len, 0.0, c.efficiency_target,
                                           c.efficiency_ramp_steps, _g(c.efficiency_gate_ep_len), rf, _q("eff_scale", d_steps))
@@ -634,11 +675,14 @@ class PPO:
                                                c.stoplight_curriculum_steps, _g(c.stoplight_gate_ep_len), rf, d_steps)
         if self.cfg.curriculum_order:
             groups = [(g,) if isinstance(g, str) else tuple(g) for g in self.cfg.curriculum_order]
-            done_g = lambda g: all(self.cur.get(k, {}).get("progress", 0.0) >= 0.99 for k in g)
-            live = next((g for g in groups if not done_g(g)), None)
+            # the SAME predicate _queued uses, cap included. Reporting "done" by progress alone
+            # announced dr_scale at 152 M in every 2026-09-17 seed when it had been ramping since
+            # 119 M, which hid the overlap that ended those runs.
+            idx = self._live_group(groups)
+            live = groups[idx] if idx < len(groups) else None
             if live != getattr(self, "_live_curriculum", "<none>"):
                 self._live_curriculum = live
-                n_done = sum(1 for g in groups if done_g(g))
+                n_done = idx
                 name = "+".join(live) if live else "nothing left"
                 # say WHY the previous group handed over: finished, or ran out of turn. A group
                 # that timed out leaves a partly-open curriculum behind and that is worth seeing in

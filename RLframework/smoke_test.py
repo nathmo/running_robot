@@ -433,6 +433,7 @@ def test_queue():
 
     class FakeQ:                       # just enough of PPO for _queued / _q
         _queued = PPO._queued
+        _live_group = PPO._live_group
         def __init__(self, cfg):
             self.cfg, self.cur, self.step = cfg, {}, 0
 
@@ -463,12 +464,43 @@ def test_queue():
     check("a group out of turn hands over anyway", q._queued("dr_scale") is True,
           f"(cap {cfg.curriculum_group_max_steps:,} steps)")
 
+    # ...and the capped group itself STOPS when it hands over. Without this, the cap starts the
+    # next group while the capped one keeps ramping: two curricula at once, which is what ended
+    # the 2026-09-17 seeds (eff_scale 0.68 and still climbing when dr_scale was let in).
+    check("a capped group stops advancing once it hands over", q._queued("eff_scale") is False)
+    check("and the group that took over does advance", q._queued("dr_scale") is True)
+
+    # ...and it gets the turn back once nothing else needs the queue, so the tail of the run
+    # finishes what the cap cut short instead of leaving the budget unspent.
+    for k in ("dr_scale", "ctrl_jitter_ms", "ctrl_drop_prob"):
+        q.cur[k] = {"progress": 0.995, "turn": 0.0}
+    check("a frozen group resumes when nothing else is live", q._queued("shape_scale") is True)
+
     q2 = FakeQ(replace(cfg, curriculum_group_max_steps=0))
     q2.cur = {k: {"progress": 0.995, "turn": 1e12} for k in ("cmd_lo", "cmd_hi", "cmd_zero_p")}
     q2.cur.update({k: {"progress": 0.4, "turn": 1e12}
                    for k in ("shape_scale", "eff_scale", "stance_ratio")})
     q2.cur["dr_scale"] = {"progress": 0.0}
     check("cap 0 means wait forever (the old behaviour)", q2._queued("dr_scale") is False)
+
+
+def test_dr_floor():
+    """DR must not be identically zero at step 0.
+
+    Every 2026-09-17 seed trained 119 M steps on a plant that never varied, then collapsed from
+    ep_len 2376 to 45 within 10 M steps of dr_scale first becoming nonzero -- at a dose of 0.088.
+    A policy converged on one point in plant space has no margin to spend.
+    """
+    print("DR floor")
+    from ppo import initial_params
+    from env import EnvParams
+    for name in ("dash", "dash_planar"):
+        cfg = get_config(name)
+        p0 = initial_params(cfg)
+        check(f"{name}: the plant varies from the first rollout",
+              p0.dr_scale > 0.0, f"dr_scale starts at {p0.dr_scale:.3f}")
+        check(f"{name}: and the ramp still reaches full DR",
+              EnvParams.final(cfg).dr_scale == 1.0)
 
 
 def main():
@@ -483,6 +515,7 @@ def main():
     test_plant()
     test_net()
     test_queue()
+    test_dr_floor()
     test_env(args.quick)
     test_heading_env(args.quick)
     print(f"\n{'ALL OK' if OK == 0 else f'{OK} FAILURE(S)'}")

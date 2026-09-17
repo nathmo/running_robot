@@ -137,6 +137,21 @@ class Config:
     # ----- domain randomization (§07, §08) -----------------------------------------------------
     dr_enable: bool = True
     dr_curriculum_steps: int = 60_000_000   # gated ramp on the width of every range below
+    # THE DR FLOOR -- where the ramp STARTS, not 0.
+    #
+    # Measured 2026-09-17 on dash_s0/s1/s2: dr_scale sat at exactly 0.000 for the first 119 M
+    # steps (it is last but one in the queue), so the policy converged on a plant that is not
+    # merely easy but DETERMINISTIC -- the same masses, the same gains, the same friction, every
+    # episode. All three seeds climbed to ep_len 2376 and then collapsed to 45 within 10 M steps
+    # of dr_scale first becoming nonzero, at a dose of 0.088: mass +-1.1%, kp +-1.8%, gravity
+    # tilt +-0.44 deg, wind +-2.6 N against a 141 N robot. Nothing at that scale should topple a
+    # policy surviving 2376 ticks; it did because the policy had spent its whole life on a single
+    # point in plant space and had no margin to spend.
+    #
+    # A floor keeps that from ever being true: the plant varies from the first rollout, so
+    # robustness is built with the gait instead of asked of a finished one. The ramp above still
+    # runs, from here to 1.0.
+    dr_scale_start: float = 0.0
     dr_mass_global: float = 0.12
     dr_mass_body: float = 0.15
     dr_inertia: float = 0.25
@@ -595,6 +610,7 @@ _DASH = dict(
                       ("shape_scale", "eff_scale", "stance_ratio"), "dr_scale",
                       ("ctrl_jitter_ms", "ctrl_drop_prob")),
     curriculum_group_max_steps=80_000_000,
+    dr_scale_start=0.15,
     total_steps=450_000_000,
 )
 
