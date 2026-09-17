@@ -110,6 +110,8 @@ def initial_params(c):
     """
     return EnvParams(dr_scale=(float(getattr(c, "dr_scale_start", 0.0))
                               if (c.dr_enable and c.dr_curriculum_steps > 0) else 1.0),
+    alive_scale=1.0 if getattr(c, "alive_decay_steps", 0) > 0
+               else float(getattr(c, "alive_scale_final", 1.0)),
     sprint_dist_m=float(c.sprint_dist_start_m if c.sprint_curriculum_steps > 0
                         else c.sprint_dist_m),
     stance_ratio=float(c.stance_ratio_start if c.gait_curriculum_steps > 0
@@ -608,6 +610,11 @@ class PPO:
         if c.dr_enable and c.dr_curriculum_steps > 0:
             kw["dr_scale"] = self._gated("dr_scale", ep_len, float(getattr(c, "dr_scale_start", 0.0)),
                                          1.0, c.dr_curriculum_steps, gate, rf, _q("dr_scale", d_steps))
+        if getattr(c, "alive_decay_steps", 0) > 0:
+            # offset clock: hold full weight until the policy can balance, then wean over a window.
+            f = (self.step - c.alive_decay_start_steps) / max(c.alive_decay_steps, 1)
+            f = min(1.0, max(0.0, f))
+            kw["alive_scale"] = 1.0 + f * (float(c.alive_scale_final) - 1.0)
         if c.objective == "sprint" and c.sprint_curriculum_steps > 0:
             kw["sprint_dist_m"] = self._clock(c.sprint_dist_start_m, c.sprint_dist_m, c.sprint_curriculum_steps)
         if c.gait_curriculum_steps > 0 and c.w_phase_contact > 0:

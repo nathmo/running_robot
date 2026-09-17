@@ -102,15 +102,17 @@ def test_gait():
 
 
 def test_presets():
-    """One recipe, three presets. The control law carries no reflexes and no assists, the action is
-    47 wide, and the per-joint residual authority is what the preset asked for."""
-    print("presets: the recipe, the planar probe, the smoke config")
+    """One recipe, five presets: the joystick recipe, the same with the standing basin priced out,
+    the endless sprint, a planar probe and a smoke config. The control law carries no reflexes and
+    no assists, the action is 47 wide, and the per-joint residual authority is what the preset
+    asked for."""
+    print("presets: the recipe, the speed variant, the sprint, the planar probe, the smoke config")
     from dataclasses import asdict
     rng = np.random.default_rng(1)
     nominal = np.array([0, 0, 0.12, 0, 0, -0.12])
     names = sorted(get_config.__globals__["PRESETS"])
-    check("three presets: the recipe, a planar probe, a smoke config",
-          names == ["dash", "dash_planar", "smoke"], str(names))
+    check("five presets: recipe, speed variant, sprint, planar probe, smoke",
+          names == ["dash", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
     # the averaged heading: wobble and a start transient cost little, a held offset is billed in full
     from env import heading_ema
     ah, dt_h = float(np.exp(-0.01 / 1.0)), 0.01
@@ -530,6 +532,66 @@ def test_dr_floor():
           "(the sole pins the joints, not the IMU)")
 
 
+def test_alive_decay():
+    """w_alive is a curriculum: full weight while balance is learned, weaned after.
+
+    Removing it outright (2026-09-17) gave alive_frac 0.19/0.30/0.00 and froze every curriculum at
+    progress 0.00, because a cold policy earns 0.051/tick and the alive term is the only reachable
+    reward. Keeping it forever pays the standing basin. So it decays, on an offset clock.
+    """
+    print("alive decay")
+    from ppo import initial_params, PPO
+    from env import EnvParams
+
+    c = get_config("dash")
+    check("dash: no decay by default", initial_params(c).alive_scale == 1.0
+          and EnvParams.final(c).alive_scale == 1.0)
+
+    for name in ("dash_speed", "dash_sprint"):
+        c = get_config(name)
+        check(f"{name}: starts at FULL survival bonus", initial_params(c).alive_scale == 1.0)
+        check(f"{name}: ends weaned", abs(EnvParams.final(c).alive_scale - c.alive_scale_final) < 1e-9,
+              f"alive_scale_final {c.alive_scale_final}")
+
+    # drive the real ramp
+    class FakeR:
+        _queued = PPO._queued
+        _live_group = PPO._live_group
+        def __init__(self, cfg):
+            self.cfg, self.cur, self.step = cfg, {}, 0
+    c = get_config("dash_speed")
+    got = []
+    for st in (0, 30_000_000, 60_000_000, 90_000_000, 120_000_000, 200_000_000):
+        f = min(1.0, max(0.0, (st - c.alive_decay_start_steps) / max(c.alive_decay_steps, 1)))
+        got.append(round(1.0 + f * (c.alive_scale_final - 1.0), 4))
+    check("dash_speed: holds 1.0 through the balance phase, then weans",
+          got[:3] == [1.0, 1.0, 1.0] and got[3] == 0.625 and got[4] == 0.25 and got[5] == 0.25,
+          str(got))
+    # and the weaned weight must leave a STANDER below break-even but a walker above
+    w_end = c.w_alive * c.alive_scale_final
+    check("weaned w_alive is below the stander's 0.46 break-even", w_end < 0.46,
+          f"w_alive {c.w_alive} -> {w_end:.3f}")
+
+
+def test_sprint_preset():
+    """dash_sprint: one job, run. Linear income, no command, no stop."""
+    print("sprint preset")
+    import jax.numpy as jnp
+    from env import DashEnvV2, EnvParams
+    c = get_config("dash_sprint")
+    check("objective is the endless speed run", c.objective == "speed")
+    check("no command curriculum", c.cmd_curriculum_steps == 0 and c.cmd_zero_frac == 0.0)
+    check("no stop phase", c.stoplight_prob_final == 0.0)
+    check("the command group is not queued (there is no command)",
+          all("cmd_lo" not in g for g in c.curriculum_order))
+    env = DashEnvV2(c, n_envs=2)
+    import jax
+    st, ob = env.reset(jax.random.PRNGKey(0), EnvParams.final(c))
+    task = env._task(st, EnvParams.final(c))
+    check("task channel is pinned to full throttle, no braking",
+          bool(jnp.allclose(task, jnp.array([1.0, 1.0]))), str(task))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
@@ -543,6 +605,8 @@ def main():
     test_net()
     test_queue()
     test_dr_floor()
+    test_alive_decay()
+    test_sprint_preset()
     test_env(args.quick)
     test_heading_env(args.quick)
     print(f"\n{'ALL OK' if OK == 0 else f'{OK} FAILURE(S)'}")

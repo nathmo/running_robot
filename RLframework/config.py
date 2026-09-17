@@ -236,6 +236,12 @@ class Config:
     speed_upright_c0: float = 0.5
     speed_upright_k: float = 1.0
     w_alive: float = 0.0
+    # Weaning schedule for w_alive (see EnvParams.alive_scale). A CLOCK with an offset, not a
+    # competence gate: the gate would hold it at 1.0 exactly when the policy is comfortable, which
+    # is the state we are trying to leave. Off by default (final 1.0 = no decay).
+    alive_scale_final: float = 1.0
+    alive_decay_start_steps: int = 0
+    alive_decay_steps: int = 0
     sprint_dist_m: float = 100.0
     sprint_dist_start_m: float = 25.0
     sprint_curriculum_steps: int = 60_000_000
@@ -664,6 +670,66 @@ _DASH = dict(
 )
 
 
+# --------------------------------------------------------------------------------------------
+# dash_speed: the joystick task, with the standing basin priced out
+# --------------------------------------------------------------------------------------------
+# `dash` trains, but the first campaign settled into a policy that stands at 0.31 m/s under ANY
+# command (command_sweep FAIL at 92% of v_max). Three changes, all aimed at that basin and none of
+# them touching the balance signal -- w_alive keeps its full weight until the policy can stand.
+#
+#   w_speed_income 3 -> 10.  The Laplace kernel is nearly flat where a non-walker lives: at a 2 m/s
+#   command, moving at 0.31 m/s earns 0.419 of kernel, and the next 0.1 m/s buys almost nothing.
+#   The monotone term w * clip(vx, 0, v_cmd) / v_ceiling is the ONLY part that pays strictly more
+#   for going faster at every speed, so it is the part that has to carry a policy out of the basin.
+#   At 10 it pays 2.5/tick at a tracked 2 m/s against 0.775 standing.
+#
+#   cmd_zero_frac 0.25 -> 0.10.  A quarter of episodes commanded exactly zero, where standing still
+#   is not a basin at all but the correct answer, worth 3.0/tick + alive. Stop is still trained,
+#   at 10% of episodes instead of 25%.
+#
+#   alive_scale 1 -> 0.25 over 60 M..120 M.  w_alive is 121% of a stander's whole income and 21%
+#   of a walker's. Weaning it to 0.375 puts the stander below its 0.46 break-even -- a LOSING
+#   strategy -- while a walker stays strongly positive. It holds full weight through 60 M so the
+#   balance signal is intact for the part of training that needs it.
+_DASH_SPEED = dict(
+    _DASH,
+    w_speed_income=10.0,
+    cmd_zero_frac=0.10,
+    alive_scale_final=0.25,
+    alive_decay_start_steps=60_000_000,
+    alive_decay_steps=60_000_000,
+)
+
+# --------------------------------------------------------------------------------------------
+# dash_sprint: one job, run, never stop
+# --------------------------------------------------------------------------------------------
+# objective "speed" is the endless sprint: the task channel is pinned to [1.0, 1.0] (full throttle,
+# no braking), there is no finish line and no stop phase, and income is LINEAR in forward speed --
+# w_fwd_speed * vx, paying from the first cm/s and paying nothing for standing.
+#
+# That last property is why this preset exists. The joystick kernel pays a robot that walks in
+# place 0.419/tick under a 2 m/s command; linear income pays it 0.00. The standing basin is closed
+# by construction rather than by tuning, and it is the income this project trained THE RUNNER on.
+#
+# No command curriculum (there is no command), no stop, no zero-speed draws. The gait-quality,
+# DR and jitter curricula stay. w_alive still weans -- standing earns nothing here, so the bonus is
+# the only thing that could pay for it.
+_DASH_SPRINT = dict(
+    _DASH,
+    objective="speed",
+    cmd_curriculum_steps=0,
+    cmd_zero_frac=0.0,
+    track_sigma_steps=0,
+    stoplight_prob_final=0.0,
+    sprint_curriculum_steps=0,
+    alive_scale_final=0.25,
+    alive_decay_start_steps=60_000_000,
+    alive_decay_steps=60_000_000,
+    # the command group has nothing to advance without a command
+    curriculum_order=(("shape_scale", "eff_scale", "stance_ratio"), "dr_scale",
+                      ("ctrl_jitter_ms", "ctrl_drop_prob")),
+)
+
 PRESETS = {
     # The recipe.  One run, random weights, free plant, 450 M steps.
     "dash": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH, **_FAST),
@@ -672,6 +738,13 @@ PRESETS = {
     # flat foot removed the need for one -- but the cheapest way to ask whether a failure is about
     # balance or about the gait.
     "dash_planar": lambda: _cfg(model_path="model/dash01_planar.xml", **_DASH, **_FAST),
+
+    # The joystick task with the standing basin priced out: speed income 10, 10% zero commands,
+    # and w_alive weaned to a quarter after 60 M.
+    "dash_speed": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_SPEED, **_FAST),
+
+    # Run, as fast as possible, and never stop. Linear speed income, no command, no stop phase.
+    "dash_sprint": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_SPRINT, **_FAST),
 
     # Tiny and fast: what smoke_test.py and the CI path build.  Never train on it.
     "smoke": lambda: _cfg(**dict(_DASH, model_path="model/dash01_free.xml",

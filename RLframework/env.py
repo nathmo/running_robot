@@ -91,6 +91,18 @@ def heading_rate(w, g, euler):
 class EnvParams(NamedTuple):
     """Curriculum / runtime values, traced. Defaults = the FINAL (hardest) curriculum point."""
     dr_scale: float = 1.0
+    # THE SURVIVAL BONUS IS A CURRICULUM, NOT A CONSTANT.
+    #
+    # w_alive has two jobs that pull opposite ways. Early it is the ONLY reachable reward -- a cold
+    # policy earns 0.051/tick of income, so without it LIVING clamps to the step floor and living
+    # ties with dying (measured 2026-09-17; removing it outright gave alive_frac 0.19/0.30/0.00 and
+    # froze every curriculum at progress 0.00). Late it is a flat subsidy worth 121% of a stander's
+    # whole income and only 21% of a walker's, which compresses walking's 5.8x income advantage to
+    # 3.1x and pays for the standing basin the first campaign settled into.
+    #
+    # So: full weight while the policy learns to balance, then weaned off so income has to come
+    # from the task. 1.0 = cfg.w_alive, and it decays toward cfg.alive_scale_final.
+    alive_scale: float = 1.0
     sprint_dist_m: float = 100.0
     stance_ratio: float = 0.42
     eff_scale: float = 1.0
@@ -120,6 +132,7 @@ class EnvParams(NamedTuple):
     @classmethod
     def final(cls, cfg):
         return cls(dr_scale=1.0, sprint_dist_m=float(cfg.sprint_dist_m),
+                   alive_scale=float(getattr(cfg, "alive_scale_final", 1.0)),
                    cmd_zero_p=float(cfg.cmd_zero_frac),
                    cmd_lo=float(cfg.cmd_range[0]), cmd_hi=float(cfg.cmd_range[1]),
                    stance_ratio=float(cfg.stance_ratio_final), eff_scale=float(cfg.efficiency_target),
@@ -1130,7 +1143,7 @@ class DashEnvV2:
         over = jnp.maximum(0.0, sprint_d - (params.sprint_dist_m + c.sprint_brake_m))
         t["overrun"] = jnp.where(run_phase, 0.0, pen(-c.w_overrun * over))
         t["time"] = -c.w_time if c.objective == "sprint" else 0.0   # joystick: obeying "stop" is not a sin
-        t["alive"] = c.w_alive
+        t["alive"] = c.w_alive * params.alive_scale
         t["yaw_rate"] = pen(-c.w_yaw_rate * lp_yaw_true ** 2)
         # HEADING: the set point the yaw-rate term never had. Billed on the TRUE base yaw (a
         # reward may be privileged; the actor gets the integrated-gyro estimate instead), and
