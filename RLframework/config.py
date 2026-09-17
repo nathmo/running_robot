@@ -611,6 +611,19 @@ _DASH = dict(
                       ("ctrl_jitter_ms", "ctrl_drop_prob")),
     curriculum_group_max_steps=80_000_000,
     dr_scale_start=0.15,
+    # NO CALIBRATION DR. Homing error was randomised because the previous robot had no mechanical
+    # zero reference: it stood on point feet, so nothing about a pose on the floor pinned the leg
+    # angles, and the measured drift was large -- deploy_map needed a re-fit of cam -9.0 deg and
+    # thigh +4.0 deg. The flat sole replaces that. Stood on a flat floor the sole IS the reference,
+    # so the zero is measured rather than guessed and there is no residual distribution to train
+    # over.
+    #
+    # Worth removing on its own merits: this is a per-episode SYSTEMATIC bias on all six joints,
+    # present on both sides of the loop (the encoder reads in the offset frame and the command is
+    # issued in it), which is far harder to reject than white noise -- on the previous robot's
+    # leave-one-in it caused 81% of falls at dr_scale 0.25 while every other component stayed
+    # under 6%. Randomising over an uncertainty the hardware no longer has only spends margin.
+    dr_joint_zero_deg=0.0,
     total_steps=450_000_000,
 )
 

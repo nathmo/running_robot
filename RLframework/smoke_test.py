@@ -502,6 +502,25 @@ def test_dr_floor():
         check(f"{name}: and the ramp still reaches full DR",
               EnvParams.final(cfg).dr_scale == 1.0)
 
+    # NO CALIBRATION DR: the flat sole is a mechanical zero reference, so homing error is measured
+    # rather than randomised. Asserted at the DRAW, not just the config, because joint_zero rides
+    # two other multipliers (dr_scale and obs_noise_enable) and a config knob alone would not prove
+    # the plant is clean.
+    import jax
+    import numpy as np
+    from plant import Plant, draw_plant
+    cfg = get_config("dash")
+    pl = Plant(cfg)
+    for s_ in (0.15, 1.0):
+        dr = draw_plant(jax.random.PRNGKey(0), cfg, pl, s_)
+        jz = np.abs(np.asarray(dr.joint_zero)).max()
+        check(f"no homing error in the plant at dr_scale {s_:.2f}", jz == 0.0,
+              f"max |joint_zero| {jz:.3e} rad")
+    dr = draw_plant(jax.random.PRNGKey(0), cfg, pl, 1.0)
+    check("the IMU mount angle is still randomised",
+          float(np.abs(np.asarray(dr.imu_R) - np.eye(3)).max()) > 0.0,
+          "(the sole pins the joints, not the IMU)")
+
 
 def main():
     ap = argparse.ArgumentParser()
