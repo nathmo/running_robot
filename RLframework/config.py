@@ -625,7 +625,23 @@ _DASH = dict(
     # It does not reintroduce the die-is-better bug: step_reward_floor clamps a tick at -0.500 and
     # -0.231 sits above it, so living still beats dying (the budget's "w_alive: live>die 0.000").
     # Cold start stays positive too (+0.230) because shape_scale starts at 0.15.
-    w_alive=0.0,
+    # w_alive STAYS at the _JOYSTICK value of 1.5, and that number is load-bearing.
+    #
+    # Zeroing it looked right on paper -- the flat foot makes standing free, and the task income
+    # already favours walking 5.8x (8.500/tick tracked at 2 m/s against 0.651 standing), so a flat
+    # 1.5 only compresses that edge to 3.1x and pays a stander 121% of its whole income. Measured
+    # 2026-09-17, it is still wrong: a COLD policy earns 0.051/tick of income, so with no alive
+    # term LIVING clamps to the -0.500 step floor and living-vs-dying is an exact tie. The bonus
+    # is not a subsidy for a finished policy, it is the ONLY learning signal before any tracking
+    # income is reachable. tools/reward_budget.py --cold reports the threshold directly:
+    # "w_alive for LIVING>0  1.3710", and 1.5 sits just above it.
+    #
+    # Run at 0: alive_frac 0.19/0.30/0.00 (was 0.98/0.83/0.75) and EVERY curriculum group handed
+    # over at progress 0.00, because the gate needs ep_len 150 and the robot could not stay up --
+    # 200 M steps trained entirely at the starting values.
+    #
+    # The standing basin is real but it is NOT priced here: walking already pays 5.8x. Attack it
+    # with the income shape or the command distribution, not by removing the balance signal.
     # 200 M, not 450 M: a shorter walltime schedules far sooner, and the first campaign had
     # settled into its final behaviour long before 200 M anyway.
     total_steps=200_000_000,
