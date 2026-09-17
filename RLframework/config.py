@@ -609,7 +609,28 @@ _DASH = dict(
     curriculum_order=(("cmd_lo", "cmd_hi", "cmd_zero_p"),
                       ("shape_scale", "eff_scale", "stance_ratio"), "dr_scale",
                       ("ctrl_jitter_ms", "ctrl_drop_prob")),
-    curriculum_group_max_steps=80_000_000,
+    # NO SURVIVAL BONUS. It existed because the previous robot could not stand: its CoM sat 87 mm
+    # behind its toe contacts, so staying upright was itself the hard part and had to be paid for.
+    # The flat foot removed that -- released with the motors merely holding the nominal command
+    # this robot settles 1.8 mm and stays -- so w_alive had become a flat subsidy for doing
+    # nothing, and the first campaign collected it: 450 M steps produced 0.31 m/s at ANY command,
+    # 64/64 upright, command_sweep FAIL at 92% of v_max.
+    #
+    # Measured 2026-09-17. The task income already favours walking 5.8x (8.500/tick at a tracked
+    # 2 m/s against 0.651 standing), so the reward never preferred standing -- but a flat 1.5/tick
+    # is 121% of a stander's whole income and 21% of a walker's, which compressed that edge to
+    # 3.1x and made the zero-command harbour worth 4.5/tick for nothing. At 0 the stander's LIVING
+    # goes to -0.231/tick, a LOSING strategy, while a walker sits near +2.7.
+    #
+    # It does not reintroduce the die-is-better bug: step_reward_floor clamps a tick at -0.500 and
+    # -0.231 sits above it, so living still beats dying (the budget's "w_alive: live>die 0.000").
+    # Cold start stays positive too (+0.230) because shape_scale starts at 0.15.
+    w_alive=0.0,
+    # 200 M, not 450 M: a shorter walltime schedules far sooner, and the first campaign had
+    # settled into its final behaviour long before 200 M anyway.
+    total_steps=200_000_000,
+    # scaled with the budget -- at the 450 M value of 80 M one group could hold 40% of this run.
+    curriculum_group_max_steps=40_000_000,
     dr_scale_start=0.15,
     # NO CALIBRATION DR. Homing error was randomised because the previous robot had no mechanical
     # zero reference: it stood on point feet, so nothing about a pose on the floor pinned the leg
@@ -624,7 +645,6 @@ _DASH = dict(
     # leave-one-in it caused 81% of falls at dr_scale 0.25 while every other component stayed
     # under 6%. Randomising over an uncertainty the hardware no longer has only spends margin.
     dr_joint_zero_deg=0.0,
-    total_steps=450_000_000,
 )
 
 
