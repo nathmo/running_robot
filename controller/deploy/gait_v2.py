@@ -1,12 +1,12 @@
-"""The v2 gait generator, in numpy. Vendored from `legacy_trainer_to_port/gait.py` (artifact §02, §06).
+"""The v2 gait generator, in numpy. Vendored from `RLframework/gait.py` (artifact §02, §06).
 
 WHY A COPY AND NOT AN IMPORT
 ----------------------------
-`legacy_trainer_to_port/gait.py` is backend-agnostic by design -- every function takes `xp`, and `xp=numpy` is
+`RLframework/gait.py` is backend-agnostic by design -- every function takes `xp`, and `xp=numpy` is
 the deploy reference. But the module imports `jax.numpy` at the top to supply its default, and jax
 is not on the robot and never will be. So the functions are copied here with `xp` removed and
 numpy inlined, in the SAME arithmetic order, and `tests/test_v2_deploy.py` diffs this against the
-trained law on the recorded MJX trace (`legacy_trainer_to_port/results/trace_mjx.json`) -- the same fixture the
+trained law on the recorded MJX trace (`RLframework/results/trace_mjx.json`) -- the same fixture the
 two training arms cross-check each other on.
 
 Read this next to `controller_v2.py`: this module is the pure algebra (a spec and a phase in,

@@ -108,7 +108,7 @@ TWO_PI = 2.0 * np.pi
 
 
 def heading_rate(gyro, grav, euler):
-    """The rate integrated into the heading channel -- legacy_trainer_to_port/env.py `heading_rate`, in numpy.
+    """The rate integrated into the heading channel -- RLframework/env.py `heading_rate`, in numpy.
 
     v3 bundles integrate body gyro z. That is the heading rate only while the body is level: on a
     runner leaning 2 deg with 2 deg of roll it drifted 10 deg from the true heading in 15 s (sim,

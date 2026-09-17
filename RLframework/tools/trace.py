@@ -114,7 +114,7 @@ def main():
         if bool(d[0]):
             rows[-1]["note"] = "episode ended on this tick; numbers are the auto-reset state"
             break
-    out = dict(impl="walk_v2 (MJX/JAX)", rig=bool(args.rig), preset=args.preset, model=cfg.model_path, control_dt=env.control_dt,
+    out = dict(impl="RLframework (MJX/JAX)", rig=bool(args.rig), preset=args.preset, model=cfg.model_path, control_dt=env.control_dt,
                fixed_spec=FIXED_SPEC.tolist(), residual="0.05*sin(2*pi*3*t + j)", ticks=len(rows), rows=rows,
                nominal_ctrl=p.nominal_ctrl.tolist(), default_motor_pos=p.default_motor_pos.tolist(),
                gait_params=dict(env.gp._asdict()))

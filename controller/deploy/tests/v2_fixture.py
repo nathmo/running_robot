@@ -28,7 +28,7 @@ ACTOR_DIM_V3 = FRAME_DIM_V3 * HIST_LEN + ONCE_DIM    # 384
 Q_LO = np.array([-0.785, -1.5, -1.047, -0.785, -1.5, -1.047])
 VEL_LIMIT = np.array([10.30, 22.01, 22.01, 10.30, 22.01, 22.01])
 FORCERANGE = np.array([61.2, 144.5, 144.5, 61.2, 144.5, 144.5])
-# field-for-field `legacy_trainer_to_port/gait.py GaitParams`: the seven reflex numbers went with the reflexes
+# field-for-field `RLframework/gait.py GaitParams`: the seven reflex numbers went with the reflexes
 DEFAULT_GAIT = dict(
     cam_amp=0.45, thigh_amp=0.45, roll_amp=0.20, delta_max=0.6, o_max=[0.06, 0.06, 0.15],
     imp_kp_up=2.5, imp_kp_dn=3.0, imp_kd_up=1.0, imp_kd_dn=4.0, residual_scale=0.20,

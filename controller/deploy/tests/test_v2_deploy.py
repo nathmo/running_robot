@@ -2,7 +2,7 @@
 
     python -m pytest controller/deploy/tests/test_v2_deploy.py -q
 
-THE ONE THAT MATTERS is `TestAgainstTheTrainedLoop`. `legacy_trainer_to_port/tools/trace.py` records, from the
+THE ONE THAT MATTERS is `TestAgainstTheTrainedLoop`. `RLframework/tools/trace.py` records, from the
 real MJX training environment, every per-tick number of a deterministic 85-tick rollout: the spec,
 the phase, the commanded target, the gains, the measurements and the 33-dim observation frame. It
 is the fixture the two training arms (MJX/JAX on GPU, classic MuJoCo on CPU) cross-check each
@@ -40,24 +40,24 @@ from v2_fixture import (ACTION_DIM, ACTOR_DIM, ACTOR_DIM_V3, FRAME_DIM,  # noqa:
 # The v4 trace, NOT walk_v2's: that one was recorded against a 44-dim spec and a control law with
 # two reflexes in it, so replaying it here would be checking this runtime against a generation it
 # deliberately no longer implements.
-TRACE = REPO / "legacy_trainer_to_port" / "results" / "trace_mjx.json"
+TRACE = REPO / "RLframework" / "results" / "trace_mjx.json"
 
 
 def _trace():
     if not TRACE.exists():
-        pytest.skip("no legacy_trainer_to_port/results/trace_mjx.json (the legacy trainer is not checked out)")
+        pytest.skip("no RLframework/results/trace_mjx.json (run RLframework/tools/trace.py --rig)")
     tr = json.loads(TRACE.read_text())
     got = len(tr["rows"][0]["spec"])
     assert got == SPEC_DIM, (
         "this trace carries a {}-dim spec and the deployed generator is {} -- it was recorded by a "
-        "legacy_trainer_to_port/tools/trace.py that still writes the pre-reflex-deletion layout. Re-record it "
+        "RLframework/tools/trace.py that still writes the pre-reflex-deletion layout. Re-record it "
         "rather than comparing two different control laws.".format(got, SPEC_DIM))
     return tr
 
 
 # ===================================================================== the vendored generator
 class TestGaitPortIsTheTrainedLaw:
-    """`gait_v2.py` is a hand copy of `legacy_trainer_to_port/gait.py` with jax removed. This is the net under it."""
+    """`gait_v2.py` is a hand copy of `RLframework/gait.py` with jax removed. This is the net under it."""
 
     def test_targets_and_gains_match_the_recorded_mjx_rollout(self):
         tr = _trace()
@@ -206,7 +206,7 @@ class TestTheHeadingChannel:
     def test_a_v4_bundle_integrates_the_euler_rate_and_a_v3_bundle_gyro_z(self):
         """A body leaning 0.3 rad in pitch and 0.2 in roll, turning 1 rad/s about WORLD z. Body gyro
         z reads cos(roll) cos(pitch) of that rate -- the drift that took a sim runner 10 deg off its
-        heading in 15 s. A v4 bundle (`heading_euler`) must read all of it, as legacy_trainer_to_port/env.py
+        heading in 15 s. A v4 bundle (`heading_euler`) must read all of it, as RLframework/env.py
         `heading_rate` does; a v3 bundle must keep integrating gyro z. 49 ticks, as above."""
         roll, pitch, r = 0.2, 0.3, 1.0
         cr, sr, cp, sp = np.cos(roll), np.sin(roll), np.cos(pitch), np.sin(pitch)
@@ -489,7 +489,7 @@ class TestTheCommandIsSafeToSend:
 class TestAgainstTheTrainedLoop:
     """Drive the deployed runtime through the MJX trace's own recorded states.
 
-    This is the whole point of the file. `legacy_trainer_to_port/tools/trace.py` played a FIXED spec plus a known
+    This is the whole point of the file. `RLframework/tools/trace.py` played a FIXED spec plus a known
     sinusoidal residual through the real training environment and wrote down, per tick, the state,
     the command it produced and the observation frame it published. Feeding those states to
     `PolicyControllerV2` with the same actions must reproduce both -- and it exercises exactly the

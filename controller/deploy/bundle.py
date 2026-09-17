@@ -24,7 +24,7 @@ Version 1 is the walk_mit bundle: 200 Hz, per-step Fourier gait, a velocity/yaw 
 `export_policy.py`. Version 2 is the walk_v2 (DASH-01 Walker v2) bundle: 100 Hz, a gait spec
 LATCHED at each clock wrap plus a 6-dim per-tick residual, and a task channel that is a run/stop
 flag and a distance countdown (or, under the joystick objective, a commanded speed) rather than a
-velocity. `legacy_trainer_to_port/export.py` writes it, and the spec is 41 dims wide since the reflexes -- and
+velocity. `RLframework/export.py` writes it, and the spec is 41 dims wide since the reflexes -- and
 the three latched dims that carried their gains -- were deleted.
 
 They are different control laws with different runtimes (`controller.py` vs `controller_v2.py`),
