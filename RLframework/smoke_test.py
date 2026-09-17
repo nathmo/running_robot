@@ -516,6 +516,14 @@ def test_dr_floor():
         jz = np.abs(np.asarray(dr.joint_zero)).max()
         check(f"no homing error in the plant at dr_scale {s_:.2f}", jz == 0.0,
               f"max |joint_zero| {jz:.3e} rad")
+    # The floor randomises the PLANT, it does not start the disturbances: at dr_scale == the
+    # floor the wind draw must still be exactly zero, and it must reach full scale by 1.0.
+    w0 = float(np.abs(np.asarray(draw_plant(jax.random.PRNGKey(1), cfg, pl,
+                                            cfg.dr_scale_start).wind)).max())
+    w1 = float(np.abs(np.asarray(draw_plant(jax.random.PRNGKey(1), cfg, pl, 1.0).wind)).max())
+    check("no disturbances at the DR floor", w0 == 0.0, f"max |wind| {w0:.3e} N")
+    check("and full adversity at dr_scale 1.0", w1 > 0.0, f"max |wind| {w1:.1f} N")
+
     dr = draw_plant(jax.random.PRNGKey(0), cfg, pl, 1.0)
     check("the IMU mount angle is still randomised",
           float(np.abs(np.asarray(dr.imu_R) - np.eye(3)).max()) > 0.0,

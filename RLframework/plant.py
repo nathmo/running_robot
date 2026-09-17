@@ -273,7 +273,11 @@ def draw_plant(key, cfg, plant: Plant, dr_scale, ov: Override = None) -> PlantDr
                                maxval=cfg.resync_kappa + (khi - cfg.resync_kappa) * on)
     kappa = _ov(ov.kappa, kappa) * (1.0 if cfg.resync_enable else 0.0)
     # ---- wind: constant world-frame force, x and y (y only on the free plant)
-    adv = s if cfg.adversity_curriculum else on
+    # above the floor, not the floor itself -- see the note in env.py: dr_scale_start randomises
+    # the PLANT from step 0, it does not mean "start the disturbances".
+    _f = float(getattr(cfg, "dr_scale_start", 0.0))
+    adv = (jnp.clip((s - _f) / max(1.0 - _f, 1e-6), 0.0, 1.0)
+           if cfg.adversity_curriculum else on)
     wind = cfg.wind_force_max * adv * jax.random.uniform(ks[16], (2,), minval=-1.0, maxval=1.0)
     wind = jnp.stack([_ov(ov.wind_x, wind[0]), _ov(ov.wind_y, wind[1]) * (0.0 if plant.planar else 1.0)])
     # ---- measurement chain

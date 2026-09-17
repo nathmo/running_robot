@@ -750,7 +750,20 @@ class DashEnvV2:
         cmd = jnp.concatenate([target + dr.joint_zero, kp * dr.kp_scale, kd * dr.kv_scale])
         cmd_buf = jnp.stack([cmd, state.cmd_buf[0], state.cmd_buf[1]])
         # ---- disturbances at tick start
-        adv = params.dr_scale if c.adversity_curriculum else 1.0
+        # ADVERSITY RIDES THE RAMP ABOVE THE FLOOR, NOT THE FLOOR ITSELF.
+        #
+        # dr_scale_start exists to stop the policy converging on a deterministic PLANT -- one set
+        # of masses, gains and friction. Pushes, trips and wind are not that; they are a separate
+        # difficulty, and reading them straight off dr_scale meant the floor switched them on at
+        # step 0. Measured: with the floor at 0.15 the robot took a push every 4.0 s while its
+        # episodes were ~0.8 s long, and early ep_len halved against the same run at dr_scale 0
+        # (84 vs 175 at 14 M) with the cadence stuck on its 1.50 Hz floor the whole way.
+        #
+        # Subtracting the floor and renormalising keeps both properties: the plant varies from the
+        # first rollout, and the disturbances still start at zero and reach full by dr_scale 1.
+        _f = float(getattr(c, "dr_scale_start", 0.0))
+        adv = (jnp.clip((params.dr_scale - _f) / max(1.0 - _f, 1e-6), 0.0, 1.0)
+               if c.adversity_curriculum else 1.0)
         qvel = data.qvel
         push_now = state.push_countdown <= 1
         kp1, kp2, kp3 = jax.random.split(k_push, 3)
