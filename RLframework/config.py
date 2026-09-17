@@ -717,6 +717,14 @@ _DASH_SPEED = dict(
 _DASH_SPRINT = dict(
     _DASH,
     objective="speed",
+    # A cold policy drifts BACKWARDS, and linear income is signed, so the sprint's cold cost is
+    # 2.05/tick against the joystick's 1.42 -- LIVING lands at -0.250 at w_alive 1.5, which is the
+    # same figure recorded in cold-start-shaping-tax as the point where dying won. The budget names
+    # the threshold ("w_alive for LIVING>0  2.0"), so start there. Safe here in a way it would not
+    # be under the joystick kernel: standing earns EXACTLY zero under linear income, so a larger
+    # bonus cannot buy a standing basin -- and it weans to 0.56 regardless. 2.25 rather than the bare
+    # 2.0 threshold: at 2.0 cold LIVING is +0.0002/tick, which is the boundary, not margin.
+    w_alive=2.25,
     cmd_curriculum_steps=0,
     cmd_zero_frac=0.0,
     track_sigma_steps=0,
