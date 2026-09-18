@@ -1165,12 +1165,16 @@ class DashEnvV2:
         # switched off for the entire deceleration, i.e. exactly while the robot has to hold a gait
         # together through 2.5 -> 2.0 -> 1.0 -> 0 m/s, the regime it has never been shaped in. Now the
         # shaping tracks the command down and only lets go below gait_cmd_gate (a genuine standstill).
+        standing_cmd = jnp.zeros((), bool)
         if c.objective == "joystick":
             # the commanded speed IS the joystick, and the gait block stays on all the way down to
             # zero: a zero command means step in place, not stand still, because this plant has no
             # passive stance to hold (bring-up probe: it topples in 0.7-1.0 s with no gait)
             cmd_speed = state.v_cmd
-            gait_on = jnp.ones((), bool)
+            # ...unless stand_at_zero: the flat-foot robot HAS a stance, so at exactly zero stick the
+            # gait block lets go and the stand bill below takes over (config.stand_at_zero).
+            standing_cmd = (state.v_cmd <= 1e-3) if c.stand_at_zero else jnp.zeros((), bool)
+            gait_on = ~standing_cmd
         elif c.stop_cmd_continuous and c.stop_decel_s > 0:
             cmd_speed = jnp.where(run_phase, c.v_ceiling, jnp.clip(v_target, 0.0, c.v_ceiling))
             gait_on = cmd_speed >= c.gait_cmd_gate
@@ -1253,6 +1257,15 @@ class DashEnvV2:
             t["angmom"] = pen(-c.w_angmom * self._angmom_pitch(mx_i, data) ** 2)
         else:
             t["angmom"] = 0.0
+        # ---- the stand: zero stick only. Measured pose against the standing stance, fading in as the
+        # body comes to rest so braking steps are free (config.stand_at_zero).
+        if c.stand_at_zero and (c.w_stand_pose > 0.0 or c.w_stand_vel > 0.0):
+            dq_stand = data.qpos[p.act_qadr] - jnp.asarray(p.default_motor_pos)
+            still = jnp.exp(-(jnp.linalg.norm(v_body[:2]) / c.stand_still_mps) ** 2)
+            bill = pen(-c.w_stand_pose * jnp.sum(dq_stand ** 2)) + pen(-c.w_stand_vel * jnp.sum(qd ** 2))
+            t["stand"] = jnp.where(standing_cmd, still * bill, 0.0)
+        else:
+            t["stand"] = jnp.zeros(())
         sep = self._foot_sep(data)
         t["stance"] = pen(-c.w_no_cross * jnp.maximum(0.0, c.stance_min_sep - sep) ** 2)
         hr = data.qpos[p.act_qadr[p.hip_roll_idx]] - jnp.asarray(p.default_motor_pos)[p.hip_roll_idx]

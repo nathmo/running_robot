@@ -215,6 +215,26 @@ class Config:
     # RUN/STOP (walk_v4): the command is 0 or v_max, nothing in between, and under RUN the income is
     # linear in forward speed (as fast as you can, capped at v_ceiling) instead of the tracking kernel
     cmd_binary: bool = False
+    # ----- A REAL STOP (flat-foot robot) -------------------------------------------------------
+    # Until now a zero command meant "step in place": the gait block stayed on at every command
+    # because the previous robot had no passive stance. This one has -- but it cannot be reached by
+    # switching the policy off. Measured 2026-09-18 on the dash_speed_v2_s1 73.7 M bundle, shipping
+    # control law, CPU MuJoCo: blending the policy's command into the fixed stand PD fell in 135 of
+    # 135 hand-overs (3 speeds x 3 brake times x 3 blend times x 5 gait phases), and even a
+    # hand-over after 0.05 s of policy at 0.03 m/s tipped forward in 1.0 s; the pure hold from the
+    # keyframe stands 10 s. The stance is an open-loop pose with a tiny basin, so the POLICY has to
+    # bring the robot to rest in it, balancing actively; only then can a supervisor take over.
+    #
+    # With stand_at_zero, at EXACTLY zero stick (and only then): the gait block is off -- no credit
+    # for stepping, no bill for a planted foot -- and the measured joint pose is billed against the
+    # standing stance (plant.default_motor_pos = the keyframe pose, NOT nominal_ctrl: that is the
+    # command which holds it, a few degrees away under load; held as a target the keyframe pose
+    # itself falls backward in 0.85 s). The bill fades in below stand_still_mps of body speed, so
+    # the capture steps that a stop from a run needs are not punished.
+    stand_at_zero: bool = False
+    w_stand_pose: float = 0.0               # -w * sum (q - q_stand)^2, zero stick only
+    w_stand_vel: float = 0.0                # -w * sum qd^2, zero stick only
+    stand_still_mps: float = 0.3
     run_income_linear: bool = False
     w_track: float = 3.0                    # income for tracking the command
     track_sigma: float = 0.6                # Laplace width, m/s (Gaussian is flat where we live)
@@ -786,6 +806,11 @@ _DASH_JOY = dict(
     alive_scale_final=1.0, alive_decay_start_steps=0, alive_decay_steps=0,
 )
 
+# dash_joy_stand: dash_joy, plus a real stop at zero stick (see stand_at_zero above). A quarter of
+# the command draws are zero so stopping is practised, not glimpsed.
+_DASH_JOY_STAND = dict(_DASH_JOY, stand_at_zero=True, w_stand_pose=5.0, w_stand_vel=0.02,
+                       cmd_zero_frac=0.25)
+
 PRESETS = {
     # The recipe.  One run, random weights, free plant, 450 M steps.
     "dash": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH, **_FAST),
@@ -801,6 +826,9 @@ PRESETS = {
 
     # The joystick for a clean day: no disturbances, half-width plant DR paced by competence.
     "dash_joy": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY, **_FAST),
+
+    # dash_joy with a real stop: at zero stick the robot is paid to stand in the stable stance.
+    "dash_joy_stand": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY_STAND, **_FAST),
 
     # Run, as fast as possible, and never stop. Linear speed income, no command, no stop phase.
     "dash_sprint": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_SPRINT, **_FAST),

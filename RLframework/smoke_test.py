@@ -111,8 +111,13 @@ def test_presets():
     rng = np.random.default_rng(1)
     nominal = np.array([0, 0, 0.12, 0, 0, -0.12])
     names = sorted(get_config.__globals__["PRESETS"])
-    check("six presets: recipe, clean-day joystick, planar probe, speed variant, sprint, smoke",
-          names == ["dash", "dash_joy", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
+    check("seven presets: recipe, clean-day joystick (+ with a real stop), planar probe, speed variant, sprint, smoke",
+          names == ["dash", "dash_joy", "dash_joy_stand", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
+    js = get_config("dash_joy_stand")
+    check("dash_joy_stand: the stand is on, billed, and practised; dash_joy itself is unchanged",
+          js.stand_at_zero and js.w_stand_pose > 0 and js.cmd_zero_frac == 0.25
+          and not get_config("dash_joy").stand_at_zero and get_config("dash_joy").cmd_zero_frac == 0.10,
+          f"pose {js.w_stand_pose} vel {js.w_stand_vel} zero {js.cmd_zero_frac}")
     joy = get_config("dash_joy")
     check("dash_joy: no disturbances, half-width DR, DR gated, command band on a clock",
           joy.wind_force_max == 0.0 and joy.push_interval_s == 0.0 and joy.trip_prob == 0.0
