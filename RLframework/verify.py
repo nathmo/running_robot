@@ -96,9 +96,11 @@ def check_curriculum(rep, run, ckpt, cfg):
     # is no curriculum to ramp), so the sidecar of a run that did no randomisation at all reports a
     # perfect 1.000 -- the check would pass on precisely the runs it exists to catch.
     dr_on = bool(cfg.dr_enable)
-    rep.add("1. trained as advertised", "domain randomisation reached full width",
-            dr_on and float(ep.get("dr_scale", 0)) >= 0.9,
-            f"{ep.get('dr_scale', 0):.3f}" if dr_on else "dr_enable=False", ">= 0.900",
+    # "full width" is the preset's own target (dr_scale_final), not 1.0: a clean-day preset ramps to 0.5
+    _dr_need = 0.9 * float(getattr(cfg, "dr_scale_final", 1.0))
+    rep.add("1. trained as advertised", "domain randomisation reached its target width",
+            dr_on and float(ep.get("dr_scale", 0)) >= _dr_need,
+            f"{ep.get('dr_scale', 0):.3f}" if dr_on else "dr_enable=False", f">= {_dr_need:.3f}",
             "dr_scale from the sidecar AND the flag, not either alone")
     # the flag AND the value, for the same reason as dr_scale above: `initial_params` writes
     # bringup_scale = 1.0 when there IS no bring-up curriculum, so reading the sidecar alone hands a

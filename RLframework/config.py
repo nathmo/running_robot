@@ -152,6 +152,10 @@ class Config:
     # robustness is built with the gait instead of asked of a finished one. The ramp above still
     # runs, from here to 1.0.
     dr_scale_start: float = 0.0
+    # WHERE THE RAMP ENDS. 1.0 = the full widths below plus full-strength pushes, wind and trips: a
+    # robot hardened for a bad day. A policy that only has to run on a clean floor needs the plant
+    # to vary (the real robot is never the model) but not by the whole range.
+    dr_scale_final: float = 1.0
     dr_mass_global: float = 0.12
     dr_mass_body: float = 0.15
     dr_inertia: float = 0.25
@@ -747,6 +751,41 @@ _DASH_SPRINT = dict(
                       ("ctrl_jitter_ms", "ctrl_drop_prob")),
 )
 
+# --------------------------------------------------------------------------------------------
+# dash_joy: the joystick for a CLEAN DAY
+# --------------------------------------------------------------------------------------------
+# dash_speed_v2 (2026-09-18, the first campaign on the repaired plant) learned to walk and track:
+# training episodes 470-590 ticks against the old ceiling of 240, and by 59-74 M the greedy ladder
+# had 20-47% of episodes upright with 0.8 m/s error. Then the DR CLOCK took its turn at 64.8 M
+# and drove dr_scale 0.15 -> 1.0 in 40 M whatever the policy was doing. All three seeds peaked within
+# 3 M of that start, lost half their episode length by dr 0.33-0.42 and finished 64/64 falls.
+# Probe on the 73.7 M keeper, command pinned at 1 m/s, dr 0.47, survive 6 s: no DR 23/32, plant
+# widths only 10/32, disturbances only 3/32, everything 3/32.
+#
+# The requirement is a policy that runs on a clean day, not a terrible one. So:
+#   * NO DISTURBANCES. Pushes, wind, gusts and trips are off; they were the larger killer and they
+#     model a day this robot will not be run on.
+#   * HALF-WIDTH PLANT DR (dr_scale_final 0.5): mass +-6%, gains +-10%, friction 0.7-1.15, tilt
+#     +-2.5 deg. Sensor noise and the measured 6-18 ms delay draw stay -- those ARE the clean day.
+#   * DR AND JITTER ARE PACED BY COMPETENCE AGAIN. The gate was useless while the loop-site jitter
+#     pinned ep_len near 150; with the plant repaired the statistic moves (140 -> 590 over 65 M), so
+#     a relative gate means something. Tight bars: advance only while ep_len >= 0.72 of the recent
+#     best (0.8 x 0.9), re-arm at 0.8. The ramp is monotone -- it pauses, it never retreats. The
+#     command band stays on its clock (cmd_gate_ep_len 0), which worked.
+#   * DR STARTS LATER: a 60 M turn per group puts it at ~85 M instead of 65 M. The policy was still
+#     improving fast when DR hit it.
+#   * NO SURVIVAL-BONUS WEAN. It was added against a standing basin that the broken plant caused
+#     (walking was fatal, standing was safe), and at 60-120 M it lands on top of the DR ramp.
+_DASH_JOY = dict(
+    _DASH_SPEED,
+    push_interval_s=0.0, wind_force_max=0.0, wind_gust_n=0.0, trip_prob=0.0,
+    dr_scale_final=0.5,
+    curriculum_gate_ep_len=1200.0, jitter_curriculum_gate_ep_len=1200.0, cmd_gate_ep_len=0.0,
+    curriculum_gate_frac=0.8, curriculum_retreat_frac=0.9,
+    curriculum_group_max_steps=60_000_000,
+    alive_scale_final=1.0, alive_decay_start_steps=0, alive_decay_steps=0,
+)
+
 PRESETS = {
     # The recipe.  One run, random weights, free plant, 450 M steps.
     "dash": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH, **_FAST),
@@ -759,6 +798,9 @@ PRESETS = {
     # The joystick task with the standing basin priced out: speed income 10, 10% zero commands,
     # and w_alive weaned to a quarter after 60 M.
     "dash_speed": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_SPEED, **_FAST),
+
+    # The joystick for a clean day: no disturbances, half-width plant DR paced by competence.
+    "dash_joy": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY, **_FAST),
 
     # Run, as fast as possible, and never stop. Linear speed income, no command, no stop phase.
     "dash_sprint": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_SPRINT, **_FAST),

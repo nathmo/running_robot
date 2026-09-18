@@ -131,7 +131,7 @@ class EnvParams(NamedTuple):
 
     @classmethod
     def final(cls, cfg):
-        return cls(dr_scale=1.0, sprint_dist_m=float(cfg.sprint_dist_m),
+        return cls(dr_scale=float(getattr(cfg, "dr_scale_final", 1.0)), sprint_dist_m=float(cfg.sprint_dist_m),
                    alive_scale=float(getattr(cfg, "alive_scale_final", 1.0)),
                    cmd_zero_p=float(cfg.cmd_zero_frac),
                    cmd_lo=float(cfg.cmd_range[0]), cmd_hi=float(cfg.cmd_range[1]),

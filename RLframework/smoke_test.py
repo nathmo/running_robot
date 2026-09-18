@@ -102,8 +102,8 @@ def test_gait():
 
 
 def test_presets():
-    """One recipe, five presets: the joystick recipe, the same with the standing basin priced out,
-    the endless sprint, a planar probe and a smoke config. The control law carries no reflexes and
+    """One recipe, six presets: the joystick recipe, the same with the standing basin priced out,
+    the clean-day joystick, the endless sprint, a planar probe and a smoke config. The control law carries no reflexes and
     no assists, the action is 47 wide, and the per-joint residual authority is what the preset
     asked for."""
     print("presets: the recipe, the speed variant, the sprint, the planar probe, the smoke config")
@@ -111,8 +111,13 @@ def test_presets():
     rng = np.random.default_rng(1)
     nominal = np.array([0, 0, 0.12, 0, 0, -0.12])
     names = sorted(get_config.__globals__["PRESETS"])
-    check("five presets: recipe, speed variant, sprint, planar probe, smoke",
-          names == ["dash", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
+    check("six presets: recipe, clean-day joystick, planar probe, speed variant, sprint, smoke",
+          names == ["dash", "dash_joy", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
+    joy = get_config("dash_joy")
+    check("dash_joy: no disturbances, half-width DR, DR gated, command band on a clock",
+          joy.wind_force_max == 0.0 and joy.push_interval_s == 0.0 and joy.trip_prob == 0.0
+          and joy.dr_scale_final == 0.5 and joy.curriculum_gate_ep_len > 0 and joy.cmd_gate_ep_len == 0.0,
+          f"wind {joy.wind_force_max} dr_final {joy.dr_scale_final} gate {joy.curriculum_gate_ep_len}")
     # the averaged heading: wobble and a start transient cost little, a held offset is billed in full
     from env import heading_ema
     ah, dt_h = float(np.exp(-0.01 / 1.0)), 0.01

@@ -609,7 +609,8 @@ class PPO:
         kw = dict(p._asdict())
         if c.dr_enable and c.dr_curriculum_steps > 0:
             kw["dr_scale"] = self._gated("dr_scale", ep_len, float(getattr(c, "dr_scale_start", 0.0)),
-                                         1.0, c.dr_curriculum_steps, gate, rf, _q("dr_scale", d_steps))
+                                         float(getattr(c, "dr_scale_final", 1.0)),
+                                         c.dr_curriculum_steps, gate, rf, _q("dr_scale", d_steps))
         if getattr(c, "alive_decay_steps", 0) > 0:
             # offset clock: hold full weight until the policy can balance, then wean over a window.
             f = (self.step - c.alive_decay_start_steps) / max(c.alive_decay_steps, 1)
