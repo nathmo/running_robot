@@ -4,7 +4,7 @@ This runs the SHIPPING control law -- `controller/deploy/controller_v2.PolicyCon
 numpy path the Pi executes -- against CPU MuJoCo. It needs no JAX, so it runs on the laptop, and what
 you feel here is what the robot would run, not a re-implementation of it.
 
-    python RLframework/tools/play_joystick.py --bundle RLframework/results/v3_s0.npz
+    python RLframework/tools/play_joystick.py --bundle controller/deploy/bundles/<run>.npz
 
 Keys (focus the viewer window):
     W / S     stick up / down by 10% of v_max      SPACE  stick to zero
@@ -39,15 +39,16 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "walk_v4"))
-sys.path.insert(0, str(ROOT / "controller" / "deploy"))   # controller_v2 imports gait_v2 flat
+# FLAT imports from controller/deploy. That directory has to be on the path anyway (controller_v2
+# imports gait_v2 flat, as it does on the Pi), and it contains a controller.py -- which shadows the
+# `controller` namespace package, so `from controller.deploy.bundle import ...` cannot resolve.
+sys.path.insert(0, str(ROOT / "controller" / "deploy"))
 
 import mujoco
 import mujoco.viewer
 
-from controller.deploy.bundle import Bundle
-from controller.deploy.controller_v2 import PolicyControllerV2
+from bundle import Bundle
+from controller_v2 import PolicyControllerV2
 
 
 class Sim:
@@ -56,7 +57,7 @@ class Sim:
     def __init__(self, bundle_path, model_path=None):
         self.bundle = Bundle.load(bundle_path)
         m = self.bundle.meta
-        mp = model_path or (ROOT / "walk_v4" / m["model_path"])
+        mp = model_path or (ROOT / "RLframework" / m["model_path"])
         self.model = mujoco.MjModel.from_xml_path(str(mp))
         self.data = mujoco.MjData(self.model)
 
