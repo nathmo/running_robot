@@ -252,8 +252,18 @@ def draw_plant(key, cfg, plant: Plant, dr_scale, ov: Override = None) -> PlantDr
     # tilt the world: down = Rx(roll) Ry(pitch) [0,0,-1]
     down = jnp.array([-jnp.sin(tp) * jnp.cos(tr), jnp.sin(tr), -jnp.cos(tp) * jnp.cos(tr)])
     gravity = gmag * down / jnp.linalg.norm(down)
-    # ---- loop-closure sites (the as-built asymmetry)
+    # ---- loop-closure sites (the as-built asymmetry) -- IN THE PLANE OF THE LINKAGE ONLY.
+    # Every leg joint is a hinge about y, so a lateral (y) offset between rod_tip and leg_anchor
+    # has no kinematic resolution: the connect constraint (solref 2 ms) fights it at ~600 MN/m.
+    # Measured 2026-09-18 (classic MuJoCo, keyframe held by the drive PD): a 0.225 mm shift in x or
+    # z costs 200-290 N of constraint force and moves the foot 1 mm; the same shift in y costs
+    # 133,641 N. Under MJX's 8 Newton iterations that fight threw the foot out of the workspace box
+    # and ended training episodes at a median 0.8 s at dr_scale 0.15, in every run of the 2026-09-18
+    # campaign -- and it is what the 2026-09-17 campaign hit at dose 0.088. Leave-one-in over all
+    # twelve DR widths named this term alone; the MJX axis split read xz-only 28/32 survive (= no
+    # jitter), y-only 8/32.
     js = cfg.dr_loop_site_m * s * jax.random.uniform(ks[11], (m.nsite, 3), minval=-1.0, maxval=1.0)
+    js = js * jnp.array([1.0, 0.0, 1.0])
     site_pos = jnp.asarray(plant.n_site_pos) + jnp.where(jnp.asarray(plant.loop_site_mask)[:, None], js, 0.0)
     # ---- delay (ms), drawn in the full range whatever the curriculum: the RUNNER had zero
     # margin, the stabilizer must see the whole range from the start (§07)

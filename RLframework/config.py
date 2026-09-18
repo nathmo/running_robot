@@ -576,6 +576,15 @@ _JOYSTICK = dict(
     dr_enable=True,
     curriculum_gate_mode="relative", curriculum_gate_frac=0.6, curriculum_gate_floor=150.0,
     curriculum_retreat_frac=0.5,
+    # CLOCKS, NOT GATES, inside the queue. Measured 2026-09-18 across all nine 200 M runs: the
+    # exploring policy's ep_len_mean never left 70-240 ticks (the loop-site jitter, plant.py), so the
+    # relative gate was its 150 floor everywhere, the command band stayed at 0.15-0.45 for 200 M in
+    # every joystick seed, dr_scale ended at 0.15-0.27, and 120 M of each run was spent on a group
+    # that could not advance. The one clock ramp (shape_scale) was the only ramp that moved. With
+    # a gate of 0 every _gated call takes the clock branch and still advances only on its turn.
+    # All three MUST be zeroed together: in relative mode a zero curriculum_gate_ep_len alone makes
+    # every other gate rel = g / 1e-9 (ppo._eff_gate), i.e. infinite.
+    curriculum_gate_ep_len=0.0, jitter_curriculum_gate_ep_len=0.0, cmd_gate_ep_len=0.0,
     cmd_range_start=(0.15, 0.45), track_sigma_start=1.5, track_sigma_steps=40_000_000,
     shape_scale_start=0.15,
     w_alive=1.5, episode_s=30.0, sprint_curriculum_steps=0,
