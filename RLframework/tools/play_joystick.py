@@ -85,6 +85,7 @@ class Sim:
         self.r_ohm = np.asarray(m["motor_r_ohm"], float)
         self.v_bus = float(m.get("motor_bus_volts", 48.0))
 
+        self.delay_ms = float(m.get("drive_delay_ms", 0.0))   # nominal actuation delay the policy was trained with
         self.ctrl = PolicyControllerV2(self.bundle)
         self.v_cmd = 0.0
         self.reset()
@@ -116,6 +117,7 @@ class Sim:
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.key_id)
         mujoco.mj_forward(self.model, self.data)
         self.ctrl = PolicyControllerV2(self.bundle)       # fresh history, latch and clock
+        self._cmd_buf = None
         self.ctrl.set_speed(self.v_cmd, immediate=True)
         q, qd, tau = self._motor_state()
         self.ctrl.start(q, qd, tau, self._grav_body(), self._gyro())
@@ -136,9 +138,21 @@ class Sim:
         q, qd, tau = self._motor_state()
         cmd = self.ctrl.step(q, qd, tau, self._grav_body(), self._gyro())
         self._last_cmd = cmd
-        target = np.asarray(cmd.target, float)
-        kp, kd = np.asarray(cmd.kp, float), np.asarray(cmd.kd, float)
-        for _ in range(self.substeps):
+        # THE TRANSPORT DELAY. The trainer holds the previous tick's (target, kp, kd) live for the first
+        # delay_ms of every tick (drive.live_command); the real drives supply that delay in hardware,
+        # so the deploy controller carries none -- and this sim carried none either, which made it a
+        # plant no policy was trained on. Measured 2026-09-19 on three bundles: without the delay the
+        # ladder disagrees with the training eval (a policy that eval-tracks 0.21 m/s at zero stick
+        # crept at 0.68 and FELL above 1 m/s); with the bundle's 12 ms it matches to ~0.02 m/s at
+        # every rung. Same rule as drive.live_command: age >= 0 current, >= -10 ms previous, else two back.
+        cur = (np.asarray(cmd.target, float), np.asarray(cmd.kp, float), np.asarray(cmd.kd, float))
+        if not getattr(self, "_cmd_buf", None):
+            self._cmd_buf = [cur, cur, cur]
+        self._cmd_buf = [cur, self._cmd_buf[0], self._cmd_buf[1]]
+        dt_ms = self.model.opt.timestep * 1000.0
+        for _k in range(self.substeps):
+            age = _k * dt_ms - self.delay_ms
+            target, kp, kd = self._cmd_buf[0 if age >= 0.0 else (1 if age >= -10.0 else 2)]
             qq = self.data.qpos[self.act_q]
             dd = self.data.qvel[self.act_d]
             # torque-speed envelope: the bus cannot push current through back-EMF forever
@@ -204,6 +218,8 @@ def headless(args):
     failure that would make a v3 policy veer on hardware and not in sim.
     """
     sim = Sim(args.bundle, args.model)
+    if args.delay_ms is not None:
+        sim.delay_ms = float(args.delay_ms)
     sim.lock = args.lock
     ticks = int(args.seconds / sim.control_dt)
     warm = int(args.warm / sim.control_dt)
@@ -264,6 +280,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=10.0, help="headless: seconds per stick rung")
     ap.add_argument("--warm", type=float, default=2.0, help="headless: seconds discarded as the "
                                                             "start-up transient")
+    ap.add_argument("--delay-ms", type=float, default=None,
+                    help="actuation delay in the sim; default = the bundle's drive_delay_ms (what the policy trained with)")
     ap.add_argument("--lock", choices=("none", "yaw", "rail"), default="none",
                     help="none = free; yaw = hold the heading straight; rail = yaw AND no lateral drift")
     args = ap.parse_args()
@@ -271,6 +289,8 @@ def main():
         return headless(args)
 
     sim = Sim(args.bundle, args.model)
+    if args.delay_ms is not None:
+        sim.delay_ms = float(args.delay_ms)
     sim.lock = args.lock
     sim.set_stick(args.start_stick)
     speed_scale = [1.0]
