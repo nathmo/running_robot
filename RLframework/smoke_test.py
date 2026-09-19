@@ -112,13 +112,20 @@ def test_presets():
     nominal = np.array([0, 0, 0.12, 0, 0, -0.12])
     names = sorted(get_config.__globals__["PRESETS"])
     check("eight presets: recipe, clean-day joystick (+ stop, + the obeyable stick), planar probe, speed variant, sprint, smoke",
-          names == ["dash", "dash_joy", "dash_joy2", "dash_joy3", "dash_joy_stand", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
+          names == ["dash", "dash_joy", "dash_joy2", "dash_joy3", "dash_joy3_lr", "dash_joy_stand", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
     j3 = get_config("dash_joy3")
     check("dash_joy3: STOP has a far field, halved gait bills, no jitter stage, dash_joy2 untouched",
           j3.w_stop_speed > 0 and j3.w_foot_slip == 4.0 and j3.w_phase_contact == 0.5 and j3.ctrl_jitter_ms_final == 0.0
           and all("ctrl_jitter_ms" not in (g if isinstance(g, tuple) else (g,)) for g in j3.curriculum_order)
           and get_config("dash_joy2").w_stop_speed == 0.0 and j3.gait_freq_hz[1] == 4.0,
           f"w_stop_speed {j3.w_stop_speed} slip {j3.w_foot_slip} order {j3.curriculum_order}")
+    j3l = get_config("dash_joy3_lr")
+    from dataclasses import asdict
+    _d3, _d3l = asdict(j3), asdict(j3l)
+    check("dash_joy3_lr differs from dash_joy3 in the adaptive step size and nothing else",
+          j3l.lr_kl_adaptive and not j3.lr_kl_adaptive
+          and [k for k in _d3 if _d3[k] != _d3l[k]] == ["lr_kl_adaptive"],
+          str([k for k in _d3 if _d3[k] != _d3l[k]]))
     j2 = get_config("dash_joy2")
     check("dash_joy2: reachable stick, tight kernel, RUN/STOP flag with a learned stop, paced band, live swing credit",
           j2.v_max == 2.5 and j2.v_ceiling == 2.5 and j2.track_sigma == 0.3 and j2.stop_flag

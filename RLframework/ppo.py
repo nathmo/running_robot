@@ -852,11 +852,15 @@ class PPO:
                 lambda x: np.moveaxis(np.asarray(x), 0, 1).reshape((x.shape[1], x.shape[0] * x.shape[2]) + x.shape[3:]),
                 metrics)
         if self.lr_kl_adaptive and n_mb > 0 and cfg.target_kl > 0:
-            kl_mean = aux_acc.get("kl", 0.0) / n_mb
-            if kl_mean > 2.0 * cfg.target_kl:
-                self.lr_now = max(self.lr_now / 1.5, float(cfg.lr_kl_min))
-            elif kl_mean < 0.5 * cfg.target_kl:
-                self.lr_now = min(self.lr_now * 1.5, float(cfg.lr_kl_max))
+            # follow the early stop, under the scheduled lr as a ceiling (see config.lr_kl_adaptive)
+            n_full = max(int(cfg.n_epochs) * int(self.n_minibatches), 1)
+            if stop and n_mb < float(cfg.lr_kl_frac) * n_full:
+                self.lr_now = self.lr_now / float(cfg.lr_kl_down)
+            elif not stop:
+                self.lr_now = self.lr_now * float(cfg.lr_kl_up)
+            _ceil = float(cfg.learning_rate) + (float(cfg.lr_final) - float(cfg.learning_rate)) * min(
+                self.step / max(self.total_steps, 1), 1.0)
+            self.lr_now = float(min(max(self.lr_now, float(cfg.lr_kl_min)), _ceil))
             self.opt_state = _set_lr(self.opt_state, self.lr_now)
         # ---- obs stats (after the update, from the rollout's raw observations)
         self.stats = self.stats.update(b_mean, b_var, float(b_n))
@@ -920,7 +924,7 @@ class PPO:
             "train/n_minibatch_updates": n_mb, "train/early_stop": float(stop),
             "train/ent_coef": self.ent_coef, "train/log_std_clamp": self.log_std_clamp,
             "train/std_mean": float(np.exp(np.asarray(self.params["params"]["log_std"])).mean()),
-            "train/lr": float(self.lr_now) if self.lr_kl_adaptive else float(self.lr(_adam_count(self.opt_state))),
+            "train/lr": _get_lr(self.opt_state) if self.lr_kl_adaptive else float(self.lr(_adam_count(self.opt_state))),
             "est/vel_rmse": float(np.sqrt(float(est_last))) if est_last is not None else float("nan"),
         }
         for kk, v in m["reward_terms"].items():
@@ -1107,6 +1111,10 @@ class PPO:
             print(f"[ppo] warm-started weights + obs stats <- {path.name} (fresh optimizer, schedules, step 0)")
             return
         self.opt_state = d["opt_state"]
+        if getattr(self, "lr_kl_adaptive", False):
+            _lr = _get_lr(self.opt_state)
+            if _lr is not None:
+                self.lr_now = _lr
         self.est_opt_state = d["est_opt_state"]
         self.step, self.rollout_n = int(d["step"]), int(d["rollout_n"])
         self.ent_coef, self.log_std_clamp = float(d["ent_coef"]), float(d["log_std_clamp"])
@@ -1133,15 +1141,36 @@ def _adam_count(opt_state) -> int:
     return 0
 
 
+def _is_inject(x):
+    """An optax.inject_hyperparams state, BY STRUCTURE. The class is InjectHyperparamsState in old optax
+    and InjectStatefulHyperparamsState from 0.2.x on; an isinstance test against the first silently
+    matched nothing on 0.2.8, so _set_lr was a no-op and the logged lr was not the optimizer's
+    (caught 2026-09-19 by a save/resume round trip, before the switch was ever used in a run)."""
+    return hasattr(x, "hyperparams") and hasattr(x, "inner_state") and hasattr(x, "_replace")
+
+
 def _set_lr(opt_state, lr):
     """Set the learning rate inside an optax.inject_hyperparams state (wherever it sits in the chain)."""
+    hit = []
+
     def fix(leaf):
-        if isinstance(leaf, optax.InjectHyperparamsState):
+        if _is_inject(leaf):
             hp = dict(leaf.hyperparams)
             hp["learning_rate"] = jnp.asarray(lr, jnp.float32)
+            hit.append(1)
             return leaf._replace(hyperparams=hp)
         return leaf
-    return jax.tree_util.tree_map(fix, opt_state, is_leaf=lambda x: isinstance(x, optax.InjectHyperparamsState))
+    out = jax.tree_util.tree_map(fix, opt_state, is_leaf=_is_inject)
+    assert hit, "lr_kl_adaptive: no inject_hyperparams state found in the optimizer state"
+    return out
+
+
+def _get_lr(opt_state):
+    """The learning rate the optimizer will actually use (None without inject_hyperparams)."""
+    for leaf in jax.tree_util.tree_leaves(opt_state, is_leaf=_is_inject):
+        if _is_inject(leaf):
+            return float(np.asarray(leaf.hyperparams["learning_rate"]))
+    return None
 
 
 def _clamp_log_std(params, clamp, fill=False):

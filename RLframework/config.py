@@ -519,9 +519,22 @@ class Config:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     grad_guard: bool = False                # optax.apply_if_finite around the optimizer (new runs only)
-    lr_kl_adaptive: bool = False            # rl_games adaptive lr on the mean KL (x1.5 / /1.5 around target_kl)
+    # The step size follows the KL EARLY STOP. The first version of this switch was rl_games' rule on the
+    # mean KL (shrink above 2x target_kl, grow below 0.5x), and it cannot work here: the early stop ends
+    # the update at 1.5x, so the mean never reaches 2x. Replayed on dash_joy2_s1's log it would have
+    # shrunk on 0.4 % of rollouts after 80 M and GROWN on 33 % of them before 40 M. What the log does
+    # show is the early stop: it trips on 41 % of updates while std is 0.65 and on 85 % once the std
+    # anneal has taken it to 0.22 at an almost unchanged lr (KL per step ~ lr^2 / std^2), the median
+    # update shrinks from 36 minibatches to 14, and every collapse of that campaign sits on a KL spike
+    # in that regime. So: an update the early stop cut before lr_kl_frac of its minibatches shrinks the
+    # step by lr_kl_down; one that ran to the end grows it by lr_kl_up. Never above the scheduled lr
+    # (the baseline is the ceiling, this can only make a run more careful), never below lr_kl_min.
+    lr_kl_adaptive: bool = False
     lr_kl_min: float = 1.0e-5
-    lr_kl_max: float = 1.0e-3
+    lr_kl_max: float = 1.0e-3               # unused by the early-stop rule (the schedule is the ceiling)
+    lr_kl_frac: float = 0.5
+    lr_kl_down: float = 1.25
+    lr_kl_up: float = 1.10
     ent_coef: float = 0.01
     ent_final: float = 0.0
     ent_anneal_steps: int = 40_000_000
@@ -912,6 +925,8 @@ PRESETS = {
     # The obeyable stick: v_max 2.5, tight kernel, paced band, RUN/STOP flag with a learned stop.
     "dash_joy2": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY2, **_FAST),
     "dash_joy3": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY3, **_FAST),
+    # the A/B for the late collapses: dash_joy3 with the step size following the KL early stop
+    "dash_joy3_lr": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY3, **_FAST, lr_kl_adaptive=True),
 
     # dash_joy with a real stop: at zero stick the robot is paid to stand in the stable stance.
     "dash_joy_stand": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY_STAND, **_FAST),
