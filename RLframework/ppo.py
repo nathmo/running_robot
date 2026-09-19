@@ -874,7 +874,12 @@ class PPO:
         swing_min = float(m["foot_air"].reshape(-1, 2).mean(0).min())
         # mean |v - v_target| over RUN ticks: what paces the command band (cfg.cmd_gate_err)
         _run = np.asarray(m["run_tick"], np.float64)
-        trk_err = float((np.asarray(m["track_err"], np.float64) * _run).sum() / max(_run.sum(), 1.0))
+        # NaN-safe and bounded: a few envs per hundred rollouts blow up numerically (track_err 1e7 or NaN),
+        # and one NaN made this EMA NaN for the rest of every dash_joy2 run -> the band never left the
+        # slow rate. A blown-up tick counts as a 5 m/s miss, not as infinity.
+        _te = np.clip(np.nan_to_num(np.asarray(m["track_err"], np.float64), nan=5.0, posinf=5.0, neginf=5.0), 0.0, 5.0)
+        _run = np.nan_to_num(_run, nan=0.0)
+        trk_err = float((_te * _run).sum() / max(_run.sum(), 1.0))
         _prev = getattr(self, "_trk_err_ema", None)
         self._trk_err_ema = trk_err if _prev is None else 0.95 * _prev + 0.05 * trk_err
         finishes = int((m["finished"] & done).sum())

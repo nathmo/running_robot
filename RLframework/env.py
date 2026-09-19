@@ -1283,6 +1283,9 @@ class DashEnvV2:
             t["angmom"] = 0.0
         # ---- the stand: zero stick only. Measured pose against the standing stance, fading in as the
         # body comes to rest so braking steps are free (config.stand_at_zero).
+        t["stop_speed"] = jnp.where(
+            standing_cmd, -c.w_stop_speed * jnp.clip(jnp.linalg.norm(v_body[:2]), 0.0, c.v_ceiling) / c.v_ceiling,
+            0.0) if c.w_stop_speed > 0.0 else jnp.zeros(())
         if c.stand_at_zero and (c.w_stand_pose > 0.0 or c.w_stand_vel > 0.0 or c.w_stop_amp > 0.0):
             dq_stand = data.qpos[p.act_qadr] - jnp.asarray(p.default_motor_pos)
             still = jnp.exp(-(jnp.linalg.norm(v_body[:2]) / c.stand_still_mps) ** 2)

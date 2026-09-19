@@ -251,6 +251,12 @@ class Config:
     stop_flag: bool = False
     cmd_stop_frac: float = 0.0              # FINAL share of command draws that are STOP (ramped with the band)
     w_stop_amp: float = 0.0                 # -w * sum_family amp^2 * sum_k w_k^2 (a_k^2 + b_k^2), STOP only
+    # STOP's far field. Under STOP the only pull toward rest is the Laplace kernel, and at sigma 0.3 it
+    # is flat where a walker lives: 3*exp(-1.24/0.3) = 0.05/tick at 1.24 m/s. Measured on the dash_joy2
+    # keepers (2026-09-19): STOP takes 0.55 -> 0.11 m/s at 25 % stick but only 1.56 -> 1.24 at 75 %.
+    # The mirror of w_speed_income: -w * clip(|v_xy|, 0, v_ceiling) / v_ceiling, STOP ticks only, so
+    # there is a slope toward rest from any speed.
+    w_stop_speed: float = 0.0
     stop_bill_floor: float = 0.25           # weight of the stop bills while still moving fast
     # ----- the command band is PACED by tracking, not just by a clock --------------------------
     # The band ramp advances at full rate while the mean |v - v_target| over RUN ticks is below
@@ -869,6 +875,24 @@ _DASH_JOY2 = dict(
                       ("ctrl_jitter_ms", "ctrl_drop_prob")),
 )
 
+# dash_joy3 = dash_joy2 with what its campaign measured (2026-09-19, jobs 3181154-56) fixed:
+#   * dash_joy2_s1 @ 88 M is the first policy that obeys the stick (0.22-1.87 m/s for 0.31-2.19 asked,
+#     5/5 upright to 1.88), but STOP only slowed it, and less the faster it went -> w_stop_speed.
+#   * the pacing EMA went NaN at rollout 6 (physics blow-ups in a few envs), so the band crawled at the
+#     slow rate all run and the group cap closed it at 78 % stick / 15 % STOP share -> ppo.py is NaN-safe.
+#   * two seeds collapsed when the shaping ramp finished and living went net-negative (reward_mean
+#     -0.1 .. -0.2 just before ep_len 400 -> 120): the four gait-quality bills were ~3/tick against a
+#     ~3.5 tracking income -> halved.
+#   * the jitter stage eroded every seed and the user trains for a clean day -> off.
+_DASH_JOY3 = dict(
+    _DASH_JOY2,
+    w_stop_speed=10.0,
+    w_phase_contact=0.5, w_foot_slip=4.0, w_residual=0.10, w_foot_flat=0.25,
+    ctrl_jitter_ms_final=0.0, ctrl_drop_prob_final=0.0,
+    curriculum_order=(("cmd_lo", "cmd_hi", "cmd_zero_p", "cmd_stop_p"),
+                      ("shape_scale", "eff_scale", "stance_ratio"), "dr_scale"),
+)
+
 PRESETS = {
     # The recipe.  One run, random weights, free plant, 450 M steps.
     "dash": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH, **_FAST),
@@ -887,6 +911,7 @@ PRESETS = {
 
     # The obeyable stick: v_max 2.5, tight kernel, paced band, RUN/STOP flag with a learned stop.
     "dash_joy2": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY2, **_FAST),
+    "dash_joy3": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY3, **_FAST),
 
     # dash_joy with a real stop: at zero stick the robot is paid to stand in the stable stance.
     "dash_joy_stand": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY_STAND, **_FAST),
