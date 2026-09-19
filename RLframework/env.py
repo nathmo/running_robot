@@ -113,6 +113,7 @@ class EnvParams(NamedTuple):
     bringup_p_held: float = -1.0 # share HELD-misaligned then released (<0 = cfg * scale); the eval
                                  # pins these to force every episode to start dirty
     cmd_zero_p: float = 0.25     # share of command draws that are exactly zero (ramped)
+    cmd_stop_p: float = 0.0      # share of command draws that are STOP (cfg.stop_flag; ramped)
     cmd_lo: float = 0.0          # joystick: fraction-of-v_max band the command is drawn from
     cmd_hi: float = 1.0          # (curriculum widens it down from cmd_range_start to cmd_range)
     track_sigma: float = 0.6     # Laplace width of the tracking income, m/s (annealed from wider)
@@ -134,6 +135,8 @@ class EnvParams(NamedTuple):
         return cls(dr_scale=float(getattr(cfg, "dr_scale_final", 1.0)), sprint_dist_m=float(cfg.sprint_dist_m),
                    alive_scale=float(getattr(cfg, "alive_scale_final", 1.0)),
                    cmd_zero_p=float(cfg.cmd_zero_frac),
+                   cmd_stop_p=(float(getattr(cfg, "cmd_stop_frac", 0.0))
+                               if getattr(cfg, "stop_flag", False) else 0.0),
                    cmd_lo=float(cfg.cmd_range[0]), cmd_hi=float(cfg.cmd_range[1]),
                    stance_ratio=float(cfg.stance_ratio_final), eff_scale=float(cfg.efficiency_target),
                    ctrl_jitter_ms=float(cfg.ctrl_jitter_ms_final),
@@ -208,6 +211,7 @@ class EnvState:
     grace_left: jnp.ndarray      # seconds of fall-termination grace left (a drop needs to land)
     v_cmd: jnp.ndarray           # m/s, absolute; task[0] carries v_cmd / v_max
     cmd_left: jnp.ndarray        # seconds until the command is redrawn
+    stop_cmd: jnp.ndarray        # 1.0 = the operator's switch is on STOP (cfg.stop_flag); task[1] = 1 - this
     # library variant
     theta: jnp.ndarray           # (44,) this episode's gait (box-perturbed library entry)
     v_ref: jnp.ndarray
@@ -474,7 +478,9 @@ class DashEnvV2:
             # 0.05 of a possible 9.0 of tracking income and fell 100% of the time inside 86 ticks,
             # while the same checkpoint ran 600/600 upright under the sprint preset. 1.0 is what the
             # warm start saw for the whole run phase, i.e. "nothing to brake for".
-            return jnp.stack([jnp.clip(state.v_cmd / self.cfg.v_max, 0.0, 1.0), 1.0])
+            # ...unless stop_flag: then it is the RUN/STOP switch, 1 = run, 0 = stop (config.stop_flag).
+            run = (1.0 - state.stop_cmd) if self.cfg.stop_flag else 1.0
+            return jnp.stack([jnp.clip(state.v_cmd / self.cfg.v_max, 0.0, 1.0), run])
         stop_now = state.crossed | state.light_red
         if self.cfg.stop_cmd_continuous and self.cfg.stop_decel_s > 0:
             # the same ramp the stop reward tracks, recomputed from the state (v0 at the switch, time since)
@@ -562,7 +568,7 @@ class DashEnvV2:
         nominal = jnp.asarray(p.nominal_ctrl)
         cmd0 = jnp.concatenate([nominal, jnp.asarray(gp.drive_kp), jnp.asarray(gp.drive_kd)])
         k_cmd0, k_bring = jax.random.split(k_noise)
-        v_cmd0, cmd_left0 = self._draw_cmd(k_cmd0, params)
+        v_cmd0, cmd_left0, stop0 = self._draw_cmd(k_cmd0, params)
         hold_s0 = jnp.asarray(params.hold_s, jnp.float32)      # probe override wins when set
         grace0 = jnp.zeros(())
         if c.bringup_enable:
@@ -608,7 +614,7 @@ class DashEnvV2:
                                 jax.random.uniform(k_next, (), minval=c.stoplight_green_s[0],
                                                    maxval=c.stoplight_green_s[1]), jnp.inf)),
             light_v0=jnp.zeros(()), light_t=jnp.zeros(()), light_floor=jnp.zeros(()),
-            v_cmd=v_cmd0, cmd_left=cmd_left0, hold_s=hold_s0, grace_left=grace0,
+            v_cmd=v_cmd0, cmd_left=cmd_left0, stop_cmd=stop0, hold_s=hold_s0, grace_left=grace0,
             theta=jnp.clip(theta, -1.0, 1.0), v_ref=v_ref, raibert_i=jnp.zeros(()),
             ep_return=jnp.zeros(()), ep_len=jnp.zeros((), jnp.int32),
         )
@@ -684,7 +690,13 @@ class DashEnvV2:
         # step 0, which drags the gait clock onto the slow rail it never comes back from.
         v = jnp.where(jax.random.uniform(k_z) < params.cmd_zero_p, 0.0, v)
         left = c.cmd_interval_s * jax.random.uniform(k_t, (), minval=0.6, maxval=1.4)
-        return v, left
+        # THE SWITCH. Drawn independently of the stick, which keeps whatever value it drew: on the
+        # robot the operator flips STOP with the stick anywhere, so the flag has to win on its own.
+        if c.stop_flag:
+            stop = (jax.random.uniform(jax.random.fold_in(k_z, 7)) < params.cmd_stop_p).astype(jnp.float32)
+        else:
+            stop = jnp.zeros(())
+        return v, left, stop
 
     def _next_interval(self, key, mean_s):
         if mean_s <= 0.0:
@@ -941,11 +953,12 @@ class DashEnvV2:
         if c.objective == "joystick":
             k_cmd, k_light = jax.random.split(k_light)
             due = (state.cmd_left - dt) <= 0.0
-            v_new, left_new = self._draw_cmd(k_cmd, params)
+            v_new, left_new, stop_new = self._draw_cmd(k_cmd, params)
             v_cmd = jnp.where(due, v_new, state.v_cmd)
             cmd_left = jnp.where(due, left_new, state.cmd_left - dt)
+            stop_cmd = jnp.where(due, stop_new, state.stop_cmd)
         else:
-            v_cmd, cmd_left = state.v_cmd, state.cmd_left
+            v_cmd, cmd_left, stop_cmd = state.v_cmd, state.cmd_left, state.stop_cmd
         # ---- stop curriculum: red light / green light phases (only before the line)
         kl1, kl2 = jax.random.split(k_light)
         light_left = state.light_left - dt
@@ -1027,7 +1040,7 @@ class DashEnvV2:
             gust_countdown=gust_countdown, gust_dir=gust_dir, sprint_d=sprint_d, crossed=crossed,
             t_line=t_line, stop_hold=stop_hold,
             light_red=light_red, light_left=light_left, light_v0=light_v0, light_t=light_t,
-            light_floor=light_floor, v_cmd=v_cmd, cmd_left=cmd_left,
+            light_floor=light_floor, v_cmd=v_cmd, cmd_left=cmd_left, stop_cmd=stop_cmd,
             hold_s=state.hold_s, grace_left=grace_left,
             raibert_i=jnp.clip(state.raibert_i + (v_body[0] - state.v_ref) * dt,
                                -c.raibert_imax, c.raibert_imax),
@@ -1045,7 +1058,11 @@ class DashEnvV2:
             # what the joystick actually commands: FORWARD speed in the base frame. The world-x
             # velocity is the wrong readout for a policy that tracks its own heading -- after a half
             # turn an obedient robot reads as running backwards -- and it is what the reward bills.
-            v_body_x=v_body[0], yaw_true=self._yaw(data), v_cmd=state.v_cmd,
+            v_body_x=v_body[0], yaw_true=self._yaw(data),
+            # the EFFECTIVE target: zero under STOP, whatever the stick says
+            v_cmd=state.v_cmd * (1.0 - state.stop_cmd), stop_cmd=state.stop_cmd,
+            track_err=jnp.abs(v_body[0] - state.v_cmd * (1.0 - state.stop_cmd)),
+            run_tick=1.0 - state.stop_cmd,
             term_low=term_low, term_tip=term_tip, term_floor=floor_viol, term_ws=ws_kill, term_nan=~finite,
             light_red=light_red.astype(jnp.float32),
             # the observation of the state the episode ENDED in, before the auto-reset overwrote it:
@@ -1100,7 +1117,8 @@ class DashEnvV2:
             # 3.2 m/s one pays 0.005 -- flat, which is how four cold seeds ended up parked on the
             # 1.5 Hz clock rail with nothing to climb. Starting wide makes the first metre of speed
             # worth something; it then tightens to 0.6 so the finished policy is held to the stick.
-            income = joystick_income(vx, state.v_cmd, params.track_sigma, c.w_track, c.w_fwd_speed,
+            v_tgt_j = state.v_cmd * (1.0 - state.stop_cmd)      # STOP asks for zero, whatever the stick says
+            income = joystick_income(vx, v_tgt_j, params.track_sigma, c.w_track, c.w_fwd_speed,
                                      getattr(c, "w_speed_income", 0.0), c.v_ceiling)
             if c.run_income_linear:
                 # RUN/STOP (walk_v4). The Laplace kernel above pays a robot that walks in place under
@@ -1170,10 +1188,14 @@ class DashEnvV2:
             # the commanded speed IS the joystick, and the gait block stays on all the way down to
             # zero: a zero command means step in place, not stand still, because this plant has no
             # passive stance to hold (bring-up probe: it topples in 0.7-1.0 s with no gait)
-            cmd_speed = state.v_cmd
+            cmd_speed = state.v_cmd * (1.0 - state.stop_cmd)
             # ...unless stand_at_zero: the flat-foot robot HAS a stance, so at exactly zero stick the
-            # gait block lets go and the stand bill below takes over (config.stand_at_zero).
-            standing_cmd = (state.v_cmd <= 1e-3) if c.stand_at_zero else jnp.zeros((), bool)
+            # gait block lets go and the stand bill below takes over (config.stand_at_zero). With
+            # stop_flag the condition is the operator's SWITCH, not the stick (config.stop_flag).
+            if c.stop_flag:
+                standing_cmd = state.stop_cmd > 0.5
+            else:
+                standing_cmd = (state.v_cmd <= 1e-3) if c.stand_at_zero else jnp.zeros((), bool)
             gait_on = ~standing_cmd
         elif c.stop_cmd_continuous and c.stop_decel_s > 0:
             cmd_speed = jnp.where(run_phase, c.v_ceiling, jnp.clip(v_target, 0.0, c.v_ceiling))
@@ -1190,6 +1212,8 @@ class DashEnvV2:
         air_credit = jnp.where(grounded & (state.air_time > 0.0) & gait_on,
                                c.w_air_time * jnp.clip(state.air_time - c.foot_air_time_min, 0.0,
                                                        c.air_credit_cap_s), 0.0)
+        if c.air_credit_cmd_scaled:
+            air_credit = air_credit * jnp.clip(cmd_speed / max(c.v_max, 1e-6), 0.0, 1.0)
         t["air_time"] = air_credit.sum()
         air_time = jnp.where(grounded, 0.0, state.air_time + dt)
         contact_time = jnp.where(grounded, state.contact_time + dt, 0.0)
@@ -1259,13 +1283,27 @@ class DashEnvV2:
             t["angmom"] = 0.0
         # ---- the stand: zero stick only. Measured pose against the standing stance, fading in as the
         # body comes to rest so braking steps are free (config.stand_at_zero).
-        if c.stand_at_zero and (c.w_stand_pose > 0.0 or c.w_stand_vel > 0.0):
+        if c.stand_at_zero and (c.w_stand_pose > 0.0 or c.w_stand_vel > 0.0 or c.w_stop_amp > 0.0):
             dq_stand = data.qpos[p.act_qadr] - jnp.asarray(p.default_motor_pos)
             still = jnp.exp(-(jnp.linalg.norm(v_body[:2]) / c.stand_still_mps) ** 2)
+            fade = (c.stop_bill_floor + (1.0 - c.stop_bill_floor) * still) if c.stop_flag else still
             bill = pen(-c.w_stand_pose * jnp.sum(dq_stand ** 2)) + pen(-c.w_stand_vel * jnp.sum(qd ** 2))
-            t["stand"] = jnp.where(standing_cmd, still * bill, 0.0)
+            t["stand"] = jnp.where(standing_cmd, fade * bill, 0.0)
+            if c.w_stop_amp > 0.0:
+                # what the POLICY is commanding: the oscillating coefficients of the live latched spec,
+                # in rad^2 (coefficient 0 of each family, the offset, is free: it may need it to balance)
+                wk2 = jnp.asarray(gait.WEIGHTS)[1:] ** 2
+                osc = 0.0
+                for _sl, _amp in ((gait.I_S_CAM, c.cam_amp), (gait.I_S_THIGH, c.thigh_amp),
+                                  (gait.I_S_HIP, c.roll_amp)):
+                    _co = jnp.clip(spec[_sl], -1.0, 1.0)
+                    osc = osc + (_amp ** 2) * jnp.sum(wk2 * (_co[1::2] ** 2 + _co[2::2] ** 2))
+                t["stop_amp"] = jnp.where(standing_cmd, fade * pen(-c.w_stop_amp * osc), 0.0)
+            else:
+                t["stop_amp"] = jnp.zeros(())
         else:
             t["stand"] = jnp.zeros(())
+            t["stop_amp"] = jnp.zeros(())
         sep = self._foot_sep(data)
         t["stance"] = pen(-c.w_no_cross * jnp.maximum(0.0, c.stance_min_sep - sep) ** 2)
         hr = data.qpos[p.act_qadr[p.hip_roll_idx]] - jnp.asarray(p.default_motor_pos)[p.hip_roll_idx]

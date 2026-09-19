@@ -111,8 +111,15 @@ def test_presets():
     rng = np.random.default_rng(1)
     nominal = np.array([0, 0, 0.12, 0, 0, -0.12])
     names = sorted(get_config.__globals__["PRESETS"])
-    check("seven presets: recipe, clean-day joystick (+ with a real stop), planar probe, speed variant, sprint, smoke",
-          names == ["dash", "dash_joy", "dash_joy_stand", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
+    check("eight presets: recipe, clean-day joystick (+ stop, + the obeyable stick), planar probe, speed variant, sprint, smoke",
+          names == ["dash", "dash_joy", "dash_joy2", "dash_joy_stand", "dash_planar", "dash_speed", "dash_sprint", "smoke"], str(names))
+    j2 = get_config("dash_joy2")
+    check("dash_joy2: reachable stick, tight kernel, RUN/STOP flag with a learned stop, paced band, live swing credit",
+          j2.v_max == 2.5 and j2.v_ceiling == 2.5 and j2.track_sigma == 0.3 and j2.stop_flag
+          and j2.cmd_stop_frac == 0.25 and j2.cmd_zero_frac == 0.0 and j2.w_stop_amp > 0 and j2.cmd_gate_err > 0
+          and j2.foot_air_time_min < 0.125 and j2.gait_freq_hz[1] == 4.0
+          and not get_config("dash_joy").stop_flag,
+          f"v_max {j2.v_max} sigma {j2.track_sigma} stop {j2.cmd_stop_frac} f_hi {j2.gait_freq_hz[1]}")
     js = get_config("dash_joy_stand")
     check("dash_joy_stand: the stand is on, billed, and practised; dash_joy itself is unchanged",
           js.stand_at_zero and js.w_stand_pose > 0 and js.cmd_zero_frac == 0.25
@@ -161,7 +168,7 @@ def test_presets():
               cfg.w_lane == 0.0 and cfg.heading_avg_s > 0 and cfg.heading_euler,
               f"w_lane {cfg.w_lane}, tau {cfg.heading_avg_s} s")
         check(f"{name}: the stick and the income cap agree, so the policy plateaus at its own",
-              cfg.v_max == cfg.v_ceiling == 4.0 and cfg.w_speed_income > 0,
+              cfg.v_max == cfg.v_ceiling and cfg.v_max in (4.0, 2.5) and cfg.w_speed_income > 0,
               f"v_max {cfg.v_max} v_ceiling {cfg.v_ceiling} w_speed {cfg.w_speed_income}")
         # the scaffolding the flat foot removed: no base spring anywhere, no bring-up
         check(f"{name}: no training-wheel scaffolding left in the config",
@@ -172,7 +179,7 @@ def test_presets():
         flat_order = [x for g in cfg.curriculum_order for x in ((g,) if isinstance(g, str) else g)]
         check(f"{name}: every queued curriculum is a real knob",
               all(hasattr(cfg, k) or k in ("cmd_lo", "cmd_hi", "shape_scale", "dr_scale",
-                                           "cmd_zero_p", "eff_scale", "stance_ratio",
+                                           "cmd_zero_p", "cmd_stop_p", "eff_scale", "stance_ratio",
                                            "ctrl_jitter_ms", "ctrl_drop_prob")
                   for k in flat_order), str(flat_order))
         check(f"{name}: the control law has no reflex parameters left",

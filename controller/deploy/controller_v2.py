@@ -271,6 +271,9 @@ class PolicyControllerV2:
         self.objective = str(m["objective"])
         self.command_kind = "speed" if self.objective == "joystick" else "run_stop"
         self.task_is_constant = (self.objective == "speed")
+        # RUN/STOP on the spare task input (RLframework config.stop_flag). Optional in the meta, so every
+        # bundle exported before it reads exactly as it always did: task[1] pinned at 1.0.
+        self.stop_flag = bool(m.get("stop_flag", False))
         self.task_brake_m = float(m["task_brake_m"])
         self.sprint_dist_m = float(m.get("sprint_dist_m", 0.0))
         self.v_max = float(m.get("v_max") or 0.0)
@@ -356,7 +359,13 @@ class PolicyControllerV2:
         channel (objective='speed'), or a joystick bundle, whose task[0] is a speed and has no
         flag in it at all -- in which case the caller should say so rather than pretend."""
         if self.command_kind == "speed":
-            return False
+            if not self.stop_flag:
+                return False
+            # a joystick bundle trained with the RUN/STOP switch: task[1] = 1 run, 0 stop. STOP means
+            # "come to rest in the standing stance, whatever the stick says" -- the policy does the
+            # stopping, nothing in this control law is forced to zero.
+            self._run = bool(run)
+            return True
         self._run = bool(run)
         return not self.task_is_constant
 
@@ -473,7 +482,8 @@ class PolicyControllerV2:
             # is far away", 0 means "brake now". A joystick bundle that shipped 0 here would hold
             # the policy in a permanent stop request; the trainer pins it at 1.0 and this must match
             # bit for bit or the robot runs a different controller than the one that was trained.
-            return float(np.clip(self._v_cmd / self.v_max, self.v_min / self.v_max, 1.0)), 1.0
+            flag = (1.0 if self._run else 0.0) if self.stop_flag else 1.0
+            return float(np.clip(self._v_cmd / self.v_max, self.v_min / self.v_max, 1.0)), flag
         if self.task_is_constant:
             return 1.0, 1.0
         return (1.0 if self._run else 0.0), self._d_to_go

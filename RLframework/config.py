@@ -232,6 +232,34 @@ class Config:
     # itself falls backward in 0.85 s). The bill fades in below stand_still_mps of body speed, so
     # the capture steps that a stop from a run needs are not punished.
     stand_at_zero: bool = False
+    # ----- RUN / STOP on the spare task input --------------------------------------------------
+    # task[1] has been reserved and pinned at 1.0 since v3. With stop_flag it carries the operator's
+    # switch: 1 = RUN (task[0] is the stick), 0 = STOP (come to rest in the standing stance, whatever
+    # the stick says). No width changes anywhere -- actor 384, bundle layout, deploy controller.
+    # Why a flag and not "stick = 0": "stand" and "walk at 0.1 m/s" are different behaviours (gait off
+    # vs on) that differ by a hair on one continuous input, and a network is smooth in its inputs, so
+    # it blends them -- dash_joy_stand's zero-stick answer was a 0.21 m/s shuffle. A binary input
+    # makes the two regimes separable, and zero-speed draws stop dragging the whole speed map down.
+    #
+    # THE CONTROL LAW FORCES NOTHING UNDER STOP. Zeroing the gait series in the law would hand a
+    # moving robot a rigid pose, and that falls (0/30 hand-overs from a 0.21 m/s shuffle, 2026-09-19).
+    # Instead the reward bills what the policy itself is commanding: the OSCILLATING coefficients of
+    # the latched spec (six per family; the static offset stays free for balancing), in rad^2, next
+    # to the stand-pose bill. Both fade in as the body slows (stop_bill_floor..1), so the policy has
+    # to find its own ramp to a still stance -- the fall penalty and the per-commit spec_cycle bill
+    # price an abrupt one.
+    stop_flag: bool = False
+    cmd_stop_frac: float = 0.0              # FINAL share of command draws that are STOP (ramped with the band)
+    w_stop_amp: float = 0.0                 # -w * sum_family amp^2 * sum_k w_k^2 (a_k^2 + b_k^2), STOP only
+    stop_bill_floor: float = 0.25           # weight of the stop bills while still moving fast
+    # ----- the command band is PACED by tracking, not just by a clock --------------------------
+    # The band ramp advances at full rate while the mean |v - v_target| over RUN ticks is below
+    # cmd_gate_err, and at cmd_slow_rate of it otherwise. Never zero: every gate in this project that
+    # could stop has at some point been set above what the policy reaches and frozen a run.
+    cmd_gate_err: float = 0.0               # m/s; 0 = plain clock
+    cmd_slow_rate: float = 0.25
+    # swing credit paid in proportion to the commanded speed (a stopped robot earns none)
+    air_credit_cmd_scaled: bool = False
     w_stand_pose: float = 0.0               # -w * sum (q - q_stand)^2, zero stick only
     w_stand_vel: float = 0.0                # -w * sum qd^2, zero stick only
     stand_still_mps: float = 0.3
@@ -811,6 +839,36 @@ _DASH_JOY = dict(
 _DASH_JOY_STAND = dict(_DASH_JOY, stand_at_zero=True, w_stand_pose=5.0, w_stand_vel=0.02,
                        cmd_zero_frac=0.25)
 
+# --------------------------------------------------------------------------------------------
+# dash_joy2: a stick the robot can obey, and a real STOP
+# --------------------------------------------------------------------------------------------
+# Measured 2026-09-19 on dash_joy_s0 (deployment sim, shipping law, 12 ms delay): asked 0/1/2/3/4 m/s
+# it does 1.03/1.44/1.55/1.65/1.75. One gait at every stick -- 8 steps/s (the 4 Hz stride ceiling,
+# a PHYSICAL limit of the robot, not to be raised) with ~13 cm steps.
+#   * THE STICK ASKED FOR THE IMPOSSIBLE. Leg reach with the sole within 5 deg of flat is 0.24-0.29 m
+#     at stance height; at 4 Hz that is ~2.2-2.4 m/s walking, ~3 with flight. Commands of 3-4 m/s were
+#     40% of the eval ladder and ~half of training draws: half the signal said "flat out, whatever
+#     the stick says". v_max 4.0 -> 2.5.
+#   * THE KERNEL WAS TOO FORGIVING. Laplace 0.6: doing 1.44 at a 1.0 ask kept 48% of the income.
+#     0.6 -> 0.3, annealed from 1.5 over 60 M (the monotone speed income still gives the far gradient).
+#   * THE BAND IS PACED BY TRACKING (cmd_gate_err), never frozen.
+#   * RUN/STOP FLAG on task[1], STOP billed on pose + the policy's own gait amplitude (see stop_flag).
+#     No exact-zero stick draws any more: standing is STOP's job, not a corner of the speed map.
+#   * THE SWING CREDIT WAS DEAD: it needed a 0.25 s swing and a 4 Hz stride has 0.06-0.12 s ones, so
+#     it paid 0.00 in every run. Threshold 0.08 s, cap 0.10 s, scaled by the commanded speed.
+_DASH_JOY2 = dict(
+    _DASH_JOY,
+    v_max=2.5, v_ceiling=2.5,
+    track_sigma=0.3, track_sigma_start=1.5, track_sigma_steps=60_000_000,
+    stop_flag=True, cmd_stop_frac=0.25, cmd_zero_frac=0.0,
+    stand_at_zero=True, w_stand_pose=5.0, w_stand_vel=0.02, w_stop_amp=10.0,
+    cmd_gate_err=0.5, cmd_slow_rate=0.25,
+    foot_air_time_min=0.08, air_credit_cap_s=0.10, w_air_time=15.0, air_credit_cmd_scaled=True,
+    curriculum_order=(("cmd_lo", "cmd_hi", "cmd_zero_p", "cmd_stop_p"),
+                      ("shape_scale", "eff_scale", "stance_ratio"), "dr_scale",
+                      ("ctrl_jitter_ms", "ctrl_drop_prob")),
+)
+
 PRESETS = {
     # The recipe.  One run, random weights, free plant, 450 M steps.
     "dash": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH, **_FAST),
@@ -826,6 +884,9 @@ PRESETS = {
 
     # The joystick for a clean day: no disturbances, half-width plant DR paced by competence.
     "dash_joy": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY, **_FAST),
+
+    # The obeyable stick: v_max 2.5, tight kernel, paced band, RUN/STOP flag with a learned stop.
+    "dash_joy2": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY2, **_FAST),
 
     # dash_joy with a real stop: at zero stick the robot is paid to stand in the stable stance.
     "dash_joy_stand": lambda: _cfg(model_path="model/dash01_free.xml", **_DASH_JOY_STAND, **_FAST),

@@ -88,6 +88,7 @@ class Sim:
         self.delay_ms = float(m.get("drive_delay_ms", 0.0))   # nominal actuation delay the policy was trained with
         self.ctrl = PolicyControllerV2(self.bundle)
         self.v_cmd = 0.0
+        self.run = True                      # RUN/STOP switch (only bundles trained with stop_flag read it)
         self.reset()
 
     def _sensor_adr(self, name):
@@ -121,9 +122,21 @@ class Sim:
         self.ctrl.set_speed(self.v_cmd, immediate=True)
         q, qd, tau = self._motor_state()
         self.ctrl.start(q, qd, tau, self._grav_body(), self._gyro())
+        if getattr(self.ctrl, "stop_flag", False):
+            self.ctrl.set_run(self.run)      # start() always begins stopped; restore the operator's switch
         self.t = 0.0
         self.x0 = float(self.data.qpos[0])
         self._last_cmd = None
+
+    @property
+    def has_stop(self):
+        return bool(getattr(self.ctrl, "stop_flag", False))
+
+    def set_run(self, run):
+        """The RUN/STOP switch. No-op on a bundle that was not trained with one."""
+        self.run = bool(run)
+        if self.has_stop:
+            self.ctrl.set_run(self.run)
 
     def set_stick(self, frac):
         frac = float(np.clip(frac, 0.0, 1.0))
@@ -231,6 +244,7 @@ def headless(args):
     for frac in [i / 8.0 for i in range(9)]:
         sim.reset()
         sim.set_stick(frac)
+        sim.set_run(frac > 0.0)              # on a RUN/STOP bundle the 0% rung IS the stop command
         sim.ctrl.set_speed(sim.v_cmd, immediate=True)
         vs, ys, hs, ds, n, alive = [], [], [], [], 0, True
         for t in range(ticks):
@@ -308,6 +322,10 @@ def main():
             sim.set_stick(1.0)
         elif ch in ("R", "r"):
             sim.reset()
+        elif ch in ("X", "x"):
+            sim.set_run(not sim.run)
+            print(f"[play] switch -> {'RUN' if sim.run else 'STOP'}"
+                  + ("" if sim.has_stop else "   (this bundle has no RUN/STOP input; ignored)"))
         elif ch == "[":
             speed_scale[0] = max(0.1, speed_scale[0] / 2)
         elif ch == "]":
@@ -317,7 +335,7 @@ def main():
 
     print(f"[play] bundle {Path(args.bundle).name} | v_max {sim.v_max:.2f} m/s | "
           f"{1 / sim.control_dt:.0f} Hz control, {sim.substeps} physics substeps | lock={args.lock}")
-    print("[play] W/S = stick +-10%   SPACE = 0   F = full   R = reset   [ ] = slow/fast   Q = quit")
+    print("[play] W/S = stick +-10%   SPACE = 0   F = full   X = RUN/STOP   R = reset   [ ] = slow/fast   Q = quit")
 
     with mujoco.viewer.launch_passive(sim.model, sim.data, key_callback=on_key,
                                       show_left_ui=False, show_right_ui=False) as v:

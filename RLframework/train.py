@@ -284,6 +284,8 @@ def main():
                   f"bringup {'off' if not cfg.bringup_enable else format(row.get('curriculum/bringup_scale', 0), '.3f')} "
                   f"cmd [{row.get('curriculum/cmd_lo', 0):.2f},{row.get('curriculum/cmd_hi', 0):.2f}] "
                   f"zero {row.get('curriculum/cmd_zero_p', 0):.2f} "
+                  + (f"stop {row.get('curriculum/cmd_stop_p', 0):.2f} trk_err {row.get('rollout/track_err_ema', 0):.2f} "
+                     f"sigma {row.get('curriculum/track_sigma', 0):.2f} " if getattr(cfg, 'stop_flag', False) else "") +
                   f"jit {row.get('curriculum/ctrl_jitter_ms', 0):.2f}ms"
                   , flush=True)
         if eval_env is not None and cfg.eval_every_rollouts > 0 and agent.rollout_n % cfg.eval_every_rollouts == 0:

@@ -210,6 +210,8 @@ def export(run, out, checkpoint=None, brake=None, brake_window_s=None):
         # (`m.get("v_max")`); it raises a pointed error naming this exporter if they are missing.
         "v_max": float(cfg.v_max) if cfg.objective == "joystick" else 0.0,
         "v_min": float(cfg.v_min) if cfg.objective == "joystick" else 0.0,
+        # task[1] is the operator's RUN/STOP switch (1 run, 0 stop) instead of the reserved 1.0
+        "stop_flag": bool(getattr(cfg, "stop_flag", False)) and cfg.objective == "joystick",
         "command": {"kind": "speed_fraction" if cfg.objective == "joystick" else "run_flag_distance",
                     "zero_means": "step in place"},
         # did this checkpoint ever see a red light? The run/stop button on the robot drives task[0],

@@ -122,6 +122,8 @@ def initial_params(c):
     bringup_scale=0.0 if (getattr(c, 'bringup_enable', False)
                          and c.bringup_curriculum_steps > 0) else 1.0,
     cmd_zero_p=0.0 if c.cmd_curriculum_steps > 0 else float(c.cmd_zero_frac),
+    cmd_stop_p=((0.0 if c.cmd_curriculum_steps > 0 else float(getattr(c, "cmd_stop_frac", 0.0)))
+                if getattr(c, "stop_flag", False) else 0.0),
     cmd_lo=float(c.cmd_range_start[0] if c.cmd_curriculum_steps > 0
                  else c.cmd_range[0]),
     cmd_hi=float(c.cmd_range_start[1] if c.cmd_curriculum_steps > 0
@@ -241,6 +243,7 @@ class PPO:
                     t_line=info["t_line"], thermal_max=info["thermal_max"],
                     torque_util=info["torque_util"], freq_hz=info["freq_hz"], commit=info["commit"],
                     residual_sat=info["residual_sat"], resync=info["resync"],
+                    track_err=info["track_err"], run_tick=info["run_tick"],
                     action=a, raw_obs=obs,
                 )
                 # the value of the state the episode ended in, for a time-limit truncation: the
@@ -670,10 +673,21 @@ class PPO:
             # widen the command band DOWNWARD from what the warm start already does. Opening it to
             # [0, 1] at step 0 would spend most episodes asking a runner for speeds it has never
             # produced, which is how the v2 stop runs burned their budget.
+            # PACED by tracking (cfg.cmd_gate_err): full rate while the policy tracks the band it has,
+            # a fraction of it otherwise. The turn clock still counts real steps; only progress slows.
+            _cm = 1.0
+            _ge = float(getattr(c, "cmd_gate_err", 0.0))
+            if _ge > 0.0:
+                _te = getattr(self, "_trk_err_ema", None)
+                _cm = 1.0 if (_te is not None and _te < _ge) else float(c.cmd_slow_rate)
             kw["cmd_lo"] = self._gated("cmd_lo", ep_len, float(c.cmd_range_start[0]), float(c.cmd_range[0]),
-                                       c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, _q("cmd_lo", d_steps))
+                                       c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, _cm * _q("cmd_lo", d_steps))
             kw["cmd_hi"] = self._gated("cmd_hi", ep_len, float(c.cmd_range_start[1]), float(c.cmd_range[1]),
-                                       c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, _q("cmd_hi", d_steps))
+                                       c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf, _cm * _q("cmd_hi", d_steps))
+            if getattr(c, "stop_flag", False):
+                kw["cmd_stop_p"] = self._gated("cmd_stop_p", ep_len, 0.0, float(c.cmd_stop_frac),
+                                               c.cmd_curriculum_steps, _g(c.cmd_gate_ep_len), rf,
+                                               _cm * _q("cmd_stop_p", d_steps))
             # and the zero share with it -- "stop" is the hardest command this lineage has, so it
             # arrives last, not alongside the first rollout
             kw["cmd_zero_p"] = self._gated("cmd_zero_p", ep_len, 0.0, float(c.cmd_zero_frac),
@@ -858,6 +872,11 @@ class PPO:
         ep_len = float(m["ep_len"][done].mean()) if n_done else float(m["ep_len"].mean())
         ep_ret = float(m["ep_return"][done].mean()) if n_done else float("nan")
         swing_min = float(m["foot_air"].reshape(-1, 2).mean(0).min())
+        # mean |v - v_target| over RUN ticks: what paces the command band (cfg.cmd_gate_err)
+        _run = np.asarray(m["run_tick"], np.float64)
+        trk_err = float((np.asarray(m["track_err"], np.float64) * _run).sum() / max(_run.sum(), 1.0))
+        _prev = getattr(self, "_trk_err_ema", None)
+        self._trk_err_ema = trk_err if _prev is None else 0.95 * _prev + 0.05 * trk_err
         finishes = int((m["finished"] & done).sum())
         falls = int((m["fallen"] & done).sum())
         t_lines = m["t_line"][m["finished"] & done]
@@ -871,6 +890,7 @@ class PPO:
             "time/update_s": t_update, "time/est_s": t_est, "time/iter_s": time.time() - t0,
             "time/sps": d_steps / max(time.time() - t0, 1e-9),
             "rollout/ep_len_mean": ep_len, "rollout/ep_ret_mean": ep_ret, "rollout/episodes": n_done,
+            "rollout/track_err": trk_err, "rollout/track_err_ema": self._trk_err_ema,
             "rollout/finishes": finishes, "rollout/falls": falls,
             "rollout/t_line_mean": float(t_lines.mean()) if t_lines.size else float("nan"),
             "rollout/sprint_d_mean": float(m["sprint_d"].mean()),
@@ -967,6 +987,12 @@ class PPO:
                     # across a run and across runs.
                     state = state.replace(v_cmd=jnp.asarray(ladder),
                                           cmd_left=jnp.full_like(state.cmd_left, 1e9))
+                    # with a RUN/STOP switch the zero rung of the ladder IS the stop command: the
+                    # contract's "0%" is "stand still", and that is the flag's job, not the stick's
+                    if getattr(self.cfg, "stop_flag", False):
+                        state = state.replace(stop_cmd=(jnp.asarray(ladder) <= 1e-6).astype(jnp.float32))
+                    else:
+                        state = state.replace(stop_cmd=jnp.zeros_like(state.cmd_left))
 
                 def body(carry):
                     state, obs, alive, first_end, dist, tline, fin, fell, trk, yaw, settled, t = carry
