@@ -75,10 +75,10 @@ def test_roll_moves_both_hips_together_and_the_outputs_stay_clipped():
 def test_trims_are_clipped():
     b = balance.Balancer(STAND)
     b.set_trim(com_x_mm=999, com_y_mm=-999, pitch_deg=99)
-    assert b.trim == {"com_x_mm": 100.0, "com_y_mm": -100.0, "pitch_deg": 5.0}
-    # the loop still has its own authority around a big trim
-    t = b.step(0.01, 0.0, 30.0, 0.0, 500.0)
-    assert b.out["com_y"] == pytest.approx(-100.0 - b.p["com_y_clip"])
+    assert b.trim == {"com_x_mm": 25.0, "com_y_mm": -25.0, "pitch_deg": 5.0}
+    # the loop still has its own authority around the trim
+    b.step(0.01, 0.0, 30.0, 0.0, 500.0)
+    assert b.out["com_y"] == pytest.approx(-25.0 - b.p["com_y_clip"])
 
 
 # ---------------------------------------------------------------- daemon integration (MockBus)
@@ -204,6 +204,62 @@ def test_a_long_balance_does_not_trip_the_homing_travel_budget(robot):
         k += 1
         time.sleep(0.02)
     assert d.get_snapshot()["mode"] == "MANUAL", d.get_snapshot().get("estop")
+
+
+def test_home_goes_to_the_trimmed_stand_and_a_trim_reposes_it_without_the_loop(robot):
+    d, cal, _b, _dir = robot
+    capture_zero(d, cal)
+    d.balance_trim(com_x_mm=9.0)
+    want = balance.Balancer(STAND).targets(0.0, 9.0, 0.0)
+    assert want["left.thigh"] != pytest.approx(STAND["left.thigh"])
+    ok, why = d.home()
+    assert ok, why
+    assert wait_mode(d, "MANUAL")
+    assert _wait_pose(d, cal, want)
+    d.balance_trim(com_x_mm=-5.0, com_y_mm=4.0)          # holding the stand: re-posed at once
+    assert _wait_pose(d, cal, balance.Balancer(STAND).targets(0.0, -5.0, 4.0))
+    d.manual_update({"left.abd": 1.0}, override=True)    # jogged away: a trim no longer moves it
+    held = dict(d._manual_targets)
+    d.balance_trim(com_x_mm=5.0)
+    assert d._manual_targets == held
+
+
+def _wait_pose(d, cal, want, tol=0.5, timeout=15):
+    t_end = time.time() + timeout
+    while time.time() < t_end:
+        pose = {n: cal.norm(n, m.pos) for n, m in d.by_name.items()}
+        if all(abs(pose[n] - want[n]) < tol for n in paths.MOTOR_NAMES):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_balance_starts_from_the_trimmed_stand_and_gains_tune_live(robot):
+    d, cal, _b, _dir = robot
+    d.sense = FakeIMU()
+    capture_zero(d, cal)
+    d.balance_trim(com_x_mm=9.0)
+    assert d.home()[0] and wait_mode(d, "MANUAL")
+    assert _wait_pose(d, cal, balance.Balancer(STAND).targets(0.0, 9.0, 0.0))
+    ok, why = d.balance_start()
+    assert ok, why
+    g = d.balance_gains(kp=1.5, kd=99.0)                  # kd is clipped to its range
+    assert g["kp"] == 1.5 and g["kd"] == balance.GAIN_RANGE["kd"][1]
+    assert d._bal.p["kp"] == 1.5                           # the running loop got it
+    time.sleep(0.2)
+    assert d.get_snapshot()["manual"]["balance"]["gains"]["kp"] == 1.5
+
+
+def test_trims_and_gains_persist(tmp_path):
+    f = str(tmp_path / "balance.json")
+    d = daemon_mod.RobotDaemon(mock=True, calib=None, wstore=None, fklut=None, bb=None,
+                               balance_file=f)
+    d.balance_trim(com_x_mm=9.0, com_y_mm=-3.0)
+    d.balance_gains(kp=2.0, ki=0.2)
+    again = daemon_mod.RobotDaemon(mock=True, calib=None, wstore=None, fklut=None, bb=None,
+                                   balance_file=f)
+    assert again._bal_trim["com_x_mm"] == 9.0 and again._bal_trim["com_y_mm"] == -3.0
+    assert again._bal_gains["kp"] == 2.0 and again._bal_gains["ki"] == 0.2
 
 
 def test_jogging_cancels_balance(robot):

@@ -745,6 +745,13 @@ function updateBalanceStatus(b) {
   }
   $("bal-comx-val").textContent = sg($("bal-comx").value, 0);
   $("bal-comy-val").textContent = sg($("bal-comy").value, 0);
+  BAL.defaults = b.defaults || BAL.defaults;
+  for (const el of document.querySelectorAll("[data-gain]")) {
+    const v = (b.gains || {})[el.dataset.gain];
+    if (v !== undefined && document.activeElement !== el && !el.dataset.dirty) el.value = v;
+    const d = (BAL.defaults || {})[el.dataset.gain];
+    el.classList.toggle("override", d !== undefined && Math.abs(+el.value - d) > 1e-9);
+  }
 }
 $("btn-balance").onclick = async () => {
   if (BAL.active) {
@@ -769,6 +776,25 @@ for (const id of ["bal-comx", "bal-comy"]) {
   };
 }
 $("bal-pitch").onchange = sendBalanceTrim;
+// ◀ ▶: one step of the slider (1 mm) or 0.1° of pitch per click, clamped to the input's range
+for (const b of document.querySelectorAll("[data-bal-step]")) {
+  b.onclick = (e) => {
+    e.preventDefault();
+    const el = $(b.dataset.balStep);
+    const v = Math.min(+el.max, Math.max(+el.min, Math.round((+el.value + +b.dataset.d) * 10) / 10));
+    el.value = v;
+    if (el.oninput) el.oninput(); else sendBalanceTrim();
+  };
+}
+async function sendGains(g) {
+  try { await api("/api/balance/gains", { json: g }); } catch (_) { /* banner already set */ }
+  for (const el of document.querySelectorAll("[data-gain]")) delete el.dataset.dirty;
+}
+for (const el of document.querySelectorAll("[data-gain]")) {
+  el.oninput = () => { el.dataset.dirty = "1"; };
+  el.onchange = () => { if (el.value !== "") sendGains({ [el.dataset.gain]: +el.value }); };
+}
+$("btn-gains-default").onclick = () => { if (BAL.defaults) sendGains(BAL.defaults); };
 $("chk-override").onchange = () => {
   if ($("chk-override").checked &&
       !confirm("Override the safe-workspace check?\nOnly the physical assembly-band net remains.")) {

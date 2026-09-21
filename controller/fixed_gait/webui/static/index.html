@@ -360,15 +360,40 @@ sideways. Stop HOLDS the pose; a tilt beyond 15° is a fall and goes limp. It ca
 push: 66 mm soles recover ~8 N for 0.2 s at most.">⚖ Balance: start</button>
       <span id="bal-status" class="hint mono"></span>
       <span class="spacer"></span>
+    </div>
+    <div class="row bal-row">
+      <span class="hint" title="The CoM trims shape the STANDING POSE itself: 🏠 Home drives to the
+trimmed pose, and while the robot holds it (Home arrived, or Balance stopped) moving a trim
+re-poses it — no PID needed. Saved on the robot.">CoM trim (standing pose):</span>
       <label title="where the CoM sits along the soles (+ = toward the toes); feet stay flat,
-torso level">CoM fore/aft <input type="range" id="bal-comx" min="-100" max="100" step="1" value="0">
+torso level">fore/aft
+        <button class="btn small bal-step" data-bal-step="bal-comx" data-d="-1">◀</button>
+        <input type="range" id="bal-comx" min="-25" max="25" step="1" value="0">
+        <button class="btn small bal-step" data-bal-step="bal-comx" data-d="1">▶</button>
         <span id="bal-comx-val" class="mono">+0</span> mm</label>
       <label title="where the CoM sits between the feet (+ = left); both hips roll together,
-the soles roll by the same small angle">CoM lateral <input type="range" id="bal-comy" min="-100"
-        max="100" step="1" value="0"> <span id="bal-comy-val" class="mono">+0</span> mm</label>
+the soles roll by the same small angle">lateral
+        <button class="btn small bal-step" data-bal-step="bal-comy" data-d="-1">◀</button>
+        <input type="range" id="bal-comy" min="-25" max="25" step="1" value="0">
+        <button class="btn small bal-step" data-bal-step="bal-comy" data-d="1">▶</button>
+        <span id="bal-comy-val" class="mono">+0</span> mm</label>
       <label title="torso pitch the loop holds (+ = leaning forward): corrects an IMU mount that is
-not quite level">pitch trim <input type="number" id="bal-pitch" value="0" min="-5" max="5" step="0.1"
-        class="num small"> °</label>
+not quite level. Only used while ⚖ Balance runs.">pitch setpoint
+        <button class="btn small bal-step" data-bal-step="bal-pitch" data-d="-0.1">◀</button>
+        <input type="number" id="bal-pitch" value="0" min="-5" max="5" step="0.1" class="num small">
+        <button class="btn small bal-step" data-bal-step="bal-pitch" data-d="0.1">▶</button> °</label>
+    </div>
+    <div class="row bal-row" id="bal-gains">
+      <span class="hint" title="Live: applies to a running loop at once, and is saved on the robot.
+Pitch Kp/Kd: mm of CoM shift per deg of tilt (per deg/s). Ki: deg of torso posture per deg·s.
+Roll Kp/Kd: mm of sideways CoM shift per deg (per deg/s) — NEGATIVE on purpose (see balance.py).
+If it oscillates: lower Kp first, then Kd (the servo lags ~0.1 s, so too much D also rings).">PID gains:</span>
+      <label>pitch Kp <input type="number" class="num small" data-gain="kp" step="0.1"></label>
+      <label>Kd <input type="number" class="num small" data-gain="kd" step="0.05"></label>
+      <label>Ki <input type="number" class="num small" data-gain="ki" step="0.05"></label>
+      <label>roll Kp <input type="number" class="num small" data-gain="kp_roll" step="0.5"></label>
+      <label>roll Kd <input type="number" class="num small" data-gain="kd_roll" step="0.05"></label>
+      <button id="btn-gains-default" class="btn small">defaults</button>
     </div>
     <div id="manual-rows"></div>
   </section>

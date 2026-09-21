@@ -253,6 +253,9 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 /* ---------------- ⚖ balance row (manual panel) ---------------- */
 .bal-row { align-items: center; gap: 10px; flex-wrap: wrap; }
 .bal-row input[type=range] { width: 120px; vertical-align: middle; }
+.bal-row .bal-step { padding: 1px 7px; }
+.bal-row input.num.small { width: 64px; }
+.bal-row input.override { border-color: var(--warn); }
 #bal-status { min-width: 260px; }
 
 /* ---------------- digital twin ---------------- */

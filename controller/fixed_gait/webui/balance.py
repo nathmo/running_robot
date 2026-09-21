@@ -10,9 +10,8 @@ foot that has started to TIP onto its toe, heel or outer edge. It cannot see the
 the feet are flat -- that is the operator's trim below, set by eye or from the motor currents.
 
 The posture coordinates, both legs alike, derived on the homing CAD (tools/solve_stand_pose.py,
-`balance_maps`; linear to 0.5 mm / 0.1 deg over the loop's clip ranges below -- the +-100 mm
-trims go well past that range and past the +-33 mm sole, so a big trim is a correction for a zero
-error, not a CoM the robot can stand on):
+`balance_maps`; linear to 0.5 mm / 0.1 deg over the clip ranges below; the
+CoM trims shape the standing pose itself, PID or not):
 
   PITCH   torso pitch with the soles flat and the CoM fixed over them: how the pitch integrator
           levels the torso. (On a toe or heel it would only spin the body about its CoM.)
@@ -60,10 +59,16 @@ DEFAULTS = dict(
                                       # sign is deliberate, see the module docstring
     pitch_clip=6.0,                   # deg of posture correction
     com_x_clip=25.0, com_y_clip=30.0,  # mm the LOOP may add on top of the trim
-    trim_clip=100.0,                  # mm, the operator's CoM trims (both axes)
+    trim_clip=25.0,                   # mm, the operator's CoM trims (both axes)
     rate_tau=0.03,                    # s, low-pass on the derivative (gyro) terms
     fall_deg=15.0,                    # |tilt| beyond this = falling: the caller stops
 )
+
+
+# what the web UI may tune live (daemon.balance_gains), and the range each is clipped to
+TUNABLE = ("kp", "kd", "ki", "kp_roll", "kd_roll")
+GAIN_RANGE = {"kp": (0.0, 20.0), "kd": (0.0, 5.0), "ki": (0.0, 5.0),
+              "kp_roll": (-20.0, 20.0), "kd_roll": (-5.0, 5.0)}
 
 
 def attitude_from_up(up_body):

@@ -17,6 +17,7 @@ Modes:
     ESTOPPED        latched; zero current streamed until cleared
 HTTP handlers never touch the buses — they only post requests into this object and read snapshots.
 """
+import json
 import os
 import threading
 import time
@@ -480,7 +481,7 @@ def _pos_loop_error_ratio(f):
 
 class RobotDaemon(threading.Thread):
     def __init__(self, interface="socketcan", mock=False, calib=None, wstore=None, fklut=None,
-                 bb=None):
+                 bb=None, balance_file=None):
         super().__init__(daemon=True, name="RobotDaemon")
         self.interface = interface
         self.mock = mock
@@ -506,6 +507,11 @@ class RobotDaemon(threading.Thread):
         self._bal = None                    # balance.Balancer while ⚖ Balance runs (MANUAL only)
         self._bal_pub = None                # its last outputs, for the snapshot
         self._bal_trim = {"pitch_deg": 0.0, "com_x_mm": 0.0, "com_y_mm": 0.0}   # survives restarts
+        self._bal_gains = {k: balance.DEFAULTS[k] for k in balance.TUNABLE}
+        # trims + gains persisted here (server passes data/balance.json; tests pass nothing)
+        self._bal_file = balance_file
+        self._load_balance_settings()
+        self._stand_hold = False            # holding the (trimmed) standing pose: trims re-pose it
         self._home_relax = False            # guided move started from a pose the band net rejects
         self._home_slew = 20.0
         self._sine = {n: dict(enabled=False, a=-10.0, b=10.0, freq=0.3, _blend0=None)
@@ -692,6 +698,7 @@ class RobotDaemon(threading.Thread):
                                              if k in self.by_name})
                 self._home_active = False           # user jogging cancels a homing move
                 self._bal = None                    # ... and balancing
+                self._stand_hold = False            # ... and it no longer holds the stand
             if override is not None:
                 self._manual_override = bool(override)
             if slew_dps is not None:
@@ -729,6 +736,7 @@ class RobotDaemon(threading.Thread):
                 st["enabled"] = bool(enabled)
             self._home_active = False               # touching sine cancels a homing move
             self._bal = None                        # ... and balancing
+            self._stand_hold = False
             self._req_mode = "MANUAL"
         return True, ""
 
@@ -758,8 +766,9 @@ class RobotDaemon(threading.Thread):
             return False, why
         relax = self._pose_rejected_by_band()
         with self.lock:
-            self._manual_targets = {n: STAND_POSE_DEG[n] for n in paths.MOTOR_NAMES}
+            self._manual_targets = self._stand_targets()
             self._bal = None
+            self._stand_hold = True
             self._home_active = True
             self._home_kind = "stand"
             self._home_relax = relax
@@ -781,7 +790,9 @@ class RobotDaemon(threading.Thread):
         pose = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items() if m.pos is not None}
         if len(pose) != paths.N_MOTORS:
             return False, "a drive is silent"
-        off = {n: pose[n] - STAND_POSE_DEG[n] for n in paths.MOTOR_NAMES}
+        with self.lock:
+            stand = self._stand_targets()
+        off = {n: pose[n] - stand[n] for n in paths.MOTOR_NAMES}
         worst = max(off, key=lambda n: abs(off[n]))
         if abs(off[worst]) > BALANCE_START_TOL_DEG:
             return False, (f"not at the standing pose ({worst} is {off[worst]:+.1f} deg off, limit "
@@ -799,7 +810,8 @@ class RobotDaemon(threading.Thread):
             return False, ("the IMU axis tilts disagree (fore/aft vs left/right would make a mirror) "
                            "— flip or redo one pair in the Gyro calibration panel first")
         pitch, roll, _, _ = imu
-        bal = balance.Balancer(STAND_POSE_DEG)
+        with self.lock:
+            bal = balance.Balancer(STAND_POSE_DEG, **self._bal_gains)
         if bal.falling(pitch, roll):
             return False, f"the IMU reads the robot tilted {pitch:+.1f} / {roll:+.1f} deg (pitch/roll)"
         with self.lock:
@@ -830,7 +842,10 @@ class RobotDaemon(threading.Thread):
 
     def balance_trim(self, com_x_mm=None, com_y_mm=None, pitch_deg=None):
         """Operator trims (balance.Balancer.set_trim): where the CoM sits on the soles, and the
-        pitch the torso is held at. Kept across stop/start, clipped to the balancer's ranges."""
+        pitch the torso is held at. Kept across stop/start and restarts, clipped to the balancer's
+        ranges. The CoM trims shape the STANDING POSE itself, PID or not: Home drives to the trimmed
+        pose, and while the robot holds it (Home arrived, or Balance stopped) a trim change re-poses
+        it at Home's slew. The pitch trim is only the loop's setpoint."""
         with self.lock:
             probe = balance.Balancer(STAND_POSE_DEG)
             probe.set_trim(**self._bal_trim)
@@ -838,7 +853,63 @@ class RobotDaemon(threading.Thread):
             self._bal_trim = dict(probe.trim)
             if self._bal is not None:
                 self._bal.set_trim(**self._bal_trim)
-            return dict(self._bal_trim)
+            elif self._stand_hold and self.mode == "MANUAL":
+                self._manual_targets = self._stand_targets()
+                self._home_active, self._home_kind, self._home_relax = True, "stand", False
+                self._home_slew = 20.0
+            out = dict(self._bal_trim)
+        self._save_balance_settings()
+        return out
+
+    def balance_gains(self, **gains):
+        """Live-tune the loop (balance.TUNABLE: kp, kd, ki, kp_roll, kd_roll), clipped to
+        balance.GAIN_RANGE. Applies to a running loop at once, and to every later start."""
+        with self.lock:
+            for k, v in gains.items():
+                if k in balance.TUNABLE and v is not None:
+                    lo, hi = balance.GAIN_RANGE[k]
+                    self._bal_gains[k] = float(np.clip(float(v), lo, hi))
+            if self._bal is not None:
+                self._bal.p.update(self._bal_gains)
+            out = dict(self._bal_gains)
+        self._save_balance_settings()
+        self._bb_event("balance.gains", **out)
+        return out
+
+    def _stand_targets(self):
+        """STAND_POSE_DEG moved by the CoM trims (caller holds self.lock)."""
+        return balance.Balancer(STAND_POSE_DEG).targets(
+            0.0, self._bal_trim["com_x_mm"], self._bal_trim["com_y_mm"])
+
+    def _load_balance_settings(self):
+        if not self._bal_file or not os.path.exists(self._bal_file):
+            return
+        try:
+            with open(self._bal_file, encoding="utf-8") as f:
+                d = json.load(f)
+            probe = balance.Balancer(STAND_POSE_DEG)
+            probe.set_trim(**{k: float(v) for k, v in (d.get("trim") or {}).items()
+                              if k in self._bal_trim})
+            self._bal_trim = dict(probe.trim)
+            for k, v in (d.get("gains") or {}).items():
+                if k in balance.TUNABLE:
+                    lo, hi = balance.GAIN_RANGE[k]
+                    self._bal_gains[k] = float(np.clip(float(v), lo, hi))
+        except (OSError, ValueError, TypeError) as e:
+            print(f"(could not read {self._bal_file}: {e} — balance trims/gains at defaults)")
+
+    def _save_balance_settings(self):
+        if not self._bal_file:
+            return
+        with self.lock:
+            d = {"trim": dict(self._bal_trim), "gains": dict(self._bal_gains)}
+        try:
+            tmp = self._bal_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, indent=2)
+            os.replace(tmp, self._bal_file)
+        except OSError as e:
+            print(f"!! could not save {self._bal_file}: {e}")
 
     def _balance_imu(self, max_age=BALANCE_IMU_STALE_S):
         """(pitch_deg, roll_deg, gyro_dps[3], age_s) from the Sense HAT fast path, or None if
@@ -936,6 +1007,7 @@ class RobotDaemon(threading.Thread):
             self._bal = None
             self._home_active = True
             self._home_kind = "center"
+            self._stand_hold = False
             self._home_relax = relax
             self._home_slew = float(np.clip(slew_dps if slew_dps else 20.0, 5.0, 120.0))
             for s in self._sine.values():
@@ -1365,6 +1437,8 @@ class RobotDaemon(threading.Thread):
         and gets a Tier B dump of the full-rate window around it."""
         old = self.mode
         self.mode = mode
+        if mode != "MANUAL":
+            self._stand_hold = False            # a trim must never move a robot that left MANUAL
         if mode != "MANUAL" and self._bal is not None:
             with self.lock:
                 self._bal = None                # balancing lives inside MANUAL and never outlives it
@@ -3907,6 +3981,9 @@ class RobotDaemon(threading.Thread):
                 manual_targets=dict(self._manual_targets), override=self._manual_override,
                 slew_dps=self._slew_dps, homing=self._home_active, homing_kind=self._home_kind,
                 balance=dict(active=self._bal is not None, trim=dict(self._bal_trim),
+                             gains=dict(self._bal_gains), defaults={k: balance.DEFAULTS[k]
+                                                                    for k in balance.TUNABLE},
+                             stand_hold=self._stand_hold,
                              out=(dict(self._bal_pub) if self._bal is not None and self._bal_pub
                                   else None)),
                 # copied, not referenced: the sine dicts are mutated by sine_update()

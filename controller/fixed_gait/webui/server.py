@@ -40,6 +40,7 @@ import numpy as np
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 
 import paths
+import balance
 import blackbox
 import calibration
 import canio
@@ -728,6 +729,20 @@ def api_balance_trim():
     except (TypeError, ValueError):
         return _err("trims must be numbers")
     return _ok(token=token, trim=_dm().balance_trim(**vals))
+
+
+@app.post("/api/balance/gains")
+def api_balance_gains():
+    """{kp, kd, ki, kp_roll, kd_roll}: live-tune the loop (applies at once if it is running)."""
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    try:
+        vals = {k: float(b[k]) for k in balance.TUNABLE if b.get(k) is not None}
+    except (TypeError, ValueError):
+        return _err("gains must be numbers")
+    return _ok(token=token, gains=_dm().balance_gains(**vals))
 
 
 @app.post("/api/manual/center")
@@ -2252,7 +2267,7 @@ def main():
         bb.note_config_change("boot")
     d = daemon_mod.RobotDaemon(interface=args.interface, mock=args.mock,
                                calib=STATE["calib"], wstore=STATE["wstore"], fklut=STATE["fk"],
-                               bb=bb)
+                               bb=bb, balance_file=os.path.join(paths.DATA, "balance.json"))
     STATE["daemon"] = d
     d.start()
     d._started_ok.wait(5.0)
