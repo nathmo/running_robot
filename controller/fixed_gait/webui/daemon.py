@@ -79,6 +79,18 @@ DEFAULT_SLEW_DPS = 60.0
 HARD_CLAMP = {"abd": 48.0, "cam": 88.0, "thigh": 62.0}
 HARD_WIDEN_DEG = 10.0
 
+# Where 🏠 Home goes: the pose the robot STANDS in on its own. Both soles flat, torso level,
+# abduction 0, and the whole-robot CoM straight above the sole centres (x and y), so it balances
+# statically on the two 66.5 x 25.4 mm soles. Normalized degrees, zero = the homing pose
+# (dash-01CAD/homing), so this is only right once the drives are zeroed THERE. Solved by
+# tools/solve_stand_pose.py on the homing CAD (pushrod pin at 389 mm) with the RL plant's measured
+# masses: hip 837 mm above the sole, CoM 789 mm up and 17.5 mm ahead of the hip axis. That matches
+# the RL model's own `stand` keyframe (838 mm, thigh -11.6 vs -11.1 deg qpos). Sensitive: the sole
+# is only +-33 mm long and 3 deg of cam+thigh error moves the CoM 31-48 mm, so a sloppy zero stands
+# it on a toe or a heel.
+STAND_POSE_DEG = {"left.abd": 0.0, "left.cam": 46.0, "left.thigh": 11.1,
+                  "right.abd": 0.0, "right.cam": 46.0, "right.thigh": 11.1}
+
 # ===================================================================== pre-move safety (2026-08-10)
 # On 2026-08-10 a joint destroyed itself: left.cam was commanded absolutely against a calibration
 # whose raw origin had moved underneath it, and the drive happily wound the joint to ~678 deg
@@ -478,7 +490,7 @@ class RobotDaemon(threading.Thread):
         self._manual_override = False
         self._slew_dps = DEFAULT_SLEW_DPS
         self._home_active = False           # slow guided move engaged (feasibility-net checked)
-        self._home_kind = "zero"            # "zero" (Home) or "center" (max-room pose) — label only
+        self._home_kind = "stand"           # "stand" (Home) or "center" (max-room pose) — label only
         self._home_relax = False            # guided move started from a pose the band net rejects
         self._home_slew = 20.0
         self._sine = {n: dict(enabled=False, a=-10.0, b=10.0, freq=0.3, _blend0=None)
@@ -718,10 +730,10 @@ class RobotDaemon(threading.Thread):
         return False
 
     def home(self, slew_dps=None):
-        """Slowly drive every joint back to the URDF zero pose (normalized 0 = the stance we
-        manually zero to). Trusts the CAD zero: it slews under the physical-feasibility net (like
-        override) rather than the eroded gait polygon, so it can still reach 0 when 0 sits a
-        degree or so outside the hand-drawn safe region."""
+        """Slowly drive every joint to the standing pose (STAND_POSE_DEG: soles flat, CoM over
+        them). Trusts the CAD: it slews under the physical-feasibility net (like override) rather
+        than the eroded gait polygon, so it still gets there when the stance sits a degree or so
+        outside the hand-drawn safe region."""
         ok, why = self._activation_allowed()
         if not ok:
             with self.lock:
@@ -729,9 +741,9 @@ class RobotDaemon(threading.Thread):
             return False, why
         relax = self._pose_rejected_by_band()
         with self.lock:
-            self._manual_targets = {n: 0.0 for n in paths.MOTOR_NAMES}
+            self._manual_targets = {n: STAND_POSE_DEG[n] for n in paths.MOTOR_NAMES}
             self._home_active = True
-            self._home_kind = "zero"
+            self._home_kind = "stand"
             self._home_relax = relax
             self._home_slew = float(np.clip(slew_dps if slew_dps else 20.0, 5.0, 120.0))
             for s in self._sine.values():
@@ -779,7 +791,7 @@ class RobotDaemon(threading.Thread):
         workspace edge every amplitude is refused at t=0, which is the usual reason a measurement
         will not start. `room` is the symmetric amplitude each joint can take FROM that pose:
         cam/thigh share the inscribed-square half-width (both move at once), abduction is half its
-        safe range. A leg with no workspace falls back to the zero pose, like Home."""
+        safe range. A leg with no workspace falls back to the zero (homing) pose."""
         targets, info = {}, {}
         for side in (sides or paths.SIDES):
             leg = self.wstore.legs.get(side) if self.wstore else None

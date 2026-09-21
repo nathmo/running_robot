@@ -142,7 +142,7 @@ function updateManualStatus(st) {
     const arrived = atManualTarget(man);
     $("home-status").textContent = centring
       ? (arrived ? "⌖ centred ✓ (most room around this pose)" : "⌖ centring… (slow)")
-      : (arrived ? "🏠 at home ✓ (holding zero)" : "🏠 homing… (slow)");
+      : (arrived ? "🏠 at home ✓ (holding the standing pose)" : "🏠 homing… (slow)");
   } else {
     $("home-status").textContent = "";
   }
@@ -712,7 +712,7 @@ $("btn-hold").onclick = async () => {
 };
 $("btn-home").onclick = async () => {
   await api("/api/manual/home", { json: { slew_dps: +$("inp-home-slew").value } });
-  setBanner("homing to the zero pose (slow)…", "", 4000);
+  setBanner("homing to the standing pose (slow)…", "", 4000);
 };
 $("btn-center").onclick = async () => {
   const d = await api("/api/manual/center", { json: { slew_dps: +$("inp-home-slew").value } });
