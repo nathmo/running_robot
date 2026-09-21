@@ -1559,15 +1559,27 @@ def api_policy_info():
     # that silently does nothing while the operator believes it did.
     kind = bd.command_kind
     has_run_flag = kind == "run_stop" and m.get("objective") != "speed"
+    has_stop_switch = kind == "speed" and bool(m.get("stop_flag", False))
     if kind == "speed":
         from controller_v2 import DEFAULT_CMD_SLEW_S
         slew = float(m.get("v_cmd_rate") or 0.0) or (bd.v_max - bd.v_min) / DEFAULT_CMD_SLEW_S
-        warnings.append(
-            "joystick bundle: the command is a SPEED in m/s ({:+.2f} to {:+.2f}), which the "
-            "policy reads as task[0] = v_cmd / {:.2f}. The run comes up at 0 m/s -- walking in "
-            "place, an operating point this lineage is trained at -- and asking for 0 IS the "
-            "stop. There is no run/stop flag and no fitted brake schedule here.".format(
-                bd.v_min, bd.v_max, bd.v_max))
+        if has_stop_switch:
+            warnings.append(
+                "joystick bundle WITH A RUN/STOP SWITCH: the command is a SPEED in m/s ({:+.2f} to "
+                "{:+.2f}, task[0] = v_cmd / {:.2f}) and task[1] is the switch (1 run, 0 stop). The "
+                "run comes up in RUN at the bottom of the slider, and on this lineage the bottom of "
+                "the slider is a slow WALK, not walking in place: the robot travels as soon as the "
+                "policy is live. STOP is a behaviour the checkpoint LEARNED, not a brake -- prove it "
+                "in the sim first (RLframework/tools/play_joystick.py, key X). The dash_joy3 "
+                "checkpoints FALL under STOP (measured 2026-09-21); end their runs with End-run."
+                .format(bd.v_min, bd.v_max, bd.v_max))
+        else:
+            warnings.append(
+                "joystick bundle: the command is a SPEED in m/s ({:+.2f} to {:+.2f}), which the "
+                "policy reads as task[0] = v_cmd / {:.2f}. The run comes up at 0 m/s -- walking in "
+                "place, an operating point this lineage is trained at -- and asking for 0 IS the "
+                "stop. There is no run/stop flag and no fitted brake schedule here.".format(
+                    bd.v_min, bd.v_max, bd.v_max))
         t_lo, t_hi = bd.v_trained
         if t_lo > bd.v_min + 1e-6 or t_hi < bd.v_max - 1e-6:
             warnings.append(
@@ -1642,6 +1654,7 @@ def api_policy_info():
         "v_trained": list(bd.v_trained),
         "v_cmd_rate": float(m.get("v_cmd_rate") or 0.0),
         "has_run_flag": has_run_flag,
+        "has_stop_switch": has_stop_switch,
         "stop_trained": bool(float(stop.get("stoplight_prob_final") or 0.0)),
         "brake": ({"window_s": m["brake"].get("window_s"), "source": m["brake"].get("source"),
                    "cruise_speed": m["brake"].get("cruise_speed")}

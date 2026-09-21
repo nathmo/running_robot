@@ -1168,3 +1168,61 @@ def test_the_log_records_the_commanded_speed_the_policy_actually_saw(staged_joy)
     # normalised: (v_max / DEFAULT_CMD_SLEW_S) * 0.01 / v_max = 0.005 of full scale
     assert np.all(np.diff(col) <= 0.005 + 1e-6), "no step ever reaches the policy"
     assert got["command_kind"] == "speed" and got["v_max"] == 2.5
+
+
+# ---- a joystick trained with the RUN/STOP switch (RLframework stop_flag, dash_joy2 onward) ----------
+_JOY_SWITCH = os.path.join(paths.BUNDLE_DIR, "dash_joy3_lr_s2_180M.npz")
+needs_joy_switch = pytest.mark.skipif(not os.path.exists(_JOY_SWITCH),
+                                      reason="the dash_joy3 bundle is not in controller/deploy/bundles/")
+
+
+@needs_joy_switch
+def test_a_joystick_with_a_stop_switch_comes_up_in_run_and_the_switch_reaches_the_policy(armed):
+    """The REAL exported bundle, through the daemon. controller_v2.start() leaves task[1] at STOP, and
+    until 2026-09-21 nothing here ever set it to RUN on a speed bundle: the policy would have spent
+    the whole run under STOP, where this checkpoint falls, whatever the slider said."""
+    d, _cal = armed
+    spec = {"file": os.path.basename(_JOY_SWITCH), "supported": True, "max_seconds": 6.0,
+            "allow_uncalibrated_thermal": True, "skip_jointmap_check": True}
+    ok, why, info = d.policy_arm(spec)
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p["phase"] == "run" or p["phase"] == "done", timeout=40.0)
+    assert p["phase"] == "run", "never reached the policy: {}".format(p.get("exit_reason"))
+    ctrl = d._pol["ctrl"]
+    assert p["command_kind"] == "speed" and p["has_stop_switch"] is True
+    assert p["run_flag"] is True and ctrl.run is True, "the switch must come up at RUN"
+    assert ctrl._task()[1] == 1.0
+    # the slider still drives task[0]
+    ok, why = d.policy_set_speed(1.25)
+    assert ok, why
+    keep_alive_until(d, lambda p: abs(p.get("speed_cmd", 0.0) - 1.25) < 0.3 or p["phase"] == "done", timeout=10.0)
+    assert d._pol["ctrl"]._task()[0] > 0.2
+    # and the switch is a command the daemon now accepts on a speed bundle
+    ok, why = d.policy_set_run(False)
+    assert ok, why
+    keep_alive_until(d, lambda p: p["run_flag"] is False or p["phase"] == "done", timeout=5.0)
+    assert d._pol["ctrl"]._task()[1] == 0.0
+    ok, why = d.policy_set_run(True)
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p["run_flag"] is True or p["phase"] == "done", timeout=5.0)
+    assert d._pol["ctrl"]._task()[1] == 1.0
+    # the policy is really stepping: gait cycles are being committed at the bundle's own 100 Hz
+    p = keep_alive_until(d, lambda p: p["commits"] >= 8 or p["phase"] == "done", timeout=10.0)
+    assert p["phase"] == "run" and p["commits"] >= 8, p.get("exit_reason")
+    print("[dash_joy3 on the daemon] control {:.0f} Hz, decimation {}, {:.2f} ms per policy tick, {} gait cycles, "
+          "speed_cmd {:.2f} m/s, run_flag {}".format(p["control_hz"], p["decimation"], p["step_ms"], p["commits"],
+                                                   p["speed_cmd"], p["run_flag"]))
+    d.policy_stop(hard=True)
+
+
+def test_a_plain_joystick_bundle_still_refuses_the_run_command(staged_v2):
+    """No switch in the bundle -> no switch on the wire: the old refusal is unchanged."""
+    d, _cal, _name = staged_v2
+    ok, why, _ = d.policy_arm(v2_spec())
+    assert ok, why
+    p = keep_alive_until(d, lambda p: p["phase"] == "run" or p["phase"] == "done", timeout=30.0)
+    assert p["has_stop_switch"] is False
+    if p["command_kind"] == "speed":
+        ok, why = d.policy_set_run(False)
+        assert not ok and "SPEED" in why
+    d.policy_stop(hard=True)

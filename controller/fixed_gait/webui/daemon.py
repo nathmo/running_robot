@@ -2988,6 +2988,13 @@ class RobotDaemon(threading.Thread):
             "v_trained": [float(x) for x in getattr(ctrl, "v_trained", (0.0, 0.0))],
             "has_run_flag": (b.version == 2 and ctrl.command_kind == "run_stop"
                              and not ctrl.task_is_constant),
+            # A JOYSTICK WITH A SWITCH (RLframework stop_flag, dash_joy2 onward): task[1] is the
+            # operator's RUN/STOP input. controller_v2.start() comes up with it at STOP, and before
+            # this field existed nothing here ever set it to RUN on a speed bundle -- so such a policy
+            # sat under STOP for the whole run whatever the slider said (found 2026-09-21, before
+            # the first such bundle reached the robot).
+            "has_stop_switch": bool(b.version == 2 and ctrl.command_kind == "speed"
+                                    and getattr(ctrl, "stop_flag", False)),
             "has_brake": b.version == 2 and ctrl.brake is not None,
             "brake_window_s": (float(ctrl.brake.window_s) if getattr(ctrl, "brake", None) else 0.0),
             "never_stopped": never_stopped,
@@ -3003,6 +3010,7 @@ class RobotDaemon(threading.Thread):
                 "step_ms": round(step_ms, 2), "slow_loop": slow,
                 "bundle_version": int(b.version), "control_hz": round(hz, 1), "decimation": decim,
                 "has_run_flag": req["has_run_flag"], "never_stopped": never_stopped,
+                "has_stop_switch": req["has_stop_switch"],
                 "command_kind": req["command_kind"], "v_max": req["v_max"],
                 "v_min": req["v_min"], "cmd_slew": req["cmd_slew"],
                 "v_trained": req["v_trained"],
@@ -3075,6 +3083,11 @@ class RobotDaemon(threading.Thread):
         if p["version"] != 2:
             return False, ("this is a v{} bundle. Its command is a velocity, fixed at arm time -- "
                            "there is no run/stop channel to drive.".format(p["version"]))
+        if p.get("command_kind") == "speed" and p.get("has_stop_switch"):
+            # the switch IS the task flag on this lineage: there is no brake schedule to prefer
+            with self.lock:
+                self._pol_run_req = (bool(run), "flag")
+            return True, ""
         if p.get("command_kind") == "speed":
             return False, ("this bundle's command is a SPEED, not a flag: its task[0] is the "
                            "commanded speed over v_max and there is no green light in it. Post "
@@ -3184,6 +3197,7 @@ class RobotDaemon(threading.Thread):
             "bundle_version": p["version"], "control_hz": round(float(p["ctrl_hz"]), 1),
             "decimation": int(p["decim"]), "loop_hz": float(TICK_HZ),
             "has_run_flag": bool(p.get("has_run_flag")), "run_flag_s": round(p["run_flag_s"], 2),
+            "has_stop_switch": bool(p.get("has_stop_switch")),
             "command_kind": str(p.get("command_kind") or "velocity"),
             "v_max": float(p.get("v_max", 0.0)), "v_min": float(p.get("v_min", 0.0)),
             "speed_want": round(float(p.get("speed_want", 0.0)), 3),
@@ -3218,7 +3232,10 @@ class RobotDaemon(threading.Thread):
                  speed_want=0.0, speed_cmd=0.0, speed_est=0.0, moving_s=0.0,
                  heading_deg=0.0,
                  has_heading=bool(getattr(p.get("ctrl"), "has_heading", False)),
-                 run_flag=bool(POLICY_V2_START_RUNNING and p["has_run_flag"]))
+                 # a joystick with a switch comes up in RUN: its rest state is the bottom of the
+                 # slider, and STOP is a learned behaviour the operator asks for deliberately
+                 run_flag=bool((POLICY_V2_START_RUNNING and p["has_run_flag"])
+                               or p.get("has_stop_switch")))
         self._pol = p
         with self.lock:
             # a stop posted after the previous run had already ended is still sitting there, and
@@ -3588,6 +3605,8 @@ class RobotDaemon(threading.Thread):
                     p["ctrl"].start(pos, np.zeros(6), tau, grav, gyro)
                     if p["command_kind"] == "speed":
                         p["ctrl"].set_speed(p["speed_want"])
+                        if p.get("has_stop_switch"):
+                            p["ctrl"].set_run(p["run_flag"])
                     else:
                         p["ctrl"].set_run(p["run_flag"])
                 else:
@@ -3731,6 +3750,7 @@ class RobotDaemon(threading.Thread):
             "heading_deg": round(float(p.get("heading_deg", 0.0)), 1),
             "moving_s": round(float(p.get("moving_s", 0.0)), 2),
             "has_run_flag": bool(p.get("has_run_flag")),
+            "has_stop_switch": bool(p.get("has_stop_switch")),
             "run_flag": bool(p["run_flag"]), "never_stopped": bool(p.get("never_stopped")),
             "run_flag_s": round(float(p["run_flag_s"]), 2), "commits": int(p["commits"]),
             "has_brake": bool(p.get("has_brake")), "braking": bool(p.get("braking")),

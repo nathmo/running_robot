@@ -445,6 +445,10 @@ class Runner:
             self.ctrl.start(pos, np.zeros(6), tau, grav, gyro)
             if self.joystick:
                 _, self.speed_cmd = self.ctrl.set_speed(a.speed)
+                if getattr(self.ctrl, "stop_flag", False):
+                    # a joystick trained with the RUN/STOP switch: start() leaves it at STOP
+                    self.run_flag = True
+                    self.ctrl.set_run(True)
                 print("RUN: the policy is live, asking for {:.2f} m/s. max {:.0f} s. Ctrl+C for a "
                       "soft stop.".format(self.speed_cmd, a.max_seconds))
             else:
@@ -545,6 +549,13 @@ class Runner:
             with open(f, "r") as fh:
                 word = fh.read(16).strip().lower()
         except OSError:
+            return
+        if self.joystick and getattr(self.ctrl, "stop_flag", False) and word in ("run", "go", "green", "stop", "hold", "red"):
+            want = word in ("run", "go", "green")
+            if want != getattr(self, "run_flag", True):
+                self.run_flag = want
+                self.ctrl.set_run(want)
+                print("\nswitch: {}".format("RUN" if want else "STOP"))
             return
         if self.joystick:
             if word in ("stop", "hold", "red"):

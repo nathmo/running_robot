@@ -539,7 +539,15 @@ function polRenderCommand(st) {
       "fitted brake schedule while <em>holding the task flag at 1</em> — telling the policy it " +
       "has finished is what makes it accelerate and fall (512/512 upright vs 3/512, measured " +
       "2026-09-11).";
-  if (joy) { polRenderHeading(p); return polRenderSpeed(p); }
+  if (joy) {
+    // a joystick trained with the RUN/STOP switch (RLframework stop_flag): task[1], live
+    const sw = $("btn-pol-switch");
+    sw.classList.toggle("hidden", !p.has_stop_switch);
+    sw.disabled = p.phase !== "run";
+    sw.textContent = p.run_flag ? "switch: RUN  (press for STOP)" : "switch: STOP  (press for RUN)";
+    sw.onclick = () => api("/api/policy/command", { json: { run: !p.run_flag } }).catch(() => {});
+    polRenderHeading(p); return polRenderSpeed(p);
+  }
   polRenderHeading(p);
   const going = polGoing(p);
   const armed = p.phase === "run";                // before that the legs are still crawling

@@ -674,6 +674,8 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
           <input id="pol-speed" type="range" class="pol-slider" min="0" max="3" step="0.05"
                  value="0" disabled aria-label="commanded speed, metres per second">
           <button id="btn-pol-zero" class="btn small" disabled>⇤ 0 · walk in place</button>
+          <button id="btn-pol-switch" class="btn small hidden" disabled
+                  title="the policy's own RUN/STOP input (task[1]); STOP is a learned behaviour, not a brake">switch: RUN</button>
         </div>
         <div class="row" id="pol-cmd-flag">
           <button id="btn-pol-go" class="btn go" disabled>▶▶ RUN</button>
