@@ -10,7 +10,9 @@ foot that has started to TIP onto its toe, heel or outer edge. It cannot see the
 the feet are flat -- that is the operator's trim below, set by eye or from the motor currents.
 
 The posture coordinates, both legs alike, derived on the homing CAD (tools/solve_stand_pose.py,
-`balance_maps`; linear to 0.5 mm / 0.1 deg over the clip ranges below):
+`balance_maps`; linear to 0.5 mm / 0.1 deg over the loop's clip ranges below -- the +-100 mm
+trims go well past that range and past the +-33 mm sole, so a big trim is a correction for a zero
+error, not a CoM the robot can stand on):
 
   PITCH   torso pitch with the soles flat and the CoM fixed over them: how the pitch integrator
           levels the torso. (On a toe or heel it would only spin the body about its CoM.)
@@ -57,7 +59,8 @@ DEFAULTS = dict(
     kp_roll=-6.0, kd_roll=-0.8,       # roll: mm of lateral CoM shift per deg of tilt (*s); the
                                       # sign is deliberate, see the module docstring
     pitch_clip=6.0,                   # deg of posture correction
-    com_x_clip=25.0, com_y_clip=30.0,  # mm
+    com_x_clip=25.0, com_y_clip=30.0,  # mm the LOOP may add on top of the trim
+    trim_clip=100.0,                  # mm, the operator's CoM trims (both axes)
     rate_tau=0.03,                    # s, low-pass on the derivative (gyro) terms
     fall_deg=15.0,                    # |tilt| beyond this = falling: the caller stops
 )
@@ -87,9 +90,9 @@ class Balancer:
         if pitch_deg is not None:
             self.trim["pitch_deg"] = float(np.clip(pitch_deg, -5.0, 5.0))
         if com_x_mm is not None:
-            self.trim["com_x_mm"] = float(np.clip(com_x_mm, -self.p["com_x_clip"], self.p["com_x_clip"]))
+            self.trim["com_x_mm"] = float(np.clip(com_x_mm, -self.p["trim_clip"], self.p["trim_clip"]))
         if com_y_mm is not None:
-            self.trim["com_y_mm"] = float(np.clip(com_y_mm, -self.p["com_y_clip"], self.p["com_y_clip"]))
+            self.trim["com_y_mm"] = float(np.clip(com_y_mm, -self.p["trim_clip"], self.p["trim_clip"]))
 
     def falling(self, pitch, roll):
         return max(abs(pitch), abs(roll)) > self.p["fall_deg"]
@@ -114,17 +117,18 @@ class Balancer:
         if abs(self.i_pitch) < clip or np.sign(e) != np.sign(self.i_pitch):
             self.i_pitch = float(np.clip(self.i_pitch + p["ki"] * e * dt, -clip, clip))
         u_pitch = -self.i_pitch
-        cx = self.trim["com_x_mm"] - (p["kp"] * e + p["kd"] * pr)
-        cx = float(np.clip(cx, -p["com_x_clip"], p["com_x_clip"]))
+        # the loop's authority is clipped AROUND the trim, so a large trim does not eat it
+        dx = float(np.clip(-(p["kp"] * e + p["kd"] * pr), -p["com_x_clip"], p["com_x_clip"]))
+        cx = self.trim["com_x_mm"] + dx
 
         # roll PD -> lateral CoM shift (kp_roll < 0: leaning right moves the CoM right, see top)
-        cy = self.trim["com_y_mm"] + p["kp_roll"] * roll + p["kd_roll"] * rr
-        cy = float(np.clip(cy, -p["com_y_clip"], p["com_y_clip"]))
+        dy = float(np.clip(p["kp_roll"] * roll + p["kd_roll"] * rr, -p["com_y_clip"], p["com_y_clip"]))
+        cy = self.trim["com_y_mm"] + dy
 
         self.out = {"pitch": u_pitch, "com_x": cx, "com_y": cy}
         self.last = {"pitch": pitch, "roll": roll, "pitch_rate": pr, "roll_rate": rr,
                      "i_pitch": self.i_pitch, "sat_pitch": abs(u_pitch) >= clip - 1e-9,
-                     "sat_com_x": abs(cx) >= p["com_x_clip"] - 1e-9}
+                     "sat_com_x": abs(dx) >= p["com_x_clip"] - 1e-9}
         return self.targets(u_pitch, cx, cy)
 
     def targets(self, pitch_corr, com_x, com_y):

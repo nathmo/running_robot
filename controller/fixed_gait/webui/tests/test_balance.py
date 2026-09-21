@@ -75,7 +75,10 @@ def test_roll_moves_both_hips_together_and_the_outputs_stay_clipped():
 def test_trims_are_clipped():
     b = balance.Balancer(STAND)
     b.set_trim(com_x_mm=999, com_y_mm=-999, pitch_deg=99)
-    assert b.trim == {"com_x_mm": b.p["com_x_clip"], "com_y_mm": -b.p["com_y_clip"], "pitch_deg": 5.0}
+    assert b.trim == {"com_x_mm": 100.0, "com_y_mm": -100.0, "pitch_deg": 5.0}
+    # the loop still has its own authority around a big trim
+    t = b.step(0.01, 0.0, 30.0, 0.0, 500.0)
+    assert b.out["com_y"] == pytest.approx(-100.0 - b.p["com_y_clip"])
 
 
 # ---------------------------------------------------------------- daemon integration (MockBus)
