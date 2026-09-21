@@ -23,10 +23,8 @@ const S = {
   // CALIBRATED on every API call; the lamps below would have inherited the same flicker. Only ever
   // LEARN a field that is present.
   cal: {}, ws: {}, bypassBanner: false,
-  linkage: { left: null, right: null }, linkPrev: { left: null, right: null }, linkT: 0,
   mockTimers: {},
   preview: { on: false, t0: 0 },  // client-side both-legs gait preview animation
-  fkmInit: false,                 // sign-map selects synced from state once
   sineDefaults: {},               // motor -> {a,b,center,...} 70%-of-safe-range sine presets
   sineDefFetched: false,          // presets pulled once after calibration completes
   wsTrail: [],                    // live (cam,thigh) trail accumulated during a workspace sweep
@@ -116,7 +114,6 @@ function applyState(st) {
   updatePlaybackUI(st);
   updateManualStatus(st);
   updateFileLists(st);
-  syncFkMapSelects(st);
   // the visibility toggle lives on the ROW, not the panel: a hidden panel inside a visible
   // (empty) row would still cost the page an extra flex gap
   $("row-mock").classList.toggle("hidden", !st.mock);
@@ -550,9 +547,6 @@ async function pollTelemetry() {
         cur: m.cur[n - 1], temp: m.temp[n - 1] };
     }
     if (n) S.lastT = d.t[n - 1];
-    for (const side of ["left", "right"]) {
-      if (d.linkage[side]) { S.linkPrev[side] = S.linkage[side]; S.linkage[side] = d.linkage[side]; S.linkT = performance.now(); }
-    }
     accumulateWsTrail();
   } catch (e) { /* banner handled by state poll */ }
 }
@@ -1588,184 +1582,114 @@ $("btn-del-confirm").onclick = async () => {
   if (S.state) fillSelect($("del-file"), delFiles(S.state));
 };
 
-/* ================================================================ EE animation */
-const eeView = { left: null, right: null };   // cached fit per side
+/* ================================================================ digital twin */
+// static/twin3d.js draws the homing-pose MJCF; this feeds it. Live motor angles by default, the
+// gait preview while that runs (the same trajectory sample the playback would send). The angle
+// map is qpos = sign * normalized deg: the drives are zeroed in the pose the MJCF was exported in,
+// so there is no offset to fit, only a sign per motor (twinmap.py, persisted on the robot).
+const TW = { view: null, signs: null, defaults: null, last: "" };
 
+function setupTwin() {
+  if (!window.Twin3D) return;
+  TW.view = new Twin3D($("twin-canvas"));
+  TW.view.load().then(() => { TW.last = ""; renderEE(); });
+  for (const b of document.querySelectorAll("[data-twin-view]"))
+    b.onclick = () => TW.view.view(b.dataset.twinView);
+  fetch("/api/twin/map").then((r) => r.json()).then(applyTwinMap)
+    .catch(() => twinBanner("could not load /api/twin/map — is the server up to date?"));
+}
+
+function applyTwinMap(d) {
+  if (!d || !d.signs) return;
+  TW.signs = d.signs;
+  TW.defaults = d.defaults || d.signs;
+  const box = $("twin-signs");
+  if (!box.querySelector("select")) {
+    box.insertAdjacentHTML("beforeend", MOTORS.map((n) =>
+      `<label>${n} <select class="num small" data-twin-sign="${n}">` +
+      `<option value="1">+1</option><option value="-1">−1</option></select></label>`).join("") +
+      `<button id="btn-twin-defaults" class="btn small">defaults</button>`);
+    for (const s of box.querySelectorAll("[data-twin-sign]"))
+      s.onchange = () => saveTwinSigns({ [s.dataset.twinSign]: +s.value });
+    $("btn-twin-defaults").onclick = () => saveTwinSigns(TW.defaults);
+  }
+  for (const s of box.querySelectorAll("[data-twin-sign]")) {
+    const n = s.dataset.twinSign;
+    s.value = String(TW.signs[n]);
+    s.title = TW.signs[n] === TW.defaults[n] ? "default" : `changed from the default (${TW.defaults[n]})`;
+    s.parentElement.classList.toggle("override", TW.signs[n] !== TW.defaults[n]);
+  }
+  TW.last = "";
+  renderEE();
+}
+
+async function saveTwinSigns(signs) {
+  try { applyTwinMap(await api("/api/twin/map", { json: { signs } })); }
+  catch (_) { applyTwinMap({ signs: TW.signs, defaults: TW.defaults }); }   // revert the selects
+}
+
+function twinBanner(msg) {
+  const b = $("twin-banner");
+  b.textContent = msg || "";
+  b.classList.toggle("hidden", !msg);
+}
+
+/** The pose the twin should show: {motor: normalized deg | null}, plus where it came from. */
+function twinAngles() {
+  const out = {};
+  if (S.preview.on && S.traj) {
+    for (const side of ["left", "right"]) {
+      const tr = S.traj[side];
+      if (!tr || !tr.path || !tr.path.length) continue;
+      const [cam, thigh] = tr.path[previewIdx(tr, side, previewPhase())];
+      Object.assign(out, { [side + ".abd"]: tr.abd_hold, [side + ".cam"]: cam, [side + ".thigh"]: thigh });
+    }
+    return { norm: out, src: "gait preview" };
+  }
+  const motors = (S.state && S.state.motors) || {};
+  for (const n of MOTORS) {
+    // telemetry (10 Hz) first; the 2 Hz state snapshot covers the first moments after page load
+    const v = S.latest[n] ? S.latest[n].pos_norm : (motors[n] || {}).pos_norm;
+    out[n] = Number.isFinite(v) ? v : null;
+  }
+  return { norm: out, src: "live" };
+}
+
+// kept under its old name: the workspace / trajectory / preview code calls renderEE() whenever
+// something the leg view shows has changed
 function renderEE() {
-  for (const side of ["left", "right"]) drawEESide(side);
-}
+  const tv = TW.view;
+  if (!tv) return;
+  if (tv.error) { twinBanner(tv.error); return; }
+  if (!tv.model || !TW.signs) return;
+  const { norm, src } = twinAngles();
+  const q = {};
+  for (const n of MOTORS) q[n] = norm[n] === null || norm[n] === undefined ? null
+    : TW.signs[n] * norm[n] * Math.PI / 180;
+  const calOk = S.cal && S.cal.stage === "complete";
+  const key = JSON.stringify([q, calOk, src]);
+  if (key === TW.last) return;                 // nothing moved: skip the loop solve and the redraw
+  TW.last = key;
+  const loops = tv.setPose(q) || [];
 
-function drawEESide(side) {
-  const cv = $("ee-" + side), g = cv.getContext("2d");
-  g.clearRect(0, 0, cv.width, cv.height);
-  const legWs = S.ws && S.ws.legs ? S.ws.legs[side] : null;
-  const region = legWs && legWs.ee_region;
-  const fkOk = S.state && S.state.fk && S.state.fk.available;
-  const verified = fkOk && S.state.fk.verified[side];
-  if (!verified) {
-    g.fillStyle = "#8b97a8"; g.font = "12px sans-serif"; g.textAlign = "center";
-    g.fillText(fkOk ? "FK sign map not verified for this side" : "no FK LUT (generate on desktop)",
-      cv.width / 2, cv.height / 2 - 8);
-    g.fillText(fkOk ? "click 'verify FK sign map', or set signs + 'force enable' below"
-                    : "mujoco/dash01/gen_fk_lut.py — hot-loads once copied here",
-      cv.width / 2, cv.height / 2 + 10);
-    g.textAlign = "left";
-    return;
-  }
-  // view fit: region bounds + hip origin + both zero markers
-  let xs = [0], ys = [0];
-  if (region) for (const p of region) { xs.push(p[0]); ys.push(p[1]); }
-  const link = S.linkage[side];
-  if (link && link.nodes) for (const p of link.nodes) { xs.push(p[0]); ys.push(p[1]); }
-  for (const z of [legWs && legWs.ee_zero, legWs && legWs.ee_model_zero]) {
-    if (z) { xs.push(z[0]); ys.push(z[1]); }
-  }
-  const xmin = Math.min(...xs), xmax = Math.max(...xs), ymin = Math.min(...ys), ymax = Math.max(...ys);
-  // display-only x-mirror, persisted per side in model_map.json ("mirror view" checkbox) —
-  // pick whichever matches how you physically look at the robot
-  const mm = (S.state && S.state.fk && S.state.fk.model_map) ? S.state.fk.model_map[side] : null;
-  const mirror = mm && mm.flip_view ? -1 : 1;
-  const pad = 0.06 * Math.max(xmax - xmin, ymax - ymin, 0.2);
-  const scale = Math.min(cv.width / (xmax - xmin + 2 * pad), cv.height / (ymax - ymin + 2 * pad));
-  const P = (x, z) => {
-    x *= mirror;
-    const wx0 = mirror === 1 ? xmin : -xmax;
-    return [(x - wx0 + pad) * scale, cv.height - (z - ymin + pad) * scale];
-  };
-  // workspace region
-  if (region) {
-    g.fillStyle = COLORS.region;
-    for (const p of region) { const [x, y] = P(p[0], p[1]); g.fillRect(x - 1.2, y - 1.2, 2.4, 2.4); }
-  }
-  // gait EE path
-  const tr = S.traj && S.traj[side];
-  if (tr && tr.ee_path) {
-    g.strokeStyle = TRAJ_COLORS[side]; g.lineWidth = 2; g.beginPath();
-    let started = false;
-    for (const p of tr.ee_path) {
-      if (!p) { started = false; continue; }
-      const [x, y] = P(p[0], p[1]);
-      started ? g.lineTo(x, y) : g.moveTo(x, y);
-      started = true;
-    }
-    g.stroke();
-    if (S.preview.on) {                          // preview marker running along the foot path
-      const p = tr.ee_path[previewIdx(tr, side, previewPhase())];
-      if (p) {
-        const [x, y] = P(p[0], p[1]);
-        g.fillStyle = TRAJ_COLORS[side]; g.strokeStyle = "#fff"; g.lineWidth = 1.5;
-        g.beginPath(); g.arc(x, y, 7, 0, 7); g.fill(); g.stroke();
-      }
-    }
-  }
-  // model (URDF/MJCF qpos-0) zero — gray diamond; the calibrated zero is a DIFFERENT pose
-  if (legWs && legWs.ee_model_zero) {
-    const [x, y] = P(legWs.ee_model_zero[0], legWs.ee_model_zero[1]);
-    g.fillStyle = "#8b97a8"; g.strokeStyle = "#fff"; g.lineWidth = 1.2;
-    g.beginPath(); g.moveTo(x, y - 6); g.lineTo(x + 6, y); g.lineTo(x, y + 6); g.lineTo(x - 6, y);
-    g.closePath(); g.fill(); g.stroke();
-  }
-  // calibrated-zero EE marker (normalized 0,0 through the sign+offset map) — white circle
-  if (legWs && legWs.ee_zero) {
-    const [x, y] = P(legWs.ee_zero[0], legWs.ee_zero[1]);
-    g.strokeStyle = "#fff"; g.lineWidth = 1.5;
-    g.beginPath(); g.arc(x, y, 6, 0, 7); g.stroke();
-  }
-  // hip origin
-  g.fillStyle = "#000"; g.strokeStyle = "#fff";
-  const [hx, hy] = P(0, 0);
-  g.fillRect(hx - 5, hy - 5, 10, 10); g.strokeRect(hx - 5, hy - 5, 10, 10);
-  // live linkage — draw_pose style (plot_reachability.py:467-486)
-  if (link && link.nodes) {
-    const N = {}; ["cam", "thigh", "push", "knee", "ank", "ptip", "ee"]
-      .forEach((k, i) => N[k] = link.nodes[i]);
-    const line = (pts, color, lw) => {
-      g.strokeStyle = color; g.lineWidth = lw; g.beginPath();
-      pts.forEach((p, i) => { const [x, y] = P(p[0], p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
-      g.stroke();
-    };
-    const alpha = link.valid ? 1 : 0.35;
-    g.globalAlpha = alpha;
-    line([N.cam, N.thigh], "#7a8494", 7);                       // rigid hip block
-    line([N.thigh, N.knee, N.ank, N.ee], "#4da3ff", 4);         // serial leg
-    line([N.cam, N.push, N.ptip], "#e04545", 3);                // cam/pushrod loop
-    for (const k of ["cam", "thigh", "push", "knee", "ank"]) {
-      const [x, y] = P(N[k][0], N[k][1]);
-      g.fillStyle = "#fff"; g.beginPath(); g.arc(x, y, 3.5, 0, 7); g.fill();
-    }
-    const [ex, ey] = P(N.ee[0], N.ee[1]);
-    g.fillStyle = "#000"; g.strokeStyle = "#fff"; g.lineWidth = 1.5;
-    g.beginPath(); g.arc(ex, ey, 6, 0, 7); g.fill(); g.stroke();
-    g.globalAlpha = 1;
-    if (!link.valid) {
-      g.fillStyle = "#e0a020"; g.font = "11px sans-serif";
-      g.fillText("⚠ pose outside valid FK region", 8, 14);
-    }
-  }
-  g.fillStyle = "rgba(139,151,168,.8)"; g.font = "10px monospace";
-  g.fillText((mirror === 1 ? "X fwd →" : "← X fwd (mirrored)") + "  Z up ↑ (m, rel. hip)",
-    8, cv.height - 6);
-}
+  const deg = (v) => v === null || v === undefined ? "  —  " : ((v >= 0 ? "+" : "") + v.toFixed(1)).padStart(6);
+  const lines = ["left", "right"].map((side) => {
+    const L = loops.find((l) => /left/i.test(l.name) === (side === "left"));
+    const r = L ? `  loop ${(L.resid * 1000).toFixed(2)} mm` : "";
+    return `${side.padEnd(5)}  abd ${deg(norm[side + ".abd"])}°  cam ${deg(norm[side + ".cam"])}°  ` +
+      `thigh ${deg(norm[side + ".thigh"])}°${r}`;
+  });
+  $("twin-status").textContent = `${src} (normalized deg)\n` + lines.join("\n");
 
-$("btn-fk-verify").onclick = async () => {
-  const d = await api("/api/fk/verify", { method: "POST" });
-  const r = d.report || {};
-  $("ee-status").textContent = ["left", "right"].map((s) => {
-    const e = r[s] || {};
-    if (e.error) return `${s}: ${e.error}`;
-    return `${s}: signs ${e.best} offsets (cam ${e.cam_off_deg}°, thigh ${e.thigh_off_deg}°) ` +
-      `coverage ${(e.coverage * 100).toFixed(0)}%` +
-      (e.decisive ? " ✓ verified" : " — NOT decisive → use 'force enable' below if you know the map");
-  }).join("  ·  ");
-  S.fkmInit = false;                      // re-sync the manual inputs with the fitted map
-  await refreshEEData();
-};
-
-async function refreshEEData() {
-  await pollState();
-  await refreshWorkspace();
-  if (S.trajName) showTrajectory(S.trajName);
-}
-
-for (const side of ["left", "right"]) {
-  $(`btn-fkm-${side}`).onclick = async () => {
-    const cam = +$(`fkm-${side}-cam`).value, thigh = +$(`fkm-${side}-thigh`).value;
-    const camOff = +$(`fkm-${side}-camoff`).value || 0;
-    const thighOff = +$(`fkm-${side}-thighoff`).value || 0;
-    if (!confirm(`Force-enable the ${side} EE display with cam=${cam}, thigh=${thigh}, ` +
-                 `offsets (${camOff}°, ${thighOff}°)?\n` +
-                 "Only do this if you know the mapping — a wrong sign/offset animates the " +
-                 "linkage wrong (display only; the workspace safety check is unaffected).")) return;
-    await api("/api/fk/map", { json: { side, cam, thigh, verified: true,
-                                       cam_off_deg: camOff, thigh_off_deg: thighOff,
-                                       flip_view: $(`fkm-${side}-flip`).checked } });
-    setBanner(`${side} EE display enabled (cam=${cam}, thigh=${thigh}, ` +
-              `off ${camOff}°/${thighOff}°)`, "", 3500);
-    await refreshEEData();
-  };
-  $(`fkm-${side}-flip`).onchange = async () => {
-    // display-only mirror toggle: keep signs + offsets + verified state as they are
-    const v = S.state && S.state.fk && S.state.fk.verified ? !!S.state.fk.verified[side] : false;
-    await api("/api/fk/map", { json: {
-      side, cam: +$(`fkm-${side}-cam`).value, thigh: +$(`fkm-${side}-thigh`).value,
-      cam_off_deg: +$(`fkm-${side}-camoff`).value || 0,
-      thigh_off_deg: +$(`fkm-${side}-thighoff`).value || 0,
-      verified: v, flip_view: $(`fkm-${side}-flip`).checked } });
-    await refreshEEData();
-  };
-}
-
-function syncFkMapSelects(st) {
-  if (S.fkmInit || !st.fk || !st.fk.available || !st.fk.model_map) return;
-  S.fkmInit = true;
-  for (const side of ["left", "right"]) {
-    const m = st.fk.model_map[side] || {};
-    $(`fkm-${side}-cam`).value = (m.cam >= 0 ? "+1" : "-1");
-    $(`fkm-${side}-thigh`).value = (m.thigh >= 0 ? "+1" : "-1");
-    $(`fkm-${side}-camoff`).value = m.cam_off_deg || 0;
-    $(`fkm-${side}-thighoff`).value = m.thigh_off_deg || 0;
-    $(`fkm-${side}-flip`).checked = !!m.flip_view;
-  }
+  const silent = MOTORS.filter((n) => norm[n] === null);
+  const open = loops.filter((l) => l.resid >= Twin3D.LOOP_TOL).map((l) => /left/i.test(l.name) ? "left" : "right");
+  twinBanner(
+    open.length ? `${open.join(" + ")} four-bar cannot close at these angles (gap shown below) — a sign ` +
+      "or the zero is off. Showing the closest pose (leg orange)." :
+    !calOk && src === "live" ? "NOT CALIBRATED — normalized angles mean nothing until the zero wizard " +
+      "has run in the homing pose; the twin is drawn from them anyway." :
+    silent.length && src === "live" ? `no reading from ${silent.join(", ")} — drawn at 0°` :
+    src !== "live" ? "showing the GAIT PREVIEW, not the robot" : "");
 }
 
 /* ================================================================ playback */
@@ -1856,6 +1780,7 @@ function boot() {
   wireGuards();
   setupWsCanvas();
   setupTrajCanvas();
+  setupTwin();
   updateTrajLegBadges();
   refreshWorkspace().then(fitTrajView);
   pollState();

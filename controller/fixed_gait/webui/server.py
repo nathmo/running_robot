@@ -51,6 +51,7 @@ import measurestore
 import thermalstore
 import thermal_excite
 import sensehat
+import twinmap
 import workspace
 
 # pure-numpy identification helpers (safe to import on the Pi; the heavy estimator is imported
@@ -2074,6 +2075,22 @@ def api_fk_map():
     fk.save_map()
     return _ok(model_map={s: fk.model_map[s] for s in paths.SIDES},
                verified=dict(fk.model_map["verified"]))
+
+
+@app.get("/api/twin/map")
+def api_twin_map_get():
+    """Sign map for the 3D digital twin (twinmap.py). Display only -- nothing on the robot reads it."""
+    return jsonify(twinmap.load())
+
+
+@app.post("/api/twin/map")
+def api_twin_map_set():
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        m = twinmap.save(b.get("signs") or {})
+    except ValueError as e:
+        return _err(e)
+    return _ok(**m)
 
 
 @app.post("/api/mock/drag")

@@ -390,39 +390,26 @@ Home, and like Home it works from a pose outside the safe region.">⌖ Centre (m
   </section>
   </div>
 
-  <!-- ======================== row: leg linkage ======================== -->
+  <!-- ======================== row: digital twin ======================== -->
   <div class="prow">
   <section class="panel wide" id="panel-ee">
-    <h2>Leg linkage — end-effector space
-      <span class="hint">workspace ∙ gait path ∙ ○ calibrated zero ∙ ◆ URDF/model zero ∙ live linkage</span>
-      <button id="btn-fk-verify" class="btn small" style="float:right">verify FK map (sign + offset)</button>
+    <h2>Digital twin — homing-pose MJCF
+      <span class="hint">qpos = sign · normalized° (0° = the homing pose the drives are zeroed in) ∙
+        drag to orbit, wheel to zoom ∙ axes: x red fwd, y green left, z blue up</span>
     </h2>
-    <div class="ee-row">
-      <div><h3>left</h3><canvas id="ee-left" width="440" height="480"></canvas></div>
-      <div><h3>right</h3><canvas id="ee-right" width="440" height="480"></canvas></div>
+    <div class="twin-wrap">
+      <canvas id="twin-canvas"></canvas>
+      <div class="twin-views">
+        <button class="btn small" data-twin-view="left">left side</button>
+        <button class="btn small" data-twin-view="right">right side</button>
+        <button class="btn small" data-twin-view="front">front</button>
+        <button class="btn small" data-twin-view="iso">3/4</button>
+      </div>
+      <div id="twin-banner" class="twin-banner hidden"></div>
     </div>
-    <div id="ee-status" class="hint"></div>
-    <div class="row small">
-      <span class="hint">manual map (if auto-verify is not decisive): model° = sign·norm° + offset°
-        — the captured zero is NOT the model zero, so offsets matter:</span>
-      <span>left: cam <select id="fkm-left-cam" class="num small"><option value="+1">+1</option>
-        <option value="-1">−1</option></select>
-        thigh <select id="fkm-left-thigh" class="num small"><option value="+1">+1</option>
-        <option value="-1">−1</option></select>
-        cam off <input type="number" id="fkm-left-camoff" class="num small" step="1" value="0">°
-        thigh off <input type="number" id="fkm-left-thighoff" class="num small" step="1" value="0">°
-        <label title="display-only x-mirror of the plot"><input type="checkbox" id="fkm-left-flip">
-          mirror view</label>
-        <button id="btn-fkm-left" class="btn small">force enable</button></span>
-      <span>right: cam <select id="fkm-right-cam" class="num small"><option value="+1">+1</option>
-        <option value="-1">−1</option></select>
-        thigh <select id="fkm-right-thigh" class="num small"><option value="+1">+1</option>
-        <option value="-1">−1</option></select>
-        cam off <input type="number" id="fkm-right-camoff" class="num small" step="1" value="0">°
-        thigh off <input type="number" id="fkm-right-thighoff" class="num small" step="1" value="0">°
-        <label title="display-only x-mirror of the plot"><input type="checkbox" id="fkm-right-flip">
-          mirror view</label>
-        <button id="btn-fkm-right" class="btn small">force enable</button></span>
+    <div id="twin-status" class="hint mono"></div>
+    <div class="row small" id="twin-signs">
+      <span class="hint">joint sign (motor + → MJCF qpos +); display only, nothing on the robot reads it:</span>
     </div>
   </section>
   </div>
@@ -943,6 +930,7 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
 
 </main>
 
+<script src="/static/twin3d.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/inertia3d.js"></script>
 <script src="/static/sysid.js"></script>

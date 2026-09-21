@@ -21,7 +21,7 @@ What it does (one page):
 | Manual control | per-actuator slider that **tracks the live motor position** (grab to jog) + exact-angle box; **🏠 Home** slowly returns every joint to the zero pose and **⌖ Centre** parks both legs where the safe workspace leaves the most room in every direction (the largest inscribed box — the pose to excite from); per-actuator sine (start↔stop **preset to 70% of the safe range**, frequency); workspace-override checkbox |
 | Safe workspace | abduction bar + (cam, thigh) pixel editor — draw/erase/flood-fill, undo, save/export/import |
 | Gait trajectory | hand-**draw** a path, or **teach** by backdriving (record takes), smooth + save |
-| EE animation | live linkage + workspace + gait + zero in foot (end-effector) space, per leg |
+| Digital twin | the homing-pose MJCF rendered in the browser (WebGL), posed live from the six motors — backdrive the robot and the twin follows; also plays the gait preview |
 | Playback | position or torque-capped current mode, speed (period) + left/right dephasing live |
 | E-STOP | header button (hotkey: Space) — streams zero current, latches until cleared |
 
@@ -42,9 +42,34 @@ After a **server** restart the calibration is restored from disk with a warning 
 valid if the motors were NOT power-cycled in between. Re-zero when unsure — it never invalidates
 saved data.
 
-## The FK lookup table (EE animation)
+## The digital twin (2026-09-21)
 
-`fk_lut.npz` is generated **on the desktop** (needs mujoco, the Pi doesn't have it):
+The panel draws `dash-01CAD/homing/SpiderBotInitPos/SpiderBotInitPos.xml`, the CAD exported in
+the **homing pose the drives are zeroed in**. So the joint map has no offsets, only a sign per
+motor: `qpos = radians(sign · norm°)`. Publish (or re-publish after a CAD change) from the desktop,
+then copy to the Pi:
+
+```
+python controller/fixed_gait/webui/tools/build_twin.py        # -> static/twin/ (torso decimated, 7 MB)
+scp -r controller/fixed_gait/webui/static/twin nemo@<pi>:running_robot/controller/fixed_gait/webui/static/
+```
+
+* **Parsed in the browser** (`static/twin3d.js`, no libraries): the XML is copied verbatim.
+* **Signs** are derived from the wizard's convention (thigh + forward, cam + crank down, abduction
+  + outward, both legs) and the MJCF axes: L abd/cam/thigh = +1/+1/−1, R = −1/−1/+1 (the right
+  sagittal axes are −y). `tests/test_twinmap.py` re-derives them from the published XML. They
+  can be overridden in the panel (`data/twin_map.json`, display only).
+* **The four-bar.** The export duplicates one body per leg to express the loop; the deeper copy
+  is dropped. The pin is 389.0 mm down the pushrod, which lands on the foot's bore at 0.00 mm
+  lateral miss. It is solved in closed form, on the branch the CAD was assembled in. Homing is
+  only 5 mm from full stretch (dead centre), so a zero that is a degree or two off can ask for a
+  pose that doesn't exist. The leg then turns orange and draws its closest pose, and the gap is
+  shown under the canvas.
+
+## The FK lookup table (workspace EE paths)
+
+No longer drawn by the UI (the twin replaced the 2D linkage view); the server still uses it for
+the gait files' `ee_path`. `fk_lut.npz` is generated **on the desktop** (needs mujoco, the Pi doesn't have it):
 
 ```
 python mujoco/dash01/gen_fk_lut.py --check

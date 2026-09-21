@@ -227,10 +227,18 @@ label { display: inline-flex; align-items: center; gap: 6px; }
   color: var(--dim); white-space: nowrap; }
 .leg-badge.has { border-color: var(--good); color: var(--good); }
 
-/* ---------------- EE ---------------- */
-.ee-row { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-.ee-row canvas { background: #10141a; border: 1px solid var(--line); border-radius: 6px;
-  max-width: 100%; }
+/* ---------------- digital twin ---------------- */
+/* the canvas's pixel size follows its CSS box (twin3d.js resizes the backing store every frame),
+   so the height MUST come from here -- see the growth warning on the strip charts in app.js */
+.twin-wrap { position: relative; }
+#twin-canvas { width: 100%; height: 520px; display: block; background: #0e141b;
+  border: 1px solid var(--line); border-radius: 6px; touch-action: none; }
+.twin-views { position: absolute; top: 8px; left: 8px; display: flex; gap: 4px; flex-wrap: wrap; }
+.twin-banner { position: absolute; top: 8px; right: 8px; max-width: 55%; padding: 5px 9px;
+  border: 1px solid var(--warn); background: #3a2a0acc; color: #ffd684; border-radius: 6px;
+  font-size: 12px; }
+#twin-status { margin: 6px 2px; white-space: pre-wrap; font-family: monospace; font-size: 11.5px; }
+#twin-signs select { margin-right: 10px; }
 
 /* ---------------- playback ---------------- */
 .phasebar { flex: 1; height: 14px; background: var(--panel2); border-radius: 7px; overflow: hidden;
