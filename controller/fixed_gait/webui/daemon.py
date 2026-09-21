@@ -795,6 +795,9 @@ class RobotDaemon(threading.Thread):
         if mount is not None and not getattr(mount, "calibrated", True):
             return False, ("the IMU mount is not calibrated: its attitude is in CHIP axes, not the "
                            "robot's — run the mount calibration in the sensor panel first")
+        if mount is not None and getattr(mount, "conflict", False):
+            return False, ("the IMU axis tilts disagree (fore/aft vs left/right would make a mirror) "
+                           "— flip or redo one pair in the Gyro calibration panel first")
         pitch, roll, _, _ = imu
         bal = balance.Balancer(STAND_POSE_DEG)
         if bal.falling(pitch, roll):

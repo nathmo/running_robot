@@ -8,8 +8,11 @@
 "use strict";
 
 const SNS = { seq: 0, charts: null, rpy: [0, 0, 0], down: false,
-  mount: null, mountKey: "", viewer: null, meshBuf: undefined, levering: false,
-  levEdited: false, upBody: [0, 0, 1] };
+  mount: null, mountKey: "", viewer: null, meshBuf: undefined, upBody: [0, 0, 1],
+  seqActive: false, noising: false, noiseKey: "" };
+
+const TILT_ORDER = ["fwd", "left", "right", "back"];
+const TILT_NAME = { fwd: "forward", left: "left", right: "right", back: "backward" };
 
 /* key, label, decimals — one row of a readout group */
 const SNS_GROUPS = {
@@ -46,6 +49,7 @@ async function pollSensors() {
   if (down) {
     $("sns-down").textContent = "Sense HAT (B) not reading: " + (d.error || "unknown reason");
     $("sns-status").textContent = "";
+    if (window.twinSetAttitude) twinSetAttitude(null, "none");
     return;
   }
 
@@ -90,6 +94,11 @@ async function pollSensors() {
   $("sns-mount").textContent = mountHint(d);
   SNS.upBody = [v.ax || 0, v.ay || 0, v.az || 0];
   updateMountUI(d);
+  updateNoiseUI(d);
+  // the digital twin tilts its base by the filtered attitude (app.js) — only in body axes
+  const m = d.mount || {};
+  const frame = !m.calibrated ? "uncal" : (m.check || {}).conflict ? "conflict" : "ok";
+  if (window.twinSetAttitude) twinSetAttitude(frame === "ok" ? d.up_body : null, frame);
 }
 
 /** One line on where the frame stands. Before calibration it reports which CHIP axis gravity sits
@@ -110,65 +119,139 @@ function mountHint(d) {
 }
 
 /* ================================================================ mount calibration */
+const deg1 = (x) => (x === null || x === undefined ? "—" : `${x.toFixed(1)}°`);
+const axisName = (a) => (a ? `chip ${a[0][0] === "-" ? "−" : "+"}${a[0][1].toUpperCase()}` : "—");
+
 function updateMountUI(d) {
   const m = d.mount || {};
   SNS.mount = m;
   const cs = d.capture_status || {};
-  const ls = d.lever_status || {};
+  const ss = d.seq_status || {};
+  const chk = m.check || {};
 
-  const capMsg = (kind) => (cs.kind === kind ? cs.msg : "");
-  const capCls = (kind) => "hint" + (cs.kind === kind && ["moving", "tilt", "weak"].includes(cs.state) ? " warn-text" : "");
   const lvl = m.captures && m.captures.level;
-  $("cap-level-status").textContent = capMsg("level") ||
+  $("cap-level-status").textContent = (cs.kind === "level" ? cs.msg : "") ||
     (lvl ? `captured (|a| ${fmt(lvl.acc_mag_g, 3)} g)` : "not captured");
-  $("cap-level-status").className = capCls("level");
-  const fwd = m.captures && m.captures.forward;
-  $("cap-fwd-status").textContent = capMsg("forward") ||
-    (fwd ? `tilt capture: ${fmt(fwd.tilt_deg, 1)}° nose-down` +
-           (fwd.weak ? ` — SHALLOW: 1° of roll while tipping = ~${fmt(fwd.roll_sensitivity_deg, 0)}° of fore-aft error; redo at 10–20°` : "")
-         : "no tilt capture");
-  $("cap-fwd-status").className = "hint" + ((cs.kind === "forward" && ["moving","tilt","weak"].includes(cs.state)) || (fwd && fwd.weak) ? " warn-text" : "");
+  $("cap-level-status").className = "hint" +
+    (cs.kind === "level" && ["moving", "tilt"].includes(cs.state) ? " warn-text" : "");
 
-  const cc = m.cross_check_deg;
-  if (cc === null || cc === undefined) {
-    $("sns-crosscheck").textContent = m.fwd_chip || m.fwd_declared ? "" :
-      "fore-aft axis not set — pitch and roll are not yet distinguishable";
-    $("sns-crosscheck").className = "hint" + (m.fwd_chip || m.fwd_declared ? "" : " warn-text");
-  } else {
-    $("sns-crosscheck").textContent =
-      `measured vs declared forward: ${fmt(cc, 1)}° apart` +
-      (cc > 15 ? " — the HAT is not bolted on square (the measured axis is the one in use)" : " ✓");
-    $("sns-crosscheck").className = "hint" + (cc > 15 ? " warn-text" : "");
+  // ---- the sequence: button, live tilt, the big instruction line
+  SNS.seqActive = !!ss.active;
+  $("btn-seq").textContent = ss.active ? "✕ Cancel sequence" : "▶ Start tilt sequence";
+  $("btn-seq").classList.toggle("primary", !ss.active);
+  $("seq-live").textContent = ss.active && Number.isFinite(ss.tilt)
+    ? `tilt from upright ${ss.tilt.toFixed(1)}°` : "";
+  // the instruction line stays up after the run ends (done / cancelled), but only in a page that
+  // started or watched it — a fresh page load does not replay an old "complete"
+  const showMsg = ss.active || (SNS.seqShown && ["done", "cancelled"].includes(ss.state));
+  $("seq-msg").classList.toggle("hidden", !showMsg);
+  if (showMsg) {
+    const step = ss.active ? `${ss.i + 1}/${ss.order.length} — ` : "";
+    $("seq-msg").textContent = step + ss.msg;
+    $("seq-msg").className = "seq-msg" + (ss.state === "retry" ? " retry" : ss.state === "done" ? " done" : "");
   }
+  if (ss.active) SNS.seqShown = true;
 
-  // selects/inputs follow the server unless the user is mid-edit
-  const sel = $("sns-fwd-axis");
-  if (document.activeElement !== sel) sel.value = m.fwd_declared || "";
-  const use = $("sns-lever-use");
-  if (document.activeElement !== use) use.value = m.lever_use || "cad";
-  if (!SNS.levEdited && m.lever_cad)
-    ["x", "y", "z"].forEach((k, i) => { $("lev-" + k).value = m.lever_cad[i]; });
+  // ---- one chip per tilt: captured angle, weak / old flags, fit residual, redo
+  const tilts = m.tilts || {}, res = chk.residual_deg || {};
+  const html = TILT_ORDER.map((k) => {
+    const t = tilts[k];
+    const now = ss.active && ss.which === k;
+    let cls = "seq-tilt", txt;
+    if (now) {
+      cls += " now";
+      txt = ss.phase === "capturing" ? "capturing…" : ss.phase === "tilt" ? "tilt now" : "next";
+    } else if (!t) txt = "—";
+    else if (t.legacy) { cls += " weak"; txt = "old capture"; }
+    else {
+      const r = res[k];
+      cls += t.weak || (r !== undefined && r > 15) ? " weak" : " ok";
+      txt = `${t.tilt_deg.toFixed(1)}°` + (r !== undefined ? ` · fit ${r.toFixed(1)}°` : "");
+    }
+    return `<div class="${cls}" title="${t && t.legacy ? t.legacy : ""}"><span>${TILT_NAME[k]}<br>` +
+      `<span class="hint">${txt}</span></span>` +
+      (ss.active ? "" : `<button class="btn small" data-redo="${k}" title="redo this tilt only">↻</button>`) +
+      `</div>`;
+  }).join("");
+  if (html !== SNS.tiltHtml) { SNS.tiltHtml = html; $("seq-tilts").innerHTML = html; }
 
-  $("lever-fit-status").textContent = ls.msg ? `${ls.msg}${ls.state === "recording" ? ` (${ls.n} samples)` : ""}` : "";
-  $("lever-fit-status").className = "hint" + (ls.state === "error" ? " warn-text" : "");
-  $("btn-lever-fit").textContent = ls.state === "recording" ? "⏹ Stop & fit" : "⟳ Fit by rocking…";
-  SNS.levering = ls.state === "recording";
+  // ---- the result, and whether its parts agree
+  $("seq-axes").innerHTML = m.calibrated && m.axes
+    ? `forward = <b>${axisName(m.axes.fwd)}</b> (${deg1(m.axes.fwd[1])} off) · ` +
+      `left = <b>${axisName(m.axes.left)}</b> (${deg1(m.axes.left[1])} off) · ` +
+      `up = <b>${axisName(m.axes.up)}</b>`
+    : `<span class="warn-text">axes not set — pitch and roll are not yet distinguishable</span>`;
+  const lines = [];
+  const pair = (p, a, b) => {
+    const x = (chk.pairs || {})[p];
+    if (!x) return;
+    if (x.n < 2) { lines.push(`${a} only — do ${b} too to check it`); return; }
+    if (x.excluded) lines.push(`<span class="warn-text">✗ ${a} and ${b} point the SAME way ` +
+      `(${deg1(x.disagree_deg)} apart) — one was tilted the wrong way; redo them. Left out of ` +
+      `the fit.</span>`);
+    else lines.push(`${a} ↔ ${b} agree within ${deg1(x.disagree_deg)}` +
+      (x.disagree_deg > 15 ? ` <span class="warn-text">— sloppy, redo them</span>` : " ✓"));
+  };
+  pair("fore_aft", "forward", "backward");
+  pair("lateral", "left", "right");
+  if (chk.conflict)
+    lines.push(`<span class="warn-text">✗ fore/aft and left/right describe a MIRROR ` +
+      `(${deg1(chk.right_angle_deg)} off): one pair is the wrong way round. Using fore/aft alone ` +
+      `until one of them is flipped — ⚖ Balance is refused meanwhile.</span>`);
+  else if (Number.isFinite(chk.right_angle_deg))
+    lines.push(`fore/aft ⟂ left/right within ${deg1(chk.right_angle_deg)}` +
+      (chk.right_angle_deg > 15 ? ` <span class="warn-text">— check the tilts</span>` : " ✓"));
+  if (tilts.fwd && tilts.fwd.legacy)
+    lines.push(`<span class="warn-text">axes still from the ${tilts.fwd.legacy} — run the ` +
+      `sequence to replace it</span>`);
+  $("seq-checks").innerHTML = lines.join("<br>");
 
-  const f = m.lever_fit;
-  const bits = [];
-  if (f && f.ok) {
-    bits.push(`fit [${f.r.map((x) => x.toFixed(3)).join(", ")}] m about ${f.about}` +
-      ` — residual ${fmt(f.residual_ms2, 2)} m/s², 2nd-axis coverage ${fmt(100 * f.axis_coverage, 0)}%`);
-    if (f.weak) bits.push("⚠ weak excitation: rocking about a single axis leaves the fit " +
-      "unconstrained along it — rock about two clearly different axes, harder");
-  }
-  if (m.lever_disagreement_m !== null && m.lever_disagreement_m !== undefined)
-    bits.push(`CAD vs fit differ by ${(m.lever_disagreement_m * 1000).toFixed(0)} mm` +
-      " (expected if the hang point is not the base centre)");
-  $("lever-compare").innerHTML = bits.join("<br>");
+  const flip = m.flip || {};
+  $("btn-flip-fa").classList.toggle("on", !!flip.fore_aft);
+  $("btn-flip-lat").classList.toggle("on", !!flip.lateral);
+  $("btn-flip-fa").textContent = "⇄ flip fore/aft" + (flip.fore_aft ? " (flipped)" : "");
+  $("btn-flip-lat").textContent = "⇄ flip left/right" + (flip.lateral ? " (flipped)" : "");
 
-  const key = JSON.stringify([m.R_chip_to_body, m.lever_active, m.calibrated]);
+  const key = JSON.stringify([m.R_chip_to_body, m.calibrated]);
   if (key !== SNS.mountKey) { SNS.mountKey = key; refreshFrameView(); }
+}
+
+/* ================================================================ noise recorder */
+function updateNoiseUI(d) {
+  const ns = d.noise_status || {};
+  SNS.noising = ns.state === "recording";
+  $("btn-noise").textContent = SNS.noising ? "■ Stop & analyse" : "● Record";
+  $("btn-noise").classList.toggle("active-rec", SNS.noising);
+  $("noise-status").textContent = SNS.noising
+    ? `recording ${fmt(ns.seconds, 1)} s — do not touch the robot (20 s or more is a good record)`
+    : ns.msg || "";
+  $("noise-status").className = "hint" + (["moving", "error"].includes(ns.state) ? " warn-text" : "");
+
+  const r = d.noise_result;
+  const key = r ? `${r.file}|${r.n}` : "";
+  if (key === SNS.noiseKey) return;
+  SNS.noiseKey = key;
+  if (!r || !r.ok) { $("noise-result").innerHTML = ""; return; }
+  const f = (v, k) => (v === null || v === undefined ? "—" : v.toFixed(k));
+  const row = (label, arr, k) => `<tr><td>${label}</td>` +
+    [0, 1, 2].map((i) => `<td>${arr ? f(arr[i], k) : "—"}</td>`).join("") + `</tr>`;
+  const ax = r.frame === "body" ? ["X fwd", "Y left", "Z up"] : ["chip X", "chip Y", "chip Z"];
+  const att = (a) => (a ? `${f(a.rms, 3)}° RMS (${f(a.pp, 2)}° p-p)` : "—");
+  $("noise-result").innerHTML =
+    `<table><tr><th></th>${ax.map((a) => `<th>${a}</th>`).join("")}</tr>` +
+    row("accel noise, mg RMS", r.acc_rms_mg, 2) +
+    row("accel density, µg/√Hz", r.acc_density_ug, 0) +
+    row("gyro noise, °/s RMS", r.gyr_rms_dps, 3) +
+    row("gyro density, °/s/√Hz", r.gyr_density_dps, 4) +
+    row("gyro left after the zero, °/s", r.gyr_mean_dps, 3) +
+    row("gyro 1 s wander, °/s", r.gyr_wander_dps, 4) +
+    `</table>` +
+    `<div class="verdict">pitch ${att(r.pitch)} · roll ${att(r.roll)} — what ⚖ Balance steers on</div>` +
+    `<div class="verdict ${r.still ? "" : "bad"}">${r.still ? "✓ " : "⚠ "}${r.still_why}</div>` +
+    `<div class="hint">${fmt(r.seconds, 1)} s, ${r.n} samples at ${fmt(r.rate_hz, 1)} Hz ` +
+    `(jitter ${fmt(r.jitter_ms, 2)} ms, max gap ${fmt(r.max_gap_ms, 1)} ms), |a| ${fmt(r.acc_mag_g, 4)} g` +
+    (r.file ? ` — saved data/imu_noise/${r.file}` : r.save_error ? ` — NOT saved: ${r.save_error}` : "") +
+    `</div>`;
 }
 
 /* ================================================================ 3D frame view */
@@ -193,9 +276,9 @@ async function refreshFrameView() {
   drawFrameSegments();
 }
 
-/** Draw the base frame at the origin and the IMU's own axes at the lever arm, both in the base
- *  body frame. The mesh's body origin IS the base reference (the model puts its geom at pos 0).
- *  Cheap enough to re-run on the live tick so the measured up-vector animates. */
+/** Draw the base frame and the IMU chip's own axes (as the mount calibration places them), both
+ *  in the base body frame at the origin — where the HAT physically sits is not modelled. Cheap
+ *  enough to re-run on the live tick so the measured up-vector animates. */
 function drawFrameSegments() {
   const v = SNS.viewer;
   if (!v || !v.ok) return;
@@ -208,9 +291,8 @@ function drawFrameSegments() {
     segs.push({ a: [0, 0, 0], b: e, color: AX_COLORS[i] });
   }
 
-  const r = m.lever_active || m.lever_cad || null;
-  if (r) {
-    segs.push({ a: [0, 0, 0], b: r, color: [0.75, 0.75, 0.80] });     // base centre -> IMU
+  const r = [0, 0, 0];
+  {
     // The chip axes expressed in body coordinates are the COLUMNS of R_chip_to_body.
     const R = m.R_chip_to_body || [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
     for (let c = 0; c < 3; c++) {
@@ -228,8 +310,7 @@ function drawFrameSegments() {
   const key = (c, t) => `<span class="sns-axis-key"><i style="background:rgb(${c.map((x) => x * 255 | 0)})"></i>${t}</span>`;
   $("sns-frame-legend").innerHTML =
     key(AX_COLORS[0], "X fwd") + key(AX_COLORS[1], "Y left") + key(AX_COLORS[2], "Z up") +
-    (r ? key([0.75, 0.75, 0.8], "base → IMU") + key([1, 0.82, 0.25], "measured up") : "") +
-    (r ? "" : "<span class='hint'>enter or fit a lever arm to place the IMU</span>");
+    key([0.9, 0.9, 0.9], "chip axes (short)") + key([1, 0.82, 0.25], "measured up");
 }
 
 /* ================================================================ artificial horizon */
@@ -307,44 +388,53 @@ $("btn-gyro-bias").onclick = () =>
   capture("gyro", "btn-gyro-bias", "Averaging the gyro zero — hold the robot still…");
 $("btn-cap-level").onclick = () =>
   capture("level", "btn-cap-level", "Capturing the upright reference — hold the robot still…");
-$("btn-cap-forward").onclick = () =>
-  capture("forward", "btn-cap-forward", "Capturing the nose-down tilt — hold it still…");
 
-$("sns-fwd-axis").onchange = (e) =>
-  api("/api/sensors/mount", { json: { forward_axis: e.target.value } }).catch(() => {});
-$("sns-lever-use").onchange = (e) =>
-  api("/api/sensors/mount", { json: { lever_use: e.target.value } }).catch(() => {});
-
-["lev-x", "lev-y", "lev-z"].forEach((id) => { $(id).oninput = () => { SNS.levEdited = true; }; });
-$("btn-lever-save").onclick = async () => {
-  const v = ["lev-x", "lev-y", "lev-z"].map((id) => parseFloat($(id).value));
-  if (v.some((x) => !Number.isFinite(x))) { setBanner("enter all three lever-arm components (metres)", "error", 4000); return; }
-  await api("/api/sensors/mount", { json: { lever_cad: v } });
-  SNS.levEdited = false;
-  setBanner("CAD lever arm saved", "", 2000);
+$("btn-seq").onclick = async () => {
+  try {
+    if (SNS.seqActive) await api("/api/sensors/sequence", { json: { action: "cancel" } });
+    else {
+      SNS.seqShown = true;
+      await api("/api/sensors/sequence", { json: { action: "start" } });
+    }
+  } catch (e) { /* banner already set by api() */ }
 };
+$("seq-tilts").onclick = (e) => {
+  const b = e.target.closest("[data-redo]");
+  if (!b) return;
+  SNS.seqShown = true;
+  api("/api/sensors/sequence", { json: { action: "redo", tilt: b.dataset.redo } }).catch(() => {});
+};
+const flipPair = (pair) => {
+  const on = !((SNS.mount || {}).flip || {})[pair];
+  api("/api/sensors/mount", { json: { flip: { [pair]: on } } }).catch(() => {});
+};
+$("btn-flip-fa").onclick = () => flipPair("fore_aft");
+$("btn-flip-lat").onclick = () => flipPair("lateral");
 
-$("btn-lever-fit").onclick = async () => {
-  if (!SNS.levering) {
-    await api("/api/sensors/lever", { json: { action: "start" } });
-    setBanner("Recording — rock the robot by hand about TWO different axes, then press stop.", "", 6000);
-  } else {
-    const d = await api("/api/sensors/lever", { json: { action: "stop" } });
-    if (d && d.fit) setBanner(`Lever fit: [${d.fit.r.map((x) => x.toFixed(3)).join(", ")}] m`, "", 5000);
-  }
+$("btn-noise").onclick = async () => {
+  try {
+    if (SNS.noising) await api("/api/sensors/noise", { json: { action: "stop" } });
+    else {
+      await api("/api/sensors/noise", { json: { action: "start" } });
+      setBanner("Recording IMU noise — leave the robot completely still", "", 3000);
+    }
+  } catch (e) { /* banner already set by api() */ }
 };
 
 $("btn-mount-reset").onclick = async () => {
-  await api("/api/sensors/mount/reset", { json: {} });
-  SNS.levEdited = false;
-  setBanner("Mount calibration reset — values are back in chip axes", "warn", 4000);
+  if (!confirm("Forget the upright reference and the axes? Values go back to chip axes, and " +
+      "⚖ Balance is refused until they are redone.")) return;
+  try {
+    await api("/api/sensors/mount/reset", { json: {} });
+    setBanner("Mount calibration reset — values are back in chip axes", "warn", 4000);
+  } catch (e) { /* banner already set by api() */ }
 };
 
 $("frame-showmesh").onchange = refreshFrameView;
 $("frame-showlive").onchange = refreshFrameView;
 
-for (const [id, pose] of [["btn-mock-still", "still"], ["btn-mock-tilt", "tilt"], ["btn-mock-rock", "rock"]])
-  $(id).onclick = () => api("/api/mock/sensors", { json: { pose } }).catch(() => {});
+for (const b of document.querySelectorAll("[data-mock-pose]"))
+  b.onclick = () => api("/api/mock/sensors", { json: { pose: b.dataset.mockPose } }).catch(() => {});
 
 buildSensorRows();
 pollSensors();

@@ -16,7 +16,7 @@ What it does (one page):
 | Panel | Function |
 |---|---|
 | Telemetry | live raw/normalized position, current, temperature per motor + strip charts |
-| Sense HAT (B) | live 9-DOF IMU (attitude horizon, accel/gyro/mag), air temperature/humidity/pressure, ambient light/colour, 4 analog inputs, and the **IMU mount calibration** (upright + tilt captures, lever arm, 3D frame view) — see below |
+| Sense HAT (B) | live 9-DOF IMU (attitude horizon, accel/gyro/mag), air temperature/humidity/pressure, ambient light/colour, 4 analog inputs, and the **gyro calibration** (upright reference, gyro zero, a four-tilt axis sequence with flips, a still-robot noise recorder, 3D frame view) — see below |
 | Calibration wizard | **blocks all motion after boot** until zero pose + direction check are done |
 | Manual control | per-actuator slider that **tracks the live motor position** (grab to jog) + exact-angle box; **🏠 Home** slowly drives both legs to the **standing pose** (soles flat, CoM over them; `daemon.STAND_POSE_DEG`, from `tools/solve_stand_pose.py`) and **⌖ Centre** parks both legs where the safe workspace leaves the most room in every direction (the largest inscribed box — the pose to excite from); per-actuator sine (start↔stop **preset to 70% of the safe range**, frequency); workspace-override checkbox |
 | ⚖ Balance | manual panel, after 🏠 Home: IMU loop around the standing pose (`balance.py`) — pitch P+D shift the CoM along the soles and I levels the torso, roll P+D shift the CoM sideways; CoM fore/aft + lateral trims; Stop holds, a >15° tilt goes limp. Tested in `tools/balance_sim.py` (MuJoCo, measured SET_POS lag): survives zero errors ~0.75° (vs 0.5° without) and 49 N side pushes (vs 45), but no posture loop beats ~8 N/0.2 s fore-aft on 66 mm soles |
@@ -66,6 +66,11 @@ scp -r controller/fixed_gait/webui/static/twin nemo@<pi>:running_robot/controlle
   only 5 mm from full stretch (dead centre), so a zero that is a degree or two off can ask for a
   pose that doesn't exist. The leg then turns orange and draws its closest pose, and the gap is
   shown under the canvas.
+* **The base follows the IMU** (pitch and roll from the attitude filter; yaw stays 0 because it
+  drifts). It turns about the torso origin, which never moves, so the robot can only rotate
+  against the fixed yellow world marker (level ring, plumb line, a ring at foot level) and the
+  world triad; paler axes turn with the body. Needs a calibrated mount without a conflict, and
+  can be switched off in the panel.
 
 ## The FK lookup table (workspace EE paths)
 
@@ -172,67 +177,73 @@ Things worth knowing before trusting a number here:
   gyro-integrated and drifts.** The magnetometer is deliberately *not* fused into the attitude —
   it sits centimetres from two brushless motors and the battery, so its heading is published as an
   advisory number only.
-* **Zero the gyro** (button under the horizon) with the robot standing still: it averages the
-  zero-rate offset for 1.5 s and refuses if the robot moved (it says so rather than storing a bad
-  bias).
 * **Values are in the IMU chip's own frame until the mount is calibrated** (below), and in robot
   body axes after. The HAT is bolted UNDER the robot — it reads gravity on chip −Z — so the two
   frames are nowhere near each other and the difference is not cosmetic.
 * Missing HAT, missing `smbus2`, or I2C disabled → the panel shows the reason and the rest of the
   UI is unaffected. Per-chip failures are counted and shown, not silent.
 
-### Mount calibration — where the IMU is and which way it faces
+### Gyro calibration — upright, zero, axes, noise
 
-`mountcal.py`, persisted to `data/sensehat_mount.json`, panel block "IMU mount & frame".
+`mountcal.py` (the frame, persisted to `data/sensehat_mount.json`) and `sensehat.py` (the captures,
+the sequence and the recorder); panel block "IMU mount & frame". Every step that moves the frame is
+refused while ⚖ Balance runs on it.
 
 **Step 1 — upright reference.** Hang the robot on the test rig in its upright pose and capture.
 This measures the direction of gravity in chip axes, which fixes the tilt. It does *not* separate
 accelerometer bias from mount misalignment — a robot tilted 1° and a sensor with a 17 mg cross-axis
 bias read identically — and it does not need to: both are absorbed into the frame in which the
-reference pose reads roll = pitch = 0. (A true per-axis bias+scale calibration needs a
-6-orientation tumble; not happening with a 15 kg robot, and pointless for a sensor already within
-1% of 1 g.) **The repeatability of that pose is the accuracy ceiling of everything downstream.**
+reference pose reads roll = pitch = 0. **The repeatability of that pose is the accuracy ceiling of
+everything downstream.**
 
-**Step 2 — fore-aft axis.** Gravity fixes only *two* of the three rotation DOF: rotation about the
-vertical is invisible to an accelerometer at rest, and that is exactly the DOF separating **pitch
-from roll**. Fix it by tipping the robot nose-down 10–20° and capturing (only the direction is
-used, never the angle), and/or by declaring which chip axis points forward. With both, the panel
-reports the angle between them — a large disagreement means the HAT is not bolted on square. The
-*measured* axis is the one used.
+**Step 2 — zero gyro.** Averages the zero-rate offset for 1.5 s with the robot still, and refuses
+if it moved (it says so rather than storing a bad bias). Redo it once the robot is warm.
 
-**Step 3 — lever arm.** The IMU sits below the base, so while the body rotates it also measures
-`α×r + ω×(ω×r)`. Zero at rest, but a bias on roll/pitch exactly while running. Type the CAD vector
-(base centre → IMU, metres) and/or fit one by rocking the robot by hand.
+**Step 3 — axes: the tilt sequence.** Gravity fixes only *two* of the three rotation DOF: rotation
+about the vertical is invisible to an accelerometer at rest, and that is exactly the DOF separating
+**pitch from roll**. Press ▶ Start, then tilt the robot **forward, left, right, backward**, 10–20°
+each and back upright in between. Each tilt is **captured on its own** (both hands are on the
+robot): back within 4° of upright arms the next step, and a tilt of ≥ 8° held with the gyro under
+2°/s for 0.3 s starts the usual 1.5 s still average. Each tilt gives one direction — the horizontal
+swing of the up-vector — and only the direction is used, never the angle.
 
-> **What the fit is relative to.** A single IMU *cannot* observe its position relative to the base
-> centre — `a_base` in the rigid-body relation is unknown, so `r` is not separable. It becomes
-> identifiable only for rotation about a fixed pivot, where the fit returns `r_pivot→IMU`. Hung on
-> the rig, that pivot is the hang point: the fit matches the CAD vector only insofar as the base
-> centre sits at the pivot, and otherwise differs by exactly the pivot offset. The panel labels the
-> fit with the point it is about, and reports the CAD-vs-fit gap rather than implying they must
-> agree.
+Four tilts over-determine the heading, so they check themselves:
 
-Rock about **two clearly different axes** — a single-axis rock leaves the fit unconstrained along
-that axis and returns a number that looks fine and means nothing. The panel reports second-axis
-coverage and flags a weak excitation.
+* forward and backward must point opposite ways, so must left and right (a pair that points the
+  *same* way was tilted wrong, and is left out of the fit);
+* the fore/aft pair must sit at a right angle to the left/right pair **on the right-handed side**.
 
-The 3D view shows the base mesh, the body triad at the base centre, and the IMU's own axes at the
-lever arm, plus the live measured up-vector — the visual check that the calibration says what you
-think it does.
+The panel then shows the result as chip axes (`forward = chip −X …`) with the per-tilt fit
+residuals, and two **flip** buttons that negate what a pair is taken to mean. A rotation cannot flip
+one horizontal axis alone — that would be a mirror — so flipping *one* pair of a good calibration
+shows a **conflict** instead of silently averaging it: the fore/aft pair then sets the frame alone,
+and ⚖ Balance is refused until the pairs agree again (flip the other one too: the robot's front was
+the other end). Any single tilt can be redone with its ↻ button.
 
-Two things this machinery gets right that are easy to get wrong, both verified in `--mock` against
-a simulated HAT with a known mount and lever (mock-tools panel poses it: upright / nose-down /
-rocking):
+A calibration from the old one-tilt procedure keeps working: it is loaded as a forward tilt and the
+panel says it is an old capture until the sequence is run.
 
-* **Changing the mount resets the attitude filter.** A filter's quaternion is expressed in the
-  frame it was integrated in and is meaningless the moment that frame moves — and a near-antipodal
-  Madgwick error sits on a saddle where the correction vanishes, so it never converges out on its
-  own. Without the reset, finishing the wizard left the attitude stuck ~165° wrong.
-* **The ω in the lever terms is the same low-passed ω that α is differentiated from.** Pairing a
-  raw ω with a filtered-ω derivative mismatches their phase and biases the fit.
+**Step 4 — noise.** ● Record while the robot stands still, ■ Stop & analyse: accel and gyro noise
+(RMS and density, using the chip's DLPF noise bandwidth), what is left of the gyro zero, the 1 s
+wander, and the pitch/roll jitter the ⚖ Balance loop steers on. The record is judged by the same
+stillness gate as `tools/imu_bench.py` (both use `imunoise.py`) and a record where the robot moved
+is flagged as motion, not noise. The raw record goes to `data/imu_noise/imu_noise_*.npz` (same keys
+as `imu_bench --save`, plus pitch/roll).
 
-End-to-end in mock: mount rotation recovered to <0.01, lever arm to ~3 mm, and enabling the
-compensation cuts attitude error during hard rocking by ~77% (2.0° → 0.5° mean).
+The 3D view shows the base mesh, the body triad and the chip's own axes as the calibration places
+them, plus the live measured up-vector — the visual check that the calibration says what you think
+it does. The **digital twin** tilts its base by the same pitch and roll (see *The digital twin*).
+
+**Changing the mount resets the attitude filter.** A filter's quaternion is expressed in the frame
+it was integrated in and is meaningless the moment that frame moves — and a near-antipodal Madgwick
+error sits on a saddle where the correction vanishes, so it never converges out on its own. Without
+the reset, finishing the wizard left the attitude stuck ~165° wrong.
+
+In `--mock` the HAT is simulated with a known mount; the mock-tools panel poses it (upright, tilt
+forward / left / right / backward), and the sequence recovers the mount (`tests/test_mountcal.py`).
+
+(The lever-arm compensation — IMU offset from the base centre, CAD or fitted by rocking — was
+removed on 2026-09-21: it was never configured on the robot.)
 
 ## Black box (flight recorder) — `blackbox.py` / `blackbox_read.py`
 
@@ -434,9 +445,12 @@ still on `:8081`.** Running `server.py --port 8080` alone is the rollback and ne
 - `fklut.py` — pure-numpy LUT runtime + the sign-map verifier.
 - `canio.py` — real socketcan or `--mock` simulated motors (random boot offsets included).
 - `sensehat.py` — Sense HAT (B) I2C drivers + its own poll thread (100 Hz IMU / 20 Hz logged);
-  `--mock` is a rigid-body IMU simulator with a known mount and lever arm. Publishes a snapshot +
-  a `ScalarRing`, same read-by-sequence contract as motor telemetry.
-- `mountcal.py` — IMU mount rotation + lever arm: the capture maths, the lever least-squares and
-  its diagnostics, persisted to `data/sensehat_mount.json`. No I2C, no threads of its own.
+  `--mock` simulates a HAT with a known mount, posed upright or tilted. Also runs the auto-capturing
+  tilt sequence and the noise recorder. Publishes a snapshot + a `ScalarRing`, same
+  read-by-sequence contract as motor telemetry.
+- `mountcal.py` — IMU mount rotation from the upright capture and the four tilts (fit, pair checks,
+  flips), persisted to `data/sensehat_mount.json`. No I2C, no threads of its own.
+- `imunoise.py` — the stillness gate and the noise analysis, shared by the panel's recorder and
+  `tools/imu_bench.py`.
 - `static/` — vanilla JS, no CDN. `server.py` — thin Flask routes.
 - Runtime data lives in `webui/data/` (git-ignored, machine-local).

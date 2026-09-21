@@ -1677,6 +1677,27 @@ async function saveTwinSigns(signs) {
   catch (_) { applyTwinMap({ signs: TW.signs, defaults: TW.defaults }); }   // revert the selects
 }
 
+/** Called by sensors.js on every IMU poll (~10 Hz): the filtered world-up in body axes, or null
+ *  when the mount frame is not trustworthy (`frame`: "ok" | "uncal" | "conflict" | "none"). The twin's
+ *  base turns about the torso origin by pitch and roll only; the world marker stays put. */
+function twinSetAttitude(up, frame) {
+  const tv = TW.view;
+  if (!tv) return;
+  const on = $("twin-imu").checked;
+  const att = tv.setBase(on && frame === "ok" ? up : null);
+  const el = $("twin-att");
+  const sgn = (v) => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "°";
+  if (!on) el.textContent = "base level (IMU off)";
+  else if (frame === "ok")
+    el.textContent = `base pitch ${sgn(att.pitch)} ${att.pitch >= 0 ? "nose down" : "nose up"} · ` +
+      `roll ${sgn(att.roll)} ${att.roll >= 0 ? "right side down" : "left side down"}`;
+  else el.textContent = frame === "conflict"
+    ? "base level: the IMU axis tilts conflict — see Gyro calibration"
+    : frame === "none" ? "base level: no IMU reading" : "base level: IMU mount not calibrated";
+  el.classList.toggle("off", !on || frame !== "ok");
+}
+window.twinSetAttitude = twinSetAttitude;
+
 function twinBanner(msg) {
   const b = $("twin-banner");
   b.textContent = msg || "";

@@ -444,11 +444,23 @@ def _sense():
     return (sh, None) if sh is not None else (None, "sensors disabled (--no-sensors)")
 
 
+def _frame_locked():
+    """Why the IMU frame must not move right now, or None. ⚖ Balance steers on it: re-zeroing the
+    gyro or re-deriving the mount mid-balance would step the attitude under a running loop."""
+    d = STATE.get("daemon")
+    if d is not None and getattr(d, "_bal", None) is not None:
+        return "⚖ Balance is running on this IMU — stop it before recalibrating"
+    return None
+
+
 @app.post("/api/sensors/capture")
 def api_sensors_capture():
-    """Start a still-robot average: `gyro` (zero-rate bias), `level` (the upright reference on the
-    rig) or `forward` (the nose-down tilt that pins the fore-aft axis). The robot must hold still."""
+    """Start a still-robot average: `gyro` (zero-rate bias) or `level` (the upright reference on
+    the rig); `tilt_<fwd|left|right|back>` captures one tilt by hand. The robot must hold still."""
     sh, why = _sense()
+    if why:
+        return _err(why)
+    why = _frame_locked()
     if why:
         return _err(why)
     b = request.get_json(force=True, silent=True) or {}
@@ -456,25 +468,42 @@ def api_sensors_capture():
     return _ok() if r.get("ok") else _err(r.get("error", "capture failed"))
 
 
-@app.post("/api/sensors/mount")
-def api_sensors_mount():
-    """Edit the parts of the mount calibration that are typed rather than measured: the declared
-    forward axis, the CAD lever arm, and which lever source feeds the live compensation."""
+@app.post("/api/sensors/sequence")
+def api_sensors_sequence():
+    """The axis tilt sequence (forward, left, right, back; auto-captured): `start` runs all four,
+    `redo` with `tilt` runs one again, `cancel` stops."""
     sh, why = _sense()
     if why:
         return _err(why)
     b = request.get_json(force=True, silent=True) or {}
+    action = b.get("action", "start")
+    if action == "cancel":
+        return _ok(**sh.seq_cancel())
+    why = _frame_locked()
+    if why:
+        return _err(why)
+    if action == "start":
+        r = sh.seq_start()
+    elif action == "redo":
+        r = sh.seq_start(only=b.get("tilt"))
+    else:
+        return _err(f"unknown sequence action '{action}'")
+    return _ok() if r.get("ok") else _err(r.get("error", "sequence failed"))
+
+
+@app.post("/api/sensors/mount")
+def api_sensors_mount():
+    """Flip what a tilt pair is taken to mean: {"flip": {"fore_aft": bool, "lateral": bool}}."""
+    sh, why = _sense()
+    if why:
+        return _err(why)
+    why = _frame_locked()
+    if why:
+        return _err(why)
+    b = request.get_json(force=True, silent=True) or {}
     m = sh.mount
-    if "forward_axis" in b:
-        ok, why = m.set_declared(b["forward_axis"])
-        if not ok:
-            return _err(why)
-    if "lever_cad" in b:
-        ok, why = m.set_lever_cad(b["lever_cad"])
-        if not ok:
-            return _err(why)
-    if "lever_use" in b:
-        ok, why = m.set_lever_use(b["lever_use"])
+    for pair, on in (b.get("flip") or {}).items():
+        ok, why = m.set_flip(pair, on)
         if not ok:
             return _err(why)
     return _ok(mount=m.snapshot())
@@ -482,30 +511,34 @@ def api_sensors_mount():
 
 @app.post("/api/sensors/mount/reset")
 def api_sensors_mount_reset():
-    """Forget the measured mount rotation (and the fitted lever) — values go back to chip axes."""
+    """Forget the measured mount rotation — values go back to chip axes."""
     sh, why = _sense()
     if why:
         return _err(why)
+    why = _frame_locked()
+    if why:
+        return _err(why)
+    sh.seq_cancel()
     sh.mount.reset()
     return _ok(mount=sh.mount.snapshot())
 
 
-@app.post("/api/sensors/lever")
-def api_sensors_lever():
-    """`start` begins recording a rocking excitation, `stop` fits the lever arm from it."""
+@app.post("/api/sensors/noise")
+def api_sensors_noise():
+    """`start` records the IMU at full rate while the robot stands still, `stop` analyses it
+    (imunoise.analyze) and saves the raw record under data/imu_noise/."""
     sh, why = _sense()
     if why:
         return _err(why)
     b = request.get_json(force=True, silent=True) or {}
     action = b.get("action", "start")
     if action == "start":
-        r = sh.lever_start()
+        r = sh.noise_start()
     elif action == "stop":
-        r = sh.lever_stop()
+        r = sh.noise_stop()
     else:
-        return _err(f"unknown lever action '{action}'")
-    return _ok(mount=sh.mount.snapshot(), fit=r.get("fit")) if r.get("ok") \
-        else _err(r.get("error", "lever-arm fit failed"))
+        return _err(f"unknown noise action '{action}'")
+    return _ok(result=r.get("result")) if r.get("ok") else _err(r.get("error", "recording failed"))
 
 
 # ===================================================================== e-stop / mode
@@ -2141,8 +2174,8 @@ def api_mock_drag():
 
 @app.post("/api/mock/sensors")
 def api_mock_sensors():
-    """Pose the simulated IMU (still / tilt / rock) so the mount calibration can be walked through
-    end to end without the robot."""
+    """Pose the simulated IMU (still / fwd / left / right / back) so the mount calibration can be
+    walked through end to end without the robot."""
     if not STATE["mock"]:
         return _err("mock mode only", 403)
     sh, why = _sense()

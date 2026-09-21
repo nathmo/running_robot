@@ -201,12 +201,6 @@
           <span>pitch <b id="sns-pitch">—</b>°</span>
           <span>yaw <b id="sns-yaw">—</b>°</span>
         </div>
-        <div class="row small">
-          <button id="btn-gyro-bias" class="btn small" title="Average the gyro's zero-rate offset.
-The robot must stand completely still for ~1.5 s — the attitude filter restarts from level
-afterwards.">⌖ Zero gyro (hold still)</button>
-        </div>
-        <div id="sns-bias" class="hint"></div>
         <div id="sns-mount" class="hint"></div>
       </div>
 
@@ -261,53 +255,52 @@ afterwards.">⌖ Zero gyro (hold still)</button>
           </div>
 
           <div class="sns-cal-step">
-            <b>2 — Fore-aft axis</b>
-            <span class="hint">Gravity cannot see rotation <i>about</i> the vertical — the DOF that
-              separates <b>pitch from roll</b>. Fix it either by tipping the robot nose-down
-              10–20° and capturing (the angle itself does not matter, only the direction), or by
-              declaring which chip axis points forward. Do both and they cross-check each other:
-              a large disagreement means the HAT is not bolted on square.</span>
+            <b>2 — Zero gyro</b>
+            <span class="hint">Averages the gyro's zero-rate offset over 1.5 s. The robot must be
+              completely still; the attitude filter restarts from the accelerometer afterwards.
+              Redo it after the robot warms up — the offset drifts with temperature.</span>
             <div class="row small">
-              <button id="btn-cap-forward" class="btn small">📐 Capture nose-down tilt</button>
-              <label>declared forward
-                <select id="sns-fwd-axis" class="txt small">
-                  <option value="">— none —</option>
-                  <option value="+x">chip +X</option><option value="-x">chip −X</option>
-                  <option value="+y">chip +Y</option><option value="-y">chip −Y</option>
-                </select></label>
+              <button id="btn-gyro-bias" class="btn small primary">⌖ Zero gyro (hold still)</button>
+              <span id="sns-bias" class="hint"></span>
             </div>
-            <div id="cap-fwd-status" class="hint"></div>
-            <div id="sns-crosscheck" class="hint"></div>
           </div>
 
           <div class="sns-cal-step">
-            <b>3 — Lever arm <span class="hint">IMU position relative to the base centre, metres</span></b>
-            <span class="hint">An IMU offset from the base also measures α×r + ω×(ω×r) whenever the
-              body rotates — zero at rest, but a bias on roll/pitch exactly while running. Type the
-              CAD vector, and/or fit one by rocking the robot. <b>The fit is relative to the point
-              the rocking rotated about</b> (the hang point on the rig), not the base centre — the
-              two agree only insofar as those coincide.</span>
+            <b>3 — Axes: tilt sequence</b>
+            <span class="hint">Gravity cannot see rotation <i>about</i> the vertical, so it cannot
+              tell pitch from roll by itself. Start the sequence, then tilt the robot
+              <b>forward, left, right, backward</b>, 10–20° each, coming back upright in between.
+              Each tilt is captured automatically once it is held still. Forward/backward and
+              left/right check each other; if the result is the wrong way round, flip it.</span>
             <div class="row small">
-              <label>CAD x <input type="number" id="lev-x" class="num small" step="0.001"></label>
-              <label>y <input type="number" id="lev-y" class="num small" step="0.001"></label>
-              <label>z <input type="number" id="lev-z" class="num small" step="0.001"></label>
-              <button id="btn-lever-save" class="btn small">Save CAD vector</button>
+              <button id="btn-seq" class="btn small primary">▶ Start tilt sequence</button>
+              <span id="seq-live" class="seq-live"></span>
             </div>
+            <div id="seq-msg" class="seq-msg hidden"></div>
+            <div id="seq-tilts" class="seq-tilts"></div>
+            <div id="seq-axes" class="seq-axes"></div>
+            <div id="seq-checks" class="hint"></div>
             <div class="row small">
-              <button id="btn-lever-fit" class="btn small">⟳ Fit by rocking…</button>
-              <span id="lever-fit-status" class="hint"></span>
-            </div>
-            <div id="lever-compare" class="hint"></div>
-            <div class="row small">
-              <label>compensate using
-                <select id="sns-lever-use" class="txt small">
-                  <option value="cad">CAD vector</option>
-                  <option value="fit">fitted vector</option>
-                  <option value="none">nothing</option>
-                </select></label>
+              <button id="btn-flip-fa" class="btn small toggle" title="Treat the forward/backward
+tilts the other way round (the robot's front was the other end)">⇄ flip fore/aft</button>
+              <button id="btn-flip-lat" class="btn small toggle" title="Treat the left/right tilts
+the other way round">⇄ flip left/right</button>
               <span class="spacer"></span>
               <button id="btn-mount-reset" class="btn small">Reset mount calibration</button>
             </div>
+          </div>
+
+          <div class="sns-cal-step">
+            <b>4 — Noise <span class="hint">record while the robot stands still</span></b>
+            <span class="hint">Records the IMU at its full rate: accelerometer and gyro noise
+              (RMS and density), what is left of the gyro zero, and the pitch/roll jitter the
+              ⚖ Balance loop steers on. A record where the robot moved is flagged, not trusted.
+              The raw data is saved under data/imu_noise/.</span>
+            <div class="row small">
+              <button id="btn-noise" class="btn small">● Record</button>
+              <span id="noise-status" class="hint"></span>
+            </div>
+            <div id="noise-result" class="noise-result"></div>
           </div>
         </div>
 
@@ -414,7 +407,9 @@ not quite level">pitch trim <input type="number" id="bal-pitch" value="0" min="-
   <section class="panel wide" id="panel-ee">
     <h2>Digital twin — homing-pose MJCF
       <span class="hint">qpos = sign · normalized° (0° = the homing pose the drives are zeroed in) ∙
-        drag to orbit, wheel to zoom ∙ axes: x red fwd, y green left, z blue up</span>
+        drag to orbit, wheel to zoom ∙ axes: x red fwd, y green left, z blue up ∙ yellow = the
+        fixed world marker (level ring + plumb line); the base turns about the torso origin, pale
+        axes turn with it</span>
     </h2>
     <div class="twin-wrap">
       <canvas id="twin-canvas"></canvas>
@@ -423,7 +418,11 @@ not quite level">pitch trim <input type="number" id="bal-pitch" value="0" min="-
         <button class="btn small" data-twin-view="right">right side</button>
         <button class="btn small" data-twin-view="front">front</button>
         <button class="btn small" data-twin-view="iso">3/4</button>
+        <label class="twin-imu" title="Tilt the twin's base by the IMU's pitch and roll (yaw stays 0:
+it drifts). Needs the IMU mount calibration."><input type="checkbox" id="twin-imu" checked> IMU
+          pitch/roll</label>
       </div>
+      <div id="twin-att" class="twin-att"></div>
       <div id="twin-banner" class="twin-banner hidden"></div>
     </div>
     <div id="twin-status" class="hint mono"></div>
@@ -935,14 +934,16 @@ speed. Amplitude and frequency trade off (peak speed = 2*pi*f*A), so more range 
       <button id="btn-mock-stop" class="btn small">stop sweeps</button>
     </div>
     <div class="row">
-      <span class="hint">simulated IMU pose — the three motions the mount calibration asks for
-        (the mock mounts the HAT at a known rotation and lever arm, so the procedure can be checked
-        against the answer it should find):</span>
+      <span class="hint">simulated IMU pose — what the tilt sequence asks for (the mock mounts
+        the HAT at a known rotation, so the procedure can be checked against the answer it should
+        find):</span>
     </div>
     <div class="row">
-      <button id="btn-mock-still" class="btn small">upright &amp; still</button>
-      <button id="btn-mock-tilt" class="btn small">nose-down tilt</button>
-      <button id="btn-mock-rock" class="btn small">rock (two axes)</button>
+      <button data-mock-pose="still" class="btn small">upright &amp; still</button>
+      <button data-mock-pose="fwd" class="btn small">tilt forward</button>
+      <button data-mock-pose="left" class="btn small">tilt left</button>
+      <button data-mock-pose="right" class="btn small">tilt right</button>
+      <button data-mock-pose="back" class="btn small">tilt backward</button>
     </div>
   </section>
   </div>

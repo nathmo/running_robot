@@ -15,6 +15,11 @@
  * site at -397.97 mm is the rod's outer EDGE, 9 mm further). The passive joints (pushrod on cam,
  * foot on thigh) are then solved each frame in closed form so both sides of the loop put the pin at
  * the same point, always on the assembly branch the CAD was exported in (see solveLoops).
+ *
+ * The base.  setBase(up_body) tilts the whole robot by the IMU's pitch and roll (yaw is left at 0:
+ * it is gyro-integrated and drifts). The rotation is about the torso origin, which never moves, so
+ * the robot can only turn relative to the fixed world marker drawn around that point — a level
+ * ring, a plumb line and the world triad.
  */
 "use strict";
 (() => {
@@ -109,7 +114,7 @@
   }
 
   /* ---------------- kinematics ---------------- */
-  function fk(roots) {
+  function fk(roots, Rb = I3()) {
     const go = (b, Rp, pp) => {
       let R = mm(Rp, b.R0), p = add(pp, mv(Rp, b.p0));
       if (b.joint && b.q) {                      // hinge at joint.pos about joint.axis (body frame)
@@ -120,7 +125,7 @@
       b.R = R; b.p = p;
       for (const c of b.children) go(c, R, p);
     };
-    for (const r of roots) go(r, I3(), [0, 0, 0]);
+    for (const r of roots) go(r, Rb, [0, 0, 0]);     // the base turns about the world origin
   }
   const chain = (b) => { const out = []; for (; b; b = b.parent) out.push(b); return out; };
 
@@ -194,7 +199,7 @@
     for (const L of model.loops) {
       L.rod.q = 0; L.other.q = 0;
     }
-    fk(model.roots);
+    fk(model.roots, model.baseR);
     for (const L of model.loops) {
       const g = loopGeom(L), d = g.flat(sub(g.K, g.P)), D = Math.hypot(...d);
       if (D < 1e-9) continue;
@@ -206,7 +211,7 @@
       L.other.q = angleAbout(nrm(mv(L.other.R, L.other.joint.axis)),
         g.flat(sub(g.B0, g.K)), g.flat(sub(X, g.K)));
     }
-    fk(model.roots);
+    fk(model.roots, model.baseR);
     for (const L of model.loops) L.resid = Math.hypot(...loopResidual(L));
   }
 
@@ -292,6 +297,7 @@ void main(){ vec3 n = normalize(vN);
           const col = COLOR_OF_BODY.find(([re]) => re.test(b.name));
           b.color = col ? col[1] : [0.7, 0.7, 0.7];
         }
+        model.baseR = I3();
         fk(model.roots);
         model.loops = findLoops(model);
         model.byMotor = {};
@@ -335,6 +341,30 @@ void main(){ vec3 n = normalize(vN);
       return m.loops.map((L) => ({ name: L.name, resid: L.resid }));
     }
 
+    /** Tilt the base by the measured attitude. up: world-up in BODY axes (the IMU filter's
+     *  up_body), or null for level. Returns {pitch, roll} in degrees (+pitch = nose down,
+     *  +roll = leaning right), the same convention as balance.py. */
+    setBase(up) {
+      let pitch = 0, roll = 0;
+      if (up && up.every(Number.isFinite) && Math.hypot(...up) > 1e-6) {
+        const [ux, uy, uz] = up;
+        roll = Math.atan2(uy, uz);
+        pitch = Math.atan2(-ux, Math.hypot(uy, uz));
+      }
+      // world <- body = Ry(pitch) Rx(roll): exactly the rotation whose transpose maps world up to
+      // `up`, with no yaw
+      const cp = Math.cos(pitch), sp = Math.sin(pitch), cr = Math.cos(roll), sr = Math.sin(roll);
+      const R = [cp, sp * sr, sp * cr, 0, cr, -sr, -sp, cp * sr, cp * cr];
+      const out = { pitch: pitch * 180 / Math.PI, roll: roll * 180 / Math.PI };
+      const m = this.model;
+      this.baseR = R;
+      if (!m) return out;
+      m.baseR = R;
+      fk(m.roots, R);                            // the loops are rotation invariant: no re-solve
+      this.dirty = true;
+      return out;
+    }
+
     view(name) {
       if (!VIEWS[name]) return;
       [this.az, this.el] = VIEWS[name];
@@ -361,10 +391,31 @@ void main(){ vec3 n = normalize(vN);
       const r = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2;
       this.dist = 1.15 * r / Math.sin(0.275);
       this.home = { center: this.center, dist: this.dist };
+      this._marker(lo[2]);
       this.dirty = true;
     }
 
-    _axes() {                                     // world triad at the torso origin, 10 cm
+    /** The fixed world reference: a level ring and cross around the torso origin (the point the
+     *  base turns about), a plumb line down to the lowest point of the robot as loaded, and a
+     *  ring there. None of it moves with the robot. */
+    _marker(zLow) {
+      const g = this.gl, P = [], ring = (r, z, n = 64) => {
+        for (let i = 0; i < n; i++) {
+          const a0 = 2 * Math.PI * i / n, a1 = 2 * Math.PI * (i + 1) / n;
+          P.push(r * Math.cos(a0), r * Math.sin(a0), z, r * Math.cos(a1), r * Math.sin(a1), z);
+        }
+      };
+      ring(0.16, 0);
+      P.push(-0.2, 0, 0, 0.2, 0, 0, 0, -0.2, 0, 0, 0.2, 0);          // level cross
+      P.push(0, 0, 0, 0, 0, zLow);                                   // plumb line
+      ring(0.25, zLow);
+      P.push(-0.3, 0, zLow, 0.3, 0, zLow, 0, -0.3, zLow, 0, 0.3, zLow);
+      const b = (a) => { const x = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, x);
+        g.bufferData(g.ARRAY_BUFFER, new Float32Array(a), g.STATIC_DRAW); return x; };
+      this.marker = { pos: b(P), nor: b(P.map((_, i) => (i % 3 === 2 ? 1 : 0))), n: P.length / 3 };
+    }
+
+    _axes() {                                     // triad at the torso origin, 10 cm
       const g = this.gl, P = [], N = [];
       for (let k = 0; k < 3; k++) { const e = [0, 0, 0]; e[k] = 0.1; P.push(0, 0, 0, ...e); N.push(0, 0, 1, 0, 0, 1); }
       const b = (a) => { const x = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, x);
@@ -421,12 +472,26 @@ void main(){ vec3 n = normalize(vN);
           g.drawArrays(g.TRIANGLES, 0, buf.n);
         }
       }
-      // world triad drawn on top: x red (forward), y green (left), z blue (up)
-      g.disable(g.DEPTH_TEST); g.uniform1f(L.uFlat, 1);
+      // the fixed world marker, depth-tested so the robot can hide parts of it
+      g.uniform1f(L.uFlat, 1);
       g.uniformMatrix4fv(L.uM, false, m4(I3(), [0, 0, 0]));
+      if (this.marker) {
+        bind(this.marker.pos, this.marker.nor);
+        g.uniform3fv(L.uColor, [0.95, 0.80, 0.30]);
+        g.drawArrays(g.LINES, 0, this.marker.n);
+      }
+      // triads drawn on top: the WORLD one (fixed; x red forward, y green left, z blue up) and,
+      // when the base is tilted, the BODY one turning with it, paler
+      g.disable(g.DEPTH_TEST);
       bind(this.axes.pos, this.axes.nor);
       [[1, 0.3, 0.3], [0.3, 1, 0.3], [0.4, 0.6, 1]].forEach((col, k) => {
         g.uniform3fv(L.uColor, col); g.drawArrays(g.LINES, k * 2, 2); });
+      const Rb = this.model.baseR;
+      if (Rb && Rb.some((v, i) => Math.abs(v - I3()[i]) > 1e-6)) {
+        g.uniformMatrix4fv(L.uM, false, m4(Rb.map((v) => v * 1.4), [0, 0, 0]));
+        [[1, 0.7, 0.7], [0.7, 1, 0.7], [0.75, 0.85, 1]].forEach((col, k) => {
+          g.uniform3fv(L.uColor, col); g.drawArrays(g.LINES, k * 2, 2); });
+      }
     }
   }
 

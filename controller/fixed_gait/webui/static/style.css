@@ -154,6 +154,29 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 .sns-cal-step > .hint { display: block; line-height: 1.4; }
 .sns-cal-view canvas { width: 100%; height: 330px; display: block; background: #0f1319;
   border: 1px solid var(--line); border-radius: 8px; touch-action: none; }
+.seq-live { font: 12px ui-monospace, monospace; color: var(--dim); }
+.seq-msg { margin: 6px 0; padding: 8px 10px; border-radius: 6px; font-size: 15px; font-weight: 600;
+  background: #1c4a80; border: 1px solid var(--accent); color: #fff; }
+.seq-msg.retry { background: #3a2a0a; border-color: var(--warn); color: #ffd684; }
+.seq-msg.done { background: #173a22; border-color: var(--good); color: #bfe8c8; }
+.seq-tilts { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 6px;
+  margin: 6px 0; }
+.seq-tilt { border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; font-size: 12px;
+  display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+.seq-tilt.now { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.seq-tilt.ok { border-color: var(--good); }
+.seq-tilt.weak, .seq-tilt.off { border-color: var(--warn); }
+.seq-tilt .hint { font-size: 11px; }
+.seq-tilt button { padding: 1px 6px; font-size: 11px; }
+.seq-axes { font: 13px ui-monospace, monospace; margin: 4px 0; }
+.seq-axes b { color: var(--accent); }
+.btn.toggle.on { background: #5a3d0a; border-color: var(--warn); color: #ffd684; }
+.noise-result table { border-collapse: collapse; font: 12px ui-monospace, monospace; margin-top: 6px;
+  width: 100%; }
+.noise-result th, .noise-result td { padding: 2px 6px; text-align: right; border-bottom: 1px solid var(--line); }
+.noise-result th:first-child, .noise-result td:first-child { text-align: left; color: var(--dim); }
+.noise-result .verdict { margin-top: 6px; font-size: 12px; }
+.noise-result .verdict.bad { color: var(--warn); }
 .sns-axis-key { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; }
 .sns-axis-key i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
 
@@ -242,6 +265,11 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 .twin-banner { position: absolute; top: 8px; right: 8px; max-width: 55%; padding: 5px 9px;
   border: 1px solid var(--warn); background: #3a2a0acc; color: #ffd684; border-radius: 6px;
   font-size: 12px; }
+.twin-imu { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 2px 8px;
+  background: #1c2129cc; border: 1px solid var(--line); border-radius: 6px; }
+.twin-att { position: absolute; bottom: 8px; left: 8px; padding: 3px 8px; border-radius: 6px;
+  background: #0e141bcc; font: 12px ui-monospace, monospace; color: var(--fg); }
+.twin-att.off { color: var(--dim); }
 #twin-status { margin: 6px 2px; white-space: pre-wrap; font-family: monospace; font-size: 11.5px; }
 #twin-signs select { margin-right: 10px; }
 

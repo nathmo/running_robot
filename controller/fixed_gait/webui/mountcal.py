@@ -1,41 +1,32 @@
 #!/usr/bin/env python3
-"""Where the Sense HAT's IMU sits on DASH-01, and how its axes relate to the robot's.
+"""How the Sense HAT's IMU is rotated on DASH-01: chip axes -> body axes (X forward, Y left, Z up).
 
-Two independent things live here, both persisted to `data/sensehat_mount.json`:
+Measured, not declared, because the HAT is bolted UNDER the robot and reads gravity on chip -Z.
+Persisted to `data/sensehat_mount.json`.
 
-**1. The mount ROTATION** — chip axes -> body axes (X forward, Y left, Z up). Measured, not
-declared, because the HAT is bolted UNDER the robot and reads gravity on chip -Z.
+    Upright capture  robot hung upright and still  ->  up_chip = the measured specific force.
+    Tilt sequence    forward, left, right, back    ->  the heading of the mount about the vertical.
 
-    Level capture   robot hung upright and still  ->  up_chip = the measured specific force.
-    Forward capture robot tipped nose-down, still ->  the fore-aft axis and its sign.
+The tilts are not optional bookkeeping: **gravity fixes only two of the three rotation DOF.**
+Rotation *about* the vertical is invisible to an accelerometer at rest, and that is exactly the DOF
+separating pitch from roll — the axis every balance question on this robot is about.
 
-The second capture is not optional bookkeeping: **gravity fixes only two of the three rotation
-DOF.** Rotation *about* the vertical is invisible to an accelerometer at rest, and that is exactly
-the DOF separating pitch from roll — the axis every balance question on this robot is about. A
-declared axis (`set_declared`) can stand in for the tilt capture, and when both exist they are
-cross-checked: a disagreement means the HAT is not bolted on square.
+Each tilt contributes one direction: the HORIZONTAL part of (tilted up - upright up), in chip axes.
+Tipping the robot nose-down swings the measured up-vector toward body -X, leaning it to the left
+swings it toward body -Y, and so on (TILT_TARGET). Two captures would pin the heading; four make it
+checkable. Forward and back must point opposite ways, so must left and right, and the fore-aft pair
+must sit 90 deg from the lateral pair ON THE RIGHT-HANDED SIDE. A tilt done in the wrong direction
+shows up as a pair that disagrees, instead of as a quietly wrong frame.
 
-What the level capture does NOT do is separate accelerometer bias from mount misalignment — a robot
-tilted 1 deg and a sensor with a 17 mg cross-axis bias produce the identical reading. It does not
-need to: both are absorbed into the frame in which the reference pose reads roll = pitch = 0. A
-true per-axis bias+scale calibration needs a 6-orientation tumble, which is not happening with a
-15 kg robot for a sensor already within 1% of 1 g.
+Flips. The operator can negate what either pair is taken to mean (the robot's front was the other
+end, or left and right were swapped). A rotation cannot flip one horizontal axis alone — that is a
+mirror, and no bolted-on HAT is a mirror — so flipping ONE pair of a consistent calibration puts the
+two pairs in conflict. The conflict is shown, never averaged: the fore-aft pair then sets the frame
+on its own and the lateral pair is reported as disagreeing until it is flipped too.
 
-**2. The LEVER ARM** — the IMU's position relative to the base centre. An accelerometer offset from
-the point you care about measures the rotational terms too:
-
-    a_imu = a_base + alpha x r + omega x (omega x r)
-
-At rest those vanish (so they never disturb the calibration above), but while the robot is running
-they bias roll/pitch exactly when it matters. Two sources, deliberately kept side by side:
-`lever_cad` typed in from CAD, and `lever_fit` regressed from a rocking excitation.
-
-**Read the fit's reference point before comparing them.** A single IMU cannot observe its position
-relative to the base centre: `a_base` above is unknown, so `r` is not separable. It becomes
-identifiable only when the motion is rotation about a FIXED PIVOT, where `a_base` is itself a
-function of the pivot and the fit returns `r_pivot->imu`. Hung on the test rig, the pivot is the
-hang point — so the fit equals the CAD vector only insofar as the base centre sits at the pivot,
-and the two otherwise differ by exactly the pivot offset. `lever_fit["about"]` says so out loud.
+What the upright capture does NOT do is separate accelerometer bias from mount misalignment — a
+robot tilted 1 deg and a sensor with a 17 mg cross-axis bias produce the identical reading. It does
+not need to: both are absorbed into the frame in which the reference pose reads roll = pitch = 0.
 """
 import json
 import math
@@ -55,6 +46,18 @@ AXIS_VECTORS = {"+x": (1.0, 0.0, 0.0), "-x": (-1.0, 0.0, 0.0),
                 "+y": (0.0, 1.0, 0.0), "-y": (0.0, -1.0, 0.0),
                 "+z": (0.0, 0.0, 1.0), "-z": (0.0, 0.0, -1.0)}
 
+# The tilt sequence, in the order the operator is asked for it.
+TILTS = ("fwd", "left", "right", "back")
+TILT_LABEL = {"fwd": "forward (nose down)", "left": "left (left side down)",
+              "right": "right (right side down)", "back": "backward (nose up)"}
+# Where the up-vector's horizontal swing points, in BODY axes, for each tilt. Leaning toward +X
+# (nose down) is a positive rotation about +Y, which carries world-up toward body -X.
+TILT_TARGET = {"fwd": (-1.0, 0.0, 0.0), "back": (1.0, 0.0, 0.0),
+               "left": (0.0, -1.0, 0.0), "right": (0.0, 1.0, 0.0)}
+PAIR_OF = {"fwd": "fore_aft", "back": "fore_aft", "left": "lateral", "right": "lateral"}
+
+PAIR_OK_DEG = 15.0              # a pair (or the two pairs' right angle) this far off is flagged
+
 
 def _unit(v):
     v = np.asarray(v, float)
@@ -62,16 +65,11 @@ def _unit(v):
     return v / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
 
 
-def skew(v):
-    return np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
-
-
 def rotation_from(up_chip, fwd_chip):
     """Rotation taking a vector from CHIP axes to BODY axes (X forward, Y left, Z up).
 
     Its rows are the body axes written in chip coordinates. `fwd_chip` is orthogonalised against
-    `up_chip` rather than trusted: the tilt capture's horizontal projection is only as clean as the
-    hand that tipped the robot, and the two captures need not be exactly perpendicular."""
+    `up_chip` rather than trusted: the tilts are only as clean as the hands that made them."""
     z = _unit(up_chip)
     x = np.asarray(fwd_chip, float)
     x = x - np.dot(x, z) * z
@@ -88,74 +86,37 @@ def angle_between(a, b):
     return math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(a, b))))))
 
 
-def estimate_lever(samples, min_omega=0.6):
-    """Least-squares fit of the IMU's position relative to the pivot the motion rotated about.
-
-    `samples`: iterable of (f_body [m/s^2], omega [rad/s], alpha [rad/s^2], up_body [unit]), all in
-    BODY axes. Rearranging the rigid-body relation with a_pivot = 0:
-
-        a_imu = f_imu + g  =  (skew(alpha) + skew(omega)^2) r
-
-    which is linear in r — three rows per sample, three unknowns. Samples too slow to carry
-    information (|omega| under `min_omega` rad/s) are dropped rather than diluting the fit with rows
-    of near-zero.
-
-    Returns a dict with the fit AND what it is worth: the residual, the condition number, and how
-    much of a SECOND rotation axis the excitation actually contained. A fit from rocking about one
-    axis is rank-deficient along that axis — the number that comes back looks perfectly reasonable
-    and means nothing — so `axis_coverage` is reported for the caller to judge."""
-    rows, rhs, axes, wmax = [], [], [], 0.0
-    for f, w, al, up in samples:
-        w = np.asarray(w, float)
-        wn = np.linalg.norm(w)
-        wmax = max(wmax, wn)
-        if wn < min_omega:
-            continue
-        A = skew(np.asarray(al, float)) + skew(w) @ skew(w)
-        a_imu = np.asarray(f, float) + (-G0) * _unit(up)      # g points opposite the measured up
-        rows.append(A)
-        rhs.append(a_imu)
-        axes.append(w / wn)
-    n = len(rows)
-    if n < 60:
-        return {"ok": False, "error": f"only {n} samples had enough rotation "
-                                      f"(peak |omega| {math.degrees(wmax):.0f} deg/s) — rock the "
-                                      f"robot harder, about two different axes"}
-    A = np.vstack(rows)
-    b = np.concatenate(rhs)
-    r, _, _, sv = np.linalg.lstsq(A, b, rcond=None)
-    resid = float(np.sqrt(np.mean((A @ r - b) ** 2)))
-    cond = float(sv[0] / sv[-1]) if sv[-1] > 1e-12 else float("inf")
-
-    # Did the excitation contain a SECOND rotation axis? Measured sign-invariantly, as the second
-    # eigenvalue of the axis scatter matrix: an axis and its negative are the same axis, so a
-    # rocking oscillation must not be allowed to score as "two directions" just by reversing.
-    # 0 = every rotation was about one line, 1 = isotropic.
-    ax = np.array(axes)
-    lam = np.linalg.eigvalsh(ax.T @ ax / len(ax))[::-1]
-    coverage = float(lam[1] / lam[0]) if lam[0] > 1e-12 else 0.0
-    return {"ok": True, "r": [float(v) for v in r], "samples": n,
-            "residual_ms2": resid, "cond": cond, "axis_coverage": coverage,
-            "peak_omega_dps": math.degrees(wmax),
-            "weak": coverage < 0.05 or cond > 200.0}
+def nearest_chip_axis(v):
+    """('+x' | ... , degrees off it) — which chip axis a chip-frame direction is closest to."""
+    v = _unit(v)
+    k = int(np.argmax(np.abs(v)))
+    name = ("+" if v[k] >= 0 else "-") + "xyz"[k]
+    return name, angle_between(v, AXIS_VECTORS[name])
 
 
 class MountCal:
-    """The persisted mount calibration. Thread-safe: the poll thread reads `R`/`lever` every tick
-    while Flask handlers write captures."""
+    """The persisted mount calibration. Thread-safe: the poll thread reads `R` every tick while
+    Flask handlers write captures."""
+
+    # A small tilt is the trap in this step. The heading is the HORIZONTAL part of the gravity
+    # change, so an unintended sideways lean while tipping rotates it by roughly
+    # atan(lean / tilt): at a 4 deg tilt, 1 deg of accidental lean is 14 deg of heading error,
+    # while at 15 deg it is under 4. Shallow tilts are accepted but flagged.
+    TILT_MIN_DEG = 3.0
+    TILT_GOOD_DEG = 8.0
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.up_chip = None             # measured at the level capture (unit, chip axes)
-        self.fwd_chip = None            # from the tilt capture (unit, chip axes)
-        self.fwd_declared = None        # "+x" / "-x" / "+y" / "-y", the asserted forward axis
-        self.captures = {}              # kind -> {when, spread, mag, n}
-        self.lever_cad = None           # [x,y,z] m, base centre -> IMU, typed in from CAD
-        self.lever_fit = None           # estimate_lever() result + {"about": ...}
-        self.lever_use = "cad"          # which one feeds the live compensation: cad | fit | none
+        self.up_chip = None             # measured at the upright capture (unit, chip axes)
+        # direction -> {"acc": raw mean chip accel (g) | None, "d": legacy horizontal dir | None,
+        #               "tilt_deg", "weak", "when", ...}
+        self.tilts = {}
+        self.flip = {"fore_aft": False, "lateral": False}
+        self.captures = {}              # "level" -> {when, spread, mag, n}
         self.reference = "hung on the test rig"
         self.updated = None
         self._R = np.eye(3)             # cached; rebuilt on every mutation
+        self._check = {}                # consistency report of the last rebuild
         # Bumped whenever the rotation changes. An attitude filter's state is expressed in the
         # frame it was integrated in, so it is meaningless the instant that frame moves — the poll
         # thread watches this counter and restarts the filter rather than slowly (or never)
@@ -163,18 +124,84 @@ class MountCal:
         self.version = 0
 
     # ------------------------------------------------------------------ derived
+    def _tilt_dir(self, t):
+        """The horizontal swing of the up-vector for one tilt, chip axes (unit), or None."""
+        if t.get("acc") is not None and self.up_chip is not None:
+            up = np.asarray(self.up_chip, float)
+            d = np.asarray(t["acc"], float) - up
+            h = d - np.dot(d, up) * up
+            return _unit(h) if np.linalg.norm(h) > 1e-4 else None
+        if t.get("d") is not None:                  # migrated from the old one-tilt calibration
+            return _unit(t["d"])
+        return None
+
+    def _solve(self):
+        """(fwd_chip or None, check dict). Each tilt says where one body axis points in chip axes;
+        the fore-aft pair gives +X directly, the lateral pair gives +Y and hence +X = Y x Z."""
+        z = _unit(self.up_chip)
+        flat = lambda v: v - np.dot(v, z) * z           # noqa: E731
+        sgn = {p: (-1.0 if self.flip[p] else 1.0) for p in self.flip}
+        dirs = {k: self._tilt_dir(t) for k, t in self.tilts.items()}
+        dirs = {k: d for k, d in dirs.items() if d is not None}
+        # each tilt's vote for body +X (fore-aft) or body +Y (lateral), in chip axes
+        vote = {}
+        for k, d in dirs.items():
+            tgt = np.asarray(TILT_TARGET[k]) * sgn[PAIR_OF[k]]
+            vote[k] = d * (tgt[0] + tgt[1])            # target is +-X or +-Y: undo its sign
+        chk = {"pairs": {}, "right_angle_deg": None, "conflict": False, "used": []}
+        axes = {}
+        for pair, (a, b) in (("fore_aft", ("fwd", "back")), ("lateral", ("left", "right"))):
+            have = [k for k in (a, b) if k in vote]
+            if not have:
+                continue
+            if len(have) == 2:
+                # both of a pair should vote for the SAME axis; how far apart they are is the check
+                dis = angle_between(vote[a], vote[b])
+                chk["pairs"][pair] = {"disagree_deg": dis, "n": 2, "excluded": dis > 90.0}
+                if dis > 90.0:
+                    # one of the two was tilted the wrong way: their sum is noise, and which one
+                    # is wrong cannot be told from the pair alone — leave the pair out entirely
+                    continue
+            else:
+                chk["pairs"][pair] = {"disagree_deg": None, "n": 1, "excluded": False}
+            axes[pair] = _unit(flat(sum(vote[k] for k in have)))
+        x_fa = axes.get("fore_aft")
+        x_lat = None if "lateral" not in axes else _unit(np.cross(axes["lateral"], z))
+        if x_fa is not None and x_lat is not None:
+            # 0 = the pairs are exactly at right angles on the right-handed side; 180 = mirrored
+            chk["right_angle_deg"] = angle_between(x_fa, x_lat)
+            if chk["right_angle_deg"] > 90.0:
+                chk["conflict"] = True                  # never average a mirror into the frame
+                chk["used"] = ["fore_aft"]
+                return x_fa, chk
+            chk["used"] = ["fore_aft", "lateral"]
+            return _unit(x_fa + x_lat), chk
+        if x_fa is not None:
+            chk["used"] = ["fore_aft"]
+            return x_fa, chk
+        if x_lat is not None:
+            chk["used"] = ["lateral"]
+            return x_lat, chk
+        return None, chk
+
     def _rebuild(self):
         self.version += 1
-        fwd = self.fwd_chip
-        if fwd is None and self.fwd_declared and self.up_chip is not None:
-            # A declared body axis is a statement about the CHIP axis that points forward, so it is
-            # already a chip-frame vector — it only needs squaring up against measured gravity.
-            fwd = AXIS_VECTORS[self.fwd_declared]
-        if self.up_chip is None or fwd is None:
+        self._check = {}
+        if self.up_chip is None:
             self._R = np.eye(3)
             return
-        R = rotation_from(self.up_chip, fwd)
+        fwd, self._check = self._solve()
+        R = None if fwd is None else rotation_from(self.up_chip, fwd)
         self._R = np.eye(3) if R is None else R
+        if R is not None:
+            # per-tilt residual: where the fitted frame puts each tilt vs where it should be
+            sgn = {p: (-1.0 if self.flip[p] else 1.0) for p in self.flip}
+            res = {}
+            for k, t in self.tilts.items():
+                d = self._tilt_dir(t)
+                if d is not None:
+                    res[k] = angle_between(R @ d, np.asarray(TILT_TARGET[k]) * sgn[PAIR_OF[k]])
+            self._check["residual_deg"] = res
 
     @property
     def R(self):
@@ -194,160 +221,135 @@ class MountCal:
 
     @property
     def calibrated(self):
-        return self.up_chip is not None and (self.fwd_chip is not None or self.fwd_declared)
-
-    def lever(self):
-        """The lever arm actually used for compensation, in body axes, or None."""
         with self._lock:
-            if self.lever_use == "cad" and self.lever_cad is not None:
-                return tuple(float(v) for v in self.lever_cad)
-            if self.lever_use == "fit" and self.lever_fit and self.lever_fit.get("ok"):
-                return tuple(float(v) for v in self.lever_fit["r"])
-            return None
+            return self.up_chip is not None and bool(self._check.get("used"))
 
-    def cross_check(self):
-        """Measured vs declared forward axis — the one number that says whether the HAT is square.
-        None when only one of the two exists."""
-        if self.fwd_chip is None or not self.fwd_declared:
-            return None
-        return angle_between(self.fwd_chip, AXIS_VECTORS[self.fwd_declared])
+    @property
+    def conflict(self):
+        """True while the fore-aft and lateral pairs describe a mirror (one is mislabelled)."""
+        with self._lock:
+            return bool(self._check.get("conflict"))
 
-    def lever_disagreement(self):
-        """Distance between the CAD lever and the fitted one, in metres."""
-        if self.lever_cad is None or not (self.lever_fit and self.lever_fit.get("ok")):
+    def tilt_from_upright(self, acc_chip):
+        """Degrees between a raw chip-frame accel reading and the upright reference (None before
+        the upright capture). Cheap: the sequence calls it on every IMU tick."""
+        up = self.up_chip
+        if up is None:
             return None
-        return float(np.linalg.norm(np.asarray(self.lever_cad) - np.asarray(self.lever_fit["r"])))
+        ax, ay, az = acc_chip
+        n = math.sqrt(ax * ax + ay * ay + az * az)
+        if n < 1e-6:
+            return None
+        c = (ax * up[0] + ay * up[1] + az * up[2]) / n
+        return math.degrees(math.acos(max(-1.0, min(1.0, c))))
 
     # ------------------------------------------------------------------ mutations
     def set_level(self, acc_chip, meta):
         with self._lock:
             self.up_chip = [float(v) for v in _unit(acc_chip)]
             self.captures["level"] = {"when": time.time(), **meta}
+            # the migrated one-tilt direction was measured against the OLD upright and cannot be
+            # re-derived; raw tilts can, and are (see _tilt_dir)
             self._rebuild()
         self.save()
 
-    # A small tilt is the trap in this step. The fore-aft direction is the HORIZONTAL part of the
-    # gravity change, so an unintended roll while tipping rotates it by roughly
-    # atan(roll / tilt): at a 4 deg tilt, 1 deg of accidental roll is 14 deg of fore-aft error,
-    # while at 15 deg it is under 4. The magnitude never enters the maths — but it sets how much
-    # the answer is worth, so a shallow tilt is accepted and flagged rather than silently trusted.
-    TILT_MIN_DEG = 3.0
-    TILT_GOOD_DEG = 8.0
-
-    def set_forward_from_tilt(self, acc_tilted, meta):
-        """The tilt capture. Tipping the robot NOSE-DOWN swings the measured up-vector backwards in
-        body axes, so the horizontal part of (tilted - level) points AFT and forward is its
-        negative. Only the direction is used — the tilt angle never enters the result."""
+    def set_tilt(self, which, acc_tilted, meta):
+        """One tilt of the sequence. Only the DIRECTION of the swing is used — the tilt angle never
+        enters the result, it only says how much the direction is worth."""
+        if which not in TILTS:
+            return False, f"unknown tilt '{which}' (one of {', '.join(TILTS)})"
         with self._lock:
             if self.up_chip is None:
-                return False, "capture the level reference first"
+                return False, "capture the upright reference first"
             up = np.asarray(self.up_chip, float)
-            d = np.asarray(acc_tilted, float) - up
+            acc = np.asarray(acc_tilted, float)
+            d = acc - up
             horiz = d - np.dot(d, up) * up
-            tilt_deg = angle_between(acc_tilted, up)
+            tilt_deg = angle_between(acc, up)
             if tilt_deg < self.TILT_MIN_DEG or np.linalg.norm(horiz) < 1e-3:
-                return False, (f"only {tilt_deg:.1f}° of tilt — the fore-aft direction would be "
-                               f"mostly noise. Tip the robot nose-down 10-20° and hold it still.")
+                return False, (f"only {tilt_deg:.1f}° of tilt — the direction would be mostly "
+                               f"noise. Tilt the robot {TILT_LABEL[which]} 10-20° and hold it.")
             weak = tilt_deg < self.TILT_GOOD_DEG
-            self.fwd_chip = [float(v) for v in _unit(-horiz)]
-            self.captures["forward"] = {"when": time.time(), "tilt_deg": tilt_deg, "weak": weak,
-                                        # what 1 deg of unintended roll during the tilt would cost
-                                        "roll_sensitivity_deg": math.degrees(
-                                            math.atan2(1.0, max(tilt_deg, 1e-3))),
-                                        **meta}
+            self.tilts[which] = {"acc": [float(v) for v in acc], "tilt_deg": tilt_deg, "weak": weak,
+                                 "when": time.time(), **meta}
             self._rebuild()
         self.save()
         if weak:
-            return True, (f"only {tilt_deg:.1f}° of tilt: any roll while tipping rotates the "
-                          f"fore-aft axis by ~{math.degrees(math.atan2(1.0, tilt_deg)):.0f}° per "
-                          f"degree of roll. Re-do it at 10-20° for an axis you can trust.")
+            return True, (f"only {tilt_deg:.1f}° of tilt: 1° of unintended lean rotates this "
+                          f"direction by ~{math.degrees(math.atan2(1.0, tilt_deg)):.0f}°. "
+                          f"Redo it at 10-20°.")
         return True, None
 
-    def set_declared(self, axis):
-        axis = (axis or "").lower().strip()
-        if axis in ("", "none", "null"):
-            with self._lock:
-                self.fwd_declared = None
-                self._rebuild()
-            self.save()
-            return True, None
-        if axis not in AXIS_VECTORS:
-            return False, f"forward axis must be one of {', '.join(sorted(AXIS_VECTORS))}"
+    def set_flip(self, pair, on):
+        if pair not in self.flip:
+            return False, f"flip must be one of {', '.join(self.flip)}"
         with self._lock:
-            self.fwd_declared = axis
+            self.flip[pair] = bool(on)
             self._rebuild()
         self.save()
         return True, None
 
-    def set_lever_cad(self, xyz):
-        if xyz is None:
-            with self._lock:
-                self.lever_cad = None
-        else:
-            try:
-                v = [float(x) for x in xyz]
-            except (TypeError, ValueError):
-                return False, "lever arm must be three numbers [x, y, z] in metres"
-            if len(v) != 3 or not all(math.isfinite(x) for x in v):
-                return False, "lever arm must be three finite numbers [x, y, z] in metres"
-            if max(abs(x) for x in v) > 1.0:
-                return False, "lever arm looks wrong: over 1 m from the base centre (units are metres)"
-            with self._lock:
-                self.lever_cad = v
-        self.save()
-        return True, None
-
-    def set_lever_fit(self, fit, about="the pivot the excitation rotated about"):
+    def clear_tilts(self):
         with self._lock:
-            self.lever_fit = dict(fit, about=about) if fit else None
+            self.tilts = {}
+            self.flip = {"fore_aft": False, "lateral": False}
+            self._rebuild()
         self.save()
-        return True, None
-
-    def set_lever_use(self, which):
-        if which not in ("cad", "fit", "none"):
-            return False, "lever source must be cad, fit or none"
-        with self._lock:
-            self.lever_use = which
-        self.save()
-        return True, None
 
     def reset(self):
         with self._lock:
-            self.up_chip = self.fwd_chip = self.fwd_declared = None
+            self.up_chip = None
+            self.tilts = {}
+            self.flip = {"fore_aft": False, "lateral": False}
             self.captures = {}
-            self.lever_fit = None
             self._rebuild()
         self.save()
 
     # ------------------------------------------------------------------ persistence
     @classmethod
-    def load_or_new(cls, path=MOUNT_FILE):
+    def load_or_new(cls, path=None):
+        path = path or MOUNT_FILE
         c = cls()
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8-sig") as f:
                     d = json.load(f)
                 c.up_chip = d.get("up_chip")
-                c.fwd_chip = d.get("fwd_chip")
-                c.fwd_declared = d.get("fwd_declared")
+                c.tilts = d.get("tilts") or {}
+                c.flip = {"fore_aft": False, "lateral": False, **(d.get("flip") or {})}
                 c.captures = d.get("captures") or {}
-                c.lever_cad = d.get("lever_cad")
-                c.lever_fit = d.get("lever_fit")
-                c.lever_use = d.get("lever_use", "cad")
                 c.reference = d.get("reference", c.reference)
                 c.updated = d.get("updated")
+                if not c.tilts:
+                    c._migrate(d)
                 c._rebuild()
             except (ValueError, OSError) as e:
                 print(f"(could not read {path}: {e} — starting with an uncalibrated IMU mount)")
         return c
 
-    def save(self, path=MOUNT_FILE):
+    def _migrate(self, d):
+        """The old format had one nose-down tilt (`fwd_chip` = the forward axis in chip axes) or a
+        declared forward chip axis. Either becomes a forward tilt, so an existing calibration keeps
+        working until the sequence is re-run."""
+        old = self.captures.pop("forward", {})
+        if d.get("fwd_chip"):
+            fwd = d["fwd_chip"]
+            src = "old single nose-down capture"
+        elif d.get("fwd_declared") in AXIS_VECTORS:
+            fwd = AXIS_VECTORS[d["fwd_declared"]]
+            src = f"old declared forward axis {d['fwd_declared']}"
+        else:
+            return
+        self.tilts["fwd"] = {"acc": None, "d": [-float(v) for v in fwd], "legacy": src,
+                             "tilt_deg": old.get("tilt_deg"), "weak": bool(old.get("weak")),
+                             "when": old.get("when")}
+
+    def save(self, path=None):
+        path = path or MOUNT_FILE
         with self._lock:
             self.updated = time.time()
-            d = {"up_chip": self.up_chip, "fwd_chip": self.fwd_chip,
-                 "fwd_declared": self.fwd_declared, "captures": self.captures,
-                 "lever_cad": self.lever_cad, "lever_fit": self.lever_fit,
-                 "lever_use": self.lever_use, "reference": self.reference,
+            d = {"up_chip": self.up_chip, "tilts": self.tilts, "flip": self.flip,
+                 "captures": self.captures, "reference": self.reference,
                  "updated": self.updated,
                  # written for humans reading the file, never read back
                  "_R_chip_to_body": [[float(v) for v in row] for row in self._R]}
@@ -359,17 +361,20 @@ class MountCal:
     def snapshot(self):
         with self._lock:
             R = self._R.copy()
+            chk = dict(self._check)
+            cal = self.up_chip is not None and bool(chk.get("used"))
+            tilts = {k: {kk: vv for kk, vv in t.items() if kk not in ("acc", "d")}
+                     for k, t in self.tilts.items()}
             snap = {
-                "calibrated": self.up_chip is not None and (self.fwd_chip is not None or bool(self.fwd_declared)),
-                "up_chip": self.up_chip, "fwd_chip": self.fwd_chip,
-                "fwd_declared": self.fwd_declared, "captures": self.captures,
+                "calibrated": cal,
+                "up_chip": self.up_chip, "tilts": tilts, "flip": dict(self.flip),
+                "captures": self.captures, "check": chk,
                 "R_chip_to_body": [[round(float(v), 6) for v in row] for row in R],
-                "lever_cad": self.lever_cad, "lever_fit": self.lever_fit,
-                "lever_use": self.lever_use, "reference": self.reference,
-                "updated": self.updated,
+                "reference": self.reference, "updated": self.updated,
             }
-        snap["cross_check_deg"] = self.cross_check()
-        snap["lever_disagreement_m"] = self.lever_disagreement()
-        lv = self.lever()
-        snap["lever_active"] = None if lv is None else [float(v) for v in lv]
+        if cal:
+            # body X / Y written as the chip axis they sit nearest to — the line an operator can
+            # check against the HAT's silkscreen
+            snap["axes"] = {"fwd": nearest_chip_axis(R[0]), "left": nearest_chip_axis(R[1]),
+                            "up": nearest_chip_axis(R[2])}
         return snap

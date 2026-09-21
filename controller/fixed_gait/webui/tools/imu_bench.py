@@ -27,22 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 # hardware imports live in main() so the stillness gate stays importable off-robot,
 # to re-judge saved records with the same code that judged them live
 
-# Datasheet, FCHOICE=1: DLPF config -> (3 dB bandwidth, noise bandwidth) in Hz. NOT measured here;
-# --dlpf checks whether the noise scales the way this table implies.
-GYR_BW = {0: (196.6, 229.8), 1: (151.8, 187.6), 2: (119.5, 154.3), 3: (51.2, 73.3),
-          4: (23.9, 35.9), 5: (11.6, 17.8), 6: (5.7, 8.9)}
-ACC_BW = {0: (246.0, 265.0), 1: (246.0, 265.0), 2: (111.4, 136.0), 3: (50.4, 68.8),
-          4: (23.9, 34.4), 5: (11.5, 16.8), 6: (5.7, 8.3)}
-
-# A still robot on the ground. Above these, whatever is measured is the robot, not the sensor.
-# Vibration bounds: ~4x the datasheet noise at DLPF cfg 3 (and still >2x margin at cfg 0, whose
-# noise bandwidth is ~4x wider). Sway bounds are on 1 s block means, where rocking lives: 6 mg
-# is a steady 0.4 deg of tilt, 0.2 dps is far above the measured 0.012 dps bias instability.
-STILL_GYRO_RMS_DPS = 0.35
-STILL_ACC_RMS_G = 0.007
-STILL_GYRO_DRIFT_DPS = 0.2
-STILL_ACC_DRIFT_G = 0.006
-STILL_PP_MARGIN = 1.6
+# The DLPF bandwidth table and the stillness gate live in imunoise.py, shared with the web UI's
+# noise recorder so both judge a record the same way.
+from imunoise import ACC_BW, GYR_BW, stillness  # noqa: E402,F401
 
 
 def collect(imu, seconds, hz=200.0):
@@ -58,40 +45,6 @@ def collect(imu, seconds, hz=200.0):
         acc.append(a)
         gyr.append(g)
     return np.array(acc), np.array(gyr), np.array(ts)
-
-
-def stillness(acc, gyr, fs):
-    """(is_still, one-line reason). Three failure modes, three checks. Vibration inflates the
-    RMS itself. Sway is low-frequency and lives in the 1 s block means (a swaying robot
-    ROTATES — the gyro block means are the sharp detector; sd barely moves). Bumps are
-    transients, caught by the raw peak-to-peak against what this record's own RMS predicts
-    for gaussian noise (2*sqrt(2 ln n)*sigma). A FIXED raw peak-to-peak bound is wrong: the
-    expected extremes grow with sample count, so a perfectly still sensor trips it once the
-    record is long enough — the old 0.6 dps / 20 mg gate did exactly that on the first
-    300 s record (gyro swing 0.73 dps, 0.9x the white-noise expectation, block means clean)."""
-    n = len(gyr)
-    w = max(1, int(round(fs)))
-    checks = []
-    for name, x, rms_lim, drift_lim, scale, unit in (
-            ("gyro", gyr, STILL_GYRO_RMS_DPS, STILL_GYRO_DRIFT_DPS, 1.0, "dps"),
-            ("accel", acc, STILL_ACC_RMS_G, STILL_ACC_DRIFT_G, 1000.0, "mg")):
-        sd = x.std(0)
-        bm = x[:n // w * w].reshape(-1, w, x.shape[1]).mean(1)
-        drift = float(np.max(bm.max(0) - bm.min(0)))
-        pp = float(np.max((x.max(0) - x.min(0)) / (2 * np.sqrt(2 * np.log(n)) * sd)))
-        if float(sd.max()) > rms_lim:
-            return False, (f"MOVING (vibration): {name} RMS {sd.max() * scale:.2f} {unit} "
-                           f"(limit {rms_lim * scale:.2f}) — something is buzzing the robot")
-        if drift > drift_lim:
-            return False, (f"MOVING (sway): {name} 1 s-average swing {drift * scale:.2f} {unit} "
-                           f"(limit {drift_lim * scale:.2f}) — set the robot down on the "
-                           f"floor, off any rig that lets it rock")
-        if pp > STILL_PP_MARGIN:
-            return False, (f"MOVING (bumps): {name} peak-to-peak {pp:.2f}x the white-noise "
-                           f"expectation (limit {STILL_PP_MARGIN}) — something knocked the "
-                           f"robot mid-record")
-        checks.append(f"{name} drift {drift * scale:.2f} {unit}, p-p {pp:.2f}x white")
-    return True, "still (" + "; ".join(checks) + ")"
 
 
 def main():
