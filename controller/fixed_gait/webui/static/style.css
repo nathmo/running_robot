@@ -227,6 +227,11 @@ label { display: inline-flex; align-items: center; gap: 6px; }
   color: var(--dim); white-space: nowrap; }
 .leg-badge.has { border-color: var(--good); color: var(--good); }
 
+/* ---------------- ⚖ balance row (manual panel) ---------------- */
+.bal-row { align-items: center; gap: 10px; flex-wrap: wrap; }
+.bal-row input[type=range] { width: 120px; vertical-align: middle; }
+#bal-status { min-width: 260px; }
+
 /* ---------------- digital twin ---------------- */
 /* the canvas's pixel size follows its CSS box (twin3d.js resizes the backing store every frame),
    so the height MUST come from here -- see the growth warning on the strip charts in app.js */

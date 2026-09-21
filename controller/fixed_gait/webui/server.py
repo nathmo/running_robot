@@ -660,6 +660,43 @@ def api_manual_home():
     return _ok(token=token) if ok else _err(why)
 
 
+@app.post("/api/balance/start")
+def api_balance_start():
+    """⚖ Balance: the IMU loop around the standing pose (daemon.balance_start, balance.py)."""
+    why = _require_calibrated()
+    if why:
+        return _err(why, 403)
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    ok, why = _dm().balance_start()
+    return _ok(token=token) if ok else _err(why)
+
+
+@app.post("/api/balance/stop")
+def api_balance_stop():
+    """Stop balancing and HOLD the last commanded pose. Deliberately needs no control token: any
+    client may stop the loop, like any client may E-STOP."""
+    _dm().balance_stop()
+    return _ok()
+
+
+@app.post("/api/balance/trim")
+def api_balance_trim():
+    """{com_x_mm, com_y_mm, pitch_deg}: where the CoM sits on the soles, and the held pitch."""
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    try:
+        vals = {k: (None if b.get(k) is None else float(b[k]))
+                for k in ("com_x_mm", "com_y_mm", "pitch_deg")}
+    except (TypeError, ValueError):
+        return _err("trims must be numbers")
+    return _ok(token=token, trim=_dm().balance_trim(**vals))
+
+
 @app.post("/api/manual/center")
 def api_manual_center():
     """Slew both legs to the pose with the most room around it (the inscribed-square centre of the

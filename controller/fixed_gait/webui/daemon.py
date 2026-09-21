@@ -25,6 +25,7 @@ import traceback
 import numpy as np
 
 import paths
+import balance
 import blackbox
 import canio
 import ringbuffer
@@ -90,6 +91,17 @@ HARD_WIDEN_DEG = 10.0
 # it on a toe or a heel.
 STAND_POSE_DEG = {"left.abd": 0.0, "left.cam": 46.0, "left.thigh": 11.1,
                   "right.abd": 0.0, "right.cam": 46.0, "right.thigh": 11.1}
+
+# ⚖ Balance (balance.py): an IMU loop inside MANUAL that trims the standing pose. It is a guided
+# move like Home -- the feasibility net instead of the gait polygon, the slow-slew tracking trip --
+# with its own slew, fast enough that the drive, not the limiter, is the lag the loop was tuned
+# against in tools/balance_sim.py.
+BALANCE_SLEW_DPS = 90.0
+BALANCE_START_TOL_DEG = 4.0        # every joint this close to STAND_POSE_DEG to start (Home first)
+BALANCE_IMU_STALE_S = 0.3          # older attitude than this: stop balancing, hold the pose. A
+                                   # shorter gap (a busy Pi, a missed I2C read) holds the last
+                                   # correction instead; the policy tolerates 0.2 s the same way
+BALANCE_IMU_LATE_S = 0.05          # the IMU runs at 200 Hz: a sample older than this is a hiccup
 
 # ===================================================================== pre-move safety (2026-08-10)
 # On 2026-08-10 a joint destroyed itself: left.cam was commanded absolutely against a calibration
@@ -491,6 +503,9 @@ class RobotDaemon(threading.Thread):
         self._slew_dps = DEFAULT_SLEW_DPS
         self._home_active = False           # slow guided move engaged (feasibility-net checked)
         self._home_kind = "stand"           # "stand" (Home) or "center" (max-room pose) — label only
+        self._bal = None                    # balance.Balancer while ⚖ Balance runs (MANUAL only)
+        self._bal_pub = None                # its last outputs, for the snapshot
+        self._bal_trim = {"pitch_deg": 0.0, "com_x_mm": 0.0, "com_y_mm": 0.0}   # survives restarts
         self._home_relax = False            # guided move started from a pose the band net rejects
         self._home_slew = 20.0
         self._sine = {n: dict(enabled=False, a=-10.0, b=10.0, freq=0.3, _blend0=None)
@@ -676,6 +691,7 @@ class RobotDaemon(threading.Thread):
                 self._manual_targets.update({k: float(v) for k, v in targets.items()
                                              if k in self.by_name})
                 self._home_active = False           # user jogging cancels a homing move
+                self._bal = None                    # ... and balancing
             if override is not None:
                 self._manual_override = bool(override)
             if slew_dps is not None:
@@ -712,6 +728,7 @@ class RobotDaemon(threading.Thread):
                     st["_blend0"] = time.time()
                 st["enabled"] = bool(enabled)
             self._home_active = False               # touching sine cancels a homing move
+            self._bal = None                        # ... and balancing
             self._req_mode = "MANUAL"
         return True, ""
 
@@ -742,6 +759,7 @@ class RobotDaemon(threading.Thread):
         relax = self._pose_rejected_by_band()
         with self.lock:
             self._manual_targets = {n: STAND_POSE_DEG[n] for n in paths.MOTOR_NAMES}
+            self._bal = None
             self._home_active = True
             self._home_kind = "stand"
             self._home_relax = relax
@@ -750,6 +768,88 @@ class RobotDaemon(threading.Thread):
                 s["enabled"] = False
             self._req_mode = "MANUAL"
         return True, ""
+
+    # ---------------------------------------------------------------- ⚖ balance (balance.py)
+    def balance_start(self):
+        """Start the IMU balance loop around the standing pose. Refused unless the robot is already
+        HOLDING the standing pose in MANUAL (press 🏠 Home first) and the IMU is live: the loop
+        trims a pose by a few degrees, it is not a way to get there."""
+        if self.mode != "MANUAL":
+            return False, "balance runs from MANUAL: press 🏠 Home first (it stands the robot up)"
+        with self.lock:
+            homing = self._home_active
+        pose = {n: self.calib.norm(n, m.pos) for n, m in self.by_name.items() if m.pos is not None}
+        if len(pose) != paths.N_MOTORS:
+            return False, "a drive is silent"
+        off = {n: pose[n] - STAND_POSE_DEG[n] for n in paths.MOTOR_NAMES}
+        worst = max(off, key=lambda n: abs(off[n]))
+        if abs(off[worst]) > BALANCE_START_TOL_DEG:
+            return False, (f"not at the standing pose ({worst} is {off[worst]:+.1f} deg off, limit "
+                           f"{BALANCE_START_TOL_DEG:.0f}){' — Home is still moving' if homing else ''}: "
+                           "press 🏠 Home and wait for it to arrive")
+        imu = self._balance_imu(max_age=0.1)
+        if imu is None:
+            return False, ("no live IMU attitude (server started with --no-sensors, or the Sense "
+                           "HAT is not publishing) — balance needs it")
+        mount = getattr(self.sense, "mount", None)
+        if mount is not None and not getattr(mount, "calibrated", True):
+            return False, ("the IMU mount is not calibrated: its attitude is in CHIP axes, not the "
+                           "robot's — run the mount calibration in the sensor panel first")
+        pitch, roll, _, _ = imu
+        bal = balance.Balancer(STAND_POSE_DEG)
+        if bal.falling(pitch, roll):
+            return False, f"the IMU reads the robot tilted {pitch:+.1f} / {roll:+.1f} deg (pitch/roll)"
+        with self.lock:
+            bal.set_trim(**self._bal_trim)
+            self._bal = bal
+            self._home_active = False
+            self._manual_override = False
+            for s in self._sine.values():
+                s["enabled"] = False
+        self._bb_event("balance.start", pitch=pitch, roll=roll, trim=dict(self._bal_trim),
+                       gains=dict(bal.p))
+        return True, ""
+
+    def balance_stop(self, why="stopped by operator"):
+        """Stop balancing and HOLD where it is (not limp): the targets freeze at the last command,
+        held as a guided hold like Home's (feasibility net), because the standing pose need not
+        be inside a safe workspace that was drawn before the drives were zeroed at homing."""
+        with self.lock:
+            was = self._bal is not None
+            self._bal = None
+            self._manual_targets.update(self._held)
+            if was:
+                self._home_active, self._home_kind, self._home_relax = True, "balance_hold", False
+                self._home_slew = 20.0
+        if was:
+            self._bb_event("balance.stop", reason=why)
+        return True, ""
+
+    def balance_trim(self, com_x_mm=None, com_y_mm=None, pitch_deg=None):
+        """Operator trims (balance.Balancer.set_trim): where the CoM sits on the soles, and the
+        pitch the torso is held at. Kept across stop/start, clipped to the balancer's ranges."""
+        with self.lock:
+            probe = balance.Balancer(STAND_POSE_DEG)
+            probe.set_trim(**self._bal_trim)
+            probe.set_trim(pitch_deg=pitch_deg, com_x_mm=com_x_mm, com_y_mm=com_y_mm)
+            self._bal_trim = dict(probe.trim)
+            if self._bal is not None:
+                self._bal.set_trim(**self._bal_trim)
+            return dict(self._bal_trim)
+
+    def _balance_imu(self, max_age=BALANCE_IMU_STALE_S):
+        """(pitch_deg, roll_deg, gyro_dps[3], age_s) from the Sense HAT fast path, or None if
+        absent or older than `max_age`."""
+        sh = self.sense
+        f = sh.fast() if sh is not None else None
+        if f is None:
+            return None
+        t, up, gyr = f
+        age = max(0.0, time.time() - t)
+        if age > max_age:
+            return None
+        pitch, roll = balance.attitude_from_up(up)
+        return pitch, roll, np.asarray(gyr, float), age
 
     # ---------------------------------------------------------------- centering (max room around)
     @staticmethod
@@ -830,6 +930,7 @@ class RobotDaemon(threading.Thread):
         relax = self._pose_rejected_by_band()
         with self.lock:
             self._manual_targets.update(targets)
+            self._bal = None
             self._home_active = True
             self._home_kind = "center"
             self._home_relax = relax
@@ -1261,6 +1362,10 @@ class RobotDaemon(threading.Thread):
         and gets a Tier B dump of the full-rate window around it."""
         old = self.mode
         self.mode = mode
+        if mode != "MANUAL" and self._bal is not None:
+            with self.lock:
+                self._bal = None                # balancing lives inside MANUAL and never outlives it
+            self._bb_event("balance.stop", reason=f"mode {old} -> {mode}: {reason}")
         if old == mode:
             return
         for i in range(paths.N_MOTORS):
@@ -1730,9 +1835,41 @@ class RobotDaemon(threading.Thread):
         with self.lock:
             desired = dict(self._manual_targets)
             homing = self._home_active
+            bal = self._bal
             override = self._manual_override or homing   # homing trusts the feasibility net, not
             slew = self._home_slew if homing else self._slew_dps   # the eroded gait polygon
             sine = {n: dict(s) for n, s in self._sine.items()}
+
+        if bal is not None:
+            # ⚖ Balance: the IMU loop writes the targets. A guided move like Home (feasibility net,
+            # homing tracking limit), at its own slew so the drive is the only lag in the loop.
+            imu = self._balance_imu()
+            if imu is None:
+                self.balance_stop("IMU attitude missing or stale")
+                self._last_reject = "balance stopped: IMU attitude missing or stale — holding"
+                bal = None
+            elif imu[3] > BALANCE_IMU_LATE_S:
+                # a late sample (not yet a stale one): hold the last correction, do not steer on it
+                desired = dict(desired)
+                override, slew = True, BALANCE_SLEW_DPS
+            else:
+                pitch, roll, gyr, _ = imu
+                if bal.falling(pitch, roll):
+                    self._trip(f"balance: tilt {pitch:+.1f} / {roll:+.1f} deg (pitch/roll) beyond "
+                               f"{bal.p['fall_deg']:.0f} deg — falling")
+                    return
+                desired = bal.step(dt, pitch, roll, float(gyr[1]), float(gyr[0]))
+                override, slew = True, BALANCE_SLEW_DPS
+                with self.lock:
+                    self._manual_targets.update(desired)      # what Stop freezes at, and the UI shows
+                    self._bal_pub = dict(pitch=round(pitch, 2), roll=round(roll, 2),
+                                         pitch_corr=round(bal.out["pitch"], 2),
+                                         com_x=round(bal.out["com_x"], 1),
+                                         com_y=round(bal.out["com_y"], 1),
+                                         i_pitch=round(bal.i_pitch, 2),
+                                         saturated=bool(bal.last.get("sat_pitch") or
+                                                        bal.last.get("sat_com_x")))
+        balancing = bal is not None
 
         held_before = dict(self._held)
         targets_norm = {}
@@ -3766,6 +3903,9 @@ class RobotDaemon(threading.Thread):
                 origin_jumps=len(self._raw_jumps), holding=now < self._hold_until,
                 manual_targets=dict(self._manual_targets), override=self._manual_override,
                 slew_dps=self._slew_dps, homing=self._home_active, homing_kind=self._home_kind,
+                balance=dict(active=self._bal is not None, trim=dict(self._bal_trim),
+                             out=(dict(self._bal_pub) if self._bal is not None and self._bal_pub
+                                  else None)),
                 # copied, not referenced: the sine dicts are mutated by sine_update()
                 sine={n: dict(v) for n, v in self._sine.items()},
                 pb=None if self._pb is None else {
@@ -3825,7 +3965,8 @@ class RobotDaemon(threading.Thread):
                         slew_dps=cap["slew_dps"],
                         sine={n: {k: v for k, v in sv.items() if not k.startswith("_")}
                               for n, sv in cap["sine"].items()},
-                        homing=cap["homing"], homing_kind=cap["homing_kind"]),
+                        homing=cap["homing"], homing_kind=cap["homing_kind"],
+                        balance=cap["balance"]),
             playback=(None if pb is None else dict(
                 running=cap["mode"] == "PLAYBACK", phase=round(pb.get("phase") or 0.0, 3),
                 period=pb["period"], mode=pb["mode"], sides=pb["sides"],

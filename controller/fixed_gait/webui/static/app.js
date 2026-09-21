@@ -140,12 +140,15 @@ function updateManualStatus(st) {
   if (man.homing) {
     const centring = man.homing_kind === "center";
     const arrived = atManualTarget(man);
-    $("home-status").textContent = centring
+    $("home-status").textContent = man.homing_kind === "balance_hold"
+      ? "⚖ balance stopped — holding its last pose"
+      : centring
       ? (arrived ? "⌖ centred ✓ (most room around this pose)" : "⌖ centring… (slow)")
       : (arrived ? "🏠 at home ✓ (holding the standing pose)" : "🏠 homing… (slow)");
   } else {
     $("home-status").textContent = "";
   }
+  updateBalanceStatus(man.balance);
   const chk = $("chk-override");
   if (document.activeElement !== chk && man.override !== undefined) chk.checked = !!man.override;
 }
@@ -720,6 +723,52 @@ $("btn-center").onclick = async () => {
   setBanner("centring both legs on the safest pose (slow)…", "", 4000);
 };
 $("btn-release").onclick = () => api("/api/manual/release", { method: "POST" });
+
+/* ⚖ Balance (daemon.balance_start / balance.py): start/stop + the operator trims */
+const BAL = { active: false };
+function updateBalanceStatus(b) {
+  if (!b) return;
+  BAL.active = !!b.active;
+  const btn = $("btn-balance");
+  btn.textContent = BAL.active ? "⚖ Balance: STOP (hold)" : "⚖ Balance: start";
+  btn.classList.toggle("active-rec", BAL.active);
+  const o = b.out;
+  const sg = (v, d = 1) => (v >= 0 ? "+" : "") + (+v).toFixed(d);
+  $("bal-status").textContent = BAL.active && o
+    ? `⚖ tilt p ${sg(o.pitch)}° r ${sg(o.roll)}° → posture ${sg(o.pitch_corr)}°, CoM x ${sg(o.com_x)} y ${sg(o.com_y)} mm` +
+      (o.saturated ? "  ⚠ at its limit" : "")
+    : "";
+  const t = b.trim || {};
+  for (const [id, key] of [["bal-comx", "com_x_mm"], ["bal-comy", "com_y_mm"], ["bal-pitch", "pitch_deg"]]) {
+    const el = $(id);
+    if (document.activeElement !== el && t[key] !== undefined) el.value = t[key];
+  }
+  $("bal-comx-val").textContent = sg($("bal-comx").value, 0);
+  $("bal-comy-val").textContent = sg($("bal-comy").value, 0);
+}
+$("btn-balance").onclick = async () => {
+  if (BAL.active) {
+    await api("/api/balance/stop", { method: "POST" });
+    setBanner("balance stopped — holding the pose", "", 3000);
+  } else {
+    await api("/api/balance/start", { json: {} });
+    setBanner("⚖ balancing — let go gently; Stop holds the pose, E-STOP goes limp", "warn", 5000);
+  }
+};
+let balTrimTimer = null;
+function sendBalanceTrim() {
+  clearTimeout(balTrimTimer);
+  balTrimTimer = setTimeout(() => api("/api/balance/trim", { json: {
+    com_x_mm: +$("bal-comx").value, com_y_mm: +$("bal-comy").value,
+    pitch_deg: +$("bal-pitch").value } }).catch(() => {}), 120);
+}
+for (const id of ["bal-comx", "bal-comy"]) {
+  $(id).oninput = () => {
+    $(id + "-val").textContent = (+$(id).value >= 0 ? "+" : "") + $(id).value;
+    sendBalanceTrim();
+  };
+}
+$("bal-pitch").onchange = sendBalanceTrim;
 $("chk-override").onchange = () => {
   if ($("chk-override").checked &&
       !confirm("Override the safe-workspace check?\nOnly the physical assembly-band net remains.")) {

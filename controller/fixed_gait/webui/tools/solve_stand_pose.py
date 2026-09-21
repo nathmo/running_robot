@@ -149,6 +149,48 @@ class Robot:
         return sorted(sols, key=lambda x: abs(x[0]) + abs(x[1]))
 
 
+def sagittal(rb, cam, thigh):
+    """(torso pitch forward deg, CoM ahead of the sole centre mm) with the soles flat on the floor,
+    for the mirrored pose with left-leg qpos (cam, thigh) rad."""
+    s = rb.pose(cam, thigh)
+    n = s["normal"] / np.linalg.norm(s["normal"])
+    a = np.arctan2(n[0], -n[2])
+    R = np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])  # R n = -z
+    fwd = R @ np.array([1.0, 0, 0])
+    return (np.degrees(np.arctan2(-fwd[2], fwd[0])),
+            1e3 * ((R @ s["com"])[0] - (R @ s["sole"])[0]))
+
+
+def balance_maps(rb, cam, thigh, h=0.05):
+    """balance.py's posture maps at the stand (normalized deg, left-leg sign convention; the right
+    leg reads the same in normalized degrees):
+      D_PITCH  per deg of torso pitch (forward +), soles flat, CoM fixed on the sole
+      D_COM_X  per mm of CoM forward along the sole, soles flat, torso level
+      D_COM_Y_ABD  left.abd per mm of CoM to the LEFT (right.abd = minus it), a parallelogram:
+               every body above the roll axis translates by the hip height, the legs rotate about
+               the soles, so the CoM moves by  sin(a) * sum(m * height) / M."""
+    sc, st = SIGNS["cam"], SIGNS["thigh"]
+
+    def f(dnc, dnt):              # normalized-deg offsets -> sagittal outputs
+        return np.array(sagittal(rb, cam + np.radians(sc * dnc), thigh + np.radians(st * dnt)))
+
+    J = np.column_stack([(f(h, 0) - f(-h, 0)) / (2 * h), (f(0, h) - f(0, -h)) / (2 * h)])
+    D = np.linalg.inv(J)
+    s = rb.pose(cam, thigh)
+    W, sole_z = s["W"], s["sole"][2]
+    hip = W["HipLeftNCS-v1"][1][2] - sole_z
+    moment = 0.0                  # sum of m * lateral travel per rad of roll
+    for n, (R, p) in W.items():
+        z = (p + R @ rb.com.get(n, rb.B[n]["com"]))[2] - sole_z
+        moment += rb.mass[n] * (hip if n == "bodyNCS-v1" else z)
+    for mm, hipname, pos in rb.motors:
+        moment += mm * ((W[hipname][1] + W[hipname][0] @ pos)[2] - sole_z)
+    k = moment / rb.total           # m of CoM travel per rad; +roll (about +x) moves the CoM to -y
+    return dict(D_PITCH={"cam": D[0, 0], "thigh": D[1, 0]},
+                D_COM_X={"cam": D[0, 1], "thigh": D[1, 1]},
+                D_COM_Y_ABD=-np.degrees(1e-3 / k), com_y_per_deg=np.radians(1.0) * k * 1e3)
+
+
 def main():
     rb = Robot()
     print(f"total mass {rb.total:.2f} kg")
@@ -166,6 +208,12 @@ def main():
             e = rb.pose(cam + np.radians(dc), thigh + np.radians(dt))
             print(f"   zero error cam {dc:+d} / qpos thigh {dt:+d} deg -> CoM moves "
                   f"{1e3 * (e['com'][0] - e['sole'][0]):+.1f} mm on the sole")
+    cam, thigh = rb.solve()[0]
+    m = balance_maps(rb, cam, thigh)
+    print("balance.py maps (normalized deg):")
+    print(f"   D_PITCH = cam {m['D_PITCH']['cam']:.4f}, thigh {m['D_PITCH']['thigh']:.4f}  per deg")
+    print(f"   D_COM_X = cam {m['D_COM_X']['cam']:.5f}, thigh {m['D_COM_X']['thigh']:.5f}  per mm")
+    print(f"   D_COM_Y_ABD = {m['D_COM_Y_ABD']:.4f} per mm  ({m['com_y_per_deg']:.1f} mm of CoM per deg of abd)")
 
 
 if __name__ == "__main__":
