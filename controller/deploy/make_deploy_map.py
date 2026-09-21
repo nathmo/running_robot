@@ -62,13 +62,24 @@ def build(model_map, when=None):
         src = model_map.get(side)
         if not src:
             raise SystemExit("model_map.json has no {!r} side".format(side))
+        # THE RIGHT LEG IS MIRRORED, AND fklut DOES NOT SAY SO. fklut has ONE lookup table, the LEFT
+        # leg's, and fits BOTH sides into it: its right-side map returns the angle the LEFT model leg
+        # would have in that pose. The MJCF right cam/thigh joints turn about (0, -1, 0) where the
+        # left ones turn about (0, +1, 0), so the same sagittal pose is the NEGATIVE angle on the
+        # right (the policy's symmetric stance is cam +7.25 / thigh -11.6 deg on the left and
+        # -7.25 / +11.6 on the right). Transcribing the right side directly, as this tool did until
+        # 2026-09-21, mapped that stance to left cam +37.7 / thigh +5.5 but right cam +6.2 / thigh
+        # -15.5 normalized degrees -- a 31 / 21 degree left-right split of a symmetric pose, which
+        # the dashboard's workspace guard refused. model_R = -(sign * norm + off).
+        m = -1.0 if side == "right" else 1.0
         for role in ("cam", "thigh"):
             entries["{}.{}".format(side, role)] = {
-                "sign": float(src[role]),
-                "offset_deg": float(src["{}_off_deg".format(role)]),
+                "sign": m * float(src[role]),
+                "offset_deg": m * float(src["{}_off_deg".format(role)]),
                 "verified": bool(model_map.get("verified", {}).get(side)),
                 "verified_when": when,
-                "note": "fklut fit against the recorded workspace band",
+                "note": "fklut fit against the recorded workspace band"
+                        + (", mirrored into the right leg's own joint frame" if side == "right" else ""),
             }
         sign, off = ABDUCTION[side]
         entries["{}.abd".format(side)] = {

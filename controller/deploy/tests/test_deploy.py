@@ -754,9 +754,29 @@ class TestDeployMap:
         return make_deploy_map.build(self.MM, when="test")[0]
 
     def test_cam_and_thigh_transcribe_from_the_fit(self):
+        """The LEFT leg transcribes. The RIGHT leg is mirrored: fklut fits both sides into the LEFT
+        leg's lookup table, and the MJCF right cam/thigh turn about (0, -1, 0), so the right leg's
+        own joint angle is the negative of what fklut reports (jointmap.py: 'it must be cam -1 /
+        thigh +1'). This test asserted the unmirrored sign until 2026-09-21."""
         jm = self._build()
         assert jm.e["left.cam"]["offset_deg"] == pytest.approx(-24.5)
-        assert jm.e["right.thigh"]["sign"] == pytest.approx(-1.0)
+        assert jm.e["left.thigh"]["sign"] == pytest.approx(-1.0)
+        assert jm.e["right.cam"]["sign"] == pytest.approx(-1.0)
+        assert jm.e["right.cam"]["offset_deg"] == pytest.approx(+18.7)
+        assert jm.e["right.thigh"]["sign"] == pytest.approx(+1.0)
+        assert jm.e["right.thigh"]["offset_deg"] == pytest.approx(+8.4)
+
+    def test_a_symmetric_model_stance_is_a_symmetric_robot_stance(self):
+        """The invariant the mirror exists for. With the same fit on both legs, the policy's
+        symmetric stance (right cam/thigh = minus the left ones) must read the SAME normalized
+        angles on both legs. Unmirrored, the dash_joy3 stance came out 31 deg apart on the cams."""
+        import make_deploy_map
+        import numpy as np
+        mm = {"left": dict(self.MM["left"]), "right": dict(self.MM["left"]), "verified": {"left": True, "right": True}}
+        jm = make_deploy_map.build(mm, when="test")[0]
+        q = np.radians([0.0, 13.0, -7.0, 0.0, -13.0, 7.0])            # [hipL, camL, thighL, hipR, camR, thighR]
+        norm = (np.degrees(q) - np.degrees(jm.offset_rad)) / jm.sign
+        assert norm[1] == pytest.approx(norm[4]) and norm[2] == pytest.approx(norm[5])
 
     def test_the_two_abduction_signs_are_opposite(self):
         """Both hip_roll joints share the axis (+1,0,0) while the robot reads + outward on both,
