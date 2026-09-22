@@ -124,7 +124,10 @@ class Runner:
             raise SystemExit("this bundle wants {:.0f} Hz control, outside the {:.0f}-{:.0f} Hz "
                              "band this runner will attempt".format(hz, TICK_HZ_MIN, TICK_HZ_MAX))
         self.hz = hz
-        self.jm = JM.JointMap.load(args.jointmap) if args.jointmap else JM.JointMap()
+        jm_path = args.jointmap
+        if jm_path is None and args.mock and (DEPLOY / "deploy_map.json").exists():
+            jm_path = str(DEPLOY / "deploy_map.json")     # the shipped map, as the dashboard's runs use
+        self.jm = JM.JointMap.load(jm_path) if jm_path else JM.JointMap()
         self.v2 = self.b.version == 2
         self.ctrl = PolicyControllerV2(self.b) if self.v2 else PolicyController(self.b)
         # which of the three command channels this checkpoint has (see controller_v2's docstring)
@@ -135,6 +138,14 @@ class Runner:
         self._last_rx = {}
         self.stop_requested = False
         self.exit_reason = None
+        # THE DRY RUN LEDGER. --mock energises nothing, so every guard that exists to protect the
+        # hardware (thermal fit, joint-map verification, calibration) is lifted for it automatically
+        # and recorded here; the summary at the end says what was bypassed, so a rehearsal that
+        # passed is never mistaken for a robot that is ready. On a REAL run nothing is lifted: the
+        # flags are still required and the refusals still fire.
+        self.bypassed = []
+        self.n_ticks = 0
+        self.timed_out = False
         self._setup_thermal()
         self._setup_safety()
 
@@ -146,9 +157,13 @@ class Runner:
         for t in MOTOR_TYPE_BY_ACTUATOR:
             p = params.get(t) or TH.DEFAULT_PARAMS[t]
             chain.append(p)
+        uncal = any(not p.calibrated for p in chain)
+        if uncal and a.mock and not a.allow_uncalibrated_thermal:
+            self.bypassed.append("thermal model: placeholder parameters (no fitted thermal_params.json); "
+                                 "the winding estimate and the continuous-torque limits were guesses")
         self.thermal = TH.MotorThermalModel(
             chain, dt=self.dt, t_amb=a.ambient, names=list(JM.MODEL_ACTUATORS),
-            allow_uncalibrated=a.allow_uncalibrated_thermal)
+            allow_uncalibrated=a.allow_uncalibrated_thermal or a.mock)
 
     def _setup_safety(self):
         b, a = self.b, self.args
@@ -210,10 +225,14 @@ class Runner:
     def preflight(self, buses, motors):
         a = self.args
         ok, why = self.jm.check_ready()
-        if not ok and not a.skip_jointmap_check:
+        if not ok and a.mock and not a.skip_jointmap_check:
+            self.bypassed.append("joint map: " + why)
+        elif not ok and not a.skip_jointmap_check:
             raise SystemExit("REFUSING TO RUN: " + why)
         cal = calib_mod.Calibration.load_or_new()
-        if not cal.complete and not a.mock:
+        if not cal.complete and a.mock:
+            self.bypassed.append("zero/direction calibration: incomplete (the mock bus has its own)")
+        elif not cal.complete:
             raise SystemExit("REFUSING TO RUN: the zero/direction calibration is incomplete. "
                              "Every joint angle this policy reads is derived from it.")
         if cal.restored_from_disk and not a.mock:
@@ -328,7 +347,9 @@ class Runner:
             # ---- RUN -------------------------------------------------------------------------
             phase = "RUN"
             self.run_policy(motors, by_bus, buses, cal, sh)
-            return self.gov.stop == STOP_NONE
+            # the time limit is how a run is MEANT to end; only a governor stop for any other
+            # reason is a failure (before 2026-09-22 every rehearsal "failed" at its own deadline)
+            return self.gov.stop == STOP_NONE or self.timed_out
         except KeyboardInterrupt:
             self.exit_reason = "operator interrupt during {}".format(phase)
             print("\n!! interrupted")
@@ -473,6 +494,7 @@ class Runner:
             now = time.monotonic()
             t = now - t0
             if t >= a.max_seconds:
+                self.timed_out = True
                 self.gov.kill("max run time {:.0f} s reached".format(a.max_seconds), hard=False)
             if self.stop_requested:
                 self.gov.kill("stop requested", hard=False)
@@ -507,6 +529,7 @@ class Runner:
                     [t], pos, vel, tau, amps, temp, grav, gyro, v.target, v.kp, v.kd,
                     self.thermal.t_winding,
                     [cmd.phase, cmd.freq, v.stop, float(getattr(cmd, "run_flag", 0.0) or 0.0)]]))
+            self.n_ticks += 1
             if v.stop != STOP_NONE and v.limp:
                 self.exit_reason = "; ".join(v.reasons)
                 print("\nSTOPPED: {}".format(self.exit_reason))
@@ -520,6 +543,22 @@ class Runner:
                 next_t = time.monotonic()
         print("ran {:.1f} s, {} late ticks, {}".format(
             time.monotonic() - t0, n_late, self.gov.status()["clamp_counts"] or "no clamping"))
+
+    def dry_run_summary(self, ok):
+        """The last thing a --mock run prints: what it proved, and what it skipped to prove it."""
+        print("=" * 78)
+        print("DRY RUN {}: {} / {} / {}".format(
+            "PASSED" if ok else "FAILED", self.b.meta.get("run"), self.b.meta.get("checkpoint"),
+            "reached {} ticks of the control law".format(self.n_ticks) if self.n_ticks else "never reached the policy"))
+        print("  exit          : {}".format(self.exit_reason or "clean"))
+        print("  mock bus + IMU: nothing was energised")
+        if self.bypassed:
+            print("  BYPASSED for the dry run ({}), each of which a REAL run still requires:".format(len(self.bypassed)))
+            for b in self.bypassed:
+                print("    - " + b)
+        else:
+            print("  bypassed      : nothing -- every guard a real run needs was satisfied")
+        print("=" * 78)
 
     def deadman_age(self, now):
         f = self.args.deadman_file
@@ -667,6 +706,8 @@ def main():
     r.save_log()
     if r.exit_reason:
         print("exit: {}".format(r.exit_reason))
+    if args.mock:
+        r.dry_run_summary(ok)
     return 0 if ok else 1
 
 

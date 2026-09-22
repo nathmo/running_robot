@@ -8,6 +8,7 @@ so the endpoints are exercised with exactly the artifact export_policy.py produc
 """
 import io
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -222,3 +223,22 @@ def test_rehearse_status_is_quiet_when_nothing_ran(client, poldir):
     c, _d = client
     j = c.get("/api/policy/rehearse/status").get_json()
     assert j["ok"] is True and j["rehearsal"] is None
+
+
+_JOY3 = os.path.join(paths.BUNDLE_DIR, "dash_joy3_lr_s2_180M.npz")
+
+
+@pytest.mark.skipif(not os.path.exists(_JOY3), reason="the dash_joy3 bundle is not in deploy/bundles/")
+def test_a_rehearsal_lifts_the_hardware_guards_and_says_so(tmp_path):
+    """The panel's Rehearse button runs run_policy.py --mock with NO acknowledgement flags. Until
+    2026-09-22 that died in setup on the placeholder thermal fit, for every bundle. A dry run
+    energises nothing, so it lifts those guards itself, runs the control law, and ends with a
+    summary that names what it bypassed -- a rehearsal that passed is not a robot that is ready."""
+    import subprocess
+    out = subprocess.run([sys.executable, os.path.join(paths.DEPLOY, "run_policy.py"), "--bundle", _JOY3,
+                          "--mock", "--max-seconds", "2", "--no-log", "--speed", "1.0"],
+                         capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    assert "DRY RUN PASSED" in out.stdout
+    assert "BYPASSED for the dry run" in out.stdout and "thermal model: placeholder" in out.stdout
+    assert "ticks of the control law" in out.stdout and "never reached the policy" not in out.stdout
