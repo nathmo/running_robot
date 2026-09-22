@@ -1558,9 +1558,20 @@ class RobotDaemon(threading.Thread):
 
         bb = self.bb
         if bb is not None:
+            # the IMU as this tick saw it (NaN without a Sense HAT): the 2026-09-22 balance fall
+            # had to be read back out of the motor commands because the record had no attitude
+            sh = self.sense
+            f = sh.fast() if sh is not None else None
+            if f is None:
+                imu = blackbox._NO_IMU
+            else:
+                ti, up, gyr = f
+                pitch, roll = balance.attitude_from_up(up)
+                imu = (pitch, roll, float(gyr[0]), float(gyr[1]), float(gyr[2]),
+                       max(0.0, t_wall - ti))
             bb.push_sample((t_mono, t_wall, dt_actual, MODE_CODE.get(self.mode, 0),
                             1.0 if self.mode == "ESTOPPED" else 0.0, self._slip_count,
-                            *pr, *pn, *cr, *cn, *sp, *cu, *tp, *er))
+                            *pr, *pn, *cr, *cn, *sp, *cu, *tp, *er, *imu))
 
         self._watch_continuity(t_mono, dt_actual, pr, sp)
         self._watch_warnings(t_mono, pr, cr, sp, tp, er)

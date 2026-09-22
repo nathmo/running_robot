@@ -28,13 +28,17 @@ N = paths.N_MOTORS
 
 
 # ===================================================================== helpers
-def row(t_mono, t_wall=None, mode=0, estop=0, slip=0, pos_raw=0.0, cmd_raw=None, spd=0.0):
-    """One push_sample() tuple, laid out exactly as blackbox.ROW_HEAD + ROW_BLOCKS."""
+def row(t_mono, t_wall=None, mode=0, estop=0, slip=0, pos_raw=0.0, cmd_raw=None, spd=0.0,
+        imu=None):
+    """One push_sample() tuple, laid out exactly as blackbox.ROW_HEAD + ROW_BLOCKS + the IMU
+    block (imu=None leaves the block off, as a caller without a Sense HAT may)."""
     vals = {"pos_raw": pos_raw, "pos_norm": pos_raw, "cmd_raw": pos_raw if cmd_raw is None
             else cmd_raw, "cmd_norm": 0.0, "spd": spd, "cur": 0.0, "temp": 35.0, "err": 0.0}
     out = [t_mono, t_wall if t_wall is not None else time.time(), 0.005, mode, estop, slip]
     for f in blackbox.ROW_BLOCKS:
         out.extend([vals[f]] * N)
+    if imu is not None:
+        out.extend(imu)
     return tuple(out)
 
 
@@ -621,3 +625,91 @@ def test_acceptance_reproduces_the_2026_08_10_incident(robot):
     assert f"{raw_before:.1f}" in text or "400" in text
     assert "pos_raw AT THE LAST ZERO CAPTURE" in text
     assert "drive gains" in text                      # question 4: config live at that instant
+
+
+# ===================================================================== version 2: the IMU block
+def test_the_imu_is_in_the_record_and_a_row_without_one_is_nan(tmp_path):
+    """2026-09-22: the balance fall could only be read by inverting the motor commands through
+    the loop's law, because the tick record held no attitude. Now it does — and a caller without
+    a Sense HAT (or an old caller) still records, with NaN in the block."""
+    b = blackbox.BlackBox(directory=str(tmp_path), heartbeat_s=99, space_check_s=99)
+    b.start()
+    try:
+        t0 = time.monotonic()
+        k = blackbox.TIER_A_DIV
+        for i in range(60 * k):
+            imu = (4.4 + i * 0.01, -1.4, 0.1, 0.2, 0.3, 0.004) if i < 30 * k else None
+            assert b.push_sample(row(t0 + i * 0.01, imu=imu))
+        drain_writer(b)
+    finally:
+        b.stop()
+    h, rec = blackbox.read_segment(tmp_path / files_of(str(tmp_path), blackbox.SEG_EXT)[0])
+    assert h["version"] == 2 and h["imu_fields"] == list(blackbox.IMU_FIELDS)
+    assert rec.dtype == blackbox.RECORD_DTYPE and rec.dtype.itemsize == h["record_bytes"]
+    assert len(rec) == 60
+    pitch = rec["imu"][:, blackbox.IMU_FIELDS.index("pitch")]
+    assert pitch[0] == pytest.approx(4.4, abs=1e-5) and np.isfinite(pitch[:30]).all()
+    assert np.isnan(pitch[30:]).all(), "no IMU on the row -> NaN, not zero (zero is a level robot)"
+    assert rec["imu"][0, blackbox.IMU_FIELDS.index("age")] == pytest.approx(0.004, abs=1e-6)
+    cols = blackbox_read.to_frame(rec)
+    assert "imu.pitch" in cols and "imu.gyr_y" in cols
+
+
+def test_a_version_1_file_still_reads_with_its_own_layout(tmp_path):
+    """Files written before the IMU block (212 B records) declare their layout in the header and
+    must come back aligned, without an "imu" column — never sliced at 236 B."""
+    v1 = np.dtype([("t_mono", "<f8"), ("t_wall", "<f8"), ("dt", "<f4"), ("mode", "u1"),
+                   ("estop", "u1"), ("_pad", "<u2"), ("slip", "<u4"), ("drop", "<u4")]
+                  + [(f, "<f4", (N,)) for f in blackbox.MOTOR_FIELDS] + [("err", "<u2", (N,))])
+    assert v1.itemsize == 212
+    rec = np.zeros(50, v1)
+    rec["t_mono"] = np.arange(50) * 0.05
+    rec["pos_raw"][:, 1] = 123.0
+    h = {"version": 1, "tier": "B", "record_bytes": 212,
+         "dtype": [[n, str(v1.fields[n][0].base.str), list(v1.fields[n][0].shape)]
+                   for n in v1.names],
+         "motor_names": list(paths.MOTOR_NAMES), "session_id": "old"}
+    p = tmp_path / ("B_old_0001_trip" + blackbox.DUMP_EXT)
+    with open(p, "wb") as f:
+        f.write(blackbox.MAGIC + b"\n" + json.dumps(h).encode() + b"\n" + rec.tobytes())
+    h2, back = blackbox.read_segment(str(p))
+    assert len(back) == 50 and h2["_torn_bytes"] == 0 and h2["_record_bytes"] == 212
+    assert "imu" not in back.dtype.names
+    assert back["t_mono"][-1] == pytest.approx(49 * 0.05)
+    assert (back["pos_raw"][:, 1] == 123.0).all()
+    assert "imu.pitch" not in blackbox_read.to_frame(back)
+
+
+def test_the_daemon_records_the_sense_hat_attitude(tmp_path):
+    """The mock daemon with a fake Sense HAT: the tick's record carries the body pitch/roll the
+    balance loop would act on, and the sample's age."""
+    class FakeSense:
+        def fast(self):
+            p, r = np.radians(3.0), np.radians(-2.0)
+            up = np.array([-np.sin(p) * np.cos(r), np.sin(r), np.cos(p) * np.cos(r)])
+            return time.time() - 0.002, up, (1.0, 2.0, 3.0)
+    cal = calibration.Calibration()
+    cal.save = lambda *a, **k: None
+    b = blackbox.BlackBox(directory=str(tmp_path), heartbeat_s=99, space_check_s=99)
+    b.start()
+    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=b)
+    d.sense = FakeSense()
+    d.start()
+    try:
+        assert d._started_ok.wait(5.0)
+        time.sleep(1.0)
+        drain_writer(b)
+    finally:
+        d.stop_event.set()
+        d.join(2.0)
+        b.stop()
+    segs = files_of(str(tmp_path), blackbox.SEG_EXT)
+    assert segs
+    _, rec = blackbox.read_segment(tmp_path / segs[0])
+    assert len(rec) > 5
+    imu = rec["imu"][-1]
+    F = blackbox.IMU_FIELDS
+    assert imu[F.index("pitch")] == pytest.approx(3.0, abs=0.01)
+    assert imu[F.index("roll")] == pytest.approx(-2.0, abs=0.01)
+    assert tuple(imu[F.index("gyr_x"):F.index("gyr_z") + 1]) == pytest.approx((1.0, 2.0, 3.0))
+    assert 0.0 <= imu[F.index("age")] < 0.5

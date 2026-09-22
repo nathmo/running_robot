@@ -56,7 +56,7 @@ import numpy as np
 
 import paths
 
-VERSION = 1
+VERSION = 2                              # 2: the IMU block; files say their layout in the header
 MAGIC = b"DASHBB01"
 SEG_EXT = ".bbseg"                       # Tier A segment
 DUMP_EXT = ".bbdump"                     # Tier B triggered dump
@@ -71,19 +71,28 @@ N = paths.N_MOTORS
 # running dropped-sample count at the moment this record was accepted.
 MOTOR_FIELDS = ("pos_raw", "pos_norm", "cmd_raw", "cmd_norm", "spd", "cur", "temp")
 SCALAR_FIELDS = ("t_mono", "t_wall", "dt", "mode", "estop", "slip", "drop")
+# The IMU as the tick saw it (version 2, 2026-09-22): the balance fall of that day had to be
+# reconstructed by inverting the motor commands through the loop's law because the record held no
+# attitude at all. Body pitch/roll in deg (balance.attitude_from_up), gyro in deg/s in body axes,
+# and the sample's age at the tick in s. All NaN when there is no Sense HAT.
+IMU_FIELDS = ("pitch", "roll", "gyr_x", "gyr_y", "gyr_z", "age")
+N_IMU = len(IMU_FIELDS)
 RECORD_DTYPE = np.dtype(
     [("t_mono", "<f8"), ("t_wall", "<f8"), ("dt", "<f4"),
      ("mode", "u1"), ("estop", "u1"), ("_pad", "<u2"),
      ("slip", "<u4"), ("drop", "<u4")]
     + [(f, "<f4", (N,)) for f in MOTOR_FIELDS]
-    + [("err", "<u2", (N,))])
-RECORD_BYTES = RECORD_DTYPE.itemsize                      # 212 B
+    + [("err", "<u2", (N,))]
+    + [("imu", "<f4", (N_IMU,))])
+RECORD_BYTES = RECORD_DTYPE.itemsize                      # 236 B (212 before the IMU block)
 
 # What the daemon hands to push_sample(): one flat tuple, no dicts, no numpy, no allocation beyond
 # the tuple itself. Field-major so the writer can slice it straight into RECORD_DTYPE columns.
 ROW_HEAD = ("t_mono", "t_wall", "dt", "mode", "estop", "slip")
 ROW_BLOCKS = MOTOR_FIELDS + ("err",)                      # each block is N values
-ROW_LEN = len(ROW_HEAD) + len(ROW_BLOCKS) * N             # 6 + 8*6 = 54
+ROW_LEN_V1 = len(ROW_HEAD) + len(ROW_BLOCKS) * N          # 6 + 8*6 = 54: a row without the IMU
+ROW_LEN = ROW_LEN_V1 + N_IMU                              # ...then the IMU block = 60
+_NO_IMU = (float("nan"),) * N_IMU                         # the block when there is no Sense HAT
 
 # ---------------------------------------------------------------- tuning
 TIER_A_DIV = 5                   # keep 1 sample in 5 => 20 Hz from the 100 Hz push
@@ -400,6 +409,9 @@ class BlackBox:
             if len(r) == ROW_LEN:
                 drops.append(d)
                 rows.append(r)
+            elif len(r) == ROW_LEN_V1:                    # a caller without an IMU: NaN block
+                drops.append(d)
+                rows.append(tuple(r) + _NO_IMU)
         if not rows:
             return
         rec = self._pack(rows, drops)
@@ -424,6 +436,8 @@ class BlackBox:
             rec[f] = flat[:, o:o + N]
             o += N
         rec["err"] = np.nan_to_num(flat[:, o:o + N]).astype(np.uint16)
+        o += N
+        rec["imu"] = flat[:, o:o + N_IMU]
         return rec
 
     def _ring_write(self, rec):
@@ -505,6 +519,7 @@ class BlackBox:
                        for n in RECORD_DTYPE.names],
              "motor_names": list(paths.MOTOR_NAMES),
              "motor_fields": list(MOTOR_FIELDS) + ["err"],
+             "imu_fields": list(IMU_FIELDS),
              "mode_names": list(_MODE_NAMES),
              "rate_hz": (RING_HZ / TIER_A_DIV) if tier == "A" else RING_HZ,
              **extra}
@@ -774,7 +789,8 @@ class BlackBox:
                     item["reason"] = (h.get("trigger") or {}).get("reason")
                     item["pre_trigger_s"] = h.get("pre_trigger_s")
                     if item["n_samples"] is None:
-                        item["n_samples"] = max(0, (size - h["_data_offset"]) // RECORD_BYTES)
+                        item["n_samples"] = max(0, (size - h["_data_offset"])
+                                                // record_dtype_of(h).itemsize)
                 except (OSError, ValueError):
                     item["error"] = "unreadable header"
             out.append(item)
@@ -808,16 +824,34 @@ def read_header(path):
     return h
 
 
+def record_dtype_of(h):
+    """The record layout a file was written with, from its header: a version-1 file (no IMU block,
+    212 B) reads with its own layout, not today's. Falls back to RECORD_DTYPE for a header that
+    does not describe itself."""
+    try:
+        dt = np.dtype([(n, base, tuple(shape)) if shape else (n, base)
+                       for n, base, shape in h["dtype"]])
+        if dt.itemsize == int(h.get("record_bytes", dt.itemsize)):
+            return dt
+    except (KeyError, TypeError, ValueError):
+        pass
+    return RECORD_DTYPE
+
+
 def read_segment(path):
     """(header, records) — tolerant of a file that was killed mid-write: a torn tail record is
-    floored away rather than raising, which is the whole point of the append-only format."""
+    floored away rather than raising, which is the whole point of the append-only format.
+    Records come back in the layout the FILE declares (record_dtype_of), so a pre-IMU file has no
+    "imu" column rather than misaligned ones."""
     h = read_header(path)
+    dt = record_dtype_of(h)
+    h["_record_bytes"] = dt.itemsize
     with open(path, "rb") as f:
         f.seek(h["_data_offset"])
         blob = f.read()
-    n = len(blob) // RECORD_BYTES
-    h["_torn_bytes"] = len(blob) - n * RECORD_BYTES
-    return h, np.frombuffer(blob[:n * RECORD_BYTES], dtype=RECORD_DTYPE)
+    n = len(blob) // dt.itemsize
+    h["_torn_bytes"] = len(blob) - n * dt.itemsize
+    return h, np.frombuffer(blob[:n * dt.itemsize], dtype=dt)
 
 
 def read_events(path):

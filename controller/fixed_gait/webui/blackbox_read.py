@@ -61,6 +61,9 @@ def to_frame(rec):
     for f in list(blackbox.MOTOR_FIELDS) + ["err"]:
         for i, n in enumerate(paths.MOTOR_NAMES):
             cols[f"{n}.{f}"] = rec[f][:, i]
+    if "imu" in rec.dtype.names:                    # version 2 files carry the IMU block
+        for i, f in enumerate(blackbox.IMU_FIELDS):
+            cols[f"imu.{f}"] = rec["imu"][:, i]
     try:
         import pandas as pd
         return pd.DataFrame(cols)
@@ -157,7 +160,7 @@ def cmd_list(d, files, events):
             continue
         n = h.get("n_samples")
         if n is None:
-            n = max(0, (size - h["_data_offset"]) // blackbox.RECORD_BYTES)
+            n = max(0, (size - h["_data_offset"]) // blackbox.record_dtype_of(h).itemsize)
         extra = ""
         if h.get("tier") == "B":
             t = h.get("trigger", {})
