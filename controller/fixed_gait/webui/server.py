@@ -1674,14 +1674,17 @@ def api_policy_info():
     _root = os.path.dirname(paths.REPO)
     _rel = lambda q: os.path.relpath(q, _root).replace(os.sep, "/")
     _py = _rel(sys.executable) if os.path.abspath(sys.executable).startswith(_root) else "python"
+    _th_path = os.path.join(paths.DEPLOY, "thermal_params.json")
+    # no fitted thermal model on disk -> the runner needs the acknowledgement, not a path to a
+    # file that is not there (it died on exactly that, 2026-09-22)
+    _th = ("--thermal " + _rel(_th_path)) if os.path.exists(_th_path) else "--allow-uncalibrated-thermal"
     _head = ("sudo systemctl stop runningrobot-webui.service\n"
              "{py} {run} \\\n"
              "    --bundle {bundle} \\\n"
              "    --jointmap {jm} \\\n"
-             "    --thermal {th} \\\n".format(
+             "    {th} \\\n".format(
                  py=_py, run=_rel(os.path.join(paths.DEPLOY, "run_policy.py")), bundle=_rel(p),
-                 jm=_rel(os.path.join(paths.DEPLOY, "deploy_map.json")),
-                 th=_rel(os.path.join(paths.DEPLOY, "thermal_params.json"))))
+                 jm=_rel(os.path.join(paths.DEPLOY, "deploy_map.json")), th=_th))
     if kind == "speed":
         cmd = (_head +
                "    --command-file /tmp/dash_command --max-seconds 30 \\\n"
