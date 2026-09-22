@@ -741,10 +741,23 @@ function updateBalanceStatus(b) {
   const t = b.trim || {};
   for (const [id, key] of [["bal-comx", "com_x_mm"], ["bal-comy", "com_y_mm"], ["bal-pitch", "pitch_deg"]]) {
     const el = $(id);
-    if (document.activeElement !== el && t[key] !== undefined) el.value = t[key];
+    // A value the operator just set is DIRTY until the daemon has answered the POST that carries
+    // it. Until then a state poll must not write the daemon's copy back over it: the poll answers
+    // every 500 ms and one is nearly always in flight with the OLD trim, and the ◀ ▶ buttons take
+    // the focus, so "not the active element" protected nothing -- the click was snapped back to
+    // the old value inside the 120 ms send debounce and the old value is what got sent.
+    if (el.dataset.dirty && el.dataset.want !== undefined &&
+        (String(t[key]) === el.dataset.want || Date.now() - +el.dataset.wantT > 2000)) {
+      delete el.dataset.dirty; delete el.dataset.want; delete el.dataset.wantT;   // echoed (or given up)
+    }
+    if (document.activeElement !== el && !el.dataset.dirty && t[key] !== undefined) el.value = t[key];
   }
   $("bal-comx-val").textContent = sg($("bal-comx").value, 0);
   $("bal-comy-val").textContent = sg($("bal-comy").value, 0);
+  // where the trim lands: it re-poses the robot only while it holds the standing pose (Home
+  // arrived / Balance stopped) or while the loop runs; anywhere else it is stored for the next Home
+  $("bal-trim-where").textContent = BAL.active ? "live (loop)"
+    : b.stand_hold ? "live (holding the stand)" : "saved — applies at the next 🏠 Home";
   BAL.defaults = b.defaults || BAL.defaults;
   for (const el of document.querySelectorAll("[data-gain]")) {
     const v = (b.gains || {})[el.dataset.gain];
@@ -763,11 +776,36 @@ $("btn-balance").onclick = async () => {
   }
 };
 let balTrimTimer = null;
+let balTrimSeq = 0;
+const BAL_TRIM_INPUTS = [["bal-comx", "com_x_mm"], ["bal-comy", "com_y_mm"], ["bal-pitch", "pitch_deg"]];
 function sendBalanceTrim() {
   clearTimeout(balTrimTimer);
-  balTrimTimer = setTimeout(() => api("/api/balance/trim", { json: {
-    com_x_mm: +$("bal-comx").value, com_y_mm: +$("bal-comy").value,
-    pitch_deg: +$("bal-pitch").value } }).catch(() => {}), 120);
+  for (const [id] of BAL_TRIM_INPUTS) {          // ours until the daemon answers THIS edit: an
+    const el = $(id);                            // older edit's echo must not release the guard
+    el.dataset.dirty = "1"; delete el.dataset.want; delete el.dataset.wantT;
+  }
+  const seq = ++balTrimSeq;
+  balTrimTimer = setTimeout(async () => {
+    let d = null;
+    try {
+      d = await api("/api/balance/trim", { json: {
+        com_x_mm: +$("bal-comx").value, com_y_mm: +$("bal-comy").value,
+        pitch_deg: +$("bal-pitch").value } });
+    } catch (_) { /* banner already set */ }
+    if (seq !== balTrimSeq) return;          // a newer edit is on its way: leave its value alone
+    for (const [id, key] of BAL_TRIM_INPUTS) {
+      const el = $(id);
+      if (d && d.trim && d.trim[key] !== undefined) {
+        el.value = d.trim[key];                                   // as the daemon clipped it
+        el.dataset.want = String(d.trim[key]);                    // dirty until a poll echoes it
+        el.dataset.wantT = String(Date.now());
+      } else {
+        delete el.dataset.dirty;                                  // refused: show the daemon's copy
+      }
+    }
+    $("bal-comx-val").textContent = (+$("bal-comx").value >= 0 ? "+" : "") + $("bal-comx").value;
+    $("bal-comy-val").textContent = (+$("bal-comy").value >= 0 ? "+" : "") + $("bal-comy").value;
+  }, 120);
 }
 for (const id of ["bal-comx", "bal-comy"]) {
   $(id).oninput = () => {
