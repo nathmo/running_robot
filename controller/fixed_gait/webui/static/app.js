@@ -550,7 +550,7 @@ async function pollTelemetry() {
         cur: m.cur[n - 1], temp: m.temp[n - 1] };
     }
     if (n) S.lastT = d.t[n - 1];
-    accumulateWsTrail();
+    accumulateWsTrail(d);
   } catch (e) { /* banner handled by state poll */ }
 }
 
@@ -1289,21 +1289,29 @@ $("btn-wsrec-process").onclick = () => api("/api/workspace/process", { json: {
   });
 
 /* Accumulate the live (cam,thigh) trail + swept abduction range while a workspace pass is running,
- * so the plot fills in AS YOU MOVE. Cleared automatically once you leave sweep mode. */
-function accumulateWsTrail() {
+ * so the plot fills in AS YOU MOVE. Cleared automatically once you leave sweep mode.
+ * From EVERY sample of the telemetry batch `d`, not the last one: the daemon samples at 20 Hz
+ * whatever the link does, but a poll over the hotspot can take seconds to arrive, and one point per
+ * poll drew a straight line between wherever the leg was at each arrival (2026-09-22). The recorded
+ * workspace was never affected -- the daemon stores every 100 Hz sample -- only this drawing. */
+function accumulateWsTrail(d) {
   const st = S.state;
   if (!st || st.mode !== "RECORD_WS") { if (S.wsTrail.length) resetWsTrail(); return; }
   const rec = st.recording || {};
   if (!rec.active) return;                      // only extend while a pass is actually recording
   const leg = rec.leg || S.wsLeg;
-  const cam = S.latest[leg + ".cam"], th = S.latest[leg + ".thigh"], ab = S.latest[leg + ".abd"];
-  if (!cam || !th || cam.pos_norm == null || th.pos_norm == null) return;
-  const p = [cam.pos_norm, th.pos_norm];
-  const last = S.wsTrail[S.wsTrail.length - 1];
-  if (!last || Math.hypot(p[0] - last[0], p[1] - last[1]) > 0.25) S.wsTrail.push(p);
-  if (ab && ab.pos_norm != null) {
-    S.wsAbdSweep[0] = Math.min(S.wsAbdSweep[0], ab.pos_norm);
-    S.wsAbdSweep[1] = Math.max(S.wsAbdSweep[1], ab.pos_norm);
+  const cam = d && d.motors[leg + ".cam"], th = d && d.motors[leg + ".thigh"], ab = d && d.motors[leg + ".abd"];
+  const n = (d && d.t) ? d.t.length : 0;
+  if (!cam || !th || !n) return;
+  for (let i = 0; i < n; i++) {
+    if (cam.pos_norm[i] == null || th.pos_norm[i] == null) continue;
+    const p = [cam.pos_norm[i], th.pos_norm[i]];
+    const last = S.wsTrail[S.wsTrail.length - 1];
+    if (!last || Math.hypot(p[0] - last[0], p[1] - last[1]) > 0.25) S.wsTrail.push(p);
+    if (ab && ab.pos_norm[i] != null) {
+      S.wsAbdSweep[0] = Math.min(S.wsAbdSweep[0], ab.pos_norm[i]);
+      S.wsAbdSweep[1] = Math.max(S.wsAbdSweep[1], ab.pos_norm[i]);
+    }
   }
 }
 
