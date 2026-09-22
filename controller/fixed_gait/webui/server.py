@@ -1668,39 +1668,37 @@ def api_policy_info():
     }
     # The headless equivalent, for the record and for running without a browser. It is NOT the
     # path the panel uses: run_policy.py refuses to start while this daemon is up, because the CAN
-    # bus has one owner.
+    # bus has one owner. The paths are THIS install's, relative to the repo root the service runs
+    # from: on the Pi the tree is robot/..., on the desktop controller/..., and a command printed
+    # with the wrong one sent the operator to a folder that does not exist (2026-09-22).
+    _root = os.path.dirname(paths.REPO)
+    _rel = lambda q: os.path.relpath(q, _root).replace(os.sep, "/")
+    _py = _rel(sys.executable) if os.path.abspath(sys.executable).startswith(_root) else "python"
+    _head = ("sudo systemctl stop runningrobot-webui.service\n"
+             "{py} {run} \\\n"
+             "    --bundle {bundle} \\\n"
+             "    --jointmap {jm} \\\n"
+             "    --thermal {th} \\\n".format(
+                 py=_py, run=_rel(os.path.join(paths.DEPLOY, "run_policy.py")), bundle=_rel(p),
+                 jm=_rel(os.path.join(paths.DEPLOY, "deploy_map.json")),
+                 th=_rel(os.path.join(paths.DEPLOY, "thermal_params.json"))))
     if kind == "speed":
-        cmd = ("sudo systemctl stop runningrobot-webui.service\n"
-               "python controller/deploy/run_policy.py \\\n"
-               "    --bundle controller/fixed_gait/webui/data/policies/{} \\\n"
-               "    --jointmap controller/deploy/deploy_map.json \\\n"
-               "    --thermal controller/deploy/thermal_params.json \\\n"
+        cmd = (_head +
                "    --command-file /tmp/dash_command --max-seconds 30 \\\n"
                "    --deadman-file /tmp/dash_deadman\n"
                "# then, from a second shell, while watching the robot:\n"
                "echo 1.0 > /tmp/dash_command       # ask for 1.0 m/s\n"
-               "echo 0   > /tmp/dash_command       # walk in place again: this IS the stop"
-               .format(os.path.basename(p)))
+               "echo 0   > /tmp/dash_command       # walk in place again: this IS the stop")
     elif bd.version == 2:
-        cmd = ("sudo systemctl stop runningrobot-webui.service\n"
-               "python controller/deploy/run_policy.py \\\n"
-               "    --bundle controller/fixed_gait/webui/data/policies/{} \\\n"
-               "    --jointmap controller/deploy/deploy_map.json \\\n"
-               "    --thermal controller/deploy/thermal_params.json \\\n"
+        cmd = (_head +
                "    --command-file /tmp/dash_command --max-seconds 30 \\\n"
                "    --deadman-file /tmp/dash_deadman\n"
                "# then, from a second shell, while watching the robot:\n"
                "echo run  > /tmp/dash_command      # green light\n"
-               "echo stop > /tmp/dash_command      # red light: ask the policy to halt"
-               .format(os.path.basename(p)))
+               "echo stop > /tmp/dash_command      # red light: ask the policy to halt")
     else:
-        cmd = ("sudo systemctl stop runningrobot-webui.service\n"
-               "python controller/deploy/run_policy.py \\\n"
-               "    --bundle controller/fixed_gait/webui/data/policies/{} \\\n"
-               "    --jointmap controller/deploy/deploy_map.json \\\n"
-               "    --thermal controller/deploy/thermal_params.json \\\n"
-               "    --v-cmd 0.0 --max-seconds 20 --deadman-file /tmp/dash_deadman"
-               .format(os.path.basename(p)))
+        cmd = (_head +
+               "    --v-cmd 0.0 --max-seconds 20 --deadman-file /tmp/dash_deadman")
     return _ok(info=info, warnings=warnings, preflight=_policy_preflight(p), command=cmd)
 
 
