@@ -322,6 +322,16 @@ class Runner:
                 motors["{}.{}".format(side, role)] = m
                 by_bus[ch][m.cid] = m
         cal = self.preflight(buses, motors)
+        if a.deadman_file and not a.mock and self.deadman_age(time.time()) > a.deadman_s:
+            # the dead-man has to be alive BEFORE the drives are armed. On 2026-09-22 a run with no
+            # process touching the file went through the whole approach, handed the legs to the
+            # policy, and was in soft stop from the policy's first tick: gains bleeding out while it
+            # took its first step. Refusing here costs nothing and moves nothing.
+            raise SystemExit("REFUSING TO RUN: nobody is holding the dead-man ({} is missing or older "
+                             "than {:.1f} s). From a second shell, before starting this:\n"
+                             "    while true; do touch {}; sleep 0.2; done\n"
+                             "and Ctrl+C on THAT loop is your stop.".format(a.deadman_file, a.deadman_s,
+                                                                             a.deadman_file))
         sh = None
         phase = "LIMP"
         try:
