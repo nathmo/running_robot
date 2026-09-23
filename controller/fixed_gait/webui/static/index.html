@@ -645,6 +645,10 @@ workspace, runaway speed, over-temperature, motor faults and the E-STOP button a
         <button id="btn-pol-rehearse-stop" class="btn" disabled>■ Stop</button>
         <label>for <input id="pol-seconds" type="number" class="num small" value="5" min="1"
           max="30"> s</label>
+        <label title="While the rehearsal runs, draw the pose it is COMMANDING in the digital twin
+above instead of the (motionless) live telemetry. Nothing is energised either way — this is the
+only way to watch a dry run."><input type="checkbox" id="pol-twin" checked> drive the digital
+          twin</label>
         <span id="pol-rehearse-status" class="hint"></span>
       </div>
       <pre id="pol-log" class="pol-log hidden"></pre>

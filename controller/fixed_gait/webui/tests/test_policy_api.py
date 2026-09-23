@@ -9,6 +9,7 @@ so the endpoints are exercised with exactly the artifact export_policy.py produc
 import io
 import os
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -242,3 +243,118 @@ def test_a_rehearsal_lifts_the_hardware_guards_and_says_so(tmp_path):
     assert "DRY RUN PASSED" in out.stdout
     assert "BYPASSED for the dry run" in out.stdout and "thermal model: placeholder" in out.stdout
     assert "ticks of the control law" in out.stdout and "never reached the policy" not in out.stdout
+
+
+# ===================================================================== the dry run's live pose
+def test_the_pose_endpoint_is_quiet_when_no_rehearsal_is_running(client, poldir):
+    """No process, no pose. The twin falls back to live telemetry on exactly this answer."""
+    c, _d = client
+    j = c.get("/api/policy/rehearse/pose").get_json()
+    assert j["ok"] is True and j["pose"] is None
+
+
+class _FakeProc:
+    """A rehearsal that is 'running' without one: poll() is the only thing the endpoint asks."""
+
+    def __init__(self, rc=None):
+        self.rc = rc
+
+    def poll(self):
+        return self.rc
+
+
+def test_a_running_rehearsal_serves_the_pose_the_runner_published(client, poldir, tmp_path):
+    """run_policy.py --pose-file writes normalized degrees per motor; the endpoint hands them over
+    with an age, and the panel feeds them to the digital twin. The age is what stops a frozen twin
+    claiming a dry run is still moving."""
+    import json as _json
+    import server
+
+    pose = tmp_path / "rehearsal_pose.json"
+    rec = {"t": 1.25, "phase": "RUN", "ticks": 250, "mock": True,
+           "norm_deg": {n: 3.5 for n in paths.MOTOR_NAMES}}
+    pose.write_text(_json.dumps(rec), encoding="utf-8")
+    server._REHEARSAL.update(proc=_FakeProc(), file="b.npz", pose=str(pose))
+    try:
+        c, _d = client
+        p = c.get("/api/policy/rehearse/pose").get_json()["pose"]
+        assert p["phase"] == "RUN" and p["file"] == "b.npz"
+        assert sorted(p["norm_deg"]) == sorted(paths.MOTOR_NAMES)
+        assert p["age_s"] < 5.0
+
+        # the same file, once the process is gone: nothing to draw
+        server._REHEARSAL.update(proc=_FakeProc(rc=0))
+        assert c.get("/api/policy/rehearse/pose").get_json()["pose"] is None
+    finally:
+        server._REHEARSAL.update(proc=None, file=None, pose=None)
+
+
+def test_a_half_written_pose_is_no_pose_rather_than_a_500(client, poldir, tmp_path):
+    """The runner writes to a temp name and renames, so a reader sees one record or the other --
+    but a truncated file from a killed run must not take the endpoint down with it."""
+    import server
+
+    pose = tmp_path / "rehearsal_pose.json"
+    pose.write_text('{"phase": "RU', encoding="utf-8")
+    server._REHEARSAL.update(proc=_FakeProc(), file="b.npz", pose=str(pose))
+    try:
+        c, _d = client
+        j = c.get("/api/policy/rehearse/pose").get_json()
+        assert j["ok"] is True and j["pose"] is None
+    finally:
+        server._REHEARSAL.update(proc=None, file=None, pose=None)
+
+
+@pytest.mark.skipif(not os.path.exists(_JOY3), reason="the dash_joy3 bundle is not in deploy/bundles/")
+def test_a_rehearsal_publishes_a_pose_that_actually_moves(tmp_path):
+    """End to end: --pose-file makes a dry run watchable. A mock bus swallows every frame, so
+    without this the only evidence a rehearsal produces is a log tail -- and the digital twin, the
+    one thing that CAN show a policy moving with nothing energised, sits still.
+
+    The claim is that the pose CHANGES while the run is up: a file written once would draw a frozen
+    robot, which looks exactly like a working one."""
+    import json as _json
+    import subprocess
+
+    pose = tmp_path / "pose.json"
+    proc = subprocess.Popen([sys.executable, os.path.join(paths.DEPLOY, "run_policy.py"),
+                             "--bundle", _JOY3, "--mock", "--max-seconds", "4", "--no-log",
+                             "--speed", "1.0", "--pose-file", str(pose)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    seen = []
+    t_end = time.time() + 300.0
+    while proc.poll() is None and time.time() < t_end:
+        try:
+            rec = _json.loads(pose.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            time.sleep(0.02)
+            continue
+        if not seen or rec["norm_deg"] != seen[-1]["norm_deg"]:
+            seen.append(rec)
+        time.sleep(0.02)
+    out = proc.communicate()[0]
+    assert proc.returncode == 0, out[-2000:]
+    assert len(seen) >= 2, "the pose never changed: {}".format(seen)
+    assert sorted(seen[-1]["norm_deg"]) == sorted(paths.MOTOR_NAMES)
+    assert {r["phase"] for r in seen} <= {"APPROACH", "RUN"}
+    assert any(r["phase"] == "RUN" for r in seen), "never published a pose from the policy itself"
+
+
+@pytest.mark.skipif(not os.path.exists(_JOY3), reason="the dash_joy3 bundle is not in deploy/bundles/")
+def test_a_finished_rehearsal_takes_its_pose_away(tmp_path):
+    """A pose left behind is a viewer claiming a run that has ended -- the twin would keep drawing
+    the last commanded stance as if the policy were still in it.
+
+    Nothing reads the file while the run is up here, deliberately: on Windows a reader holding the
+    file open makes the runner's own remove() fail, which is a property of the test's polling and
+    not of the product (on the Pi it is not a race at all). The server guards on the process too."""
+    import subprocess
+
+    pose = tmp_path / "pose.json"
+    out = subprocess.run([sys.executable, os.path.join(paths.DEPLOY, "run_policy.py"),
+                          "--bundle", _JOY3, "--mock", "--max-seconds", "2", "--no-log",
+                          "--pose-file", str(pose)],
+                         capture_output=True, text=True, timeout=600)
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    assert not pose.exists(), "the runner left its pose behind after the run ended"
+    assert not (tmp_path / "pose.json.tmp").exists(), "left its scratch file behind"

@@ -21,7 +21,9 @@ const POL = { list: [], file: null, pollTimer: null, running: false,
               cmdKind: "velocity", info: null,
               // slider state. `speedPending` + `speedTimer` throttle the POST while dragging;
               // `speedDrag` stops a status poll yanking the knob out from under a finger.
-              speedPending: null, speedTimer: null, speedDrag: false, speedRun: null };
+              speedPending: null, speedTimer: null, speedDrag: false, speedRun: null,
+              // the dry run's live pose, for the digital twin (see THE DRY RUN IS WATCHABLE)
+              pose: null, poseTimer: null, posePolling: false, poseFrames: 0, poseWhy: null };
 
 function polEsc(s) {
   return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
@@ -47,6 +49,13 @@ function polInit() {
   $("btn-pol-zero").onclick = () => polSpeedSet(0);
   $("btn-pol-aim").onclick = polZeroHeading;
   $("pol-supported").onchange = polRunButtons;
+  // switching it off mid-rehearsal gives the twin straight back to the robot; switching it on
+  // picks up a rehearsal that is already running rather than waiting for the next one. Guarded
+  // because polInit() runs against whatever index.html the browser has: a page older than this
+  // script must lose the twin feed, not the whole policy panel.
+  if ($("pol-twin")) $("pol-twin").onchange = () => {
+    if (polTwinOn()) { if (POL.running) polPoseStart(); } else { polPoseStop(); }
+  };
   // Leaving the page is the dead-man's own signal, so it must not ALSO be the thing that keeps a
   // stale interval alive: the timer checks visibility every tick and simply stops posting.
   document.addEventListener("visibilitychange", () => {
@@ -198,7 +207,95 @@ async function polRehearse() {
   $("pol-log").classList.remove("hidden");
   $("pol-log").textContent = "(starting…)";
   polPollStatus();
+  polPoseStart();
 }
+
+/* ================================================================ THE DRY RUN IS WATCHABLE
+ *
+ * A rehearsal runs the whole control law against a mock bus, so the robot in front of you does
+ * nothing and the only evidence is a log tail. The runner therefore publishes its COMMANDED joint
+ * pose (--pose-file, 20 Hz) and this poll hands it to the digital twin, which already knows how to
+ * draw six normalized angles. Nothing is energised: the twin is the only thing that moves.
+ *
+ * It is the COMMAND that is drawn, not the mock drives' answer. The mock plant is a first-order
+ * lag with noise; the command is the policy's own output and the thing the rehearsal is testing.
+ *
+ * Self-scheduling rather than setInterval, and on a bare fetch rather than api(): over the Pi's
+ * hotspot a request can take a second (README: 0.15-30 s), so a fixed interval would queue
+ * requests behind each other and every failure would raise a banner. This way a slow link simply
+ * lowers the twin's frame rate, and a dropped poll is a dropped frame. */
+const POSE_POLL_MS = 100;
+const POSE_STALE_S = 1.0;          // older than this and the twin stops claiming it is live
+
+function polTwinOn() {
+  const el = $("pol-twin");
+  return !el || el.checked;          // a page without the toggle still gets the feed
+}
+
+function polPoseStart() {
+  if (POL.posePolling || !polTwinOn()) return;
+  POL.posePolling = true;
+  POL.poseFrames = 0;
+  POL.poseWhy = null;
+  const tick = async () => {
+    POL.poseTimer = null;
+    if (!POL.posePolling) return;
+    if (document.visibilityState === "visible") {
+      try {
+        const r = await fetch("/api/policy/rehearse/pose");
+        if (r.status === 404) {
+          // THE ONE FAILURE THAT LOOKS LIKE NOTHING. Flask serves static/ from disk on every
+          // request, so pulling the new page off a server process started before this endpoint
+          // existed gives you a browser that polls correctly and a twin that never moves, with
+          // nothing on screen to say why. Restarting server.py is the fix; saying so is the point.
+          POL.poseWhy = "this page is newer than the server — restart server.py " +
+                        "(no /api/policy/rehearse/pose)";
+          polPoseSet(null);
+        } else {
+          const d = await r.json();
+          POL.poseWhy = null;
+          if (d && d.pose) POL.poseFrames++;
+          polPoseSet(d && d.ok ? d.pose : null);
+        }
+      } catch (_) { /* a dropped frame; the 1 Hz status poll owns reporting the rehearsal */ }
+    }
+    if (POL.posePolling) POL.poseTimer = setTimeout(tick, POSE_POLL_MS);
+  };
+  tick();
+}
+
+/** What the rehearsal line says about the twin feed: frames if it is working, the reason if not.
+ *  A rehearsal that has run for seconds with 0 frames is the symptom worth naming. */
+function polPoseNote(elapsed_s) {
+  if (!polTwinOn()) return " · twin off";
+  if (POL.poseWhy) return " · twin: " + POL.poseWhy;
+  if (POL.poseFrames) return ` · twin ${POL.poseFrames} frames`;
+  return elapsed_s > 3 ? " · twin: no pose from the run yet" : "";
+}
+
+function polPoseStop() {
+  POL.posePolling = false;
+  if (POL.poseTimer) clearTimeout(POL.poseTimer);
+  POL.poseTimer = null;
+  polPoseClear();
+}
+
+function polPoseClear() {
+  if (POL.pose) polPoseSet(null);
+}
+
+/** Hand the twin a new pose (or take it away) and redraw. Stale samples are dropped rather than
+ *  drawn: a frozen twin that still says "dry run" is the failure this guards against. */
+function polPoseSet(pose) {
+  const live = pose && pose.norm_deg && (pose.age_s || 0) < POSE_STALE_S && polTwinOn();
+  POL.pose = live ? pose : null;
+  if (window.renderEE) renderEE();
+}
+
+/** Read by app.js's twinAngles(). Null whenever there is no live dry run to draw. */
+window.policyTwinPose = function () {
+  return POL.pose;
+};
 
 /* One poll per second while a rehearsal runs; the timer dismantles itself when nothing is. */
 function polPollStatus() {
@@ -212,6 +309,7 @@ function polPollStatus() {
       clearInterval(POL.pollTimer);
       POL.pollTimer = null;
       POL.running = false;
+      polPoseStop();
       polButtons();
       return;
     }
@@ -221,10 +319,13 @@ function polPollStatus() {
     POL.running = !!r.running;
     polButtons();
     if (r.running) {
-      st.textContent = `rehearsing ${r.file} — ${r.elapsed_s.toFixed(0)} s`;
+      polPoseStart();                 // also adopts a rehearsal that outlived a page reload
+      st.textContent = `rehearsing ${r.file} — ${r.elapsed_s.toFixed(0)} s` +
+                       polPoseNote(r.elapsed_s);
     } else {
       clearInterval(POL.pollTimer);
       POL.pollTimer = null;
+      polPoseStop();
       st.textContent = r.returncode === 0
         ? `✓ ${r.file} rehearsed cleanly — the bundle and the runtime agree`
         : `✗ rehearsal exited with code ${r.returncode} — read the log above`;

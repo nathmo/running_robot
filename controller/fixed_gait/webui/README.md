@@ -22,7 +22,7 @@ What it does (one page):
 | ⚖ Balance | manual panel, after 🏠 Home: IMU loop around the standing pose (`balance.py`) — pitch P+D shift the CoM along the soles and I levels the torso, roll P+D shift the CoM sideways; CoM fore/aft + lateral trims; Stop holds, a >15° tilt goes limp. Tested in `tools/balance_sim.py` (MuJoCo, measured SET_POS lag): survives zero errors ~0.75° (vs 0.5° without) and 49 N side pushes (vs 45), but no posture loop beats ~8 N/0.2 s fore-aft on 66 mm soles |
 | Safe workspace | abduction bar + (cam, thigh) pixel editor — draw/erase/flood-fill, undo, save/export/import |
 | Gait trajectory | hand-**draw** a path, or **teach** by backdriving (record takes), smooth + save |
-| Digital twin | the homing-pose MJCF rendered in the browser (WebGL), posed live from the six motors — backdrive the robot and the twin follows; also plays the gait preview |
+| Digital twin | the homing-pose MJCF rendered in the browser (WebGL), posed live from the six motors — backdrive the robot and the twin follows; also plays the gait preview, and a policy's dry run |
 | Playback | position or torque-capped current mode, speed (period) + left/right dephasing live |
 | E-STOP | header button (hotkey: Space) — streams zero current, latches until cleared |
 
@@ -71,6 +71,18 @@ scp -r controller/fixed_gait/webui/static/twin nemo@<pi>:running_robot/controlle
   against the fixed yellow world marker (level ring, plumb line, a ring at foot level) and the
   world triad; paler axes turn with the body. Needs a calibrated mount without a conflict, and
   can be switched off in the panel.
+* **Three sources, in this order:** the gait preview (an explicit toggle, so it wins), then a
+  **dry run**, then live telemetry. The line under the canvas names whichever is on screen.
+* **A dry run moves it** (2026-09-23). A dress rehearsal runs the whole control law against a mock
+  bus, so the robot stays limp and the live telemetry underneath is a still picture — the log tail
+  used to be the only evidence it produced. `run_policy.py --pose-file` now publishes the
+  **commanded** joint angles as JSON at 20 Hz, the server passes it on every rehearsal, and the
+  panel polls `/api/policy/rehearse/pose` at 10 Hz and hands them here. What you see is the pose
+  the policy is *asking for*, not what the mock drives report: the mock plant is a first-order lag
+  with noise, the command is the thing under test. Nothing is energised; the base tilt is still the
+  real IMU's. The poll self-schedules (a slow link lowers the frame rate instead of queueing
+  requests), the pose is dropped once it is a second old, and the runner removes the file when the
+  run ends. Off with **drive the digital twin** in the rehearsal row.
 
 ## The FK lookup table (workspace EE paths)
 

@@ -110,6 +110,7 @@ APPROACH_DPS = 25.0          # deg/s of joint travel during the approach -- deli
 APPROACH_KP = 40.0           # N*m/rad; enough to carry the leg, far too little to hurt anything
 APPROACH_KD = 2.0
 APPROACH_TRACK_ERR = np.radians(12.0)
+POSE_HZ = 20.0               # --pose-file publish rate; a viewer's frame rate, not the loop's
 # The AK60-39 (abduction) and AKE90-8 (cam, thigh) in MuJoCo actuator order.
 MOTOR_TYPE_BY_ACTUATOR = ("AK60-39", "AKE90-8", "AKE90-8", "AK60-39", "AKE90-8", "AKE90-8")
 
@@ -146,6 +147,10 @@ class Runner:
         self.bypassed = []
         self.n_ticks = 0
         self.timed_out = False
+        # --pose-file: the live viewer's window into a run that moves nothing (see publish_pose)
+        self.phase = "LIMP"
+        self._pose_t0 = time.monotonic()
+        self._pose_next = 0.0
         self._setup_thermal()
         self._setup_safety()
 
@@ -285,9 +290,55 @@ class Runner:
         return -np.asarray(up, float), np.asarray(gyr, float), max(0.0, time.time() - t)
 
     # ------------------------------------------------------------------ CAN
+    def publish_pose(self, norm_deg):
+        """Write the commanded pose where a viewer can see it, at POSE_HZ, atomically.
+
+        This exists for the DRESS REHEARSAL. A --mock run computes the whole control law and sends
+        it to a bus that goes nowhere, so nothing on the robot moves and the only evidence the
+        operator gets is a log tail: the one run you can watch safely is the one with nothing to
+        watch. The web UI's digital twin already draws a pose in normalized degrees, so the cheapest
+        way to give the rehearsal a picture is to publish exactly that, and let the panel poll it.
+
+        What is published is the COMMANDED pose -- the same six numbers that went on the wire --
+        rather than what the mock drives report back. The mock plant is a first-order lag with
+        noise, not physics; the command is the policy's own output, which is the thing under test.
+
+        It is opt-in (--pose-file) and it is never free: a file write inside a 100-200 Hz control
+        loop is exactly the kind of thing that makes a tick late. Throttled to POSE_HZ, wrapped so
+        no viewer can ever end a run, and the server only asks for it on a rehearsal."""
+        if not self.args.pose_file:
+            return
+        now = time.monotonic()
+        if now < self._pose_next:
+            return
+        self._pose_next = now + 1.0 / POSE_HZ
+        rec = {"t": round(now - self._pose_t0, 3), "phase": self.phase, "ticks": self.n_ticks,
+               "mock": bool(self.args.mock),
+               "norm_deg": {n: round(float(norm_deg[i]), 3)
+                            for i, n in enumerate(paths.MOTOR_NAMES)}}
+        try:
+            tmp = self.args.pose_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(rec, f)
+            os.replace(tmp, self.args.pose_file)        # a reader sees one record or the other
+        except OSError:
+            pass                                        # a viewer aid never takes a run down
+
+    def clear_pose(self):
+        """Take the published pose away when the run ends. A viewer that keeps drawing the last
+        commanded pose is a viewer claiming something is still happening; the file's absence is
+        how it learns otherwise (the server also guards on the process, for a kill -9)."""
+        if not self.args.pose_file:
+            return
+        try:
+            os.remove(self.args.pose_file)
+        except OSError:
+            pass
+
     def send(self, motors, cal, target_model, kp_model, kd_model):
         """Model-frame command -> six force-control frames. Returns the set of clamped fields."""
         norm_deg = self.jm.to_norm_deg(target_model)
+        self.publish_pose(norm_deg)
         kp_m = np.asarray(kp_model)[self.jm.motor_from_model]
         kd_m = np.asarray(kd_model)[self.jm.motor_from_model]
         clamped = set()
@@ -333,7 +384,7 @@ class Runner:
                              "and Ctrl+C on THAT loop is your stop.".format(a.deadman_file, a.deadman_s,
                                                                              a.deadman_file))
         sh = None
-        phase = "LIMP"
+        self.phase = "LIMP"
         try:
             # ---- preflight: limp until every drive reports -----------------------------------
             t_end = time.monotonic() + 3.0
@@ -349,27 +400,29 @@ class Runner:
                                t_amb=a.ambient)
 
             # ---- APPROACH --------------------------------------------------------------------
-            phase = "APPROACH"
+            self.phase = "APPROACH"
             if not self.approach(motors, by_bus, buses, cal, sh):
                 self.exit_reason = self.exit_reason or "approach aborted"
                 return False
 
             # ---- RUN -------------------------------------------------------------------------
-            phase = "RUN"
+            self.phase = "RUN"
             self.run_policy(motors, by_bus, buses, cal, sh)
             # the time limit is how a run is MEANT to end; only a governor stop for any other
             # reason is a failure (before 2026-09-22 every rehearsal "failed" at its own deadline)
             return self.gov.stop == STOP_NONE or self.timed_out
         except KeyboardInterrupt:
-            self.exit_reason = "operator interrupt during {}".format(phase)
+            self.exit_reason = "operator interrupt during {}".format(self.phase)
             print("\n!! interrupted")
         except SystemExit:
             raise
         except Exception as e:                              # noqa: BLE001 -- never skip the release
-            self.exit_reason = "exception during {}: {!r}".format(phase, e)
+            self.exit_reason = "exception during {}: {!r}".format(self.phase, e)
             import traceback
             traceback.print_exc()
         finally:
+            self.phase = "LIMP"
+            self.clear_pose()
             print("releasing: streaming zero-gain force control + 0 A for 0.5 s")
             t_rel = time.monotonic()
             while time.monotonic() - t_rel < 0.5:
@@ -681,6 +734,11 @@ def main():
                          "200 Hz (measured), so the default is 10 missed frames.")
     ap.add_argument("--drive-amp-limit", type=float, default=None,
                     help="the drive's configured phase-current limit, A -- caps torque absolutely")
+    ap.add_argument("--pose-file", default=None,
+                    help="publish the COMMANDED joint pose here, as JSON, at {:.0f} Hz, for a live "
+                         "viewer (the web UI points the digital twin at it during a dress "
+                         "rehearsal). Costs a small file write inside the control loop."
+                         .format(POSE_HZ))
     ap.add_argument("--interface", default="socketcan")
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--no-imu", action="store_true")

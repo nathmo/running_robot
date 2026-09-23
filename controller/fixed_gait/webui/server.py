@@ -1458,7 +1458,7 @@ def api_thermal_cooldown_drop():
 #
 # So the only subprocess this section ever launches is still the dress rehearsal, whose bus and IMU
 # are mocks and which therefore cannot collide with anything.
-_REHEARSAL = {"proc": None, "file": None, "log": None, "t0": 0.0}
+_REHEARSAL = {"proc": None, "file": None, "log": None, "pose": None, "t0": 0.0}
 _AXES6 = ("X", "Y", "Z", "roll", "pitch", "yaw")
 
 
@@ -1980,6 +1980,16 @@ def api_policy_upload():
     return _ok(file=os.path.basename(dest))
 
 
+def _drop(path):
+    """Remove a file if it is there. Absence is the answer either way."""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 @app.post("/api/policy/rehearse")
 def api_policy_rehearse():
     b = request.get_json(force=True, silent=True) or {}
@@ -1994,12 +2004,42 @@ def api_policy_rehearse():
     except (TypeError, ValueError):
         secs = 5.0
     log = os.path.join(paths.POLICYRUN_DIR, "rehearsal.log")
+    # THE POSE FILE is what makes a dry run watchable: the runner publishes its commanded joint
+    # angles there at 20 Hz and the panel feeds them to the digital twin. Nothing is energised
+    # either way -- this only gives the operator the picture the mock bus swallows. A pose left
+    # over from a previous rehearsal would be drawn as if it were this one's first frame, so it
+    # goes before the process starts rather than after it ends.
+    pose = os.path.join(paths.POLICYRUN_DIR, "rehearsal_pose.json")
+    _drop(pose)
     cmd = [sys.executable, os.path.join(paths.DEPLOY, "run_policy.py"),
-           "--bundle", p, "--mock", "--max-seconds", str(secs), "--no-log"]
+           "--bundle", p, "--mock", "--max-seconds", str(secs), "--no-log",
+           "--pose-file", pose]
     with open(log, "w", encoding="utf-8") as fh:       # Popen dups the fd; ours can close
         _REHEARSAL["proc"] = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT)
-    _REHEARSAL.update(file=os.path.basename(p), log=log, t0=time.time())
+    _REHEARSAL.update(file=os.path.basename(p), log=log, pose=pose, t0=time.time())
     return _ok(started=True)
+
+
+@app.get("/api/policy/rehearse/pose")
+def api_policy_rehearse_pose():
+    """The rehearsal's commanded joint pose, for the digital twin. Deliberately separate from
+    /status: the twin wants ~10 polls a second and the status response carries an 8 kB log tail,
+    so putting them in one request would push 80 kB/s of text over a link measured at 0.15-30 s
+    of latency (webui/README.md). This handler reads one small file and returns it."""
+    r = _REHEARSAL
+    if r["proc"] is None or r["proc"].poll() is not None or not r["pose"]:
+        return _ok(pose=None)          # nothing is running: the twin falls back to live telemetry
+    try:
+        with open(r["pose"], "r", encoding="utf-8") as f:
+            rec = json.load(f)
+        age = max(0.0, time.time() - os.path.getmtime(r["pose"]))
+    except (OSError, ValueError):
+        # the runner is up but has not commanded anything yet (preflight), or we caught the file
+        # mid-rename on a platform where that is visible. Not an error: there is simply no pose.
+        return _ok(pose=None)
+    rec["age_s"] = round(age, 3)
+    rec["file"] = r["file"]
+    return _ok(pose=rec)
 
 
 @app.get("/api/policy/rehearse/status")
@@ -2025,6 +2065,7 @@ def api_policy_rehearse_status():
 def api_policy_rehearse_stop():
     if _REHEARSAL["proc"] is not None and _REHEARSAL["proc"].poll() is None:
         _REHEARSAL["proc"].terminate()
+    _drop(_REHEARSAL["pose"])          # terminate() may not reach the runner's own cleanup
     return _ok()
 
 
@@ -2032,6 +2073,7 @@ def api_policy_rehearse_stop():
 def _kill_rehearsal():
     if _REHEARSAL["proc"] is not None and _REHEARSAL["proc"].poll() is None:
         _REHEARSAL["proc"].terminate()
+    _drop(_REHEARSAL["pose"])
 
 
 # ===================================================================== black box (flight recorder)

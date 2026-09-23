@@ -2132,7 +2132,12 @@ function twinBanner(msg) {
   b.classList.toggle("hidden", !msg);
 }
 
-/** The pose the twin should show: {motor: normalized deg | null}, plus where it came from. */
+/** The pose the twin should show: {motor: normalized deg | null}, plus where it came from.
+ *
+ *  Three sources, in this order. The GAIT PREVIEW is an explicit toggle, so it wins: someone
+ *  holding it on is asking for that trajectory and nothing else. The DRY RUN comes next, because a
+ *  rehearsal moves nothing on the robot — the drives are limp and the live telemetry underneath is
+ *  a still picture, so drawing it instead would hide the only thing happening. LIVE otherwise. */
 function twinAngles() {
   const out = {};
   if (S.preview.on && S.traj) {
@@ -2142,7 +2147,15 @@ function twinAngles() {
       const [cam, thigh] = tr.path[previewIdx(tr, side, previewPhase())];
       Object.assign(out, { [side + ".abd"]: tr.abd_hold, [side + ".cam"]: cam, [side + ".thigh"]: thigh });
     }
-    return { norm: out, src: "gait preview" };
+    return { norm: out, src: "gait preview", kind: "preview" };
+  }
+  const dry = window.policyTwinPose && window.policyTwinPose();
+  if (dry && dry.norm_deg) {
+    for (const n of MOTORS) {
+      const v = dry.norm_deg[n];
+      out[n] = Number.isFinite(v) ? v : null;
+    }
+    return { norm: out, src: `dry run · ${dry.phase || "?"}`, kind: "dry" };
   }
   const motors = (S.state && S.state.motors) || {};
   for (const n of MOTORS) {
@@ -2150,7 +2163,7 @@ function twinAngles() {
     const v = S.latest[n] ? S.latest[n].pos_norm : (motors[n] || {}).pos_norm;
     out[n] = Number.isFinite(v) ? v : null;
   }
-  return { norm: out, src: "live" };
+  return { norm: out, src: "live", kind: "live" };
 }
 
 // kept under its old name: the workspace / trajectory / preview code calls renderEE() whenever
@@ -2160,7 +2173,7 @@ function renderEE() {
   if (!tv) return;
   if (tv.error) { twinBanner(tv.error); return; }
   if (!tv.model || !TW.signs) return;
-  const { norm, src } = twinAngles();
+  const { norm, src, kind } = twinAngles();
   const q = {};
   for (const n of MOTORS) q[n] = norm[n] === null || norm[n] === undefined ? null
     : TW.signs[n] * norm[n] * Math.PI / 180;
@@ -2184,10 +2197,12 @@ function renderEE() {
   twinBanner(
     open.length ? `${open.join(" + ")} four-bar cannot close at these angles (gap shown below) — a sign ` +
       "or the zero is off. Showing the closest pose (leg orange)." :
-    !calOk && src === "live" ? "NOT CALIBRATED — normalized angles mean nothing until the zero wizard " +
+    !calOk && kind === "live" ? "NOT CALIBRATED — normalized angles mean nothing until the zero wizard " +
       "has run in the homing pose; the twin is drawn from them anyway." :
-    silent.length && src === "live" ? `no reading from ${silent.join(", ")} — drawn at 0°` :
-    src !== "live" ? "showing the GAIT PREVIEW, not the robot" : "");
+    silent.length && kind === "live" ? `no reading from ${silent.join(", ")} — drawn at 0°` :
+    kind === "dry" ? "showing the DRY RUN — the pose the policy is COMMANDING on a mock bus. " +
+      "The robot is limp and is not moving; the base tilt is still the real IMU's." :
+    kind === "preview" ? "showing the GAIT PREVIEW, not the robot" : "");
 }
 
 /* ================================================================ playback */
