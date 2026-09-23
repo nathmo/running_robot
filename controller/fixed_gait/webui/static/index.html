@@ -401,6 +401,16 @@ not quite level. Only used while ⚖ Balance runs.">pitch setpoint
         <input type="number" id="bal-pitch" value="0" min="-5" max="5" step="0.1" class="num small">
         <button class="btn small bal-step" data-bal-step="bal-pitch" data-d="0.1">▶</button> °</label>
     </div>
+    <div class="row bal-row" id="bal-joint-trim">
+      <span class="hint" title="Per-joint trim on the STANDING POSE, for when the solved pose is
+right but this robot does not stand in it — a joint zeroed a little out, or one hip that simply
+sits differently. It moves 🏠 Home, the standing hold, and the pose ⚖ Balance regulates around.
+It does NOT touch a policy run, PLAYBACK or the manual sliders. Saved on the robot.">joint trim
+        (standing pose):</span>
+      <span id="bal-jtrim-where" class="hint mono"></span>
+      <button id="btn-jtrim-zero" class="btn small" title="Put every joint trim back to 0">zero all</button>
+    </div>
+    <div class="row bal-row" id="bal-joint-trim-rows"></div>
     <div class="row bal-row" id="bal-gains">
       <span class="hint" title="Live: applies to a running loop at once, and is saved on the robot.
 Pitch Kp/Kd: mm of CoM shift per deg of tilt (per deg/s). Ki: deg of torso posture per deg·s.

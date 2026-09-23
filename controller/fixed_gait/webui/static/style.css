@@ -426,3 +426,12 @@ label.chk { display: inline-flex; align-items: center; gap: 6px; }
 .pol-heading { font-family: ui-monospace, monospace; font-size: 20px; font-weight: 700;
   min-width: 116px; text-align: right; color: var(--fg); }
 .pol-heading.warn { color: var(--warn, #d08a00); }
+
+
+/* per-joint standing-pose trim: one compact row per motor, sized so all six fit side by side */
+#bal-joint-trim-rows { flex-wrap: wrap; gap: 6px 14px; }
+label.jtrim { display: inline-flex; align-items: center; gap: 4px; }
+label.jtrim .jtrim-name { min-width: 92px; opacity: .8; }
+label.jtrim input[type=range] { width: 120px; }
+label.jtrim input[type=range].override { accent-color: #e0a020; }
+label.jtrim .mono { min-width: 42px; text-align: right; }

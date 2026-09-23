@@ -125,7 +125,20 @@ STAND_POSE_DEG = {"left.abd": 0.0, "left.cam": 46.0, "left.thigh": 11.1,
 # with its own slew, fast enough that the drive, not the limiter, is the lag the loop was tuned
 # against in tools/balance_sim.py.
 BALANCE_SLEW_DPS = 90.0
-BALANCE_START_TOL_DEG = 4.0        # every joint this close to STAND_POSE_DEG to start (Home first)
+BALANCE_START_TOL_DEG = 4.0        # every joint this close to the standing pose to start (Home first)
+
+# Per-joint output trim on the STANDING POSE. STAND_POSE_DEG is solved from CAD and is right for a
+# robot whose zero is right; when a joint is zeroed a degree or two out, or one hip simply sits
+# differently, the whole pose is off and there is nothing to turn. This is that knob: it shifts the
+# pose the robot is commanded to hold, per joint.
+#
+# WHAT IT REACHES, and nothing else: 🏠 Home, the standing hold, and the pose the ⚖ Balance loop
+# regulates around. It is deliberately NOT applied to a policy run, to PLAYBACK, or to the manual
+# sliders. A manual slider is an absolute angle the operator is looking at and must not be silently
+# moved; and a policy is far more sensitive to joint-zero error than anything here -- Jed measured
+# 98% upright at +-0.3 deg of it and 54% at +-2 deg (RLframework/tools/homing_tolerance.py,
+# 2026-09-17), so a forgotten +-20 deg trim reaching a policy would simply drop the robot.
+JOINT_TRIM_LIMIT_DEG = 20.0
 BALANCE_IMU_STALE_S = 0.3          # older attitude than this: stop balancing, hold the pose. A
                                    # shorter gap (a busy Pi, a missed I2C read) holds the last
                                    # correction instead; the policy tolerates 0.2 s the same way
@@ -534,6 +547,7 @@ class RobotDaemon(threading.Thread):
         self._bal = None                    # balance.Balancer while ⚖ Balance runs (MANUAL only)
         self._bal_pub = None                # its last outputs, for the snapshot
         self._bal_trim = {"pitch_deg": 0.0, "com_x_mm": 0.0, "com_y_mm": 0.0}   # survives restarts
+        self._joint_trim = {n: 0.0 for n in paths.MOTOR_NAMES}   # per-joint standing-pose trim
         self._bal_gains = {k: balance.DEFAULTS[k] for k in balance.TUNABLE}
         # trims + gains persisted here (server passes data/balance.json; tests pass nothing)
         self._bal_file = balance_file
@@ -871,7 +885,7 @@ class RobotDaemon(threading.Thread):
                            "— flip or redo one pair in the Gyro calibration panel first")
         pitch, roll, _, _ = imu
         with self.lock:
-            bal = balance.Balancer(STAND_POSE_DEG, **self._bal_gains)
+            bal = balance.Balancer(self._stand_pose(), **self._bal_gains)
         if bal.falling(pitch, roll):
             return False, f"the IMU reads the robot tilted {pitch:+.1f} / {roll:+.1f} deg (pitch/roll)"
         with self.lock:
@@ -921,6 +935,52 @@ class RobotDaemon(threading.Thread):
         self._save_balance_settings()
         return out
 
+    def joint_trim(self, trims):
+        """Per-joint standing-pose trim, {motor: deg}, clipped to +-JOINT_TRIM_LIMIT_DEG.
+
+        Behaves like the CoM trim it sits next to: kept across stop/start and restarts, and if the
+        robot is currently HOLDING the standing pose it re-poses at Home's slow slew rather than
+        waiting for the next Home. A running ⚖ Balance loop is re-based on the spot, so the loop
+        keeps regulating around the pose the operator just asked for instead of fighting back to
+        the old one.
+
+        Returns (trims, note). The note is advisory, never a refusal: the trim is clipped to a
+        range the joint can physically take, and Home drives there under the feasibility net that
+        already guards every guided move."""
+        bad = [k for k in trims if k not in self._joint_trim]
+        if bad:
+            return None, "unknown motor(s): " + ", ".join(sorted(bad))
+        lim = JOINT_TRIM_LIMIT_DEG
+        with self.lock:
+            for n, v in trims.items():
+                if v is not None:
+                    self._joint_trim[n] = float(np.clip(float(v), -lim, lim))
+            pose = self._stand_pose()
+            out = dict(self._joint_trim)
+            if self._bal is not None:
+                # balance.Balancer.stand is the pose it regulates AROUND (see its targets()):
+                # rewriting it moves the setpoint without disturbing the integrator or the
+                # filtered rates, so the loop keeps its state and simply holds the new pose.
+                self._bal.stand = {n: float(v) for n, v in pose.items()}
+            elif self._stand_hold and self.mode == "MANUAL":
+                self._manual_targets = self._stand_targets()
+                self._home_active, self._home_kind, self._home_relax = True, "stand", False
+                self._home_slew = 20.0
+        note = ""
+        for side in paths.SIDES:
+            if self.fklut is not None and getattr(self.fklut, "available", False):
+                ok, _ = self.fklut.feasible_check(side, pose[f"{side}.cam"], pose[f"{side}.thigh"])
+                if not ok:
+                    note = (f"the trimmed {side} knee pose (cam {pose[side + '.cam']:+.1f}, thigh "
+                            f"{pose[side + '.thigh']:+.1f}) is outside the linkage's feasible band "
+                            f"— Home will refuse to go there")
+        self._save_balance_settings()
+        self._bb_event("joint.trim", trim=out, stand_pose=pose, note=note,
+                       note_kind="advisory", mode=self.mode,
+                       balancing=self._bal is not None,
+                       note_detail="per-joint standing-pose trim; never applied to a policy run")
+        return out, note
+
     def balance_gains(self, **gains):
         """Live-tune the loop (balance.TUNABLE: kp, kd, ki, kp_roll, kd_roll), clipped to
         balance.GAIN_RANGE. Applies to a running loop at once, and to every later start."""
@@ -936,9 +996,21 @@ class RobotDaemon(threading.Thread):
         self._bb_event("balance.gains", **out)
         return out
 
+    def _stand_pose(self):
+        """STAND_POSE_DEG with the per-joint trims applied (caller holds self.lock).
+
+        Every use of the standing pose goes through here, so the trim reaches the Home target, the
+        standing hold, the pose ⚖ Balance regulates around AND the tolerance check that decides
+        whether the robot is close enough to start balancing. That last one matters: comparing a
+        trimmed Home against an untrimmed reference would refuse to balance a robot standing
+        exactly where it was just told to stand."""
+        return {n: STAND_POSE_DEG[n] + self._joint_trim.get(n, 0.0) for n in STAND_POSE_DEG}
+
     def _stand_targets(self):
-        """STAND_POSE_DEG moved by the CoM trims (caller holds self.lock)."""
-        return balance.Balancer(STAND_POSE_DEG).targets(
+        """The standing pose (per-joint trims included) moved by the CoM trims (caller holds
+        self.lock). The two trims compose: the joint trim says where the pose IS, the CoM trim
+        slides the whole body over the soles from there."""
+        return balance.Balancer(self._stand_pose()).targets(
             0.0, self._bal_trim["com_x_mm"], self._bal_trim["com_y_mm"])
 
     def _load_balance_settings(self):
@@ -955,6 +1027,10 @@ class RobotDaemon(threading.Thread):
                 if k in balance.TUNABLE:
                     lo, hi = balance.GAIN_RANGE[k]
                     self._bal_gains[k] = float(np.clip(float(v), lo, hi))
+            lim = JOINT_TRIM_LIMIT_DEG
+            for k, v in (d.get("joint_trim") or {}).items():
+                if k in self._joint_trim:
+                    self._joint_trim[k] = float(np.clip(float(v), -lim, lim))
         except (OSError, ValueError, TypeError) as e:
             print(f"(could not read {self._bal_file}: {e} — balance trims/gains at defaults)")
 
@@ -962,7 +1038,8 @@ class RobotDaemon(threading.Thread):
         if not self._bal_file:
             return
         with self.lock:
-            d = {"trim": dict(self._bal_trim), "gains": dict(self._bal_gains)}
+            d = {"trim": dict(self._bal_trim), "gains": dict(self._bal_gains),
+                 "joint_trim": dict(self._joint_trim)}
         try:
             tmp = self._bal_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -4185,6 +4262,9 @@ class RobotDaemon(threading.Thread):
                 manual_targets=dict(self._manual_targets), override=self._manual_override,
                 slew_dps=self._slew_dps, homing=self._home_active, homing_kind=self._home_kind,
                 balance=dict(active=self._bal is not None, trim=dict(self._bal_trim),
+                             joint_trim=dict(self._joint_trim),
+                             joint_trim_limit=JOINT_TRIM_LIMIT_DEG,
+                             stand_pose=self._stand_pose(),
                              gains=dict(self._bal_gains), defaults={k: balance.DEFAULTS[k]
                                                                     for k in balance.TUNABLE},
                              stand_hold=self._stand_hold,

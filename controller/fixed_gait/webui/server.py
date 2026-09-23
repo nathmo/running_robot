@@ -746,6 +746,29 @@ def api_balance_trim():
     return _ok(token=token, trim=_dm().balance_trim(**vals))
 
 
+@app.post("/api/balance/joint_trim")
+def api_balance_joint_trim():
+    """{"<side>.<role>": deg, ...}: per-joint trim on the STANDING POSE.
+
+    Reaches Home, the standing hold and the pose the balance loop regulates around -- and nothing
+    else. A policy run is deliberately untouched (see daemon.JOINT_TRIM_LIMIT_DEG)."""
+    b = request.get_json(force=True, silent=True) or {}
+    token, err = _acquire_control(b)
+    if err:
+        return _err(err, 409)
+    try:
+        vals = {k: (None if b[k] is None else float(b[k]))
+                for k in b if k in paths.MOTOR_NAMES}
+    except (TypeError, ValueError):
+        return _err("trims must be numbers")
+    if not vals:
+        return _err("no motor trims in the request")
+    trim, note = _dm().joint_trim(vals)
+    if trim is None:
+        return _err(note)
+    return _ok(token=token, joint_trim=trim, warning=note or None)
+
+
 @app.post("/api/balance/gains")
 def api_balance_gains():
     """{kp, kd, ki, kp_roll, kd_roll}: live-tune the loop (applies at once if it is running)."""

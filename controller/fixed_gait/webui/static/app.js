@@ -738,6 +738,125 @@ $("btn-release").onclick = () => api("/api/manual/release", { method: "POST" });
 
 /* ⚖ Balance (daemon.balance_start / balance.py): start/stop + the operator trims */
 const BAL = { active: false };
+
+/* ---------------- per-joint standing-pose trim ----------------
+   Six sliders, one per motor, ±JTRIM.limit degrees. They move the pose the robot is commanded to
+   HOLD: 🏠 Home, the standing hold, and the pose ⚖ Balance regulates around. Not a policy run, not
+   PLAYBACK, not the manual sliders — see daemon.JOINT_TRIM_LIMIT_DEG for why. */
+const JTRIM = { limit: 20, step: 0.5, built: false };
+const JTRIM_ROWS = [
+  ["left.cam", "left cam"], ["right.cam", "right cam"],
+  ["left.thigh", "left thigh"], ["right.thigh", "right thigh"],
+  ["left.abd", "left abduction"], ["right.abd", "right abduction"],
+];
+function jtId(n) { return "jtrim-" + n.replace(".", "-"); }
+
+function buildJointTrimRows() {
+  const host = $("bal-joint-trim-rows");
+  if (!host || JTRIM.built) return;
+  host.innerHTML = JTRIM_ROWS.map(([n, label]) => {
+    const id = jtId(n);
+    return `<label class="jtrim" title="Shifts the standing pose of ${label} by this much.">` +
+      `<span class="jtrim-name">${label}</span>` +
+      `<button class="btn small jtrim-step" data-jt="${id}" data-d="${-JTRIM.step}">◀</button>` +
+      `<input type="range" id="${id}" data-motor="${n}" min="${-JTRIM.limit}" ` +
+      `max="${JTRIM.limit}" step="${JTRIM.step}" value="0">` +
+      `<button class="btn small jtrim-step" data-jt="${id}" data-d="${JTRIM.step}">▶</button>` +
+      `<span id="${id}-val" class="mono">+0.0</span>°</label>`;
+  }).join("");
+  JTRIM.built = true;
+  for (const [n] of JTRIM_ROWS) {
+    const el = $(jtId(n));
+    el.oninput = () => { showJointTrim(el); sendJointTrim(); };
+  }
+  // ◀ ▶: one step per click, clamped to the slider's own range
+  for (const b of host.querySelectorAll("[data-jt]")) {
+    b.onclick = (e) => {
+      e.preventDefault();
+      const el = $(b.dataset.jt);
+      el.value = Math.min(+el.max, Math.max(+el.min,
+        Math.round((+el.value + +b.dataset.d) * 100) / 100));
+      el.oninput();
+    };
+  }
+  const zero = $("btn-jtrim-zero");
+  if (zero) zero.onclick = () => {
+    for (const [n] of JTRIM_ROWS) { const el = $(jtId(n)); el.value = 0; showJointTrim(el); }
+    sendJointTrim();
+  };
+}
+
+function showJointTrim(el) {
+  const v = +el.value;
+  $(el.id + "-val").textContent = (v >= 0 ? "+" : "") + v.toFixed(1);
+  el.classList.toggle("override", Math.abs(v) > 1e-9);
+}
+
+let jtrimTimer = null, jtrimSeq = 0;
+function sendJointTrim() {
+  clearTimeout(jtrimTimer);
+  // Same in-flight guard as the CoM trim above, and for the same reason: the ◀ ▶ buttons take the
+  // focus, a 500 ms state poll carrying the OLD trim is nearly always on the wire, and without
+  // this the click is snapped back inside the send debounce so the OLD value is what gets sent.
+  for (const [n] of JTRIM_ROWS) {
+    const el = $(jtId(n));
+    el.dataset.dirty = "1"; delete el.dataset.want; delete el.dataset.wantT;
+  }
+  const seq = ++jtrimSeq;
+  jtrimTimer = setTimeout(async () => {
+    const body = {};
+    for (const [n] of JTRIM_ROWS) body[n] = +$(jtId(n)).value;
+    let d = null;
+    try { d = await api("/api/balance/joint_trim", { json: body }); }
+    catch (_) { /* banner already set */ }
+    if (seq !== jtrimSeq) return;          // a newer edit is on its way: leave its value alone
+    for (const [n] of JTRIM_ROWS) {
+      const el = $(jtId(n));
+      const got = d && d.joint_trim && d.joint_trim[n];
+      if (got !== undefined && got !== null) {
+        el.value = got;                                   // as the daemon clipped it
+        el.dataset.want = String(got);                    // dirty until a poll echoes it
+        el.dataset.wantT = String(Date.now());
+        showJointTrim(el);
+      } else {
+        delete el.dataset.dirty;                          // refused: show the daemon's copy
+      }
+    }
+    if (d && d.warning) setBanner(d.warning, "error", 8000);
+  }, 120);
+}
+
+function updateJointTrim(b) {
+  buildJointTrimRows();
+  const t = b.joint_trim;
+  if (!t) return;
+  if (b.joint_trim_limit && b.joint_trim_limit !== JTRIM.limit) {
+    JTRIM.limit = b.joint_trim_limit;
+    for (const [n] of JTRIM_ROWS) {
+      const el = $(jtId(n));
+      el.min = -JTRIM.limit; el.max = JTRIM.limit;
+    }
+  }
+  for (const [n] of JTRIM_ROWS) {
+    const el = $(jtId(n));
+    if (el.dataset.dirty && el.dataset.want !== undefined &&
+        (String(t[n]) === el.dataset.want || Date.now() - +el.dataset.wantT > 2000)) {
+      delete el.dataset.dirty; delete el.dataset.want; delete el.dataset.wantT;
+    }
+    if (document.activeElement !== el && !el.dataset.dirty && t[n] !== undefined) {
+      el.value = t[n];
+    }
+    showJointTrim(el);
+  }
+  const where = $("bal-jtrim-where");
+  if (where) {
+    const any = JTRIM_ROWS.some(([n]) => Math.abs(+(t[n] || 0)) > 1e-9);
+    where.textContent = !any ? "all zero"
+      : BAL.active ? "live (loop re-based)"
+      : b.stand_hold ? "live (holding the stand)" : "saved — applies at the next 🏠 Home";
+  }
+}
+
 function updateBalanceStatus(b) {
   if (!b) return;
   BAL.active = !!b.active;
@@ -766,6 +885,7 @@ function updateBalanceStatus(b) {
   }
   $("bal-comx-val").textContent = sg($("bal-comx").value, 0);
   $("bal-comy-val").textContent = sg($("bal-comy").value, 0);
+  updateJointTrim(b);
   // where the trim lands: it re-poses the robot only while it holds the standing pose (Home
   // arrived / Balance stopped) or while the loop runs; anywhere else it is stored for the next Home
   $("bal-trim-where").textContent = BAL.active ? "live (loop)"
