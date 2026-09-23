@@ -114,6 +114,10 @@
         margin <input type="number" id="wsrec-margin" class="num small" value="3" step="0.5">°
         grid <input type="number" id="wsrec-grid" class="num small" value="1" step="0.5">°
         dilate <input type="number" id="wsrec-dilate" class="num small" value="2" step="0.5">°
+        <label title="Sweep the EDGE of where the leg may go and come back to the start; the area
+your trail encloses becomes the safe region. Turn this off to keep only the swept line itself —
+which the margin will then erode away unless you swept a wide band.">
+          <input type="checkbox" id="wsrec-close" checked> close the traced loop</label>
         <span class="spacer"></span>
         <button id="btn-wsrec-process" class="btn small primary" disabled>Process → build workspace</button>
       </div>

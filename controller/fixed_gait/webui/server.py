@@ -151,6 +151,21 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.after_request
+def _revalidate_ui(resp):
+    """The page and its scripts must be revalidated, never served blind from the browser cache.
+
+    index.html and app.js are one program in two files. A browser that holds an old index.html
+    against a new app.js gets a page where elements the script expects do not exist -- which on
+    2026-09-23 meant the workspace pen and flood fill quietly stopped working, because one missing
+    button threw before the tool handlers were attached. The script is defensive about that now,
+    but the real fix is not to hand out mismatched halves: no-cache still allows a 304, so this
+    costs a conditional request over the hotspot and not a re-download."""
+    if request.path == "/" or request.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
+
+
 # ===================================================================== state / telemetry
 @app.get("/api/state")
 def api_state():
@@ -938,7 +953,8 @@ def api_workspace_process():
         return _err(f"no recorded workspace segments for leg={leg}")
     warn = STATE["wstore"].process_segments(
         leg, segs, margin_deg=float(b.get("margin_deg", 3.0)),
-        grid_deg=float(b.get("grid_deg", 1.0)), dilate_deg=float(b.get("dilate_deg", 2.0)))
+        grid_deg=float(b.get("grid_deg", 1.0)), dilate_deg=float(b.get("dilate_deg", 2.0)),
+        close_region=bool(b.get("close_region", True)))
     return _ok(warning=warn or None)
 
 

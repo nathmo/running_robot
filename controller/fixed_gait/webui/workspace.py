@@ -24,6 +24,30 @@ import joint_limits                        # fixed_gait/ — the check object
 MAX_SCATTER = 4000
 
 
+def _region_warning(knee, margin_deg, dilate_deg, close_region):
+    """Say WHY the built region came out empty, in terms the operator can act on.
+
+    An empty result has several distinct causes needing different answers, so "region is EMPTY" on
+    its own sent people back to re-sweep when the fix was a number in a box."""
+    if knee["safe_grid"].any():
+        return ""
+    if not close_region:
+        return ("the built region is EMPTY — region-closing is off, so only the swept line itself "
+                "counts, and a line is thinner than the {:g} deg margin. Turn closing on."
+                .format(margin_deg))
+    if not knee.get("enclosed_cells"):
+        return ("the sweep does not CLOSE — nothing is enclosed by it, so there is no region to "
+                "keep. Trace all the way round the edge of where the leg may go and come back to "
+                "where you started; the yellow trail shows what has been swept so far.")
+    if dilate_deg < margin_deg:
+        return ("the built region is EMPTY — the {:g} deg margin eats more than the {:g} deg "
+                "dilation adds, so any enclosed area thinner than {:g} deg disappears. Sweep a "
+                "wider loop or reduce the margin."
+                .format(margin_deg, dilate_deg, margin_deg - dilate_deg))
+    return ("the built region is EMPTY — the enclosed area is thinner than the {:g} deg margin. "
+            "Sweep a wider loop or reduce the margin.".format(margin_deg))
+
+
 class WorkspaceStore:
     def __init__(self):
         self._lock = threading.Lock()
@@ -127,9 +151,16 @@ class WorkspaceStore:
         self._persist_active()
         return True, ""
 
-    def process_segments(self, leg, segments, margin_deg=3.0, grid_deg=1.0, dilate_deg=2.0):
+    def process_segments(self, leg, segments, margin_deg=3.0, grid_deg=1.0, dilate_deg=2.0,
+                         close_region=True):
         """Build a leg workspace from normalized backdriven segments — the exact pipeline of
-        calibrate_workspace.process_and_export (:227-277), minus file/plot I/O."""
+        calibrate_workspace.process_and_export (:227-277), minus file/plot I/O.
+
+        Each segment is one take and goes through as its own PATH, so the sweep is rasterized as
+        the line the leg actually travelled and `close_region` can fill what that line encloses.
+        Sweeping the boundary of the reachable region and having the inside come out filled is the
+        whole point: before this, tracing an outline produced a broken ring of about 100 cells
+        where the operator had outlined roughly 2400."""
         samples = np.concatenate(segments, axis=0)         # [N,3] abd, cam, thigh (normalized)
         abd = samples[:, 0]
         lo, hi = float(abd.min()), float(abd.max())
@@ -138,10 +169,12 @@ class WorkspaceStore:
         if safe_lo >= safe_hi:
             warn = (f"margin {margin_deg:g} deg empties the abduction range "
                     f"[{lo:.1f},{hi:.1f}] — reduce it or sweep wider")
-        knee = cw._knee_grid(samples[:, 1], samples[:, 2], grid_deg, dilate_deg, margin_deg)
-        if not knee["safe_grid"].any():
-            warn = (warn + "; " if warn else "") + \
-                "eroded knee safe-region is EMPTY (margin/dilate too aggressive or too few samples)"
+        paths = [(np.asarray(g)[:, 1], np.asarray(g)[:, 2]) for g in segments if len(g)]
+        knee = cw._knee_grid(samples[:, 1], samples[:, 2], grid_deg, dilate_deg, margin_deg,
+                             paths=paths, close_region=close_region)
+        why = _region_warning(knee, margin_deg, dilate_deg, close_region)
+        if why:
+            warn = (warn + "; " if warn else "") + why
         legs = {leg: dict(abd_observed=(lo, hi), abd_safe=(safe_lo, safe_hi),
                           knee_grid=knee["safe_grid"],
                           knee_cam_origin=knee["cam_origin"], knee_thigh_origin=knee["thigh_origin"],

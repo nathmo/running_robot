@@ -1175,7 +1175,25 @@ function wsGrowRoom() {
 
 /* Grid cell under a world point. `grow` asks for the canvas to be extended to reach it. Returns
    null when the point is outside the grid and cannot (or may not) be reached. */
+/* Start a blank canvas over the joint's usable range, so the pen works before anything has been
+   swept or processed. Drawing used to be impossible until a grid existed, which on a fresh leg
+   meant the pen appeared broken. */
+function wsNewGrid(res) {
+  const r = res || 1.0;
+  const [camLo, camHi] = jointLimit(S.wsLeg, "cam", "nominal");
+  const [thLo, thHi] = jointLimit(S.wsLeg, "thigh", "nominal");
+  const nc = Math.max(1, Math.round((camHi - camLo) / r));
+  const nt = Math.max(1, Math.round((thHi - thLo) / r));
+  wsEd.grid = new Uint8Array(nc * nt);
+  wsEd.shape = [nc, nt];
+  wsEd.camO = camLo; wsEd.thighO = thLo; wsEd.res = r;
+  wsEd.undo = []; wsEd.redo = []; wsEd.dirty = true;
+  wsSyncExtentInputs();
+  return wsEd.grid;
+}
+
 function wsCellAt(wx, wy, grow) {
+  if ((!wsEd.grid || !wsEd.shape) && grow) wsNewGrid();
   if (!wsEd.grid || !wsEd.shape) return null;
   wsEd.world = [wx, wy];                       // world coords survive a reindexing; cells do not
   let [i, j] = wsWorldToCell(wx, wy);
@@ -1288,9 +1306,21 @@ function setupWsCanvas() {
     // only a stroke that ADDS area may grow the canvas; pan, erase and fill stay inside it
     cellAt: (wx, wy) => wsCellAt(wx, wy, wsEd.tool === "draw"),
   });
-  $("btn-ws-resize").onclick = () => wsResizeFromInputs();
-  $("btn-ws-grow-max").onclick = () => {
-    if (!wsEd.grid) return;
+  // The tool buttons come FIRST and every handler below is attached defensively. They used to sit
+  // after a run of bare `$("id").onclick = ...` lines, so one element missing from the page --- a
+  // browser holding a cached index.html against a newer app.js is all it takes --- threw a
+  // TypeError partway down and left the tool buttons dead. wsEd.tool then stayed "pan" forever and
+  // the pen and the flood fill silently did nothing, which is exactly how that reads to whoever is
+  // holding the leg. Nothing that is merely convenient may be able to break what is essential.
+  const toolbar = $("ws-toolbar");
+  if (toolbar) toolbar.querySelectorAll(".tool").forEach((b) => b.onclick = () => {
+    toolbar.querySelectorAll(".tool").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    wsEd.tool = b.dataset.tool;
+  });
+  on("btn-ws-resize", () => wsResizeFromInputs());
+  on("btn-ws-grow-max", () => {
+    if (!wsEd.grid) { wsNewGrid(); v.render(); updateWsStats(); return; }
     pushUndo();
     const room = wsGrowRoom();
     if (!wsGrow(room.camLo, room.camHi, room.thLo, room.thHi)) {
@@ -1299,23 +1329,26 @@ function setupWsCanvas() {
       return;
     }
     wsSyncExtentInputs(); v.render(); updateWsStats();
-  };
-  $("ws-toolbar").querySelectorAll(".tool").forEach((b) => b.onclick = () => {
-    $("ws-toolbar").querySelectorAll(".tool").forEach((x) => x.classList.remove("active"));
-    b.classList.add("active");
-    wsEd.tool = b.dataset.tool;
   });
-  $("btn-undo").onclick = () => { if (wsEd.undo.length) { wsEd.redo.push(wsSnap()); wsRestore(wsEd.undo.pop()); v.render(); updateWsStats(); } };
-  $("btn-redo").onclick = () => { if (wsEd.redo.length) { wsEd.undo.push(wsSnap()); wsRestore(wsEd.redo.pop()); v.render(); updateWsStats(); } };
-  $("btn-ws-apply").onclick = async () => {
+  on("btn-undo", () => { if (wsEd.undo.length) { wsEd.redo.push(wsSnap()); wsRestore(wsEd.undo.pop()); v.render(); updateWsStats(); } });
+  on("btn-redo", () => { if (wsEd.redo.length) { wsEd.undo.push(wsSnap()); wsRestore(wsEd.redo.pop()); v.render(); updateWsStats(); } });
+  on("btn-ws-apply", async () => {
     if (!wsEd.grid) return;
     await api("/api/workspace/grid", { json: { leg: S.wsLeg, grid_b64: packBits(wsEd.grid),
       shape: wsEd.shape, cam_origin: wsEd.camO, thigh_origin: wsEd.thighO, res_deg: wsEd.res } });
     wsEd.dirty = false;
     await refreshWorkspace();
     setBanner("workspace applied to the live safety check", "", 2500);
-  };
-  $("btn-ws-revert").onclick = () => loadWsIntoEditor();
+  });
+  on("btn-ws-revert", () => loadWsIntoEditor());
+}
+
+/* Attach a click handler only if the element is actually on the page, and say so in the console
+   when it is not. A missing button is a missing feature; it must never be a broken panel. */
+function on(id, fn) {
+  const el = $(id);
+  if (!el) { console.warn("ws editor: no #" + id + " on this page (stale index.html?)"); return; }
+  el.onclick = fn;
 }
 
 /* generic pointer handling: pan/zoom always available (pan tool or 2-finger / middle button),
@@ -1510,12 +1543,19 @@ $("btn-wsrec-take").onclick = () => {
   api("/api/record/take", { json: { leg: S.wsLeg, action: active ? "stop" : "start" } });
 };
 $("btn-wsrec-undo").onclick = () => api("/api/record/undo", { json: { leg: S.wsLeg } });
-$("btn-wsrec-process").onclick = () => api("/api/workspace/process", { json: {
-  leg: S.wsLeg, margin_deg: +$("wsrec-margin").value, grid_deg: +$("wsrec-grid").value,
-  dilate_deg: +$("wsrec-dilate").value } }).then(() => {   // the built green region now stands in for the raw trail
-    resetWsTrail(); refreshWorkspace();
-    setBanner(`${S.wsLeg} workspace built from the sweep`, "", 2500);
-  });
+$("btn-wsrec-process").onclick = () => {
+  const closeEl = $("wsrec-close");
+  api("/api/workspace/process", { json: {
+    leg: S.wsLeg, margin_deg: +$("wsrec-margin").value, grid_deg: +$("wsrec-grid").value,
+    dilate_deg: +$("wsrec-dilate").value,
+    close_region: closeEl ? closeEl.checked : true } })
+    .then((r) => {
+      refreshWorkspace();       // the yellow trail STAYS: it is the guide for any hand-finishing
+      const warn = r && r.warning;
+      setBanner(warn ? `${S.wsLeg}: ${warn}` : `${S.wsLeg} workspace built from the sweep`,
+                warn ? "error" : "", warn ? 12000 : 2500);
+    });
+};
 
 /* Accumulate the live (cam,thigh) trail + swept abduction range while a workspace pass is running,
  * so the plot fills in AS YOU MOVE. Cleared automatically once you leave sweep mode.
@@ -1525,7 +1565,12 @@ $("btn-wsrec-process").onclick = () => api("/api/workspace/process", { json: {
  * workspace was never affected -- the daemon stores every 100 Hz sample -- only this drawing. */
 function accumulateWsTrail(d) {
   const st = S.state;
-  if (!st || st.mode !== "RECORD_WS") { if (S.wsTrail.length) resetWsTrail(); return; }
+  // The trail is KEPT once the sweep ends. It used to be wiped the moment the mode left RECORD_WS
+  // (and again on process, "the built green region now stands in for the raw trail"), which threw
+  // away the one drawing guide there is at precisely the moment it is wanted: the swept outline is
+  // what tells you where to close the region by hand. It is cleared when a new sweep is armed or
+  // the leg is switched, which is when it stops describing what is on screen.
+  if (!st || st.mode !== "RECORD_WS") return;
   const rec = st.recording || {};
   if (!rec.active) return;                      // only extend while a pass is actually recording
   const leg = rec.leg || S.wsLeg;

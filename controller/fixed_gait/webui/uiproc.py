@@ -273,6 +273,16 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.after_request
+def _revalidate_ui(resp):
+    """See server.py's copy: index.html and app.js are one program in two files, and a browser
+    holding one old half against one new half produces a page whose controls silently do nothing.
+    no-cache still permits a 304, so this is a conditional request, not a re-download."""
+    if request.path == "/" or request.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
+
+
 @app.get("/api/telemetry")
 def telemetry():
     """Same JSON shape as server.py's /api/telemetry — the browser cannot tell the difference."""

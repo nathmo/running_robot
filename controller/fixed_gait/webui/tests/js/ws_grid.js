@@ -38,8 +38,9 @@ ${extract("wsGrowRoom")}
 ${extract("wsCellAt")}
 ${extract("wsFlagAtLimit")}
 ${extract("wsResize")}
+${extract("wsNewGrid")}
 module.exports = { get wsEd() { return wsEd; }, set wsEd(v) { wsEd = v; },
-                   wsWorldToCell, wsGrow, wsGrowRoom, wsCellAt, wsResize,
+                   wsWorldToCell, wsGrow, wsGrowRoom, wsCellAt, wsResize, wsNewGrid,
                    get BANNERS() { return BANNERS; }, reset() { BANNERS = []; } };
 `;
 
@@ -175,6 +176,42 @@ console.log("\n7. a stroke that grows mid-drag stays on the line (world coords, 
      (missing.length ? JSON.stringify(missing) : "none missing") + ")");
   // and nothing far off the line got painted
   ok(getCellWorld(-30.5, -25.5) === 0, "the brush did not smear across the shift");
+}
+
+console.log("\n8. setupWsCanvas wires the TOOL BUTTONS before anything optional");
+{
+  /* The failure this guards against is specific and was reported from the robot: one bare
+     $("id").onclick on an element that is not in the page throws, and every handler after it in
+     setupWsCanvas is never attached. When the casualty is the tool buttons, wsEd.tool stays "pan"
+     and the pen and the flood fill silently do nothing while the operator is holding the leg.
+     Essential wiring goes first; everything after it goes through on(), which tolerates a missing
+     element. */
+  const a = SRC.indexOf("function setupWsCanvas(");
+  let depth = 0, started = false, end = a;
+  for (let k = a; k < SRC.length; k++) {
+    if (SRC[k] === "{") { depth++; started = true; }
+    else if (SRC[k] === "}") { depth--; if (started && depth === 0) { end = k; break; } }
+  }
+  // strip comments first: this very file talks ABOUT the pattern it is looking for
+  const body = SRC.slice(a, end).replace(/\/\*[\s\S]*?\*\//g, "")
+                                .replace(/^[ 	]*\/\/.*$/gm, "");
+  const bare = body.match(/\$\("[A-Za-z0-9_-]+"\)\.onclick\s*=/g) || [];
+  ok(bare.length === 0, "no bare $(id).onclick in setupWsCanvas (" +
+     (bare.length ? bare.join(", ") : "none") + ")");
+  const tools = body.indexOf("wsEd.tool = b.dataset.tool");
+  const firstOn = body.search(/\bon\("/);
+  ok(tools >= 0, "the tool buttons are still wired");
+  ok(firstOn < 0 || tools < firstOn, "tool buttons are wired before any optional control");
+}
+
+console.log("\n9. the pen works on a blank canvas (a fresh leg has no grid yet)");
+{
+  H.wsEd.grid = null; H.wsEd.shape = null;
+  const cell = H.wsCellAt(10.0, 10.0, true);
+  ok(cell !== null, "drawing on an empty editor creates a grid instead of doing nothing");
+  ok(!!(H.wsEd.grid && H.wsEd.shape), "... and that grid exists afterwards");
+  H.wsEd.grid = null; H.wsEd.shape = null;
+  ok(H.wsCellAt(10.0, 10.0, false) === null, "pan/erase still do not conjure a grid");
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall grid checks passed\n");

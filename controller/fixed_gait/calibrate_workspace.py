@@ -205,23 +205,131 @@ def _binary_erode(grid, radius):
     return ~_binary_dilate(~grid, radius)
 
 
-# ------------------------------------------------------------------ processing / export
-def _knee_grid(cam, thigh, grid_deg, dilate_deg, margin_deg):
-    cam_lo, cam_hi = float(cam.min()) - grid_deg, float(cam.max()) + grid_deg
-    th_lo, th_hi = float(thigh.min()) - grid_deg, float(thigh.max()) + grid_deg
-    nc = int(np.ceil((cam_hi - cam_lo) / grid_deg)) + 1
-    nt = int(np.ceil((th_hi - th_lo) / grid_deg)) + 1
-    raw_grid = np.zeros((nc, nt), bool)
-    ic = np.clip(((cam - cam_lo) / grid_deg).astype(int), 0, nc - 1)
-    jt = np.clip(((thigh - th_lo) / grid_deg).astype(int), 0, nt - 1)
-    raw_grid[ic, jt] = True
+def _fill_enclosed(grid):
+    """Mark every cell the OUTSIDE cannot reach.
 
+    A hand sweep is a PATH, and the natural way to describe a reachable region with one is to trace
+    its boundary -- run the leg round the edge of where it may go and come back to the start. Doing
+    that used to produce a thin ring, because the pipeline only ever knew about the cells the path
+    itself crossed: the region the operator was outlining was never in the grid at all, and the
+    erosion below then ate most of the ring as well.
+
+    Flood the complement inward from the array border with 4-connectivity; whatever the flood never
+    reaches is enclosed by the trace, and is exactly what was being outlined. 4-connectivity is the
+    conservative choice here: it will not squeeze the outside through a diagonal pinhole in the
+    trace, so a boundary that is one cell thin still closes.
+
+    CAVEAT worth knowing: this fills ALL enclosed area, so a genuine forbidden island inside the
+    reachable region would be filled in as safe if the sweep went round it rather than through it.
+    The 4-bar assembly band has no such island, which is why closing is the default, but it is why
+    the caller can turn it off."""
+    nx, ny = grid.shape
+    free = ~grid
+    seen = np.zeros_like(grid)
+    stack = []
+    border = ([(i, 0) for i in range(nx)] + [(i, ny - 1) for i in range(nx)]
+              + [(0, j) for j in range(ny)] + [(nx - 1, j) for j in range(ny)])
+    for i, j in border:
+        if free[i, j] and not seen[i, j]:
+            seen[i, j] = True
+            stack.append((i, j))
+    while stack:
+        i, j = stack.pop()
+        for a, b in ((i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)):
+            if 0 <= a < nx and 0 <= b < ny and free[a, b] and not seen[a, b]:
+                seen[a, b] = True
+                stack.append((a, b))
+    return grid | (free & ~seen)
+
+
+def _rasterize_points(cam, thigh, nc, nt, cam_lo, th_lo, grid_deg):
+    """Mark only the cells that hold a sample -- the pre-2026-09-23 behaviour, for callers with no
+    take structure to rasterize as paths."""
+    grid = np.zeros((nc, nt), bool)
+    ic = np.clip(np.floor((np.asarray(cam) - cam_lo) / grid_deg).astype(int), 0, nc - 1)
+    jt = np.clip(np.floor((np.asarray(thigh) - th_lo) / grid_deg).astype(int), 0, nt - 1)
+    grid[ic, jt] = True
+    return grid
+
+
+def _rasterize_paths(paths, nc, nt, cam_lo, th_lo, grid_deg):
+    """Mark every cell the swept path CROSSES, not only the cells that happen to hold a sample.
+
+    Two consecutive 200 Hz samples can be several cells apart when the leg is moved briskly by
+    hand, and marking only the sample cells leaves a dotted line. Dilation used to paper over that,
+    but a gap wider than the dilation is a hole in the traced boundary, and a hole is all it takes
+    for _fill_enclosed to leak straight out through it. Joining consecutive samples closes the
+    trace properly instead of hoping the dilation is big enough.
+
+    Each path is one take: they are rasterized separately so lifting the leg between passes does
+    not draw a line across the middle of the region."""
+    grid = np.zeros((nc, nt), bool)
+    for cam, thigh in paths:
+        if not len(cam):
+            continue
+        ic = np.clip(np.floor((np.asarray(cam) - cam_lo) / grid_deg).astype(int), 0, nc - 1)
+        jt = np.clip(np.floor((np.asarray(thigh) - th_lo) / grid_deg).astype(int), 0, nt - 1)
+        grid[ic, jt] = True
+        if len(ic) < 2:
+            continue
+        span = np.maximum(np.abs(np.diff(ic)), np.abs(np.diff(jt)))
+        for k in np.flatnonzero(span > 1):
+            n = int(span[k])
+            grid[np.round(np.linspace(ic[k], ic[k + 1], n + 1)).astype(int),
+                 np.round(np.linspace(jt[k], jt[k + 1], n + 1)).astype(int)] = True
+    return grid
+
+
+# ------------------------------------------------------------------ processing / export
+def _knee_grid(cam, thigh, grid_deg, dilate_deg, margin_deg, paths=None, close_region=True):
+    """Build the (cam, thigh) safe-region grid from a hand sweep.
+
+    paths:         [(cam_array, thigh_array), ...], one per take, so the sweep is rasterized as the
+                   PATH it was rather than as a cloud of dots. Omitted means the caller has no take
+                   structure, and the points are plotted on their own exactly as before -- joining
+                   an already-concatenated array would draw a bridge across the region every time
+                   one take ended and the next began.
+    close_region:  fill what the trace encloses (see _fill_enclosed).
+
+    Order matters: dilate to close hand-sampling gaps, THEN close the region, THEN erode for the
+    safety margin. Eroding before the fill would open the trace back up.
+
+    The grid is padded by the full structuring-element reach before the morphology and cropped
+    afterwards. Without the pad, _binary_erode -- which is the complement of dilating the
+    complement, with zeros shifted in from beyond the array -- does not eat inward from the array
+    edge, so a region touching that edge silently kept its margin. The pad also guarantees the
+    flood in _fill_enclosed starts from genuinely outside cells.
+    """
+    cam, thigh = np.asarray(cam, float), np.asarray(thigh, float)
     dilate_r = max(0, int(round(dilate_deg / grid_deg)))
     margin_r = max(0, int(round(margin_deg / grid_deg)))
-    safe_grid = _binary_dilate(raw_grid, dilate_r)          # fill small hand-sampling gaps
-    safe_grid = _binary_erode(safe_grid, margin_r)          # then shrink inward for safety margin
-    return dict(raw_grid=raw_grid, safe_grid=safe_grid,
-                cam_origin=cam_lo, thigh_origin=th_lo, grid_deg=grid_deg)
+    pad = dilate_r + margin_r + 2
+
+    cam_lo = float(cam.min()) - grid_deg
+    th_lo = float(thigh.min()) - grid_deg
+    nc = int(np.ceil((float(cam.max()) + grid_deg - cam_lo) / grid_deg)) + 1
+    nt = int(np.ceil((float(thigh.max()) + grid_deg - th_lo) / grid_deg)) + 1
+
+    p_lo_cam, p_lo_th = cam_lo - pad * grid_deg, th_lo - pad * grid_deg
+    p_nc, p_nt = nc + 2 * pad, nt + 2 * pad
+    if paths is None:
+        raw_padded = _rasterize_points(cam, thigh, p_nc, p_nt, p_lo_cam, p_lo_th, grid_deg)
+    else:
+        raw_padded = _rasterize_paths(paths, p_nc, p_nt, p_lo_cam, p_lo_th, grid_deg)
+
+    closed = _binary_dilate(raw_padded, dilate_r)           # close small hand-sampling gaps
+    enclosed = 0
+    if close_region:
+        filled = _fill_enclosed(closed)                     # a traced outline becomes its interior
+        enclosed = int(filled.sum() - closed.sum())
+        closed = filled
+    safe = _binary_erode(closed, margin_r)                  # then shrink inward for safety margin
+
+    crop = (slice(pad, pad + nc), slice(pad, pad + nt))
+    return dict(raw_grid=raw_padded[crop], safe_grid=safe[crop],
+                cam_origin=cam_lo, thigh_origin=th_lo, grid_deg=grid_deg,
+                closed=bool(close_region), enclosed_cells=enclosed,
+                raw_cells=int(raw_padded[crop].sum()), safe_cells=int(safe[crop].sum()))
 
 
 def process_and_export(out_dir, margin_deg, grid_deg, dilate_deg):
@@ -246,7 +354,8 @@ def process_and_export(out_dir, margin_deg, grid_deg, dilate_deg):
                   f"abduction range [{lo:.1f},{hi:.1f}] -- safe range would be empty/inverted. "
                   f"Reduce --margin-deg or re-sweep a wider range.")
 
-        knee = _knee_grid(samples[:, 1], samples[:, 2], grid_deg, dilate_deg, margin_deg)
+        knee = _knee_grid(samples[:, 1], samples[:, 2], grid_deg, dilate_deg, margin_deg,
+                          paths=[(s[:, 1], s[:, 2]) for s in segments])
         if not knee["safe_grid"].any():
             print(f"!! {leg}: the eroded knee safe-region is EMPTY -- --margin-deg/--dilate-deg "
                   f"too aggressive for --grid-deg {grid_deg:g}, or too few samples. Nothing here "
