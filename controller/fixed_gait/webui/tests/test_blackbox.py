@@ -312,7 +312,8 @@ def robot(tmp_path):
     b.set_config_provider(lambda: {"calibration": cal.snapshot(),
                                    "dynamics": dyn.as_dict()})
     b.start()
-    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=b)
+    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=b,
+                               anchor_file=str(tmp_path / "pose_anchor.json"))
     d.start()
     assert d._started_ok.wait(5.0)
     for _ in range(200):
@@ -416,7 +417,8 @@ def test_guard_fires_on_a_calibration_restored_after_a_power_cycle(tmp_path):
     cal.restored_from_disk = True
     cal.zero_epoch = 7
 
-    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=None)
+    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=None,
+                               anchor_file=str(tmp_path / "pose_anchor.json"))
     d.start()
     assert d._started_ok.wait(5.0)
     try:
@@ -446,9 +448,15 @@ def test_homing_uses_a_tighter_tracking_threshold(robot):
 
 def test_travel_budget_is_bounded_by_the_joint_range(robot):
     """(d) The backstop. left.cam reached ~1.9 output turns on a +-88 deg joint on 2026-08-10; the
-    budget cuts any guided move at 1.3x the joint's own range whatever the calibration claims."""
+    budget cuts any guided move at 1.3x the joint's own range whatever the calibration claims.
+
+    Sized off _nominal_bounds since 2026-09-23. It used to read _hard_bounds, which was the same
+    number until the knee pair's never-exceed clamp went to +-180 deg so a workspace could be drawn
+    out to where the leg really reaches; off the clamp this budget would be 468 deg -- 1.3 output
+    turns, past the very excursion it exists to cut. The assertion below is the invariant that
+    matters and it is unchanged."""
     d, cal, b, _dir = robot
-    lo, hi = d._hard_bounds("left", "cam")
+    lo, hi = d._nominal_bounds("left", "cam")
     budget = daemon_mod.TRAVEL_BUDGET_FACTOR * (hi - lo)
     assert budget < 360.0, f"the budget ({budget:.0f} deg) must cut well under one output turn"
 
@@ -505,7 +513,8 @@ def test_a_bus_that_will_not_take_frames_does_not_kill_the_daemon(tmp_path, monk
                           space_check_s=1.0)
     blackbox.install(b)
     b.start()
-    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=b)
+    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=b,
+                               anchor_file=str(tmp_path / "pose_anchor.json"))
     d.start()
     try:
         assert d._started_ok.wait(6.0), "the daemon must survive setup on a dead bus"
@@ -692,7 +701,8 @@ def test_the_daemon_records_the_sense_hat_attitude(tmp_path):
     cal.save = lambda *a, **k: None
     b = blackbox.BlackBox(directory=str(tmp_path), heartbeat_s=99, space_check_s=99)
     b.start()
-    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=b)
+    d = daemon_mod.RobotDaemon(mock=True, calib=cal, wstore=None, fklut=None, bb=b,
+                               anchor_file=str(tmp_path / "pose_anchor.json"))
     d.sense = FakeSense()
     d.start()
     try:

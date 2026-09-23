@@ -345,3 +345,124 @@ def convert_legacy_raw_segments(npz, signs=None):
     sgn = np.array([s["abd"], s["cam"], s["thigh"]])
     segments = [sgn * (npz[f"p{i}"] - zero) for i in range(int(npz["n"]))]
     return leg, segments
+
+
+# ===================================================================== continuity across a restart
+ANCHOR_VERSION = 1
+
+
+class PoseAnchor:
+    """Where the encoders read a moment ago, so a daemon restart can tell a stale calibration from
+    a robot that is simply not standing in its zero pose.
+
+    THE BUG THIS FIXES. The pre-move guard's raw-at-rest check asks one question: did a driver
+    board renumber its own multi-turn origin while nothing was watching? Until this existed the
+    only reference it had was `Calibration.zero_raw`, the raw pose captured at the ZERO CAPTURE, so
+    what the check actually asked was "is the robot back in the zero pose?". Those are the same
+    question exactly once — before the first move. After a Home (cam goes to 46 deg) or any hand
+    sweep for a workspace, a perfectly healthy calibration failed by tens of degrees on every
+    restart of the web UI, and the operator was told to re-zero for nothing.
+
+    THE REFERENCE. The daemon writes the live raw pose here about once a second while it runs, so
+    a restart compares against where the encoders read a second before it went down, not against
+    where they read at the zero capture. The safety property is untouched: a power cycle still
+    re-randomises the origins and still fails the comparison, and so does a joint moved by hand
+    while the daemon was down. What goes away is only the false alarm.
+
+    ONLY STATIONARY SAMPLES ARE WRITTEN. A daemon killed mid-move would otherwise leave an anchor
+    stale by however far the joint travelled after the last write, and the guard would read that
+    travel as an origin jump — the same false alarm one level down.
+
+    NOT SELF-SEEDING. An anchor is never written for a pose the daemon has not watched arrive. A
+    daemon that adopted whatever the encoders happened to read at startup would hand out a clean
+    bill of health to the exact power-cycle case the guard exists to catch. No file means no
+    continuity evidence, and the guard falls back to the zero-capture comparison.
+    """
+
+    def __init__(self, path=None, raw=None, zero_epoch=None, t_wall=None, mode=None, age_s=None):
+        self.path = path or paths.POSE_ANCHOR_FILE
+        self.raw = dict(raw or {})
+        self.zero_epoch = zero_epoch
+        self.t_wall = t_wall
+        self.mode = mode
+        self.age_s = age_s                 # the writer's monotonic clock at the write, for
+                                           # ordering only -- it is not a wall time and not a
+                                           # process uptime, so never subtract it from "now"
+        self._written = {}
+        self._written_at = -1e9
+
+    # ------------------------------------------------------------------ load
+    @classmethod
+    def load(cls, path=None):
+        """The anchor left by the PREVIOUS process, or an empty one. Never raises."""
+        path = path or paths.POSE_ANCHOR_FILE
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                d = json.load(f)
+            if int(d.get("version", 0)) != ANCHOR_VERSION:
+                return cls(path)
+            raw = {n: float(v) for n, v in (d.get("raw") or {}).items() if n in paths.MOTOR_NAMES}
+            return cls(path, raw=raw, zero_epoch=int(d["zero_epoch"]), t_wall=d.get("t_wall"),
+                       mode=d.get("mode"), age_s=d.get("uptime_s"))
+        except (ValueError, OSError, KeyError, TypeError) as e:
+            print(f"(no usable pose anchor at {path}: {e})")
+            return cls(path)
+
+    # ------------------------------------------------------------------ is it usable as evidence
+    def valid_for(self, zero_epoch):
+        """Does this anchor describe the calibration now in force, for all six joints?
+
+        A zero_epoch mismatch means the operator re-zeroed after this anchor was written, so the
+        anchor is older than the calibration and says nothing about it. A missing joint means the
+        writing process never heard from that drive, and a joint we cannot compare is a joint we
+        cannot vouch for."""
+        return (self.zero_epoch == zero_epoch
+                and all(n in self.raw for n in paths.MOTOR_NAMES))
+
+    def compare(self, raw_now):
+        """{name: {"then","now","delta"}} against the anchored pose — same shape as
+        Calibration.compare_raw, so the guard, the snapshot and any postmortem read one format."""
+        out = {}
+        for n in paths.MOTOR_NAMES:
+            a, b = self.raw.get(n), raw_now.get(n)
+            if a is None or b is None:
+                continue
+            out[n] = {"then": round(float(a), 3), "now": round(float(b), 3),
+                      "delta": round(float(b) - float(a), 3)}
+        return out
+
+    # ------------------------------------------------------------------ write
+    def write(self, raw_now, zero_epoch, mode, mono_s):
+        """Replace the anchor with this pose. Atomic; the caller decides when (see should_write).
+
+        mono_s is the caller's monotonic clock, kept only so should_write can measure intervals;
+        it is meaningless across processes and nothing compares it to wall time."""
+        d = {"version": ANCHOR_VERSION, "zero_epoch": int(zero_epoch), "mode": mode,
+             "t_wall": time.time(), "uptime_s": round(float(mono_s), 1),
+             "raw": {n: round(float(v), 3) for n, v in raw_now.items() if v is not None},
+             "note": "live raw pose, written only while stationary. The pre-move guard compares "
+                     "against this after a restart instead of against the zero capture — see "
+                     "calibration.PoseAnchor."}
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+        os.replace(tmp, self.path)
+        self._written = dict(d["raw"])
+        self._written_at = mono_s
+
+    def should_write(self, raw_now, mono_s, min_period_s, refresh_s, moved_deg):
+        """Rate limit + change filter, so a robot sitting still costs one small write per
+        `refresh_s` rather than one per second for as long as it is powered. The caller has
+        already decided the pose is stationary and complete."""
+        since = mono_s - self._written_at
+        if since < min_period_s:
+            return False
+        if since >= refresh_s or not self._written:
+            return True
+        return any(abs(float(v) - self._written.get(n, 1e9)) > moved_deg
+                   for n, v in raw_now.items() if v is not None)
+
+    def snapshot(self):
+        return {"have": bool(self.raw), "zero_epoch": self.zero_epoch,
+                "mode": self.mode, "t_wall": self.t_wall, "uptime_s": self.age_s,
+                "motors": sorted(self.raw)}

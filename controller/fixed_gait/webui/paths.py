@@ -33,6 +33,10 @@ IDENT_DIR = os.path.join(DATA, "identification")       # estimator outputs (iden
 POLICY_DIR = os.path.join(DATA, "policies")            # exported policy bundles (.npz, see deploy/bundle.py)
 POLICYRUN_DIR = os.path.join(DATA, "policyruns")       # run_policy.py logs (also its --out default)
 CALIB_FILE = os.path.join(DATA, "session_calibration.json")
+# the daemon's continuity heartbeat: the live raw pose, rewritten while it runs, so a
+# restart can tell "the origin moved while we were down" from "the robot is not standing
+# in its zero pose" (calibration.PoseAnchor).
+POSE_ANCHOR_FILE = os.path.join(DATA, "pose_anchor.json")
 MODEL_MAP_FILE = os.path.join(DATA, "model_map.json")
 DYN_CONFIG_FILE = os.path.join(DATA, "dynamics_config.json")   # weighed masses, drive PID gains, Kt
 FK_LUT_FILE = os.path.join(WEBUI, "fk_lut.npz")

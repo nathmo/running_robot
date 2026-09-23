@@ -307,7 +307,8 @@ def test_a_bypass_is_never_persisted_across_a_restart(robot):                   
     import calibration as _cal, daemon as _dm
     d, _c, _b, _dir = robot
     d.bypass["torque"] = True
-    fresh = _dm.RobotDaemon(mock=True, calib=_cal.Calibration(), wstore=None, fklut=None, bb=None)
+    fresh = _dm.RobotDaemon(mock=True, calib=_cal.Calibration(), wstore=None, fklut=None, bb=None,
+                            anchor_file=os.path.join(_dir, "pose_anchor.json"))
     assert fresh.bypass == {n: False for n in _dm.BYPASS_NAMES}
 
 

@@ -5,7 +5,19 @@
 
 const MOTORS = ["right.abd", "right.cam", "right.thigh", "left.abd", "left.cam", "left.thigh"];
 const ROLES = ["abd", "cam", "thigh"];
-const HARD = { abd: 48, cam: 88, thigh: 62 };
+/* Fallback joint ranges, used only until /api/workspace has answered once. The daemon serves the
+   real numbers (see _joint_limits in server.py) because two copies of a safety limit drift apart:
+   this literal said the thigh stopped at 62 deg while the daemon had already widened itself to the
+   demonstrated workspace, and the workspace editor clipped strokes at whichever number it held. */
+const HARD_FALLBACK = { abd: 48, cam: 88, thigh: 62 };
+
+/* kind: "hard" = the never-exceed refusal, as far as a region may be drawn;
+         "nominal" = the CAD guess widened by what has been demonstrated, what the UI spans. */
+function jointLimit(side, role, kind) {
+  const L = S.ws && S.ws.limits && S.ws.limits[side] && S.ws.limits[side][role];
+  if (L && L[kind]) return L[kind];
+  return [-HARD_FALLBACK[role], HARD_FALLBACK[role]];
+}
 const COLORS = { pos: "#4da3ff", target: "#f2f2f2", cur: "#e0a020", temp: "#e04545", good: "#2c9e3f",
   region: "rgba(44,158,63,0.55)", samples: "rgba(160,170,185,0.4)", gait: "#ff35c8",
   stroke: "#ffd23f", zero: "#ffffff" };
@@ -581,7 +593,7 @@ function buildManualRows() {
     <div class="man-row" id="man-${n.replace(".", "-")}">
       <span class="mr-line mr-line1">
         <span class="mr-name">${n}</span>
-        <input type="range" class="mr-slider" min="${-HARD[role]}" max="${HARD[role]}" step="0.5" value="0">
+        <input type="range" class="mr-slider" min="${-HARD_FALLBACK[role]}" max="${HARD_FALLBACK[role]}" step="0.5" value="0">
       </span>
       <span class="mr-line mr-line2">
         <input type="number" class="num mr-num" step="0.5" value="0">
@@ -907,7 +919,83 @@ function niceStep(raw) {
 const wsEd = {
   view: null, grid: null, shape: null, camO: 0, thighO: 0, res: 1,
   undo: [], redo: [], tool: "pan", dirty: false, lastCell: null,
+  world: [0, 0],        // last world point the hit test saw (shift-invariant across a grow)
+  prevWorld: [0, 0],    // ... and the one the current stroke came from
 };
+
+/* Put the live canvas span into the extent boxes (they are also the resize input). */
+function wsSyncExtentInputs() {
+  const on = !!(wsEd.grid && wsEd.shape);
+  const [nc, nt] = on ? wsEd.shape : [0, 0];
+  const vals = on
+    ? [wsEd.camO, wsEd.camO + nc * wsEd.res, wsEd.thighO, wsEd.thighO + nt * wsEd.res]
+    : ["", "", "", ""];
+  ["ws-cam-lo", "ws-cam-hi", "ws-th-lo", "ws-th-hi"].forEach((id, k) => {
+    const el = $(id);
+    if (!el) return;
+    el.disabled = !on;
+    el.value = on ? Number(vals[k]).toFixed(1) : "";
+  });
+  const hint = $("ws-extent-hint");
+  if (hint) {
+    const [camLo, camHi] = jointLimit(S.wsLeg, "cam", "hard");
+    const [thLo, thHi] = jointLimit(S.wsLeg, "thigh", "hard");
+    hint.textContent = `limit cam ${camLo.toFixed(0)}…${camHi.toFixed(0)}°, ` +
+                       `thigh ${thLo.toFixed(0)}…${thHi.toFixed(0)}°`;
+  }
+}
+
+/* Resize to the typed span. Shrinking is allowed and DISCARDS the cells outside it -- undo holds
+   the previous frame, and the stats line reports the new occupied count either way. */
+function wsResizeFromInputs() {
+  if (!wsEd.grid) return;
+  const want = [+$("ws-cam-lo").value, +$("ws-cam-hi").value,
+                +$("ws-th-lo").value, +$("ws-th-hi").value];
+  if (want.some((v) => !isFinite(v))) { setBanner("span must be four numbers", "error", 3000); return; }
+  if (want[0] >= want[1] || want[2] >= want[3]) {
+    setBanner("each span must run low → high", "error", 3000); return;
+  }
+  const [camLo, camHi] = jointLimit(S.wsLeg, "cam", "hard");
+  const [thLo, thHi] = jointLimit(S.wsLeg, "thigh", "hard");
+  if (want[0] < camLo || want[1] > camHi || want[2] < thLo || want[3] > thHi) {
+    setBanner(`span must stay inside the never-exceed range ` +
+              `(cam ${camLo.toFixed(0)}…${camHi.toFixed(0)}°, ` +
+              `thigh ${thLo.toFixed(0)}…${thHi.toFixed(0)}°)`, "error", 5000);
+    return;
+  }
+  const r = wsEd.res, [nc, nt] = wsEd.shape;
+  const pad = [Math.round((wsEd.camO - want[0]) / r),
+               Math.round((want[1] - (wsEd.camO + nc * r)) / r),
+               Math.round((wsEd.thighO - want[2]) / r),
+               Math.round((want[3] - (wsEd.thighO + nt * r)) / r)];
+  pushUndo();
+  if (!wsResize(...pad)) { wsEd.undo.pop(); return; }
+  wsSyncExtentInputs();
+  wsEd.view.render();
+  updateWsStats();
+}
+
+/* Pad (positive) or crop (negative) each edge by a number of cells. */
+function wsResize(camLo, camHi, thLo, thHi) {
+  const [nc, nt] = wsEd.shape;
+  const nc2 = nc + camLo + camHi, nt2 = nt + thLo + thHi;
+  if (nc2 < 1 || nt2 < 1) { setBanner("that span is smaller than one cell", "error", 3000); return false; }
+  if (nc2 * nt2 > 4000000) { setBanner("that span is too many cells", "error", 3000); return false; }
+  const g2 = new Uint8Array(nc2 * nt2);
+  for (let i = 0; i < nc; i++) {
+    const i2 = i + camLo;
+    if (i2 < 0 || i2 >= nc2) continue;
+    for (let j = 0; j < nt; j++) {
+      const j2 = j + thLo;
+      if (j2 < 0 || j2 >= nt2) continue;
+      if (wsEd.grid[i * nt + j]) g2[i2 * nt2 + j2] = 1;
+    }
+  }
+  wsEd.grid = g2; wsEd.shape = [nc2, nt2];
+  wsEd.camO -= camLo * wsEd.res; wsEd.thighO -= thLo * wsEd.res;
+  wsEd.dirty = true;
+  return true;
+}
 
 function wsLegData() { return S.ws && S.ws.legs ? S.ws.legs[S.wsLeg] : null; }
 
@@ -938,6 +1026,7 @@ function loadWsIntoEditor() {
   wsEd.undo = []; wsEd.redo = []; wsEd.dirty = false;
   wsEd.view.fit(k.cam_origin, k.cam_origin + k.shape[0] * k.res_deg,
                 k.thigh_origin, k.thigh_origin + k.shape[1] * k.res_deg);
+  wsSyncExtentInputs();
   wsEd.view.render();
   drawAbd();
   updateWsStats();
@@ -1026,18 +1115,98 @@ function drawLoop(g, v, pts, color, lw) {
 }
 
 function updateWsStats() {
-  if (!wsEd.grid) { $("ws-stats").textContent = "no workspace for this leg yet — import or record a sweep"; return; }
+  if (!wsEd.grid) {
+    $("ws-stats").textContent = "no workspace for this leg yet — import or record a sweep";
+    wsSyncExtentInputs();
+    return;
+  }
   let n = 0; for (let i = 0; i < wsEd.grid.length; i++) n += wsEd.grid[i];
-  $("ws-stats").innerHTML = `${n} / ${wsEd.grid.length} cells safe (${wsEd.res}°/cell)` +
+  const [nc, nt] = wsEd.shape, r = wsEd.res;
+  const span = `canvas cam ${wsEd.camO.toFixed(0)}…${(wsEd.camO + nc * r).toFixed(0)}°, ` +
+               `thigh ${wsEd.thighO.toFixed(0)}…${(wsEd.thighO + nt * r).toFixed(0)}°`;
+  $("ws-stats").innerHTML = `${n} / ${wsEd.grid.length} cells safe (${r}°/cell) — ${span}` +
     (n === 0 ? ' — <b style="color:#e04545">EMPTY: nothing will pass the safety check!</b>' : "") +
     (wsEd.dirty ? ' — <b style="color:#e0a020">unapplied edits</b>' : "");
 }
 
-function wsCellAt(wx, wy) {
-  const i = Math.floor((wx - wsEd.camO) / wsEd.res);
-  const j = Math.floor((wy - wsEd.thighO) / wsEd.res);
+/* The grid's extent used to be frozen at whatever the backdriven sweep happened to cover: the
+   array is built as [min(sample)-1deg, max(sample)+1deg] (calibrate_workspace._knee_grid), and
+   this hit test returned null outside it, so a brush stroke past the edge was silently dropped.
+   That read as a hard limit -- "I cannot draw past 36 deg of thigh" -- when 36 was simply where
+   that operator's sweep had stopped, with the joint itself good for a great deal more.
+
+   So the canvas grows. Drawing past an edge pads the array out to the cell under the cursor,
+   bounded by the joint's never-exceed range; a padded cell is empty until it is painted, and
+   the daemon sizes its clamps off the OCCUPIED cells, so growing the canvas alone widens nothing.
+   Pan and erase never grow: only a stroke that is trying to ADD area. */
+function wsWorldToCell(wx, wy) {
+  return [Math.floor((wx - wsEd.camO) / wsEd.res), Math.floor((wy - wsEd.thighO) / wsEd.res)];
+}
+
+function wsGrow(padCamLo, padCamHi, padThLo, padThHi) {
+  if (!(padCamLo || padCamHi || padThLo || padThHi)) return false;
   const [nc, nt] = wsEd.shape;
-  return (i >= 0 && i < nc && j >= 0 && j < nt) ? [i, j] : null;
+  const nc2 = nc + padCamLo + padCamHi, nt2 = nt + padThLo + padThHi;
+  const g2 = new Uint8Array(nc2 * nt2);
+  for (let i = 0; i < nc; i++) {
+    const src = i * nt, dst = (i + padCamLo) * nt2 + padThLo;
+    for (let j = 0; j < nt; j++) if (wsEd.grid[src + j]) g2[dst + j] = 1;
+  }
+  wsEd.grid = g2;
+  wsEd.shape = [nc2, nt2];
+  wsEd.camO -= padCamLo * wsEd.res;
+  wsEd.thighO -= padThLo * wsEd.res;
+  wsEd.dirty = true;
+  return true;
+}
+
+/* How many cells may be added on each side before the span leaves the never-exceed range. */
+function wsGrowRoom() {
+  const [camLo, camHi] = jointLimit(S.wsLeg, "cam", "hard");
+  const [thLo, thHi] = jointLimit(S.wsLeg, "thigh", "hard");
+  const [nc, nt] = wsEd.shape, r = wsEd.res;
+  return {
+    camLo: Math.max(0, Math.floor((wsEd.camO - camLo) / r)),
+    camHi: Math.max(0, Math.floor((camHi - (wsEd.camO + nc * r)) / r)),
+    thLo: Math.max(0, Math.floor((wsEd.thighO - thLo) / r)),
+    thHi: Math.max(0, Math.floor((thHi - (wsEd.thighO + nt * r)) / r)),
+  };
+}
+
+/* Grid cell under a world point. `grow` asks for the canvas to be extended to reach it. Returns
+   null when the point is outside the grid and cannot (or may not) be reached. */
+function wsCellAt(wx, wy, grow) {
+  if (!wsEd.grid || !wsEd.shape) return null;
+  wsEd.world = [wx, wy];                       // world coords survive a reindexing; cells do not
+  let [i, j] = wsWorldToCell(wx, wy);
+  const [nc, nt] = wsEd.shape;
+  const outside = i < 0 || i >= nc || j < 0 || j >= nt;
+  if (outside && grow) {
+    const room = wsGrowRoom();
+    const pad = [Math.min(Math.max(0, -i), room.camLo),
+                 Math.min(Math.max(0, i - nc + 1), room.camHi),
+                 Math.min(Math.max(0, -j), room.thLo),
+                 Math.min(Math.max(0, j - nt + 1), room.thHi)];
+    if (wsGrow(...pad)) {
+      const blocked = (i < -pad[0]) || (i > nc - 1 + pad[1]) ||
+                      (j < -pad[2]) || (j > nt - 1 + pad[3]);
+      [i, j] = wsWorldToCell(wx, wy);
+      wsSyncExtentInputs();
+      if (blocked) wsFlagAtLimit();
+    } else {
+      wsFlagAtLimit();
+    }
+  }
+  const [nc2, nt2] = wsEd.shape;
+  return (i >= 0 && i < nc2 && j >= 0 && j < nt2) ? [i, j] : null;
+}
+
+function wsFlagAtLimit() {
+  const [camLo, camHi] = jointLimit(S.wsLeg, "cam", "hard");
+  const [thLo, thHi] = jointLimit(S.wsLeg, "thigh", "hard");
+  setBanner(`that is past the never-exceed range for this joint ` +
+            `(cam ${camLo.toFixed(0)}…${camHi.toFixed(0)}°, ` +
+            `thigh ${thLo.toFixed(0)}…${thHi.toFixed(0)}°) — the canvas stops there`, "", 3500);
 }
 
 function wsApplyBrush(cell, value) {
@@ -1072,8 +1241,20 @@ function wsFloodFill(cell) {
   wsEd.dirty = true;
 }
 
+/* A snapshot is the grid AND its frame: the canvas can be resized now, so restoring cells into a
+   different shape or origin would put them somewhere else entirely. */
+function wsSnap() {
+  return { grid: wsEd.grid.slice(), shape: wsEd.shape.slice(),
+           camO: wsEd.camO, thighO: wsEd.thighO, res: wsEd.res };
+}
+function wsRestore(snap) {
+  wsEd.grid = snap.grid; wsEd.shape = snap.shape;
+  wsEd.camO = snap.camO; wsEd.thighO = snap.thighO; wsEd.res = snap.res;
+  wsEd.dirty = true;
+  wsSyncExtentInputs();
+}
 function pushUndo() {
-  wsEd.undo.push(wsEd.grid.slice());
+  wsEd.undo.push(wsSnap());
   if (wsEd.undo.length > 50) wsEd.undo.shift();
   wsEd.redo = [];
 }
@@ -1085,29 +1266,47 @@ function setupWsCanvas() {
   attachPanZoomDraw(v, () => wsEd.tool, {
     onStrokeStart: (cell) => { if (!wsEd.grid) return;
       pushUndo();
+      wsEd.prevWorld = wsEd.world.slice();
       if (wsEd.tool === "fill") { wsFloodFill(cell); v.render(); updateWsStats(); }
       else { wsApplyBrush(cell, wsEd.tool === "draw" ? 1 : 0); v.render(); }
     },
-    onStrokeMove: (cell, prev) => { if (!wsEd.grid || wsEd.tool === "fill") return;
-      // interpolate cells between events so fast strokes don't gap
+    onStrokeMove: (cell) => { if (!wsEd.grid || wsEd.tool === "fill") return;
+      // Interpolate between events so a fast stroke does not gap. The previous point is carried in
+      // WORLD degrees, not as a cell index: growing the canvas mid-stroke renumbers every cell, and
+      // an index captured before the growth would smear the brush across the shift.
+      const prev = wsWorldToCell(...wsEd.prevWorld);
       const steps = Math.max(Math.abs(cell[0] - prev[0]), Math.abs(cell[1] - prev[1]), 1);
       for (let s = 1; s <= steps; s++) {
         const i = Math.round(prev[0] + (cell[0] - prev[0]) * s / steps);
         const j = Math.round(prev[1] + (cell[1] - prev[1]) * s / steps);
         wsApplyBrush([i, j], wsEd.tool === "draw" ? 1 : 0);
       }
+      wsEd.prevWorld = wsEd.world.slice();
       v.render();
     },
     onStrokeEnd: () => updateWsStats(),
-    cellAt: wsCellAt,
+    // only a stroke that ADDS area may grow the canvas; pan, erase and fill stay inside it
+    cellAt: (wx, wy) => wsCellAt(wx, wy, wsEd.tool === "draw"),
   });
+  $("btn-ws-resize").onclick = () => wsResizeFromInputs();
+  $("btn-ws-grow-max").onclick = () => {
+    if (!wsEd.grid) return;
+    pushUndo();
+    const room = wsGrowRoom();
+    if (!wsGrow(room.camLo, room.camHi, room.thLo, room.thHi)) {
+      wsEd.undo.pop();
+      setBanner("the canvas already spans the joint's full never-exceed range", "", 2500);
+      return;
+    }
+    wsSyncExtentInputs(); v.render(); updateWsStats();
+  };
   $("ws-toolbar").querySelectorAll(".tool").forEach((b) => b.onclick = () => {
     $("ws-toolbar").querySelectorAll(".tool").forEach((x) => x.classList.remove("active"));
     b.classList.add("active");
     wsEd.tool = b.dataset.tool;
   });
-  $("btn-undo").onclick = () => { if (wsEd.undo.length) { wsEd.redo.push(wsEd.grid); wsEd.grid = wsEd.undo.pop(); wsEd.dirty = true; v.render(); updateWsStats(); } };
-  $("btn-redo").onclick = () => { if (wsEd.redo.length) { wsEd.undo.push(wsEd.grid); wsEd.grid = wsEd.redo.pop(); wsEd.dirty = true; v.render(); updateWsStats(); } };
+  $("btn-undo").onclick = () => { if (wsEd.undo.length) { wsEd.redo.push(wsSnap()); wsRestore(wsEd.undo.pop()); v.render(); updateWsStats(); } };
+  $("btn-redo").onclick = () => { if (wsEd.redo.length) { wsEd.undo.push(wsSnap()); wsRestore(wsEd.redo.pop()); v.render(); updateWsStats(); } };
   $("btn-ws-apply").onclick = async () => {
     if (!wsEd.grid) return;
     await api("/api/workspace/grid", { json: { leg: S.wsLeg, grid_b64: packBits(wsEd.grid),
@@ -1242,21 +1441,13 @@ async function refreshWorkspace() {
   }
 }
 
-/* slider bounds follow the demonstrated workspace (the real ranges can exceed the URDF guesses) */
+/* Slider bounds follow the daemon's NOMINAL range: the CAD guess widened by the demonstrated
+   workspace. Deliberately not the never-exceed clamp -- that is +-180 deg on the knee pair and a
+   slider spanning it would put a hard-stop collision one careless drag away. */
 function updateManualRanges() {
   for (const n of MOTORS) {
     const [side, role] = n.split(".");
-    const d = S.ws && S.ws.legs ? S.ws.legs[side] : null;
-    let lo = -HARD[role], hi = HARD[role];
-    if (d) {
-      if (role === "abd") { lo = Math.min(lo, d.abd_observed[0] - 10); hi = Math.max(hi, d.abd_observed[1] + 10); }
-      else {
-        const k = d.knee;
-        const o = role === "cam" ? k.cam_origin : k.thigh_origin;
-        const nc = role === "cam" ? k.shape[0] : k.shape[1];
-        lo = Math.min(lo, o - 10); hi = Math.max(hi, o + nc * k.res_deg + 10);
-      }
-    }
+    const [lo, hi] = jointLimit(side, role, "nominal");
     const row = $("man-" + n.replace(".", "-"));
     row.querySelector(".mr-slider").min = lo;
     row.querySelector(".mr-slider").max = hi;

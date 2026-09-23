@@ -28,6 +28,7 @@ import numpy as np
 import paths
 import balance
 import blackbox
+import calibration as calibmod           # PoseAnchor: continuity across a daemon restart
 import canio
 import ringbuffer
 
@@ -73,13 +74,39 @@ TELEMETRY_DIV = int(round(TICK_HZ / 20.0))  # ring/snapshot update every Nth tic
 MAX_TEMP_C = 80                           # run_hardware.py:102
 MAX_TRACK_ERR_DEG = 25.0                  # run_hardware.py:101 (position-command modes)
 DEFAULT_SLEW_DPS = 60.0
-# base never-exceed clamps, normalized deg (model joint ranges + small margin; cam +-1.5 rad,
-# thigh +-1.047 rad, abduction +-0.785 rad — mujoco/dash01/build_model.py J dict).
-# NOTE: the URDF ranges are CAD guesses (calibrate_workspace.py docstring) and the real cam is
-# multi-turn — a recorded workspace can legitimately exceed these, so _hard_bounds() widens the
-# net to the demonstrated envelope (+10 deg) whenever a workspace is loaded for that leg.
-HARD_CLAMP = {"abd": 48.0, "cam": 88.0, "thigh": 62.0}
+# TWO range concepts, because they answer different questions and used to be one number.
+#
+# NOMINAL_RANGE is the CAD/URDF guess (cam +-1.5 rad, thigh +-1.047 rad, abduction +-0.785 rad --
+# mujoco/dash01/build_model.py J dict). It is a GUESS (calibrate_workspace.py docstring says so)
+# and the real cam is multi-turn, so it is used only where a sensible default span is wanted: the
+# manual sliders and the workspace editor's opening view. Both widen to the demonstrated envelope.
+#
+# HARD_CLAMP is the never-exceed refusal -- the last thing between a bad number and the hardware.
+# The knee pair is clamped at +-180 deg because the CAD guess was never the real limit there: the
+# cam is a crank driven through the parallel pushrod loop and a recorded workspace routinely runs
+# past +-88, which is why _hard_bounds() already had to widen itself out of the way whenever one
+# was loaded. A clamp that every real workspace overrides is not a clamp, and it was also the wall
+# that stopped the operator drawing a safe region out to where the leg actually reaches. The
+# abduction motor is a plain single DOF with a real +-48 and stays there.
+#
+# What holds the line instead is the pre-move guard's continuity check, which is now anchored to a
+# pose the daemon watched (calibration.PoseAnchor) rather than to the zero capture, and the drawn
+# workspace grid itself. Range sanity in _premove_guard is correspondingly weaker on the knee pair:
+# it still catches the 2026-08-10 class of failure (678 deg on a +-88 axis) and the +-967 deg
+# origin steps in the log, but a ~100 deg renumber is now caught by the anchor, not by this.
+NOMINAL_RANGE = {"abd": 48.0, "cam": 88.0, "thigh": 62.0}
+HARD_CLAMP = {"abd": 48.0, "cam": 180.0, "thigh": 180.0}
 HARD_WIDEN_DEG = 10.0
+
+# ---- continuity heartbeat (calibration.PoseAnchor) ----
+# The daemon rewrites the live raw pose while it runs so that a RESTART can ask "did an encoder
+# origin move while nothing was watching?" instead of "is the robot back in its zero pose?" -- the
+# second question has a wrong answer the moment the robot is parked anywhere but zero, and it was
+# refusing healthy calibrations on every restart of the web UI.
+ANCHOR_MIN_PERIOD_S = 1.0        # never more often than this
+ANCHOR_REFRESH_S = 30.0          # ... but at least this often, so a still robot stays anchored
+ANCHOR_MOVED_DEG = 0.2           # a pose that changed by more than this is worth a write
+ANCHOR_STILL_ERPM = 200.0        # the RAW_JUMP_SPD_MAX threshold: under this the joint is not turning
 
 # Where 🏠 Home goes: the pose the robot STANDS in on its own. Both soles flat, torso level,
 # abduction 0, and the whole-robot CoM straight above the sole centres (x and y), so it balances
@@ -481,7 +508,7 @@ def _pos_loop_error_ratio(f):
 
 class RobotDaemon(threading.Thread):
     def __init__(self, interface="socketcan", mock=False, calib=None, wstore=None, fklut=None,
-                 bb=None, balance_file=None):
+                 bb=None, balance_file=None, anchor_file=None):
         super().__init__(daemon=True, name="RobotDaemon")
         self.interface = interface
         self.mock = mock
@@ -579,6 +606,15 @@ class RobotDaemon(threading.Thread):
         self._bb_buf = [[0.0] * paths.N_MOTORS for _ in range(8)]   # reused: zero alloc per tick
         self._zero_epoch_at_start = getattr(calib, "zero_epoch", 0) if calib else 0
         self._cmd_zero_epoch = None        # zero_epoch in force when we last commanded absolutely
+        # The anchor the PREVIOUS process left behind, frozen for our whole lifetime: it is the
+        # evidence the guard weighs at startup and it must not quietly become the pose we are
+        # writing ourselves, or it would always match and prove nothing. self._anchor is the live
+        # writer; self._anchor_at_start is the witness.
+        # anchor_file is injectable so a test daemon never writes into the operator's data/ --
+        # the fixtures promise "NO writes to the real data directory" and a heartbeat is a write.
+        self._anchor = calibmod.PoseAnchor.load(anchor_file)
+        self._anchor_at_start = calibmod.PoseAnchor.load(anchor_file)
+        self._continuity_ok = False        # latched once the startup comparison has been passed
         self._raw_prev = [None] * paths.N_MOTORS      # continuity watchdog
         self._raw_jumps = []               # discontinuities seen since the last zero capture
         self._jump_epoch = self._zero_epoch_at_start
@@ -611,21 +647,45 @@ class RobotDaemon(threading.Thread):
         with self.lock:
             self._req_clear_estop = True
 
-    def _hard_bounds(self, side, role):
-        """(lo, hi) never-exceed clamp: model limits, widened by the demonstrated workspace."""
-        lo, hi = -HARD_CLAMP[role], HARD_CLAMP[role]
+    def _widen_to_workspace(self, side, role, lo, hi):
+        """Widen (lo, hi) to the DEMONSTRATED envelope of this leg's workspace, +HARD_WIDEN_DEG.
+
+        For the knee pair this is the bounding box of the grid's OCCUPIED cells, not the extent of
+        the array. The two used to be the same thing because the array was built to hug the swept
+        samples, but the editor can now grow the canvas past the sweep so a region can be drawn out
+        to where the leg actually reaches -- and a canvas that has merely been made bigger is not a
+        demonstration of anything. Sizing off the array would let empty padding quietly push the
+        never-exceed clamp outwards, which is the one thing a clamp must not do."""
         leg = self.wstore.legs.get(side) if self.wstore else None
-        if leg:
-            if role == "abd":
-                olo, ohi = leg["abd_observed"]
-                lo, hi = min(lo, olo - HARD_WIDEN_DEG), max(hi, ohi + HARD_WIDEN_DEG)
-            elif "knee_grid" in leg:
-                o = leg["knee_cam_origin"] if role == "cam" else leg["knee_thigh_origin"]
-                n_cells = leg["knee_grid"].shape[0 if role == "cam" else 1]
-                r = leg["knee_grid_deg"]
-                lo = min(lo, o - HARD_WIDEN_DEG)
-                hi = max(hi, o + n_cells * r + HARD_WIDEN_DEG)
-        return lo, hi
+        if not leg:
+            return lo, hi
+        if role == "abd":
+            olo, ohi = leg["abd_observed"]
+            return min(lo, olo - HARD_WIDEN_DEG), max(hi, ohi + HARD_WIDEN_DEG)
+        if "knee_grid" not in leg:
+            return lo, hi
+        grid = leg["knee_grid"]
+        axis = 0 if role == "cam" else 1
+        occupied = np.flatnonzero(grid.any(axis=1 - axis))
+        if not occupied.size:                       # an empty grid demonstrates nothing
+            return lo, hi
+        o = leg["knee_cam_origin"] if role == "cam" else leg["knee_thigh_origin"]
+        r = leg["knee_grid_deg"]
+        return (min(lo, o + occupied[0] * r - HARD_WIDEN_DEG),
+                max(hi, o + (occupied[-1] + 1) * r + HARD_WIDEN_DEG))
+
+    def _hard_bounds(self, side, role):
+        """(lo, hi) never-exceed clamp: HARD_CLAMP, widened by the demonstrated workspace."""
+        return self._widen_to_workspace(side, role, -HARD_CLAMP[role], HARD_CLAMP[role])
+
+    def _nominal_bounds(self, side, role):
+        """(lo, hi) for the UI to span -- sliders, the editor's opening view and how far a region
+        may be drawn. The CAD guess widened by what has been demonstrated, never the +-180 deg
+        refusal threshold: a slider that spans the never-exceed clamp is a loaded gun with a long
+        trigger, and the operator asked for room to draw, not room to drag."""
+        lo, hi = self._widen_to_workspace(side, role, -NOMINAL_RANGE[role], NOMINAL_RANGE[role])
+        h_lo, h_hi = self._hard_bounds(side, role)
+        return max(lo, h_lo), min(hi, h_hi)
 
     def _validate_pose(self, targets, override):
         """Check a FULL normalized pose {name: deg} (hard clamps + workspace / feasibility).
@@ -976,8 +1036,11 @@ class RobotDaemon(threading.Thread):
             if got is None:
                 for role in paths.ROLES:
                     targets[f"{side}.{role}"] = 0.0
+                # NOMINAL_RANGE, not HARD_CLAMP: with no workspace to measure against, the CAD
+                # guess is the only honest estimate of how far a chirp may swing. The +-180 deg
+                # never-exceed clamp is a refusal threshold, not an invitation.
                 info[side] = dict(source="zero pose (no workspace for this leg)",
-                                  room={r: HARD_CLAMP[r] for r in paths.ROLES})
+                                  room={r: NOMINAL_RANGE[r] for r in paths.ROLES})
                 continue
             cam, thigh, room = got
             lo, hi = leg["abd_safe"]
@@ -1419,6 +1482,9 @@ class RobotDaemon(threading.Thread):
             # 6) black box: EVERY tick at the full rate (a bounded deque append, no I/O)
             self._bb_tick(t_mono, now, dt_actual)
 
+            # 6b) continuity heartbeat, rate-limited inside (a few hundred bytes, seconds apart)
+            self._tick_anchor(t_mono)
+
             # 7) telemetry + snapshot at 20 Hz
             self._tick_count += 1
             if self._tick_count % TELEMETRY_DIV == 0:
@@ -1673,6 +1739,46 @@ class RobotDaemon(threading.Thread):
                            pos_raw=pr[i], cmd_raw=cr[i], spd=sp[i], temp=tp[i], err=int(er[i]))
             self._bb_dump(f"warn_{hit[0]}", motor=n, message=hit[1])
 
+    # ================================================================= continuity heartbeat
+    def _tick_anchor(self, t_mono):
+        """Rewrite the pose anchor while the robot is stationary and fully reporting.
+
+        This is what lets the next process tell a renumbered encoder origin from a robot that is
+        simply parked away from its zero pose. It writes only what it can vouch for:
+
+          * a COMPLETE pose -- a joint we never heard from is a joint the next process cannot
+            compare, and a partial anchor would silently narrow the check to whoever was awake;
+          * a STATIONARY pose -- if the daemon is killed mid-move the last write must not be from
+            before the travel, or the next process reads that travel as an origin jump;
+          * the zero_epoch it belongs to, so an anchor older than the calibration is discarded
+            rather than believed.
+
+        Never on the critical path: a failed write costs the heartbeat, not the tick."""
+        if self.calib is None or not self.calib.complete:
+            return                                   # nothing to be continuous WITH yet
+        raw, still = {}, True
+        for n, m in self.by_name.items():
+            if m.pos is None or m.pos != m.pos:      # silent or NaN: the pose is not complete
+                return
+            if abs(m.spd or 0.0) >= ANCHOR_STILL_ERPM:
+                still = False
+                break
+            raw[n] = float(m.pos)
+        if not still or len(raw) != paths.N_MOTORS:
+            return
+        if not self._anchor.should_write(raw, t_mono, ANCHOR_MIN_PERIOD_S,
+                                         ANCHOR_REFRESH_S, ANCHOR_MOVED_DEG):
+            return
+        try:
+            self._anchor.write(raw, self.calib.zero_epoch, self.mode, t_mono)
+        except OSError as e:
+            if t_mono - getattr(self, "_anchor_err_logged", -1e9) > 300.0:
+                self._anchor_err_logged = t_mono
+                self._bb_event("anchor.write_failed", error=str(e), mode=self.mode,
+                               note="the continuity heartbeat is not being written; the next "
+                                    "restart will fall back to the zero-capture comparison and "
+                                    "may ask for a re-zero it does not need")
+
     # ================================================================= pre-move guard
     def _premove_guard(self):
         """Is it safe to command absolute positions right now? (ok, reason, detail) — pure.
@@ -1689,14 +1795,42 @@ class RobotDaemon(threading.Thread):
                 their raw origin on every power cycle, so a stale file is precisely the trap; and
                 since gravity sag also moves the joints while we were dead, a mismatch is
                 genuinely ambiguous and must be resolved by a re-zero rather than by guessing.
+
+        WHAT (iii) COMPARES AGAINST, and why it changed. The reference is the pose anchor the
+        previous process left behind (calibration.PoseAnchor): where the encoders read a second or
+        so before the daemon went down. It falls back to the zero capture only when there is no
+        usable anchor.
+
+        That fallback used to be the ONLY reference, and it made the check ask the wrong question.
+        `zero_raw` is where the encoders read while the operator held the robot in its zero pose,
+        so comparing against it asks "is the robot back in the zero pose?" -- which stops being the
+        same question as "did an origin move?" the first time the robot is commanded anywhere.
+        After a Home the cams sit at 46 deg (STAND_POSE_DEG), four times the tolerance, so
+        restarting the web UI on a parked robot refused a healthy calibration and demanded a
+        re-zero, every time. Measured on the robot 2026-09-23: right.cam +45.0, left.cam -41.5,
+        both thighs ~21 deg off the zero capture, with a calibration in perfect health.
+
+        The anchor restores the original question without weakening it. A power cycle still
+        re-randomises the origins and still fails; a joint moved by hand while the daemon was down
+        still fails; an origin that renumbered itself in the blind window still fails. Only the
+        false alarm goes away.
+
+        ONCE PASSED, DONE. Continuity established at startup is latched: from then on check (ii),
+        which watches every tick, is a strictly better witness than any stored pose, and re-running
+        (iii) against a startup snapshot would refuse the robot the moment it legitimately moved.
         """
         raw_now = {n: m.pos for n, m in self.by_name.items()}
+        anchored = self._anchor_at_start.valid_for(self.calib.zero_epoch)
         detail = {"raw_now": {n: (None if v is None else round(v, 3)) for n, v in raw_now.items()},
                   "raw_at_last_zero": self.calib.raw_at_rest(),
                   "compare": self.calib.compare_raw(raw_now),
                   "zero_epoch": self.calib.zero_epoch,
                   "zeroed_this_session": self.calib.zero_epoch != self._zero_epoch_at_start,
                   "moved_since_zero": self._cmd_zero_epoch == self.calib.zero_epoch,
+                  "continuity_ok": self._continuity_ok,
+                  "anchor": self._anchor_at_start.snapshot(),
+                  "anchor_usable": anchored,
+                  "anchor_compare": (self._anchor_at_start.compare(raw_now) if anchored else None),
                   "origin_jumps_since_zero": list(self._raw_jumps)}
 
         # (i) range sanity
@@ -1719,17 +1853,46 @@ class RobotDaemon(threading.Thread):
                            f"moved, so the zero is stale. Re-zero before moving."), detail
 
         # (iii) raw-at-rest, when continuity is unknowable
-        if not detail["zeroed_this_session"] and detail["raw_at_last_zero"]:
-            off = {n: c for n, c in detail["compare"].items()
-                   if abs(c["delta"]) > RAW_AT_REST_TOL_DEG}
-            if off:
-                worst = max(off, key=lambda n: abs(off[n]["delta"]))
-                return False, (
-                    f"{worst}: pos_raw is {off[worst]['now']:.1f} but the last zero capture "
-                    f"recorded {off[worst]['then']:.1f} ({off[worst]['delta']:+.1f} deg, "
-                    f"{len(off)} joint(s) off). This calibration was restored from disk and has "
-                    f"not been re-captured since — the drives re-randomise their raw origin on "
-                    f"every power cycle. Re-zero before moving."), detail
+        if not detail["zeroed_this_session"] and not self._continuity_ok:
+            if anchored:
+                ref = detail["anchor_compare"]
+                what = "the pose this daemon last recorded before it went down"
+                advice = ("A leg moved, settled, or the motor power was cycled while the UI was "
+                          "down. Re-zero before moving.")
+            elif detail["raw_at_last_zero"]:
+                ref = detail["compare"]
+                what = "the zero capture"
+                advice = ("There is no continuity record from the previous run (it was killed "
+                          "before writing one, or this is the first run since the feature "
+                          "landed), so the zero pose is the only reference left and the robot is "
+                          "not standing in it. Re-zero before moving.")
+            else:
+                ref = None
+            if ref:
+                off = {n: c for n, c in ref.items()
+                       if abs(c["delta"]) > RAW_AT_REST_TOL_DEG}
+                if off:
+                    worst = max(off, key=lambda n: abs(off[n]["delta"]))
+                    # An origin renumber lands pos_raw on EXACTLY 0.0 (8264 of them in 9.87 h of
+                    # log on 2026-08-26), which is worth saying out loud: it separates "the board
+                    # renumbered itself" from "the leg settled" without changing the verdict.
+                    renum = sorted(n for n, c in off.items() if c["now"] == 0.0)
+                    hint = ((" " + ", ".join(renum) + " now read exactly 0.0, which is the "
+                             "signature of a driver board rewriting its own origin.")
+                            if renum else "")
+                    return False, (
+                        f"{worst}: pos_raw is {off[worst]['now']:.1f} but {what} recorded "
+                        f"{off[worst]['then']:.1f} ({off[worst]['delta']:+.1f} deg, "
+                        f"{len(off)} joint(s) off by more than "
+                        f"{RAW_AT_REST_TOL_DEG:.0f}).{hint} {advice}"), detail
+                # Nothing is off: the origins did not move in the blind window. Continuity is
+                # established, and from here the tick-by-tick watchdog (ii) carries it.
+                self._continuity_ok = True
+                self._bb_event("premove.continuity_ok", reference=what,
+                               compare=ref, tol_deg=RAW_AT_REST_TOL_DEG,
+                               anchor=detail["anchor"], zero_epoch=self.calib.zero_epoch,
+                               note="restart continuity confirmed against a watched pose; the "
+                                    "restored calibration stands without a re-zero")
         return True, "", detail
 
     def _activation_allowed(self):
@@ -2037,6 +2200,12 @@ class RobotDaemon(threading.Thread):
         manual sliding legitimately accumulates unlimited travel. On 2026-08-10 left.cam reached
         ~1.9 output turns on a +-88 deg joint: this cuts that at ~0.6 of a turn whatever the
         calibration claims.
+
+        Sized off _nominal_bounds, NOT _hard_bounds. The two were the same number until the knee
+        pair's never-exceed clamp went to +-180 deg to let a workspace be drawn out to where the
+        leg really reaches; budgeting off that would have quietly raised this backstop from 0.6 of
+        an output turn to 1.3 of one, which is past the very excursion it was built to cut.
+        test_travel_budget_is_bounded_by_the_joint_range asserts the budget stays under 360 deg.
         """
         for n, m in self.by_name.items():
             if m.pos is None:
@@ -2048,7 +2217,7 @@ class RobotDaemon(threading.Thread):
                 continue
             self._travel[n] = self._travel.get(n, 0.0) + abs(m.pos - prev)
             side, role = paths.split_name(n)
-            lo, hi = self._hard_bounds(side, role)
+            lo, hi = self._nominal_bounds(side, role)
             budget = TRAVEL_BUDGET_FACTOR * (hi - lo)
             if self._travel[n] <= budget:
                 continue
@@ -4008,6 +4177,10 @@ class RobotDaemon(threading.Thread):
                 guard_raw_now=self._guard_detail.get("raw_now"),
                 guard_raw_at_zero=self._guard_detail.get("raw_at_last_zero"),
                 guard_compare=self._guard_detail.get("compare"),
+                guard_continuity=self._continuity_ok,
+                guard_anchor=self._anchor_at_start.snapshot(),
+                guard_anchor_usable=self._anchor_at_start.valid_for(self.calib.zero_epoch)
+                if self.calib else False,
                 origin_jumps=len(self._raw_jumps), holding=now < self._hold_until,
                 manual_targets=dict(self._manual_targets), override=self._manual_override,
                 slew_dps=self._slew_dps, homing=self._home_active, homing_kind=self._home_kind,
@@ -4063,7 +4236,11 @@ class RobotDaemon(threading.Thread):
             premove=dict(refused=cap["guard_refused"], raw_now=cap["guard_raw_now"],
                          raw_at_last_zero=cap["guard_raw_at_zero"],
                          compare=cap["guard_compare"], origin_jumps=cap["origin_jumps"],
-                         holding=cap["holding"]),
+                         holding=cap["holding"],
+                         # continuity across the restart: whether the daemon could vouch for the
+                         # restored calibration from a watched pose instead of asking for a re-zero
+                         continuity_ok=cap["guard_continuity"],
+                         anchor=cap["guard_anchor"], anchor_usable=cap["guard_anchor_usable"]),
             motors={n: dict(alive=cap["alive"][i],
                             pos_raw=None if np.isnan(raw[i]) else round(float(raw[i]), 2),
                             pos_norm=None if np.isnan(norm[i]) else round(float(norm[i]), 2),

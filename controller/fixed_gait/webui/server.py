@@ -794,7 +794,7 @@ def api_sine():
 def api_workspace():
     ws = STATE["wstore"]
     fk = STATE["fk"]
-    out = {"source": ws.source, "files": ws.list_files(), "legs": {}}
+    out = {"source": ws.source, "files": ws.list_files(), "legs": {}, "limits": _joint_limits()}
     for leg in paths.SIDES:
         lj = ws.leg_json(leg)
         if lj is not None and fk.available and fk.side_verified(leg):
@@ -803,6 +803,47 @@ def api_workspace():
             lj["ee_model_zero"] = fk.ee_model_zero()         # MJCF/URDF qpos-0 pose (differs!)
         out["legs"][leg] = lj
     return jsonify(out)
+
+
+def _joint_limits():
+    """{side: {role: {"hard": [lo,hi], "nominal": [lo,hi]}}} -- the daemon's own numbers.
+
+    The browser used to carry its own copy of the joint ranges (a `HARD` literal in app.js). Two
+    copies of a safety number drift, and the editor silently clipped strokes at whichever one it
+    held. Served from the daemon so there is exactly one source: `hard` is the never-exceed
+    refusal and bounds how far a region may be DRAWN, `nominal` is the CAD guess widened by what
+    has been demonstrated and is what the sliders and the opening view span."""
+    dm = STATE.get("daemon")
+    if dm is None:
+        return None
+    return {side: {role: {"hard": list(dm._hard_bounds(side, role)),
+                          "nominal": list(dm._nominal_bounds(side, role))}
+                   for role in paths.ROLES}
+            for side in paths.SIDES}
+
+
+# A cell is at least a tenth of a degree and the span may not exceed the never-exceed clamp on
+# either axis (plus one cell of slack, since the grid is built to straddle its samples).
+GRID_MIN_RES_DEG = 0.1
+GRID_MAX_CELLS = 4_000_000          # 2000 x 2000 at 0.1 deg: far past any real leg
+
+
+def _grid_within_limits(shape, res, cam_origin, thigh_origin):
+    if len(shape) != 2 or shape[0] < 1 or shape[1] < 1:
+        return False, "grid shape must be two positive dimensions"
+    if not res >= GRID_MIN_RES_DEG:
+        return False, f"grid resolution must be at least {GRID_MIN_RES_DEG} deg/cell"
+    if shape[0] * shape[1] > GRID_MAX_CELLS:
+        return False, f"grid has {shape[0] * shape[1]} cells (max {GRID_MAX_CELLS})"
+    dm = STATE.get("daemon")
+    if dm is None:
+        return True, ""
+    for role, origin, n in (("cam", cam_origin, shape[0]), ("thigh", thigh_origin, shape[1])):
+        lo, hi = dm._hard_bounds(paths.SIDES[0], role)
+        if origin < lo - res or origin + n * res > hi + res:
+            return False, (f"{role} span [{origin:.1f}, {origin + n * res:.1f}] leaves the "
+                           f"never-exceed range [{lo:.0f}, {hi:.0f}]")
+    return True, ""
 
 
 @app.post("/api/workspace/grid")
@@ -814,10 +855,19 @@ def api_workspace_grid():
         return _err("leg must be right|left")
     try:
         shape = tuple(int(v) for v in b["shape"])
+        res = float(b["res_deg"])
+        cam_o, thigh_o = float(b["cam_origin"]), float(b["thigh_origin"])
+        # The editor can grow the canvas now, so the posted shape is no longer whatever the sweep
+        # happened to produce. Bound it here: a grid is a safety object and an accidental (or
+        # hostile) 10000 x 10000 would be allocated, persisted and then consulted on every tick.
+        ok, why = _grid_within_limits(shape, res, cam_o, thigh_o)
+        if not ok:
+            return _err(why)
         bits = np.unpackbits(np.frombuffer(base64.b64decode(b["grid_b64"]), np.uint8))
+        if bits.size < shape[0] * shape[1]:
+            return _err("grid_b64 is shorter than shape says")
         grid = bits[: shape[0] * shape[1]].reshape(shape).astype(bool)
-        STATE["wstore"].apply_grid(leg, grid, float(b["cam_origin"]),
-                                   float(b["thigh_origin"]), float(b["res_deg"]))
+        STATE["wstore"].apply_grid(leg, grid, cam_o, thigh_o, res)
     except (KeyError, ValueError) as e:
         return _err(f"bad grid payload: {e}")
     if not grid.any():

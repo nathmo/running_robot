@@ -149,6 +149,17 @@
         <button id="btn-ws-apply" class="btn small primary">Apply to robot</button>
         <button id="btn-ws-revert" class="btn small">Revert</button>
       </div>
+      <div class="row small" id="ws-extent-row">
+        <span class="hint">canvas span — drawing past an edge grows it by itself; the sweep only
+          sets where it starts:</span>
+        cam <input type="number" id="ws-cam-lo" class="num small" step="1">
+        … <input type="number" id="ws-cam-hi" class="num small" step="1">°
+        thigh <input type="number" id="ws-th-lo" class="num small" step="1">
+        … <input type="number" id="ws-th-hi" class="num small" step="1">°
+        <button id="btn-ws-resize" class="btn small">resize</button>
+        <button id="btn-ws-grow-max" class="btn small">grow to limit</button>
+        <span id="ws-extent-hint" class="hint"></span>
+      </div>
       <div class="canvas-wrap">
         <canvas id="ws-canvas" width="900" height="620"></canvas>
         <div id="ws-coords" class="coords"></div>
