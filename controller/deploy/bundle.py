@@ -44,7 +44,7 @@ import json
 import numpy as np
 
 BUNDLE_VERSION = 1                     # what `save` writes; v2 bundles come from walk_v2/export.py
-SUPPORTED_VERSIONS = (1, 2)
+SUPPORTED_VERSIONS = (1, 2, 3)         # v3 = the BalanceRL push-recovery stander (BalanceRL/export.py)
 
 # Keys every bundle must carry. Checked on load: a bundle produced by an older exporter must fail
 # loudly here rather than half-configure a robot.
@@ -60,6 +60,15 @@ REQUIRED_ARRAYS_V2 = _NETS + (
     "motor_vel_limit", "forcerange", "drive_kp", "drive_kd", "stand_torque",
     "hist_idx", "latched_dims",
 )
+# v3: BalanceRL. No gait, no latch: the action IS the MIT frame [q 6 | kp 6 | kd 6] (controller_balance.py)
+REQUIRED_ARRAYS_V3 = _NETS + (
+    "nominal_ctrl", "default_motor_pos", "q_lo", "q_hi", "q_scale",
+    "motor_vel_limit", "forcerange", "drive_kp", "drive_kd", "hist_idx",
+)
+REQUIRED_META_V3 = ("control_dt", "frame_dim", "history_len", "actor_dim", "action_dim", "nu",
+                    "obs_scales", "clip_obs", "obs_eps", "gains", "motor_accel_limit",
+                    "term_gravity_z", "est_hidden", "policy_hidden", "kind", "reflex",
+                    "once_dim", "slow", "action_filter_tau_s")
 # meta keys the v2 runtime reads that the FIRST v2 exporter did not write. Named here so a stale
 # bundle says which field is missing instead of dying inside the control law on tick 1.
 # "pitch_reflex_rate_lp" was on this list until walk_v4 deleted the reflexes: the exporter stopped
@@ -80,10 +89,11 @@ class Bundle:
             raise ValueError(f"bundle version {meta.get('bundle_version')} is not one of "
                              f"{SUPPORTED_VERSIONS} — this runtime cannot vouch for it; re-export")
         self.version = version
-        required = REQUIRED_ARRAYS if version == 1 else REQUIRED_ARRAYS_V2
+        required = {1: REQUIRED_ARRAYS, 2: REQUIRED_ARRAYS_V2, 3: REQUIRED_ARRAYS_V3}[version]
         missing = [k for k in required if k not in arrays]
         if missing:
-            exporter = ("controller/deploy/export_policy.py" if version == 1 else "walk_v2/export.py")
+            exporter = {1: "controller/deploy/export_policy.py", 2: "RLframework/export.py",
+                        3: "BalanceRL/export.py"}[version]
             raise ValueError(f"v{version} policy bundle is missing {missing} — re-export it with "
                              f"{exporter}")
         self.a = {k: np.asarray(v) for k, v in arrays.items()}
@@ -92,6 +102,8 @@ class Bundle:
         if version == 2:
             self._v2_missing_meta()
             self._v2_aliases()
+        if version == 3:
+            self._v3_setup()
         self._check_shapes()
 
     # ------------------------------------------------------------------ v2 compatibility
@@ -129,6 +141,26 @@ class Bundle:
         for k in ("cmd_v_back_trained", "cmd_yaw_trained"):
             m.setdefault(k, 0.0)
 
+    def _v3_setup(self):
+        """v3 (balance): the same derived vocabulary as v2, and no command channel at all."""
+        missing = [k for k in REQUIRED_META_V3 if k not in self.meta]
+        if missing:
+            raise ValueError(f"v3 (balance) bundle's meta is missing {missing} -- re-export it with "
+                             f"BalanceRL/export.py")
+        if self.meta["kind"] != "balance":
+            raise ValueError(f"v3 bundle kind {self.meta['kind']!r}: this runtime knows only 'balance'")
+        a, m = self.a, self.meta
+        a.setdefault("ctrl_lo", a["q_lo"])
+        a.setdefault("ctrl_hi", a["q_hi"])
+        a.setdefault("imp_kp_base", a["drive_kp"])
+        a.setdefault("imp_kd_base", a["drive_kd"])
+        self.derived_keys = ("ctrl_lo", "ctrl_hi", "imp_kp_base", "imp_kd_base")
+        m.setdefault("vn_epsilon", float(m["obs_eps"]))
+        m.setdefault("command", {"kind": "none", "v_max": 0.0})
+        m.setdefault("base_lock", [0, 0, 0, 0, 0, 0])
+        for k in ("cmd_v_fwd_trained", "cmd_v_back_trained", "cmd_yaw_trained"):
+            m.setdefault(k, 0.0)
+
     # ------------------------------------------------------------------ io
     @classmethod
     def load(cls, path):
@@ -158,6 +190,26 @@ class Bundle:
         m = self.meta
         nu, ad, fd, hl = m["nu"], m["action_dim"], m["frame_dim"], m["history_len"]
         n_actor = self.n_actor
+        if self.version == 3:
+            od = int(m["once_dim"])
+            if fd * hl + od != n_actor:
+                raise ValueError(f"v3 bundle: {hl} frames x {fd} + a {od}-wide slow block is "
+                                 f"{fd * hl + od}, actor_dim says {n_actor}")
+            for k, want in (("est_w0", (m["est_hidden"][0], n_actor)),
+                            ("est_w2", (3, m["est_hidden"][1])),
+                            ("pi_w0", (m["policy_hidden"][0], n_actor + 3)),
+                            ("act_w", (ad, m["policy_hidden"][-1])),
+                            ("obs_mean", (n_actor,)), ("obs_var", (n_actor,)),
+                            ("nominal_ctrl", (nu,)), ("default_motor_pos", (nu,)),
+                            ("q_lo", (nu,)), ("q_hi", (nu,)), ("q_scale", (nu,)),
+                            ("drive_kp", (nu,)), ("drive_kd", (nu,)), ("hist_idx", (hl,))):
+                got = tuple(self.a[k].shape)
+                if got != tuple(want):
+                    raise ValueError(f"bundle array {k!r} has shape {got}, expected {tuple(want)} "
+                                     f"— the bundle and its meta disagree")
+            if ad != 3 * nu:
+                raise ValueError(f"v3 bundle: action_dim {ad} is not 3 x {nu} joints")
+            return
         if self.version == 2:
             if fd * hl + int(m["once_dim"]) != n_actor:
                 raise ValueError(
@@ -201,7 +253,7 @@ class Bundle:
         v1: the stacked history is the whole thing. v2 adds the once-block (the live latched spec,
         the task channel and the commit flag), so the exporter states it and the history alone is
         the wrong number by 44."""
-        if self.version == 2:
+        if self.version in (2, 3):
             return int(self.meta["actor_dim"])
         return int(self.meta["frame_dim"]) * int(self.meta["history_len"])
 
@@ -224,6 +276,8 @@ class Bundle:
 
         The panel offers exactly one of the three, because a control that cannot reach the policy
         is worse than no control: it silently does nothing while the operator believes it did."""
+        if self.version == 3:
+            return "none"                  # a balance bundle has no command: it stands
         if self.version != 2:
             return "velocity"
         # the exporter states it outright ("speed_fraction" / "run_flag_distance"); the objective

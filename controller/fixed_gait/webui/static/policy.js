@@ -157,6 +157,11 @@ async function polInfo() {
           `${i.action_dim - i.latched_dims} residual every tick</div>` +
         `<div>odometry</div><div>none — task[1] is reserved and held at 0, so nothing the policy ` +
           `reads is a position</div>`
+    : POL.cmdKind === "none"
+      ? `<div>command</div><div>none — a balance stander; the action is the MIT frame ` +
+          `(target, Kp, Kd per joint) every tick</div>` +
+        `<div>trained pushes</div><div>up to ${((i.trained || {}).push_level_mps || 0).toFixed(2)} m/s ` +
+          `of whole-robot Δv, any direction</div>`
     : POL.cmdKind === "run_stop"
       ? `<div>command</div><div>run / stop flag${i.has_run_flag ? "" :
            " — <b>constant</b> for this checkpoint (objective ‘speed’)"}</div>` +
@@ -182,6 +187,8 @@ async function polInfo() {
   $("pol-cmd-box").textContent = vel
     ? `trained box: ${cmd.back_ms == null ? "?" : -cmd.back_ms} … ${cmd.fwd_ms} m/s, ` +
       `±${cmd.yaw_rads} rad/s`
+    : POL.cmdKind === "none"
+    ? "command: none — it stands and recovers from pushes; End-run / Kill are the only inputs"
     : POL.cmdKind === "speed"
     ? `command: a speed slider, ${(i.v_min || 0).toFixed(2)}–${(i.v_max || 0).toFixed(2)} m/s, ` +
       `live once the run is up — it starts at 0, walking in place`
@@ -794,6 +801,8 @@ function polRenderRun(st) {
   const cmdText = p.command_kind === "speed"
     ? `cmd ${p.speed_cmd.toFixed(2)} m/s` +
       (Math.abs(p.speed_cmd - p.speed_want) > 0.01 ? ` → ${p.speed_want.toFixed(2)}` : "")
+    : p.command_kind === "none"
+    ? "balance: no command"
     : p.bundle_version === 2
     ? `cmd ${p.braking ? "BRAKE " + (p.brake_frac * 100).toFixed(0) + "%"
                        : (p.run_flag ? "RUN" : "HOLD")}`

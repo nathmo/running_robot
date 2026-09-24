@@ -100,6 +100,7 @@ import jointmap as JM                                                 # noqa: E4
 from bundle import Bundle                                             # noqa: E402
 from controller import PolicyController                               # noqa: E402
 from controller_v2 import PolicyControllerV2                          # noqa: E402
+from controller_balance import PolicyControllerBalance                # noqa: E402
 from safety import Limits, SafetyGovernor, STOP_NONE, STOP_HARD       # noqa: E402
 
 # The rate is the BUNDLE's, not the runner's: v1 (walk_mit) is 200 Hz and v2 (walk_v2) is 100 Hz,
@@ -130,7 +131,10 @@ class Runner:
             jm_path = str(DEPLOY / "deploy_map.json")     # the shipped map, as the dashboard's runs use
         self.jm = JM.JointMap.load(jm_path) if jm_path else JM.JointMap()
         self.v2 = self.b.version == 2
-        self.ctrl = PolicyControllerV2(self.b) if self.v2 else PolicyController(self.b)
+        # v3: the BalanceRL stander -- no gait, no command; the action is the MIT frame itself
+        self.balance = self.b.version == 3
+        self.ctrl = (PolicyControllerBalance(self.b) if self.balance
+                     else PolicyControllerV2(self.b) if self.v2 else PolicyController(self.b))
         # which of the three command channels this checkpoint has (see controller_v2's docstring)
         self.joystick = self.v2 and self.ctrl.command_kind == "speed"
         self.run_flag = False           # v2: the green light. Always starts stopped.
@@ -195,7 +199,15 @@ class Runner:
         print("=" * 78)
         print("POLICY  {} / {}   (v{} bundle, {} action dims, {:.0f} Hz)".format(
             m["run"], m["checkpoint"], b.version, m["action_dim"], self.hz))
-        if self.joystick:
+        if self.balance:
+            tr = m.get("trained") or {}
+            print("BALANCE: stands still and recovers from pushes (trained to {:.2f} m/s of push, CoM "
+                  "shift +-{} mm). No command: the only input is the stop.".format(
+                      float(tr.get("push_level_mps") or 0.0),
+                      int(round(1000 * max(tr.get("com_shift_m") or [0.0])))))
+            print("         The policy sets its own Kp / Kd every tick (up to {:.0f} / {:.1f}); no torque "
+                  "feed-forward.".format(float(m["gains"]["kp_hi"]), float(m["gains"]["kd_hi"])))
+        elif self.joystick:
             print("COMMAND: SPEED (task[0] = v_cmd / {:.2f}). Range {:+.2f} to {:+.2f} m/s, slewed "
                   "at {:.2f} m/s^2.".format(self.ctrl.v_max, self.ctrl.v_min, self.ctrl.v_max,
                                             self.ctrl.cmd_slew_mps2))
@@ -525,7 +537,11 @@ class Runner:
         pos, amps, temp, err, _ = self.measure(motors, cal)
         grav, gyro, _ = self.read_imu(sh, time.monotonic())
         tau = self.jm.torque_to_model(amps)
-        if self.v2:
+        if self.balance:
+            self.ctrl.start(pos, np.zeros(6), tau, grav, gyro)
+            print("RUN: the balance policy is live. max {:.0f} s. Ctrl+C for a soft stop.".format(
+                a.max_seconds))
+        elif self.v2:
             self.ctrl.start(pos, np.zeros(6), tau, grav, gyro)
             if self.joystick:
                 _, self.speed_cmd = self.ctrl.set_speed(a.speed)

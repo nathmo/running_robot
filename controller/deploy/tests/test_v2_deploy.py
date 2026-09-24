@@ -266,7 +266,7 @@ class TestBundleGenerations:
     def test_an_unknown_bundle_version_is_refused(self):
         b = v2_bundle()
         with pytest.raises(ValueError, match="not one of"):
-            Bundle(dict(b.a), dict(b.meta, bundle_version=3))
+            Bundle(dict(b.a), dict(b.meta, bundle_version=4))
 
     def test_a_v2_bundle_survives_a_round_trip_through_npz(self, tmp_path):
         b = v2_bundle()

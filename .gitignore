@@ -77,6 +77,8 @@ controller/fixed_gait/webui/data/*
 # XMLs and the validation renders ARE tracked: they are what the model builder is judged on, and a
 # reader should not have to run MuJoCo to see what the robot looks like.
 RLframework/runs/
+BalanceRL/runs/
+BalanceRL/logs/
 RLframework/logs/
 RLframework/**/__pycache__/
 

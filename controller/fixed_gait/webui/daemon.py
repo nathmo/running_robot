@@ -3067,6 +3067,7 @@ class RobotDaemon(threading.Thread):
             from bundle import Bundle
             from controller import PolicyController
             from controller_v2 import PolicyControllerV2
+            from controller_balance import PolicyControllerBalance
             import thermal as TH
             b = Bundle.load(path)
         except Exception as e:                              # noqa: BLE001 -- surfaced as data
@@ -3228,7 +3229,9 @@ class RobotDaemon(threading.Thread):
             yaw_cmd = float(np.clip(yaw_want, -yaw_lim, yaw_lim))
 
         try:
-            ctrl = PolicyControllerV2(b) if b.version == 2 else PolicyController(b)
+            # v3 = BalanceRL: no gait and no command; the action is the MIT frame itself
+            ctrl = (PolicyControllerBalance(b) if b.version == 3
+                    else PolicyControllerV2(b) if b.version == 2 else PolicyController(b))
         except ValueError as e:                             # noqa: BLE001 -- surfaced as data
             return False, str(e), info
         # Can this machine actually run it? Timed HERE, on the HTTP thread, with the real bundle
@@ -3260,7 +3263,7 @@ class RobotDaemon(threading.Thread):
             "jm_verified": jm_ok, "thermal_uncalibrated": bool(uncal),
             "step_ms": step_ms, "slow_loop": slow, "max_step_ms": max_step_ms,
             "version": int(b.version), "ctrl_hz": hz, "decim": decim, "ctrl_dt": ctrl_dt,
-            "command_kind": (ctrl.command_kind if b.version == 2 else "velocity"),
+            "command_kind": (ctrl.command_kind if b.version in (2, 3) else "velocity"),
             "v_max": float(getattr(ctrl, "v_max", 0.0) or 0.0),
             "v_min": float(getattr(ctrl, "v_min", 0.0) or 0.0),
             "cmd_slew": float(getattr(ctrl, "cmd_slew_mps2", 0.0) or 0.0),
@@ -3876,7 +3879,10 @@ class RobotDaemon(threading.Thread):
                 p["t_phase"] = now
                 p["run_t0"] = now
                 p["reached_run"] = True
-                if p["version"] == 2:
+                if p["version"] == 3:
+                    # the balance stander: nothing to command, it holds the stance it arrived at
+                    p["ctrl"].start(pos, np.zeros(6), tau, grav, gyro)
+                elif p["version"] == 2:
                     # v2 comes up STOPPED and holds the stance until the panel commands otherwise.
                     # Any command posted during the approach is honoured here, once, rather than
                     # dropped -- for the joystick that means the slider's position, and start()

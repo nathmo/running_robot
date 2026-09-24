@@ -1683,6 +1683,22 @@ def api_policy_info():
             "reaches the policy as a ramp. A step change on the command channel is the one thing "
             "measured to drop this robot (3/512 upright against 512/512 for leaving it alone), "
             "and a browser can deliver one in a single tick.".format(slew))
+    elif bd.version == 3:
+        tr = m.get("trained") or {}
+        warnings.append(
+            "BALANCE bundle (BalanceRL): the policy stands still and recovers from pushes. It has "
+            "no command at all -- nothing on this panel reaches it but End-run and Kill. It was "
+            "trained against pushes up to {:.2f} m/s of whole-robot velocity change and a CoM "
+            "shift of +-{:.0f} mm, with the sensor-noise model on.".format(
+                float(tr.get("push_level_mps") or 0.0),
+                1000.0 * max(tr.get("com_shift_m") or [0.0])))
+        warnings.append(
+            "the policy sets its OWN Kp and Kd every tick, anywhere in {:.0f}-{:.0f} N*m/rad and "
+            "{:.1f}-{:.1f} N*m*s/rad (the stance command is {:.0f}/{:.1f}). Expect the gains to "
+            "move while it is standing still; the governor's torque cap still bounds kp * error."
+            .format(float(m["gains"]["kp_lo"]), float(m["gains"]["kp_hi"]),
+                    float(m["gains"]["kd_lo"]), float(m["gains"]["kd_hi"]),
+                    float(np.max(bd["drive_kp"])), float(np.max(bd["drive_kd"]))))
     elif bd.version == 2:
         warnings.append(
             "v2 bundle: the command is a RUN / STOP flag (the task channel's green light), not a "
@@ -1750,6 +1766,7 @@ def api_policy_info():
                   if m.get("brake") else None),
         "stop_decel_s": stop.get("stop_decel_s"),
         "objective": m.get("objective"),
+        "trained": m.get("trained"),          # v3 (balance): push level, CoM shift, eval
         "spec_source": m.get("spec_source"),
         # v2 only: the 44 latched spec dims commit at a clock wrap, the 6 residual dims every tick
         "latched_dims": (int(np.sum(np.asarray(bd["latched_dims"])))
@@ -1781,6 +1798,10 @@ def api_policy_info():
                "# then, from a second shell, while watching the robot:\n"
                "echo 1.0 > /tmp/dash_command       # ask for 1.0 m/s\n"
                "echo 0   > /tmp/dash_command       # walk in place again: this IS the stop")
+    elif bd.version == 3:
+        cmd = (_head +
+               "    --max-seconds 30 --deadman-file /tmp/dash_deadman\n"
+               "# no command file: a balance bundle takes no command. Push it by hand, gently first.")
     elif bd.version == 2:
         cmd = (_head +
                "    --command-file /tmp/dash_command --max-seconds 30 \\\n"
