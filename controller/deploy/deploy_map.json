@@ -5,48 +5,48 @@
    "offset_deg": 0.0,
    "erpm_per_rad_s": null,
    "verified": true,
-   "verified_when": "2026-09-21",
+   "verified_when": "2026-09-24",
    "note": "model hip_roll_L moves the foot outward at +0.25 rad while the robot reads + outward; offset 0 because abduction is zeroed aligned with the base, which is model qpos-0"
   },
   "left.cam": {
    "sign": 1.0,
-   "offset_deg": -25.9,
+   "offset_deg": -38.72,
    "erpm_per_rad_s": null,
    "verified": true,
-   "verified_when": "2026-09-21",
-   "note": "fklut fit against the recorded workspace band"
+   "verified_when": "2026-09-24",
+   "note": "from the STANDING-POSE CORRESPONDENCE, not an fklut band fit: the homing CAD (which defines normalized zero) and RLframework/model/dash01_free.xml were each solved independently for soles flat + torso level + CoM over the sole centre. The two solutions are the same physical pose (hip above sole 837.24 vs 837.68 mm, CoM above sole 788.95 vs 789.47, same 14.36 kg), at normalized cam 45.97 and model cam 7.25 -- so the offset is 7.25 - 45.97. Replaces -25.9, which was 12.8 deg out."
   },
   "left.thigh": {
    "sign": -1.0,
-   "offset_deg": -10.8,
+   "offset_deg": -0.48,
    "erpm_per_rad_s": null,
    "verified": true,
-   "verified_when": "2026-09-21",
-   "note": "fklut fit against the recorded workspace band"
+   "verified_when": "2026-09-24",
+   "note": "same standing-pose solve: normalized thigh 11.12 is model thigh -11.60, so the offset is -11.60 + 11.12. Replaces -10.8, which was 10.3 deg out. daemon.py's STAND_POSE_DEG comment states this correspondence independently (838 mm, thigh -11.6 vs -11.1)."
   },
   "right.abd": {
    "sign": -1.0,
    "offset_deg": 0.0,
    "erpm_per_rad_s": null,
    "verified": true,
-   "verified_when": "2026-09-21",
+   "verified_when": "2026-09-24",
    "note": "model hip_roll_R moves the foot inward at +0.25 rad while the robot reads + outward; offset 0 because abduction is zeroed aligned with the base, which is model qpos-0"
   },
   "right.cam": {
    "sign": -1.0,
-   "offset_deg": 28.1,
+   "offset_deg": 38.72,
    "erpm_per_rad_s": null,
    "verified": true,
-   "verified_when": "2026-09-21",
-   "note": "fklut fit against the recorded workspace band, mirrored into the right leg's own joint frame"
+   "verified_when": "2026-09-24",
+   "note": "the left leg's offset mirrored into the right leg's own joint frame. Replaces 28.1, which was 10.6 deg out. The robot is symmetric, so these two MUST be equal and opposite -- the old pair (-25.9 / 28.1) was not, and neither was the thigh pair."
   },
   "right.thigh": {
    "sign": 1.0,
-   "offset_deg": 14.4,
+   "offset_deg": 0.48,
    "erpm_per_rad_s": null,
    "verified": true,
-   "verified_when": "2026-09-21",
-   "note": "fklut fit against the recorded workspace band, mirrored into the right leg's own joint frame"
+   "verified_when": "2026-09-24",
+   "note": "mirror of left.thigh. Replaces 14.4, which was 13.9 deg out."
   }
  },
  "kt_joint": [

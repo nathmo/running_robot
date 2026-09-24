@@ -485,8 +485,14 @@ class Runner:
         return pos, amps, temp, err, erpm
 
     def approach(self, motors, by_bus, buses, cal, sh):
-        """Crawl to the policy's stance at low gain. Aborts on tracking error or a governor kill."""
+        """Crawl to the policy's stance at low gain. Aborts on tracking error or a governor kill.
+
+        `nominal_ctrl` is the PD COMMAND for the stance, not the pose: it sits a gravity deflection
+        past where the joints rest (stand_torque = drive_kp * (nominal_ctrl - default_motor_pos)),
+        so no leg carrying weight can ever reach it. The ramp drives the command there -- that
+        offset is what holds the robot up -- and tracking is judged against `rest`."""
         stance = np.asarray(self.b["nominal_ctrl"], float)
+        rest = np.asarray(self.b["default_motor_pos"], float)
         pt = sys.modules["play_trajectory"]
         pos, *_ = self.measure(motors, cal)
         travel = float(np.max(np.abs(stance - pos)))
@@ -500,6 +506,7 @@ class Runner:
             now = time.monotonic()
             f = min(1.0, (now - t0) / max(t_total, 1e-6))
             tgt = start + (stance - start) * f
+            rest_tgt = start + (rest - start) * f        # the same ramp in POSE space
             self.drain(buses, by_bus, now)
             pos, amps, temp, err, _ = self.measure(motors, cal)
             grav, gyro, imu_age = self.read_imu(sh, now)
@@ -511,14 +518,18 @@ class Runner:
             if np.any(err):
                 print("!! drive error during approach: {}".format(err.tolist()))
                 return False
-            if float(np.max(np.abs(pos - tgt))) > APPROACH_TRACK_ERR:
-                i = int(np.argmax(np.abs(pos - tgt)))
-                print("!! {} is {:.1f} deg from its approach target -- stopping. Either the joint "
-                      "map is wrong or the leg is obstructed.".format(
-                          JM.MODEL_ACTUATORS[i], np.degrees(abs(pos - tgt)[i])))
+            # the band between "tracking the command, unloaded" and "resting under full weight":
+            # anywhere inside it is healthy, the error is the distance outside (see daemon.py)
+            miss = np.abs(pos - np.clip(pos, np.minimum(rest_tgt, tgt), np.maximum(rest_tgt, tgt)))
+            if float(np.max(miss)) > APPROACH_TRACK_ERR:
+                i = int(np.argmax(miss))
+                print("!! {} is {:.1f} deg outside where it should be resting -- stopping. Either "
+                      "the joint map is wrong or the leg is obstructed.".format(
+                          JM.MODEL_ACTUATORS[i], np.degrees(miss[i])))
                 return False
             self.send(motors, cal, tgt, np.full(6, APPROACH_KP), np.full(6, APPROACH_KD))
-            if f >= 1.0 and float(np.max(np.abs(pos - stance))) < np.radians(3.0):
+            lo, hi = np.minimum(rest, stance), np.maximum(rest, stance)
+            if f >= 1.0 and float(np.max(np.abs(pos - np.clip(pos, lo, hi)))) < np.radians(3.0):
                 print("APPROACH: at stance.")
                 return True
             if now - t0 > t_total + 5.0:

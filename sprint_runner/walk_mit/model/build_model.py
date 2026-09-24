@@ -1,0 +1,416 @@
+"""Generate a simulation-ready MuJoCo model from the CAD OPEN_B export.
+
+Copies the OPEN_B body tree verbatim (bodies/inertials/meshes are placeholders to be replaced
+with measured values later) and layers on everything needed to actually simulate and train:
+  - a free-floating base, world <option>, ground plane, lighting
+  - PD position actuators on the 6 motors  (AKE90-8 on cam+thigh, AK60-39 on hip-roll)
+  - the closed parallel loop (pushrod tip -> shin) via <equality><connect>
+  - a passive preloaded ankle spring
+  - an IMU + per-motor sensors (NO foot-contact sensor)
+  - simple box foot collision (visual meshes are non-colliding)
+  - a standing keyframe
+
+All tunable numbers live in MOTORS / JOINTS below so the eventual real values are a one-edit swap.
+Re-run after CAD regen:  .venv/Scripts/python.exe mujoco/dash01/build_model.py
+"""
+import xml.etree.ElementTree as ET
+import numpy as np
+import mujoco
+from geometry import loop_anchors, foot_tips, foot_heels
+
+# slight thigh-forward crouch used as the standing init pose (feet under the CoM)
+INIT_CTRL = np.array([0.0, 0.0, 0.12, 0.0, 0.0, -0.12])
+# A small sphere at each foot TIP is the walking contact (a point/ball foot): the robot must
+# actively balance / step on its toe points. A second sphere at the far (ankle) end of the foot is
+# a HEEL STOP — it clears the floor in the toe-down stance (~28 cm up) so normal contact stays
+# toe-only, but it catches the floor if the leg folds and the long foot flattens, so the foot can
+# physically never clip through the ground. (Without it the ghost foot mesh traversed the floor,
+# and the old vertex-scan termination that guarded against that fired on every leg-fold.)
+FOOT_SPHERE_R = 0.025
+HEEL_SPHERE_R = 0.03
+
+
+def geom_bottom_z(model, data, gid):
+    """World z of a geom's LOWEST point, in its CURRENT orientation.
+
+    The settle below used `geom_xpos - geom_rbound`, the BOUNDING-SPHERE radius. That is exact for
+    a sphere and only for a sphere. On the flat-plate foot (30x100x10 mm) rbound is the half
+    DIAGONAL, 52 mm against a true 5 mm bottom offset — so the torso got dropped from 47 mm too
+    high and the "settle" started with a drop test. This is the support point along -z, exact for
+    the sphere / box / cylinder / capsule feet this model uses; anything else keeps the old
+    conservative rbound.
+    """
+    R = data.geom_xmat[gid].reshape(3, 3)
+    a = R[2, :]                      # world-z row: z_world(p_local) = xpos_z + a . p_local
+    s = model.geom_size[gid]
+    t = model.geom_type[gid]
+    T = mujoco.mjtGeom
+    if t == T.mjGEOM_SPHERE:
+        off = s[0]
+    elif t == T.mjGEOM_BOX:
+        off = abs(a[0]) * s[0] + abs(a[1]) * s[1] + abs(a[2]) * s[2]
+    elif t == T.mjGEOM_CYLINDER:     # radius s[0], half-length s[1] along the geom's LOCAL z
+        off = s[0] * float(np.hypot(a[0], a[1])) + s[1] * abs(a[2])
+    elif t == T.mjGEOM_CAPSULE:
+        off = s[0] + s[1] * abs(a[2])
+    else:
+        off = float(model.geom_rbound[gid])
+    return float(data.geom_xpos[gid][2] - off)
+
+
+def compute_standing_keyframe(model, init_ctrl):
+    """Settle the init pose in the air (gravity off, base frozen) so the closed loop is
+    consistent, drop the torso so the toes touch, then RE-SETTLE UNDER GRAVITY (base xy +
+    attitude held, z free) so the recorded keyframe is the true LOADED stance — PD sag, ankle
+    spring compression and contact deflection included. (The old gravity-off keyframe sat
+    ~3 cm above the real loaded height, baking a constant error into the height reward.)"""
+    data = mujoco.MjData(model)
+    mujoco.mj_resetDataKeyframe(model, data, 0)
+    g = model.opt.gravity.copy()
+    model.opt.gravity[:] = 0
+    # base qpos[0:6] = x,y,z,roll,pitch,yaw (composite scalar joints; identity attitude = zero hinges).
+    # The base-lock equalities are inactive here (active="false"), so the base is held manually.
+    data.qpos[0:3] = [0, 0, 1.5]
+    data.qpos[3:6] = 0
+    base_q = data.qpos[:6].copy()
+    data.ctrl[:] = init_ctrl
+    for _ in range(2000):
+        mujoco.mj_step(model, data)
+        data.qpos[:6] = base_q
+        data.qvel[:6] = 0
+    mujoco.mj_forward(model, data)
+    model.opt.gravity[:] = g
+    foot_g = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{s}_col") for s in "LR"]
+    zmin = min(geom_bottom_z(model, data, gg) for gg in foot_g)   # lowest point of either foot
+    data.qpos[0:3] = [0, 0, 1.5 - zmin + 0.002]   # drop torso so feet just touch z=0
+    data.qpos[3:6] = 0
+    data.qvel[:] = 0
+    for _ in range(1500):                          # 1.5 s loaded settle, xy + attitude pinned, z free
+        mujoco.mj_step(model, data)
+        data.qpos[0:2] = 0
+        data.qpos[3:6] = 0
+        data.qvel[0:2] = 0
+        data.qvel[3:6] = 0
+    data.qvel[:] = 0
+    mujoco.mj_forward(model, data)
+    return data.qpos.copy()
+
+OPEN_B = "robotCADdescription/MJCF_OPEN_MUJOCO_B/dash01/dash01.xml"
+OUT = "mujoco/dash01/dash01.xml"
+MESHDIR = "../../robotCADdescription/MJCF_OPEN_MUJOCO_B/dash01"  # relative to OUT
+
+# --- Motor specs (output/joint side, after gearbox). Edit here when real values are known. ---
+# mass/inertia: the CAD part inertials OMIT the actuators (~7.1 kg of motors on a ~5.7 kg CAD
+# model), so each motor is welded onto its stator body as a point mass at the joint anchor.
+# inertia is a rough solid-cylinder estimate; replace with measured values with the rest.
+# forcerange is the DELIVERED peak joint torque, not the datasheet's. The datasheet quotes torque at
+# an ideal Kt; the gearbox does not deliver it. Measured 2026-08-05 with a known 1.552 kg mass on the
+# shin (robot/identification, measure_*_static_1552g_*.npz): effective joint Kt came out 82-89% of
+# the AKE90-8 datasheet 0.272 Nm/A x 8:1 = 2.176, i.e. a gearbox at ~85% efficiency. Peak torque
+# scales with Kt for the same peak current, so both drop by the same factor.
+#   AKE90-8:  170 -> 144.5 Nm   (0.85, MEASURED)
+#   AK60-39:   72 ->  61.2 Nm   (0.85 TRANSFERRED, not measured -- no datasheet Kt is published for
+#                                the AK60-39 to compare a fit against. If anything optimistic: 39:1
+#                                needs more gear stages than 8:1, so its efficiency is likely lower.)
+# Residual uncertainty is geometric, not physical: the test mass was clamped by hand, and Kt/gravity
+# trade off steeply against its position (~1.9%/cm of lever arm, plus a 5-10 cm perpendicular
+# standoff known only approximately). Across that box Kt spans 82-98% of datasheet. 0.85 is the
+# centre of the standoff-corrected reading. To tighten it, re-run the known-mass test with the mass
+# on the shin CENTRELINE at a distance measured to +-1 cm.
+GEARBOX_EFF = 0.85
+AKE90 = dict(kp=200, kv=5.0, forcerange=144.5, armature=0.0216,  # cam + thigh (propulsion)
+             mass=1.40, inertia=0.002)
+AK60 = dict(kp=120, kv=4.0, forcerange=61.2, armature=0.046,     # hip-roll (lateral)
+            mass=0.75, inertia=0.001)
+
+# --- Per-joint setup. range=None => unlimited. act => actuator (motor spec). ---
+#  name : (role, range, damping, armature, motor)
+J = {
+    "bodyNCS-v1_Révolution-1":   ("act", (-0.785, 0.785), 0.1, AK60["armature"],  AK60),  # hip-roll L
+    "bodyNCS-v1_Révolution-2":   ("act", (-0.785, 0.785), 0.1, AK60["armature"],  AK60),  # hip-roll R
+    "HipLeftNCS-v1_Révolution-3":  ("act", (-1.5, 1.5),   0.1, AKE90["armature"], AKE90), # cam L
+    "HipRightNCS-v1_Révolution-4": ("act", (-1.5, 1.5),   0.1, AKE90["armature"], AKE90), # cam R
+    "HipLeftNCS-v1_Révolution-5":  ("act", (-1.047, 1.047), 0.1, AKE90["armature"], AKE90), # thigh L
+    "HipRightNCS-v1_Révolution-6": ("act", (-1.047, 1.047), 0.1, AKE90["armature"], AKE90), # thigh R
+    "ThighLeftNCS-v1_Révolution-7":  ("passive", None, 0.2, 0.001, None),  # knee L (loop-driven)
+    "ThighRightNCS-v1_Révolution-8": ("passive", None, 0.2, 0.001, None),  # knee R
+    "LegLeftNCS-v1_Révolution-9":   ("ankle", (-1.047, 1.047), 0.3, 0.001, None),  # ankle L (spring)
+    "LegRightNCS-v1_Révolution-10": ("ankle", (-1.047, 1.047), 0.3, 0.001, None),  # ankle R
+    "CamLeftNCS-v1_Révolution-11":  ("passive", None, 0.2, 0.001, None),  # pushrod pivot L (loop)
+    "CamRightNCS-v1_Révolution-12": ("passive", None, 0.2, 0.001, None),  # pushrod pivot R
+}
+
+# Ankle passive spring: real spec is 0.5 Nm/deg = 28.65 Nm/rad with a 2.27 Nm preload.
+# springref = the foot's neutral (flat) pitch, tuned per side via tune_ankle.py (axes are mirrored).
+# NOTE: MuJoCo's linear spring can't represent the 2.27 Nm preload "breakaway"; that's a TODO
+# (one-sided joint limit + spring). Stiffness is the real value; preload is currently approximated.
+ANKLE_STIFFNESS = 28.65
+# Toe-DOWN neutral so the long foot rests on its toe ball with the heel/rest-of-foot clear of the
+# floor (~8.5 cm), tuned via tune_foot_posture.py. Required because only the toe sphere may touch.
+ANKLE_SPRINGREF = {"LegLeftNCS-v1_Révolution-9": -0.7, "LegRightNCS-v1_Révolution-10": 0.7}
+
+# Actuator order (also the ctrl / observation order).
+ACTUATORS = [
+    ("hip_roll_L", "bodyNCS-v1_Révolution-1"),
+    ("cam_L",      "HipLeftNCS-v1_Révolution-3"),
+    ("thigh_L",    "HipLeftNCS-v1_Révolution-5"),
+    ("hip_roll_R", "bodyNCS-v1_Révolution-2"),
+    ("cam_R",      "HipRightNCS-v1_Révolution-4"),
+    ("thigh_R",    "HipRightNCS-v1_Révolution-6"),
+]
+
+
+def f3(v):
+    return " ".join(f"{x:.6g}" for x in v)
+
+
+def apply_identified_params(model_out):
+    """If measured dynamic parameters are available, patch them into the generated model. The file
+    is looked up at $IDENTIFIED_PARAMS, else `identified_params.json` next to this script. No-op (with
+    a note) when absent, so the CAD build is unaffected. Uses robot/identification/apply_identified."""
+    import json
+    import os
+    import sys
+    path = os.environ.get("IDENTIFIED_PARAMS",
+                          os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "identified_params.json"))
+    if not os.path.exists(path):
+        print(f"(no measured params at {path} — model uses CAD/placeholder dynamics; run the "
+              f"system-ID web UI + robot/identification to generate them)")
+        return
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(repo, "robot"))
+    try:
+        from identification.apply_identified import apply
+        with open(path, "r", encoding="utf-8-sig") as f:
+            params = json.load(f)
+        changed = apply(model_out, params)
+        print(f"applied measured params from {path}: {len(changed['bodies'])} bodies, "
+              f"{len(changed['armature'])} armatures, {len(changed['damping'])} dampings")
+    except Exception as e:                              # never let write-back break a CAD regen
+        print(f"(could not apply identified params: {e})")
+
+
+def add_motor_masses(root):
+    """Weld each motor's mass onto its STATOR body (the joint's parent) at the joint anchor.
+    The anchor comes from the compiled model's world-frame xanchor mapped into the parent frame
+    (not hand-composed from body_pos/body_quat), so it stays correct even if a CAD regen inserts
+    intermediate frames. Bodies with an explicit <inertial> ignore geom masses, hence a child
+    body with its own inertial."""
+    model = mujoco.MjModel.from_xml_path(OUT)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)                     # default qpos: frames + xanchor populated
+    bodies = {b.get("name"): b for b in root.iter("body")}
+    for aname, jname in ACTUATORS:
+        spec = J[jname][4]
+        j = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+        pb = model.body_parentid[model.jnt_bodyid[j]]
+        Rp = data.xmat[pb].reshape(3, 3)
+        anchor = Rp.T @ (data.xanchor[j] - data.xpos[pb])
+        parent = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, pb)
+        bodies[parent].append(ET.fromstring(
+            f'<body name="motor_{aname}" pos="{f3(anchor)}">'
+            f'<inertial pos="0 0 0" mass="{spec["mass"]}" '
+            f'diaginertia="{spec["inertia"]} {spec["inertia"]} {spec["inertia"]}"/>'
+            f'</body>'))
+
+
+def build():
+    anchors, tips, heels = loop_anchors(), foot_tips(), foot_heels()
+    tree = ET.parse(OPEN_B)
+    root = tree.getroot()
+    root.set("model", "dash01")
+
+    # compiler
+    comp = root.find("compiler")
+    if comp is None:
+        comp = ET.SubElement(root, "compiler")
+    comp.set("angle", "radian")
+    comp.set("meshdir", MESHDIR)
+    comp.set("autolimits", "true")
+
+    # option + statistic (insert near the top). impratio=10: with the default 1, a loaded foot
+    # creeps several mm/s BELOW the friction cone (measured 2.6-7.9 mm/s at 0.3-0.9 mu*N) — free
+    # translation that real stick friction does not have; 10 cuts it ~10x.
+    opt = ET.fromstring(
+        '<option timestep="0.001" integrator="implicitfast" cone="elliptic" impratio="10" '
+        'solver="Newton" iterations="100" ls_iterations="50"/>')
+    root.insert(list(root).index(comp) + 1, opt)
+
+    # defaults: visual meshes non-colliding; a collision class; site styling.
+    # condim=6: at condim=3 the torsional/rolling friction entries are silently IGNORED, making
+    # the toe spheres frictionless ball casters (free pivot + free rolling = the skating/spin
+    # exploits). Coefficients are realistic for a rubber pad on indoor floor, NOT anti-skate
+    # knobs: torsional ~ (2/3)*mu*patch_radius ~ 0.008 m, rolling ~ Crr*r ~ 0.001 m.
+    default = ET.fromstring(
+        '<default>'
+        '<default class="dash01">'
+        '<geom contype="0" conaffinity="0" group="2"/>'
+        '<site group="4" size="0.012" rgba="0.95 0.45 0.1 1"/>'
+        '<default class="collision">'
+        '<geom contype="1" conaffinity="1" group="3" condim="6" '
+        'friction="1 0.008 0.001" solref="0.01 1" solimp="0.95 0.99 0.001" '
+        'rgba="0.2 0.8 0.2 0.4"/>'
+        '</default></default></default>')
+    root.insert(list(root).index(opt) + 1, default)
+
+    # ground texture/material
+    asset = root.find("asset")
+    asset.append(ET.fromstring(
+        '<texture name="grid" type="2d" builtin="checker" rgb1="0.2 0.3 0.4" '
+        'rgb2="0.1 0.15 0.2" width="300" height="300"/>'))
+    asset.append(ET.fromstring(
+        '<material name="grid" texture="grid" texrepeat="6 6" reflectance="0.1"/>'))
+
+    wb = root.find("worldbody")
+    # replace CAD's tiny visual plane with a proper collidable floor + light
+    for g in wb.findall("geom"):
+        if g.get("type") == "plane":
+            wb.remove(g)
+    for lt in wb.findall("light"):
+        wb.remove(lt)
+    wb.insert(0, ET.fromstring('<geom name="floor" type="plane" size="0 0 0.05" '
+                               'material="grid" contype="1" conaffinity="1" condim="6" '
+                               'friction="1 0.008 0.001" solref="0.01 1" '
+                               'solimp="0.95 0.99 0.001"/>'))
+    wb.insert(0, ET.fromstring('<light name="top" pos="0 0 3" dir="0 0 -1" directional="true"/>'))
+
+    # base body: childclass + composite 6-DOF base + imu site.
+    # Instead of a single <freejoint>, the base carries 6 explicit world-aligned scalar joints
+    # (3 slide, then 3 hinge) so each base DOF can be locked INDEPENDENTLY at runtime (see the
+    # <equality><joint> locks below). The order (slides first, world axes) reproduces a freejoint's
+    # qpos/qvel index semantics exactly: base at world origin + identity attitude => qpos[0:3] is the
+    # world position, qpos[2] the height, qvel[0:3] the world linear velocity. So the RL reward/
+    # termination math (which reads those indices) is unchanged; only the hinge block shifts from
+    # qpos[7:] to qpos[6:] (nq 19->18, nv stays 18). damping/armature=0 keeps it as neutral as a
+    # freejoint. Orientation/ang-vel are read from xmat / the imu_gyro sensor, never qpos[3:6], so
+    # the composite's gimbal singularity (pitch=+-90 deg, unreachable inside a valid episode) is moot.
+    base = wb.find("body")
+    base.set("childclass", "dash01")
+    base.insert(0, ET.fromstring('<site name="imu" pos="0 0 0" size="0.015" rgba="0.1 0.5 0.95 1"/>'))
+    BASE_JOINTS = [
+        ("base_x", "slide", "1 0 0"), ("base_y", "slide", "0 1 0"), ("base_z", "slide", "0 0 1"),
+        ("base_roll", "hinge", "1 0 0"), ("base_pitch", "hinge", "0 1 0"), ("base_yaw", "hinge", "0 0 1"),
+    ]
+    for i, (jn, jt, ax) in enumerate(BASE_JOINTS):
+        base.insert(i, ET.fromstring(
+            f'<joint name="{jn}" type="{jt}" axis="{ax}" limited="false" damping="0" armature="0"/>'))
+
+    # configure every leg joint (the base joints are already fully specified at creation above)
+    for jnt in root.iter("joint"):
+        name = jnt.get("name")
+        if name not in J:
+            continue
+        role, rng, damping, armature, _ = J[name]
+        jnt.set("damping", str(damping))
+        jnt.set("armature", str(armature))
+        if rng is None:
+            jnt.set("limited", "false")
+        else:
+            jnt.set("limited", "true")
+            jnt.set("range", f"{rng[0]:.6g} {rng[1]:.6g}")
+        if role == "ankle":
+            jnt.set("stiffness", str(ANKLE_STIFFNESS))
+            jnt.set("springref", f"{ANKLE_SPRINGREF[name]:.6g}")
+
+    # find bodies by name to attach loop sites + foot collision
+    bodies = {b.get("name"): b for b in root.iter("body")}
+    for s in "LR":
+        push = "PushrodLeftNCS-v1" if s == "L" else "PushrodRightNCS-v1"
+        leg = "LegLeftNCS-v1" if s == "L" else "LegRightNCS-v1"
+        foot = "FootLeftNCS-v1" if s == "L" else "FootRightNCS-v1"
+        bodies[push].append(ET.fromstring(
+            f'<site name="pushrod_tip_{s}" pos="{f3(anchors[s]["pushrod_site"])}"/>'))
+        bodies[leg].append(ET.fromstring(
+            f'<site name="leg_anchor_{s}" pos="{f3(anchors[s]["leg_site"])}"/>'))
+        bodies[foot].append(ET.fromstring(
+            f'<geom name="foot_{s}_col" class="collision" type="sphere" '
+            f'size="{FOOT_SPHERE_R}" pos="{f3(tips[s])}"/>'))
+        bodies[foot].append(ET.fromstring(
+            f'<geom name="heel_{s}_col" class="collision" type="sphere" '
+            f'size="{HEEL_SPHERE_R}" pos="{f3(heels[s])}"/>'))
+
+    # equality: close both loops, then the per-DOF base locks
+    eq = ET.SubElement(root, "equality")
+    for s in "LR":
+        eq.append(ET.fromstring(
+            f'<connect name="loop_{s}" site1="pushrod_tip_{s}" site2="leg_anchor_{s}" '
+            f'solref="0.005 1" solimp="0.95 0.99 0.001"/>'))
+    # base DOF locks: one joint-equality per base joint, INACTIVE by default. The RL env activates
+    # the masked subset at reset (data.eq_active) to rail/lock those DOFs; with a single joint the
+    # constraint reduces to qpos[joint] = polycoef0 = eq_data[k,0] (default 0). M1 randomizes the
+    # base_z lock target per episode by writing eq_data[lock_z,0] = ride-height. Stiff solref so the
+    # rail is rigid: the solver supplies the exact reaction wrench, keeping leg torques faithful.
+    for jn, _, _ in BASE_JOINTS:
+        eq.append(ET.fromstring(
+            f'<joint name="lock_{jn[5:]}" joint1="{jn}" polycoef="0 0 0 0 0" '
+            f'active="false" solref="0.005 1" solimp="0.95 0.99 0.001"/>'))
+
+    # actuators (PD position)
+    act = ET.SubElement(root, "actuator")
+    for aname, jname in ACTUATORS:
+        m = J[jname][4]
+        rng = J[jname][1]
+        act.append(ET.fromstring(
+            f'<position name="{aname}" joint="{jname}" kp="{m["kp"]}" kv="{m["kv"]}" '
+            f'forcerange="-{m["forcerange"]} {m["forcerange"]}" '
+            f'ctrlrange="{rng[0]:.6g} {rng[1]:.6g}"/>'))
+
+    # sensors: IMU + per-motor feedback (no contact sensor)
+    sen = ET.SubElement(root, "sensor")
+    sen.append(ET.fromstring('<accelerometer name="imu_acc" site="imu"/>'))
+    sen.append(ET.fromstring('<gyro name="imu_gyro" site="imu"/>'))
+    sen.append(ET.fromstring('<framequat name="base_quat" objtype="site" objname="imu"/>'))
+    for aname, jname in ACTUATORS:
+        sen.append(ET.fromstring(f'<jointpos name="{aname}_pos" joint="{jname}"/>'))
+        sen.append(ET.fromstring(f'<jointvel name="{aname}_vel" joint="{jname}"/>'))
+        sen.append(ET.fromstring(f'<actuatorfrc name="{aname}_frc" actuator="{aname}"/>'))
+
+    # placeholder keyframe (overwritten below, once the model can be simulated)
+    kf = ET.SubElement(root, "keyframe")
+    key = ET.fromstring(
+        f'<key name="stand" qpos="{f3([0,0,1.0,0,0,0]+[0.0]*12)}" ctrl="{f3([0]*6)}"/>')
+    kf.append(key)
+    ET.indent(tree, space="  ")
+    tree.write(OUT, encoding="unicode", xml_declaration=False)
+
+    # weld the motor masses on (needs the compiled model for the anchor frames), then rewrite
+    add_motor_masses(root)
+    ET.indent(tree, space="  ")
+    tree.write(OUT, encoding="unicode", xml_declaration=False)
+
+    # compute a real standing keyframe by settling the crouched init pose, then rewrite
+    model = mujoco.MjModel.from_xml_path(OUT)
+    qpos = compute_standing_keyframe(model, INIT_CTRL)
+    key.set("qpos", f3(qpos))
+    key.set("ctrl", f3(INIT_CTRL))
+    ET.indent(tree, space="  ")
+    tree.write(OUT, encoding="unicode", xml_declaration=False)
+    print(f"wrote {OUT}")
+
+    # close the sim-to-real loop: if measured dynamic parameters exist, patch them into the freshly
+    # generated model (armature/damping/link-inertials/masses). CAD values above are the fallback.
+    apply_identified_params(OUT)
+
+    # The masses above are CAD placeholders (12.83 kg); the robot was weighed and is 15.14 kg. Since
+    # 2026-08-04 there is only ONE plant file, so a regen that stopped here would silently hand the
+    # next run a robot that does not exist. Both steps are idempotent. Imported here, not at module
+    # scope: apply_measured_masses imports compute_standing_keyframe back out of this module.
+    from apply_measured_masses import restand, patch
+    from make_ankle_variants import add_ankle_locks, make_active
+    restand(patch(OUT, OUT))
+    add_ankle_locks(OUT)
+    make_active(OUT)
+
+    # summarize the FILE as it now stands, not the pre-patch compile: the mass patch and the ankle
+    # locks both changed it, so reusing `model` here would report the CAD mass and a stale keyframe.
+    final = mujoco.MjModel.from_xml_path(OUT)
+    total_mass = float(final.body_subtreemass[
+        mujoco.mj_name2id(final, mujoco.mjtObj.mjOBJ_BODY, "bodyNCS-v1")])
+    print(f"compiled OK: nq={final.nq} nv={final.nv} nu={final.nu} neq={final.neq} "
+          f"nsensor={final.nsensor} nkey={final.nkey}; "
+          f"stance height={float(final.key_qpos[0][2]):.3f} m; total mass={total_mass:.2f} kg")
+
+
+if __name__ == "__main__":
+    build()

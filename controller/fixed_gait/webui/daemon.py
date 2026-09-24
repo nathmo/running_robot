@@ -275,7 +275,15 @@ POLICY_APPROACH_DPS = 25.0        # joint travel during the approach -- delibera
 POLICY_APPROACH_KP = 40.0         # N*m/rad: enough to carry a leg, far too little to hurt anything
 POLICY_APPROACH_KD = 2.0
 POLICY_APPROACH_TRACK_ERR_DEG = 12.0   # abort: the map is wrong, the zero is stale, or it is stuck
-POLICY_APPROACH_ARRIVE_DEG = 3.0
+POLICY_APPROACH_ARRIVE_DEG = 3.0       # of default_motor_pos, where the joints REST at the stance
+# ...and holding still there. Arrival used to be a position test alone, which a leg swinging
+# through the tolerance passes on its way past. Both must hold for SETTLE_S before the policy
+# takes over. The threshold is set off the 2026-09-23 flight: `vel` is differentiated pos_raw,
+# whose LSB is 0.1 deg, so a single count at 100 Hz reads 0.175 rad/s however still the leg is.
+# Measured there -- ramping 1.07, still settling 0.56, stopped 0.00 with 0.175 spikes -- so this
+# has to clear one count and stay well under the settling rate.
+POLICY_APPROACH_SETTLE_RAD_S = 0.25
+POLICY_APPROACH_SETTLE_S = 0.30
 POLICY_APPROACH_SLACK_S = 5.0     # grace on top of the computed travel time before giving up
 POLICY_APPROACH_MAX_S = 30.0      # only used to size the log buffer
 # The dead-man is the panel saying "a human is looking at this", refreshed only while the page is
@@ -3194,6 +3202,15 @@ class RobotDaemon(threading.Thread):
 
         # ---- the stance has to be somewhere this robot can actually stand ----------------------
         stance = np.asarray(b["nominal_ctrl"], float)
+        # ...and `stance` is the PD COMMAND for that pose, not the pose. It sits a gravity
+        # deflection beyond where the joints rest, by construction: the bundle's own
+        # stand_torque IS drive_kp * (nominal_ctrl - default_motor_pos), which is 5.9 deg of cam
+        # and 5.0 of thigh on this robot. Nothing can ever arrive AT it -- a leg standing there
+        # would be carrying no weight. So the approach ramps the command to `stance` (that offset
+        # is what holds the robot up) and judges tracking against `rest` below. 2026-09-23: the
+        # legs reached the stance to 2.9 deg, were scored 8.1 deg against the command, and the run
+        # was failed for it.
+        rest = np.asarray(b["default_motor_pos"], float)
         stance_norm = jm.to_norm_deg(stance)
         pose = {n: float(stance_norm[i]) for i, n in enumerate(paths.MOTOR_NAMES)}
         ok, why = self._validate_pose(pose, override=False)
@@ -3258,7 +3275,8 @@ class RobotDaemon(threading.Thread):
         never_stopped = b.version == 2 and not float(stop_meta.get("stoplight_prob_final") or 0.0)
         req = {
             "file": fname, "bundle": b, "ctrl": ctrl, "gov": gov, "thermal": thermal, "jm": jm,
-            "stance": stance, "v_cmd": v_cmd, "yaw_cmd": yaw_cmd, "max_seconds": max_s,
+            "stance": stance, "rest": rest, "v_cmd": v_cmd, "yaw_cmd": yaw_cmd,
+            "max_seconds": max_s,
             "ambient_c": amb, "no_imu": no_imu, "log": np.zeros((rows, POLICY_LOG_COLS), np.float32),
             "jm_verified": jm_ok, "thermal_uncalibrated": bool(uncal),
             "step_ms": step_ms, "slow_loop": slow, "max_step_ms": max_step_ms,
@@ -3503,6 +3521,7 @@ class RobotDaemon(threading.Thread):
                  t_end=None, run_t0=None, run_seconds=0.0, reached_run=False,
                  exit_reason=None, n=0, slip0=self._slip_count, ws_block=0, ws_blocked_total=0,
                  last_ws_target=None, prev_pos=None, approach_total=0.0, approach_f=0.0,
+                 settled_since=None,
                  freq=0.0, gait_phase=0.0, saturated=0,
                  rate_t0=None, rate_n=0, rate_hz=float(p["ctrl_hz"]),
                  run_name=b.meta.get("run"), checkpoint=b.meta.get("checkpoint"),
@@ -3848,6 +3867,9 @@ class RobotDaemon(threading.Thread):
             f = 1.0 if p["approach_total"] <= 0 else min(1.0, el / p["approach_total"])
             p["approach_f"] = f
             tgt = p["approach_start"] + (p["stance"] - p["approach_start"]) * f
+            # the same ramp in POSE space: where the joints should be as the command sweeps, which
+            # is what the two tests below compare against. It ends at `rest`, not at the command.
+            rest_tgt = p["approach_start"] + (p["rest"] - p["approach_start"]) * f
             # The endpoints were both checked -- the stance at arm time, the measured pose is
             # where the robot already is -- but a straight line between two safe poses is not
             # itself safe, and this one sweeps both legs at once. Aborted rather than frozen: the
@@ -3860,12 +3882,19 @@ class RobotDaemon(threading.Thread):
                                          "extend the recorded workspace".format(ws_why))
                 return
             p["last_ws_target"] = tgt.copy()
-            miss = np.abs(pos - tgt)
+            # Where the leg ends up depends on what it is carrying: unloaded it tracks the command,
+            # under full body weight it sits back at the resting pose, and with part of its weight
+            # on a tether it stops somewhere between. So the BAND between the two is the healthy
+            # region and the error is the distance outside it -- zero anywhere in between. Judging
+            # against either endpoint alone fails the other case: against the command a loaded leg
+            # can never arrive (2026-09-23), against the rest pose an unloaded one never does.
+            band_lo, band_hi = np.minimum(rest_tgt, tgt), np.maximum(rest_tgt, tgt)
+            miss = np.abs(pos - np.clip(pos, band_lo, band_hi))
             if float(np.max(miss)) > np.radians(POLICY_APPROACH_TRACK_ERR_DEG):
                 i = int(np.argmax(miss))
                 self._policy_end(p, now, (
-                    "{} is {:.1f} deg from its approach target -- either the joint map is wrong, "
-                    "the zero is stale, or the leg is obstructed".format(
+                    "{} is {:.1f} deg from where it should be resting -- either the joint map is "
+                    "wrong, the zero is stale, or the leg is obstructed".format(
                         JM.MODEL_ACTUATORS[i], float(np.degrees(miss[i])))))
                 return
             # the observer tracks through the approach as well -- the drive's case temperature
@@ -3873,8 +3902,13 @@ class RobotDaemon(threading.Thread):
             gov.observe(amps_model, omega=np.abs(vel), drive_temp=temp, t_amb=p["ambient_c"])
             self._policy_send(p, tgt, np.full(6, POLICY_APPROACH_KP),
                               np.full(6, POLICY_APPROACH_KD))
-            if f >= 1.0 and float(np.max(np.abs(pos - p["stance"]))) < np.radians(
-                    POLICY_APPROACH_ARRIVE_DEG):
+            lo, hi = np.minimum(p["rest"], p["stance"]), np.maximum(p["rest"], p["stance"])
+            at_rest = (f >= 1.0
+                       and float(np.max(np.abs(pos - np.clip(pos, lo, hi))))
+                       < np.radians(POLICY_APPROACH_ARRIVE_DEG)
+                       and float(np.max(np.abs(vel))) < POLICY_APPROACH_SETTLE_RAD_S)
+            p["settled_since"] = (p["settled_since"] or now) if at_rest else None
+            if at_rest and now - p["settled_since"] >= POLICY_APPROACH_SETTLE_S:
                 p["phase"] = "run"
                 p["t_phase"] = now
                 p["run_t0"] = now
