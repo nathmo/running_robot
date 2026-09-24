@@ -29,6 +29,7 @@ import paths
 import balance
 import blackbox
 import calibration as calibmod           # PoseAnchor: continuity across a daemon restart
+import workspace as wsmod                # occupied_box: the cached hard-bounds input
 import canio
 import ringbuffer
 
@@ -678,15 +679,22 @@ class RobotDaemon(threading.Thread):
             return min(lo, olo - HARD_WIDEN_DEG), max(hi, ohi + HARD_WIDEN_DEG)
         if "knee_grid" not in leg:
             return lo, hi
-        grid = leg["knee_grid"]
-        axis = 0 if role == "cam" else 1
-        occupied = np.flatnonzero(grid.any(axis=1 - axis))
-        if not occupied.size:                       # an empty grid demonstrates nothing
+        # The occupied bounding box is CACHED on the leg dict (workspace.occupied_box, refreshed
+        # by WorkspaceStore._rebuild_limits on every edit). This is the hot path -- _validate_pose
+        # asks for hard bounds once per joint and measure_defaults validates 480 poses per request
+        # -- and scanning the grid here instead cost 45x per call, which on the Pi was seconds per
+        # request and showed up as "control process unreachable" from the UI proxy's 4 s timeout.
+        box = leg.get("knee_occupied")
+        if box is None:
+            box = wsmod.occupied_box(leg.get("knee_grid"))    # older dict, or never rebuilt
+        if box is None:                             # an empty grid demonstrates nothing
             return lo, hi
+        i0, i1, j0, j1 = box
+        c0, c1 = (i0, i1) if role == "cam" else (j0, j1)
         o = leg["knee_cam_origin"] if role == "cam" else leg["knee_thigh_origin"]
         r = leg["knee_grid_deg"]
-        return (min(lo, o + occupied[0] * r - HARD_WIDEN_DEG),
-                max(hi, o + (occupied[-1] + 1) * r + HARD_WIDEN_DEG))
+        return (min(lo, o + c0 * r - HARD_WIDEN_DEG),
+                max(hi, o + (c1 + 1) * r + HARD_WIDEN_DEG))
 
     def _hard_bounds(self, side, role):
         """(lo, hi) never-exceed clamp: HARD_CLAMP, widened by the demonstrated workspace."""
@@ -1168,7 +1176,11 @@ class RobotDaemon(threading.Thread):
         for n in paths.MOTOR_NAMES:
             side, role = paths.split_name(n)
             c = pose[n]
-            lo, hi = self._hard_bounds(side, role)
+            # _nominal_bounds, not _hard_bounds: this is how far to LOOK, and _safe_room looks in
+            # 2 deg steps. Bounding the search by the +-180 deg never-exceed clamp searches a range
+            # three times larger than any joint can travel, for an answer the workspace cuts short
+            # anyway -- see _safe_room's own note.
+            lo, hi = self._nominal_bounds(side, role)
             room_up = self._safe_room(pose, n, +1.0, hi - c)
             room_dn = self._safe_room(pose, n, -1.0, c - lo)
             out[n] = dict(a=round(c - frac * room_dn, 1), b=round(c + frac * room_up, 1),
@@ -1199,7 +1211,7 @@ class RobotDaemon(threading.Thread):
         for role in paths.ROLES:
             n = f"{leg}.{role}"
             c = pose[n]
-            lo, hi = self._hard_bounds(leg, role)
+            lo, hi = self._nominal_bounds(leg, role)      # how far to LOOK -- see _safe_room
             room[role] = min(self._safe_room(pose, n, +1.0, hi - c),
                              self._safe_room(pose, n, -1.0, c - lo))
 
@@ -1249,7 +1261,14 @@ class RobotDaemon(threading.Thread):
     def _safe_room(self, pose, name, direction, max_reach):
         """Largest contiguous safe displacement of `name` from its current value in `direction`
         (+1/-1), up to `max_reach` deg, judged by the safe-workspace check with the other joints
-        held at `pose`. Coarse outward scan then a bisection on the boundary."""
+        held at `pose`. Coarse outward scan then a bisection on the boundary.
+
+        `max_reach` COSTS: the outward scan walks it in 2 deg steps and every step is a full
+        _validate_pose. Callers must pass a plausible travel range -- _nominal_bounds -- and never
+        the +-180 deg never-exceed clamp. Passing the clamp on 2026-09-23 took measure_defaults
+        from 18 pose checks to 719, which on the Pi is ~1.9 s, and the UI proxy gives up at 4 s:
+        the operator saw "control process unreachable" while the control process was perfectly
+        alive and simply still counting."""
         if max_reach <= 0.5:
             return max(0.0, float(max_reach))
         base = pose[name]
@@ -2738,7 +2757,7 @@ class RobotDaemon(threading.Thread):
 
         side, role = paths.split_name(name)
         centre = self.calib.norm(name, m.pos)
-        lo, hi = self._hard_bounds(side, role)
+        lo, hi = self._nominal_bounds(side, role)
         pose = {n: self.calib.norm(n, mm.pos) for n, mm in self.by_name.items()
                 if mm.pos is not None}
         if len(pose) != paths.N_MOTORS:
@@ -2752,8 +2771,11 @@ class RobotDaemon(threading.Thread):
         if hit is not None and hit[0] == ckey and (time.monotonic() - hit[1]) < self.IDENT_PLAN_CACHE_S:
             return hit[2]
 
-        # The joint's OWN never-exceed band. This is the bound that actually stops a joint hitting
-        # an end stop, and it always applies.
+        # The joint's OWN band. This is the bound that actually stops a joint hitting an end stop,
+        # and it always applies -- so it is the NOMINAL range (the CAD travel widened by what this
+        # robot has demonstrated), not the +-180 deg never-exceed clamp. The clamp is a refusal
+        # threshold for a number that should never have been computed; it is not a statement that
+        # the joint can swing 180 deg, and sizing a wiggle off it would size it off nothing.
         hard_up, hard_dn = max(0.0, hi - centre), max(0.0, centre - lo)
 
         # The gait-feasibility polygon, which is a different question: can the LEGS be in this

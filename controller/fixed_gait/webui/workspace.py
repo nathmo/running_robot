@@ -24,6 +24,26 @@ import joint_limits                        # fixed_gait/ — the check object
 MAX_SCATTER = 4000
 
 
+def occupied_box(grid):
+    """(cam_lo, cam_hi, thigh_lo, thigh_hi) CELL INDICES of the grid's occupied bounding box, or
+    None if nothing is occupied. Inclusive on both ends.
+
+    Cached on the leg dict by _rebuild_limits, because daemon._widen_to_workspace needs it on every
+    hard-bounds lookup and that lookup is on the hot path: _validate_pose asks for it once per
+    joint, and measure_defaults validates 480 poses in a single request. Computing it there made
+    _hard_bounds 45x slower (0.2 -> 10.2 us) and measure_defaults slow enough on the Pi that the
+    UI proxy gave up at 4 s and reported the control process unreachable while it was perfectly
+    alive. The grid only changes when it is edited, so it is computed there instead."""
+    if grid is None:
+        return None
+    g = np.asarray(grid, bool)
+    if not g.size or not g.any():
+        return None
+    ci = np.flatnonzero(g.any(axis=1))
+    ti = np.flatnonzero(g.any(axis=0))
+    return (int(ci[0]), int(ci[-1]), int(ti[0]), int(ti[-1]))
+
+
 def _region_warning(knee, margin_deg, dilate_deg, close_region):
     """Say WHY the built region came out empty, in terms the operator can act on.
 
@@ -69,6 +89,7 @@ class WorkspaceStore:
         """JointLimits over normalized angles. zero == 0 by construction of the frame."""
         legs = {}
         for leg, d in self.legs.items():
+            d["knee_occupied"] = occupied_box(d.get("knee_grid"))
             legs[leg] = dict(
                 abd_safe=tuple(d["abd_safe"]), abd_observed=tuple(d["abd_observed"]),
                 abd_zero=0.0,
