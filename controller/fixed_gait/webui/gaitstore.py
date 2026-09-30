@@ -1,7 +1,7 @@
 """Trajectory (gait) files for the web UI — record, hand-draw, import/export, list.
 
 Files use the standard fixed_gait/trajectory.py per-leg npz format, so the CLI tools
-(play_trajectory.py, view_trajectory.py) can open web-made gaits unchanged — but all angles are
+(play_trajectory.py) can open web-made gaits unchanged — but all angles are
 in the NORMALIZED zero-pose frame. Hand-drawn paths are turned into a synthetic 'take' and pushed
 through the SAME traj.process pipeline as hand-recorded takes (FFT smoothing, loop closing,
 hip-turning-point re-timing), so drawn and taught gaits behave identically downstream.

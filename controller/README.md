@@ -4,11 +4,12 @@ Everything about the physical robot, self-contained so this folder can move to i
 
 | folder | what |
 |---|---|
-| `fixed_gait/` | hand-crafted in-air walking demo (sim + CAN/moteus streaming) and the Flask web control UI (`fixed_gait/webui/`) |
+| `fixed_gait/` | the Flask web control UI (`fixed_gait/webui/`) plus the teach/replay and workspace-calibration scripts it imports |
+| `deploy/` | policy deployment: numpy control laws (v1/v2/balance), safety governor, thermal observer, exported bundles |
+| `identification/` | offline dynamic-parameter identification used by the web UI's sys-ID panel |
 | `robotCADdescription/` | CAD of the PRE-REBUILD robot: Inventor/STEP source in `CAD/` (still the source for the nine parts the rebuild did not touch) and the `MJCF_OPEN_MUJOCO_B` export `model/dash01.xml` reads its meshes from. The six unreferenced export formats were deleted. The CURRENT robot's CAD is `dash-01CAD/` at the repo root. |
 | `model/` | dash01.xml (simulation-ready model, meshes referenced from `robotCADdescription/`), ride-height LUT, reachability plotting |
-| `tools/` | AK60/AKE90 motor bring-up + CAN scan + URDF patching utilities |
-| `viewer/` | browser MJCF debug viewer |
+| `tools/` | AK60/AKE90 motor bring-up, CAN scan and MIT-mode probing utilities |
 | `IMU.md` | **measured** properties of the Sense HAT (B) IMU — ranges, resolution, noise, bias, latency, frames, and a ready-to-use sim2real sensor model |
 | `requirements-rpi.txt` | Raspberry Pi runtime deps (CAN streaming) |
 | `requirements-webui.txt` | web control UI deps |
@@ -18,5 +19,5 @@ Hardware summary: 6 actuated DOF (per leg: hip_roll abduction, cam + thigh drivi
 (can0 = right, can1 = left, IDs 104/105/106). Inertial sensing: Waveshare Sense HAT (B) on the Pi's
 I2C bus, mounted under the base — see [IMU.md](IMU.md).
 
-RL / policy training lives in `../training/` (its own self-contained copy of the model), which
-stays in the training repo when this folder moves out.
+RL / policy training lives in `../RLframework/` (walking) and `../BalanceRL/` (push-recovery
+standing), each with its own copy of the plant built from `../dash-01CAD/`.

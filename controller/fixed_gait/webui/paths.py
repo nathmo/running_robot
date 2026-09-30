@@ -1,7 +1,7 @@
 """Shared paths + motor naming for the DASH-01 web UI.
 
-Importing this module makes the flat fixed_gait/ scripts importable (same sys.path trick as
-fixed_gait/validate_gait.py) and guarantees the runtime data directories exist. Every webui module
+Importing this module makes the flat fixed_gait/ scripts importable (a sys.path insert)
+and guarantees the runtime data directories exist. Every webui module
 imports paths FIRST, before any fixed_gait import.
 """
 import os
