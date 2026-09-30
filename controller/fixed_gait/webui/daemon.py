@@ -286,6 +286,25 @@ POLICY_APPROACH_SETTLE_RAD_S = 0.25
 POLICY_APPROACH_SETTLE_S = 0.30
 POLICY_APPROACH_SLACK_S = 5.0     # grace on top of the computed travel time before giving up
 POLICY_APPROACH_MAX_S = 30.0      # only used to size the log buffer
+
+
+def approach_miss(pos, rest, cmd):
+    """How far each joint is from where the approach could legitimately leave it, in rad.
+
+    Where a leg settles depends on what it is carrying. Unloaded it tracks the COMMAND. Under full
+    body weight it sits back at the RESTING pose, because the command is deliberately a gravity
+    deflection beyond it -- that offset is what generates the support force, and the bundle defines
+    it as stand_torque = drive_kp * (nominal_ctrl - default_motor_pos). With part of its weight on
+    a tether it stops somewhere between. So the band between the two endpoints is the whole healthy
+    region and this returns the distance OUTSIDE it: zero anywhere in between.
+
+    Judging against either endpoint alone breaks the other case, and both have bitten:
+      * against the command, a loaded leg can never arrive. On 2026-09-23 the legs reached the
+        stance to 2.9 deg, were scored 8.1 deg against the command, and the run was failed twice.
+      * against the rest pose, an unloaded leg never arrives -- which is every mock and every
+        bench test with the robot hanging.
+    """
+    return np.abs(pos - np.clip(pos, np.minimum(rest, cmd), np.maximum(rest, cmd)))
 # The dead-man is the panel saying "a human is looking at this", refreshed only while the page is
 # VISIBLE. A status poll deliberately does not refresh it: a poll proves a browser is alive, which
 # is not the same claim. 1.5 s is ~7 missed 200 ms refreshes.
@@ -3882,14 +3901,7 @@ class RobotDaemon(threading.Thread):
                                          "extend the recorded workspace".format(ws_why))
                 return
             p["last_ws_target"] = tgt.copy()
-            # Where the leg ends up depends on what it is carrying: unloaded it tracks the command,
-            # under full body weight it sits back at the resting pose, and with part of its weight
-            # on a tether it stops somewhere between. So the BAND between the two is the healthy
-            # region and the error is the distance outside it -- zero anywhere in between. Judging
-            # against either endpoint alone fails the other case: against the command a loaded leg
-            # can never arrive (2026-09-23), against the rest pose an unloaded one never does.
-            band_lo, band_hi = np.minimum(rest_tgt, tgt), np.maximum(rest_tgt, tgt)
-            miss = np.abs(pos - np.clip(pos, band_lo, band_hi))
+            miss = approach_miss(pos, rest_tgt, tgt)
             if float(np.max(miss)) > np.radians(POLICY_APPROACH_TRACK_ERR_DEG):
                 i = int(np.argmax(miss))
                 self._policy_end(p, now, (
@@ -3902,9 +3914,8 @@ class RobotDaemon(threading.Thread):
             gov.observe(amps_model, omega=np.abs(vel), drive_temp=temp, t_amb=p["ambient_c"])
             self._policy_send(p, tgt, np.full(6, POLICY_APPROACH_KP),
                               np.full(6, POLICY_APPROACH_KD))
-            lo, hi = np.minimum(p["rest"], p["stance"]), np.maximum(p["rest"], p["stance"])
             at_rest = (f >= 1.0
-                       and float(np.max(np.abs(pos - np.clip(pos, lo, hi))))
+                       and float(np.max(approach_miss(pos, p["rest"], p["stance"])))
                        < np.radians(POLICY_APPROACH_ARRIVE_DEG)
                        and float(np.max(np.abs(vel))) < POLICY_APPROACH_SETTLE_RAD_S)
             p["settled_since"] = (p["settled_since"] or now) if at_rest else None
